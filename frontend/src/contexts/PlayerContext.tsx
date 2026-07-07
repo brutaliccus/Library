@@ -14,9 +14,13 @@ import {
   cacheBookAudio,
   clearBookCacheForTracks,
   clearAbsBookCache,
-  getCachedTrackObjectUrl,
+  getCachedTrackObjectUrlFast,
 } from "../utils/audioCache";
-import { setAudioPlaybackActive, setMediaDownloadThrottled } from "../utils/mediaStorage";
+import {
+  setAudioPlaybackActive,
+  setMediaDownloadPaused,
+  setMediaDownloadThrottled,
+} from "../utils/mediaStorage";
 import { usePlayerProgressSync } from "../hooks/usePlayerProgressSync";
 import { usePlayerMediaSession } from "../hooks/usePlayerMediaSession";
 import {
@@ -85,6 +89,11 @@ export function usePlayer(): PlayerContextType {
   return ctx;
 }
 
+/** Auto-recovery attempts (audio element errors / stalled loads) per book. */
+const MAX_PLAYBACK_RETRIES = 6;
+/** Reload the track if buffering makes zero progress for this long. */
+const STALL_WATCHDOG_MS = 25_000;
+
 /**
  * Recalculate startOffset for every track and totalDuration from individual durations.
  * Mutates the tracks array in place for performance.
@@ -118,6 +127,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const loadSeqRef = useRef(0);
   /** Object URL of the currently playing cached track (revoked on replace). */
   const trackObjectUrlRef = useRef<string | null>(null);
+  /**
+   * True while the user wants playback (pressed play and hasn't paused).
+   * Gates auto-recovery so an error retry or stall reload never resumes
+   * a book the user deliberately paused.
+   */
+  const playIntentRef = useRef(false);
+  /** Auto-recovery budget; reset when playback actually produces sound. */
+  const retryCountRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Last playback position + wall time — used by the stall watchdog. */
+  const stallWatchRef = useRef<{ time: number; at: number } | null>(null);
+  const loadTrackRef = useRef<(np: NowPlaying, trackIndex: number, startTime?: number) => void>(
+    () => {}
+  );
+  /** Ignore pause events fired while we reset the audio element between tracks. */
+  const suppressPauseIntentRef = useRef(false);
   const [state, setState] = useState<PlayerState>({
     nowPlaying: null,
     isPlaying: false,
@@ -188,6 +213,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const track = np.tracks[trackIndex];
       if (!track) return;
 
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+
       // Record the intended position immediately so a progress save that fires
       // while the file is still loading persists where the user SHOULD be, not 0:00.
       lastPosRef.current = {
@@ -198,54 +228,77 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       };
       pendingSeekRef.current = startTime > 0 ? startTime : null;
       staleTickCountRef.current = 0;
+      playIntentRef.current = true;
+      stallWatchRef.current = { time: startTime, at: Date.now() };
 
+      suppressPauseIntentRef.current = true;
       audio.pause();
+      suppressPauseIntentRef.current = false;
       const seq = ++loadSeqRef.current;
 
-      // Prefer the locally downloaded copy. The service worker can't serve
-      // <audio> requests on Android WebView, so read the cache directly.
-      void (async () => {
-        let src = track.contentUrl;
-        let objectUrl: string | null = null;
-        try {
-          objectUrl = await getCachedTrackObjectUrl(track.contentUrl);
-        } catch {
-          /* fall back to streaming */
-        }
+      if (trackObjectUrlRef.current) {
+        URL.revokeObjectURL(trackObjectUrlRef.current);
+        trackObjectUrlRef.current = null;
+      }
+
+      const beginPlayback = (src: string, objectUrl: string | null) => {
         if (seq !== loadSeqRef.current) {
           if (objectUrl) URL.revokeObjectURL(objectUrl);
           return;
         }
-        if (trackObjectUrlRef.current) {
-          URL.revokeObjectURL(trackObjectUrlRef.current);
-          trackObjectUrlRef.current = null;
-        }
-        if (objectUrl) {
-          src = objectUrl;
-          trackObjectUrlRef.current = objectUrl;
-        }
+        if (objectUrl) trackObjectUrlRef.current = objectUrl;
 
         audio.src = src;
         audio.playbackRate = stateRef.current.playbackRate;
         audio.volume = stateRef.current.volume;
+        audio.load();
 
-        const onLoadedEnough = () => {
-          audio.removeEventListener("loadedmetadata", onLoadedEnough);
-          audio.removeEventListener("canplay", onLoadedEnough);
-
-          // Capture duration from the audio element for this track
-          if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
-            applyTrackDuration(trackIndex, audio.duration);
-          }
-
+        const tryPlay = () => {
+          if (seq !== loadSeqRef.current || !playIntentRef.current) return;
           if (startTime > 0) {
-            try { audio.currentTime = startTime; } catch { /* ignore */ }
+            try {
+              audio.currentTime = startTime;
+            } catch {
+              /* ignore */
+            }
           }
           audio.play().catch(() => {});
         };
-        audio.addEventListener("loadedmetadata", onLoadedEnough, { once: true });
-        if (startTime === 0) {
-          audio.play().catch(() => {});
+
+        const onReady = () => {
+          if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
+            applyTrackDuration(trackIndex, audio.duration);
+          }
+          tryPlay();
+        };
+
+        audio.addEventListener("loadedmetadata", onReady, { once: true });
+        audio.addEventListener("canplay", tryPlay, { once: true });
+      };
+
+      // Start streaming immediately — never block on a slow Cache API blob read.
+      beginPlayback(track.contentUrl, null);
+
+      // If the track is already fully cached (small enough for RAM), swap in.
+      void (async () => {
+        let objectUrl: string | null = null;
+        try {
+          objectUrl = await getCachedTrackObjectUrlFast(track.contentUrl);
+        } catch {
+          /* fall back to streaming */
+        }
+        if (!objectUrl || seq !== loadSeqRef.current) {
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        // Only swap before playback has advanced — avoids a mid-play src reset.
+        if (audio.paused && audio.currentTime < 0.5) {
+          if (trackObjectUrlRef.current) {
+            URL.revokeObjectURL(trackObjectUrlRef.current);
+          }
+          beginPlayback(objectUrl, objectUrl);
+        } else {
+          URL.revokeObjectURL(objectUrl);
         }
       })();
 
@@ -259,6 +312,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     },
     [getAudio, applyTrackDuration]
   );
+
+  loadTrackRef.current = loadTrack;
+
+  const schedulePlaybackRetry = useCallback(() => {
+    if (!playIntentRef.current) return;
+    if (retryCountRef.current >= MAX_PLAYBACK_RETRIES) return;
+    const np = stateRef.current.nowPlaying;
+    if (!np) return;
+
+    retryCountRef.current += 1;
+    const ti = stateRef.current.currentTrackIndex;
+    const local = lastPosRef.current?.trackLocal ?? getAudio().currentTime;
+
+    if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = setTimeout(() => {
+      if (!playIntentRef.current || !stateRef.current.nowPlaying) return;
+      loadTrackRef.current(np, ti, Math.max(0, local));
+    }, Math.min(8_000, 1_000 * retryCountRef.current));
+  }, [getAudio]);
 
   /**
    * Probe tracks in the background using temporary Audio elements to discover
@@ -310,8 +382,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
       let cursor = 0;
       const worker = async () => {
-        // Small head start so playback wins the bandwidth race at startup.
-        await new Promise((r) => setTimeout(r, 4_000));
+        // Wait until playback has had a long head start — probes compete for bandwidth.
+        await new Promise((r) => setTimeout(r, 90_000));
         while (cursor < pending.length && !controller.signal.aborted) {
           await probeOne(pending[cursor++]);
         }
@@ -350,12 +422,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
       const gt = globalTime(ti, audio.currentTime, np.tracks);
       lastPosRef.current = { key: npKey(np), time: gt, trackIndex: ti, trackLocal: audio.currentTime };
+      stallWatchRef.current = { time: audio.currentTime, at: Date.now() };
+      retryCountRef.current = 0;
       setState((s) => ({ ...s, currentTime: gt }));
     };
 
-    const onPlaying = () =>
+    const onPlaying = () => {
+      retryCountRef.current = 0;
       setState((s) => ({ ...s, isPlaying: true, buffering: false }));
+    };
     const onPause = () => {
+      if (!suppressPauseIntentRef.current) {
+        playIntentRef.current = false;
+      }
       setState((s) => ({ ...s, isPlaying: false }));
       // Persist on every pause so a later force-close can't lose the position.
       const np = stateRef.current.nowPlaying;
@@ -366,6 +445,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
     const onWaiting = () => setState((s) => ({ ...s, buffering: true }));
     const onCanPlay = () => setState((s) => ({ ...s, buffering: false }));
+    const onError = () => {
+      console.warn("[player] audio error — retrying load");
+      schedulePlaybackRetry();
+    };
+    const onStalled = () => {
+      setState((s) => ({ ...s, buffering: true }));
+    };
 
     const onEnded = () => {
       const np = stateRef.current.nowPlaying;
@@ -397,6 +483,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     audio.addEventListener("pause", onPause);
     audio.addEventListener("waiting", onWaiting);
     audio.addEventListener("canplay", onCanPlay);
+    audio.addEventListener("error", onError);
+    audio.addEventListener("stalled", onStalled);
     audio.addEventListener("ended", onEnded);
 
     return () => {
@@ -405,24 +493,42 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("waiting", onWaiting);
       audio.removeEventListener("canplay", onCanPlay);
+      audio.removeEventListener("error", onError);
+      audio.removeEventListener("stalled", onStalled);
       audio.removeEventListener("ended", onEnded);
     };
-  }, [getAudio, globalTime, loadTrack, syncProgress]);
+  }, [getAudio, globalTime, loadTrack, syncProgress, schedulePlaybackRetry]);
 
-  // Throttle (don't stop) background downloads during sustained buffering so the
-  // local cache can still finish while playback uses the network.
+  // Pause background cache immediately while buffering; soft-throttle if it persists.
   useEffect(() => {
     setAudioPlaybackActive(Boolean(state.nowPlaying));
   }, [state.nowPlaying]);
 
   useEffect(() => {
+    setMediaDownloadPaused(state.buffering);
     if (!state.buffering) {
       setMediaDownloadThrottled(false);
       return;
     }
-    const timer = setTimeout(() => setMediaDownloadThrottled(true), 4_000);
+    const timer = setTimeout(() => setMediaDownloadThrottled(true), 6_000);
     return () => clearTimeout(timer);
   }, [state.buffering]);
+
+  // Reload the track when buffering makes zero progress for too long.
+  useEffect(() => {
+    if (!state.buffering || !state.nowPlaying) return;
+
+    const id = setInterval(() => {
+      if (!playIntentRef.current || !stateRef.current.buffering) return;
+      const stall = stallWatchRef.current;
+      if (!stall) return;
+      if (Date.now() - stall.at < STALL_WATCHDOG_MS) return;
+      console.warn("[player] stall watchdog — reloading track");
+      schedulePlaybackRetry();
+    }, 5_000);
+
+    return () => clearInterval(id);
+  }, [state.buffering, state.nowPlaying, schedulePlaybackRetry]);
 
   useEffect(() => {
     if (state.sleepTimerEndAt == null) return;
@@ -455,6 +561,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const playABS = useCallback(
     async (itemId: string) => {
       probeAbortRef.current?.abort();
+      retryCountRef.current = 0;
+      playIntentRef.current = true;
       // Wake storage / ABS ahead of the play handshake (fire-and-forget).
       void api.post(`/stream/abs/${itemId}/warmup`).catch(() => {});
 
@@ -531,6 +639,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       resume: number | RDResumeInfo = 0
     ) => {
       probeAbortRef.current?.abort();
+      retryCountRef.current = 0;
+      playIntentRef.current = true;
       const tracksCopy = tracks.map((t) => ({ ...t }));
       const totalDuration = recalcOffsets(tracksCopy);
       const np: NowPlaying = {
@@ -608,8 +718,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const togglePlay = useCallback(() => {
     const audio = getAudio();
     if (audio.paused) {
+      playIntentRef.current = true;
       audio.play().catch(() => {});
     } else {
+      playIntentRef.current = false;
       audio.pause();
     }
   }, [getAudio]);
@@ -618,10 +730,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // Toggle semantics there are dangerous: if native and web state disagree,
   // "pause" would start playback.
   const play = useCallback(() => {
+    playIntentRef.current = true;
     getAudio().play().catch(() => {});
   }, [getAudio]);
 
   const pause = useCallback(() => {
+    playIntentRef.current = false;
     getAudio().pause();
   }, [getAudio]);
 
@@ -685,6 +799,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const dismissPlayer = useCallback(() => {
     probeAbortRef.current?.abort();
+    playIntentRef.current = false;
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
     const np = stateRef.current.nowPlaying;
     // Snapshot the last known-good position BEFORE tearing anything down.
     // Never read the live audio element here: mid-buffer it reports 0:00.

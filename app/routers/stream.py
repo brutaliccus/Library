@@ -44,6 +44,27 @@ _stream_tasks: dict[str, dict] = {}
 # new code uses stable, DB-backed proxy URLs that survive restarts).
 _rd_proxy_urls: dict[str, str] = {}
 
+# Shared pooled client for upstream audio streaming (RD CDN + ABS). A fresh
+# client per request meant a new TLS handshake for every playback range request
+# and every 8 MB cache chunk — slow and flaky on a Pi. Keepalive reuses the
+# connection across chunks.
+_stream_client: httpx.AsyncClient | None = None
+
+
+def _get_stream_client() -> httpx.AsyncClient:
+    global _stream_client
+    if _stream_client is None:
+        _stream_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=20.0, read=90.0, write=90.0, pool=30.0),
+            limits=httpx.Limits(
+                max_connections=16,
+                max_keepalive_connections=8,
+                keepalive_expiry=60.0,
+            ),
+            follow_redirects=True,
+        )
+    return _stream_client
+
 
 # --------------- Stable RD proxy URLs (survive restarts, self-healing) ---------------
 
@@ -467,23 +488,48 @@ async def proxy_abs_audio(
     if range_header:
         headers["Range"] = range_header
 
-    client = httpx.AsyncClient(timeout=None)
+    client = _get_stream_client()
     try:
         resp = await client.send(
             client.build_request("GET", url, headers=headers),
             stream=True,
         )
     except Exception as e:
-        await client.aclose()
         logger.error("ABS audio proxy failed: %s", e)
         raise HTTPException(status_code=502, detail="Failed to fetch audio from ABS")
+
+    if resp.status_code == 416:
+        content_range = resp.headers.get("content-range")
+        await resp.aclose()
+        return Response(
+            status_code=416,
+            headers={"content-range": content_range} if content_range else {},
+        )
 
     if resp.status_code >= 400:
         body = await resp.aread()
         await resp.aclose()
-        await client.aclose()
         logger.error("ABS returned %s for %s: %s", resp.status_code, url, body[:200])
         raise HTTPException(status_code=resp.status_code, detail="ABS file not found")
+
+    # Same guard as RD: don't commit to a 206/200 until the first body byte
+    # arrives — an empty stream poisons client chunk downloads.
+    body_iter = resp.aiter_bytes(chunk_size=65536)
+    first_chunk = b""
+    try:
+        first_chunk = await body_iter.__anext__()
+    except StopAsyncIteration:
+        first_chunk = b""
+    except Exception as e:
+        await resp.aclose()
+        logger.warning("ABS audio stream died before first byte: %s", e)
+        raise HTTPException(status_code=502, detail="ABS audio stream failed")
+
+    content_length = resp.headers.get("content-length")
+    if not first_chunk and content_length not in (None, "0"):
+        await resp.aclose()
+        logger.warning("ABS sent empty body for %s-byte response", content_length)
+        raise HTTPException(status_code=502, detail="ABS audio stream empty")
 
     resp_headers: dict[str, str] = {}
     for key in ("content-type", "content-length", "content-range", "accept-ranges"):
@@ -492,16 +538,18 @@ async def proxy_abs_audio(
             resp_headers[key] = val
     if "accept-ranges" not in resp_headers:
         resp_headers["accept-ranges"] = "bytes"
+    resp_headers["x-accel-buffering"] = "no"
 
     status_code = resp.status_code
 
     async def stream_body():
         try:
-            async for chunk in resp.aiter_bytes(chunk_size=65536):
+            if first_chunk:
+                yield first_chunk
+            async for chunk in body_iter:
                 yield chunk
         finally:
             await resp.aclose()
-            await client.aclose()
 
     return StreamingResponse(
         stream_body(),
@@ -559,20 +607,20 @@ async def proxy_abs_cover(
 
 async def _stream_rd_url(real_url: str, request: Request) -> Response | None:
     """Open a streaming proxy to an RD CDN URL. Returns None when RD rejects the
-    URL (expired link), so callers can refresh and retry."""
+    URL (expired link) or the body dies before the first byte, so callers can
+    refresh and retry."""
     headers: dict[str, str] = {}
     range_header = request.headers.get("range")
     if range_header:
         headers["Range"] = range_header
 
-    client = httpx.AsyncClient(timeout=None)
+    client = _get_stream_client()
     try:
         resp = await client.send(
             client.build_request("GET", real_url, headers=headers),
             stream=True,
         )
     except Exception as e:
-        await client.aclose()
         logger.warning("RD audio proxy connect failed: %s", e)
         return None
 
@@ -582,7 +630,6 @@ async def _stream_rd_url(real_url: str, request: Request) -> Response | None:
         # here would pointlessly re-resolve healthy links).
         content_range = resp.headers.get("content-range")
         await resp.aclose()
-        await client.aclose()
         return Response(
             status_code=416,
             headers={"content-range": content_range} if content_range else {},
@@ -591,8 +638,28 @@ async def _stream_rd_url(real_url: str, request: Request) -> Response | None:
     if resp.status_code >= 400:
         body = await resp.aread()
         await resp.aclose()
-        await client.aclose()
         logger.warning("RD CDN returned %s: %s", resp.status_code, body[:200])
+        return None
+
+    # Pull the first body chunk BEFORE committing to a response. If the CDN
+    # accepts the request but resets immediately (stale link), returning a 206
+    # with an empty body poisons client downloads ("empty chunk received");
+    # returning None here routes callers into the link-refresh path instead.
+    body_iter = resp.aiter_bytes(chunk_size=65536)
+    first_chunk = b""
+    try:
+        first_chunk = await body_iter.__anext__()
+    except StopAsyncIteration:
+        first_chunk = b""
+    except Exception as e:
+        await resp.aclose()
+        logger.warning("RD CDN stream died before first byte: %s", e)
+        return None
+
+    content_length = resp.headers.get("content-length")
+    if not first_chunk and content_length not in (None, "0"):
+        await resp.aclose()
+        logger.warning("RD CDN sent empty body for %s-byte response", content_length)
         return None
 
     resp_headers: dict[str, str] = {}
@@ -602,16 +669,21 @@ async def _stream_rd_url(real_url: str, request: Request) -> Response | None:
             resp_headers[key] = val
     if "accept-ranges" not in resp_headers:
         resp_headers["accept-ranges"] = "bytes"
+    # Tell nginx not to buffer: with default buffering it slurps the whole
+    # upstream stream into SD-card temp files as fast as RD serves it, starving
+    # the Pi's bandwidth and disk while the client plays at 1x.
+    resp_headers["x-accel-buffering"] = "no"
 
     status_code = resp.status_code
 
     async def stream_body():
         try:
-            async for chunk in resp.aiter_bytes(chunk_size=65536):
+            if first_chunk:
+                yield first_chunk
+            async for chunk in body_iter:
                 yield chunk
         finally:
             await resp.aclose()
-            await client.aclose()
 
     return StreamingResponse(
         stream_body(),

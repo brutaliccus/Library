@@ -4,37 +4,49 @@
  * (/api/stream/abs/proxy/audio/…).
  *
  * Design notes:
- * - Every 8 MB chunk is persisted to the Cache API the moment it arrives
+ * - Every chunk is persisted to the Cache API the moment it arrives
  *   (keyed as `<track>?audioCachePart=N`), so a dropped connection, app kill,
  *   or page reload never loses progress — the next attempt resumes mid-file.
  * - When all chunks are present they are assembled into one canonical entry
- *   (cheap: a multi-part Blob references the on-disk chunks) and the parts are
- *   deleted.
+ *   and the parts are deleted.
  * - Playback should NOT rely on the service worker intercepting <audio>
  *   requests: Android WebView routes media element traffic around service
  *   workers. Use getCachedTrackObjectUrl() to play the local copy directly.
+ * - Background downloads NEVER compete with active playback during the warmup
+ *   window or while the audio element is buffering.
  */
 
 import {
   cacheStorageKey,
   hasStorageRoom,
+  shouldDeferCacheDownload,
   throttleDelay,
   waitForDownloadSlot,
 } from "./mediaStorage";
 
 const AUDIO_CACHE = "audio-tracks-v1";
-/** Download in resumable ranged chunks so a failure only loses one chunk. */
-const CHUNK_SIZE = 8 * 1024 * 1024;
-/** Head start for the playback buffer before background downloading begins. */
-const START_DELAY_MS = 8_000;
-/** Small gap between chunks so playback traffic is never fully starved. */
-const INTER_CHUNK_DELAY_MS = 250;
-/** Attempts per chunk before giving up on the track (for this pass). */
-const CHUNK_RETRIES = 3;
+/** Smaller chunks = less bandwidth hogging per request on a Pi link. */
+const CHUNK_SIZE = 2 * 1024 * 1024;
+/** Let playback establish its buffer before any background download starts. */
+const START_DELAY_MS = 45_000;
+/** Gap between chunks so playback traffic is never fully starved. */
+const INTER_CHUNK_DELAY_MS = 800;
+/** Attempts per chunk (connection AND body read) before failing the track pass. */
+const CHUNK_RETRIES = 5;
+/** Extra passes over tracks that failed. */
+const MAX_TRACK_PASSES = 12;
+/** Pause between retry passes when no progress was made on disk. */
+const PASS_RETRY_DELAY_MS = 8_000;
+/** Faster retry when we already have partial chunks saved. */
+const PASS_RETRY_PARTIAL_MS = 2_000;
 /** Query param marking a partially-downloaded chunk entry. */
 const PART_PARAM = "audioCachePart";
 /** Chunk header carrying the full file size so resumes know the target. */
 const TOTAL_HEADER = "x-audio-total-size";
+/** Max size for in-memory blob URL playback (larger files stream from network). */
+const MAX_BLOB_PLAYBACK_BYTES = 32 * 1024 * 1024;
+/** Max wait for cache lookup before falling back to network streaming. */
+const CACHE_LOOKUP_TIMEOUT_MS = 400;
 
 export interface CacheableTrack {
   contentUrl: string;
@@ -110,25 +122,57 @@ export async function isBookCached(tracks: CacheableTrack[]): Promise<boolean> {
   }
 }
 
+async function cachedResponseMeta(
+  url: string
+): Promise<{ resp: Response; size: number } | null> {
+  if (!cacheSupported() || !url || !isCacheableUrl(url)) return null;
+  const cache = await caches.open(AUDIO_CACHE);
+  const key = cacheStorageKey(url);
+  const resp = (await cache.match(key)) || (await cache.match(url));
+  if (!resp) return null;
+  const len = Number(resp.headers.get("content-length") || 0);
+  if (len > 0) return { resp, size: len };
+  try {
+    const blob = await resp.clone().blob();
+    if (blob.size === 0) return null;
+    return { resp, size: blob.size };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Object URL for a fully-downloaded track, or null when not cached.
  * Callers own the URL and must revoke it via URL.revokeObjectURL().
- * This is the playback path — Android WebView media requests bypass the
- * service worker, so the player must read the cache directly.
+ *
+ * Skips very large files — reading a 200 MB blob into RAM freezes Android.
+ * Those tracks still stream from the network; the on-disk cache helps the
+ * next session once we add streaming-from-cache later.
  */
 export async function getCachedTrackObjectUrl(url: string): Promise<string | null> {
-  if (!cacheSupported() || !url || !isCacheableUrl(url)) return null;
   try {
-    const cache = await caches.open(AUDIO_CACHE);
-    const resp =
-      (await cache.match(cacheStorageKey(url))) || (await cache.match(url));
-    if (!resp) return null;
-    const blob = await resp.blob();
+    const meta = await cachedResponseMeta(url);
+    if (!meta || meta.size > MAX_BLOB_PLAYBACK_BYTES) return null;
+    const blob = await meta.resp.blob();
     if (blob.size === 0) return null;
     return URL.createObjectURL(blob);
   } catch {
     return null;
   }
+}
+
+/**
+ * Race a cache lookup against a short timeout so playback never blocks on a
+ * slow Cache API read. Returns null on miss, timeout, or oversized file.
+ */
+export async function getCachedTrackObjectUrlFast(
+  url: string,
+  timeoutMs = CACHE_LOOKUP_TIMEOUT_MS
+): Promise<string | null> {
+  return Promise.race([
+    getCachedTrackObjectUrl(url),
+    sleep(timeoutMs).then(() => null),
+  ]);
 }
 
 export async function requestPersistentStorage(): Promise<void> {
@@ -141,14 +185,53 @@ export async function requestPersistentStorage(): Promise<void> {
   }
 }
 
-async function fetchChunk(url: string, offset: number): Promise<Response | null> {
+interface ChunkResult {
+  status: 200 | 206;
+  blob: Blob;
+  contentType: string | null;
+  totalFromRange: number | null;
+}
+
+/**
+ * Fetch one ranged chunk INCLUDING its body, retrying on any failure.
+ * The body read must be inside the retry loop: a proxy stream that dies
+ * mid-transfer rejects blob() or yields an empty blob.
+ */
+async function fetchChunkWithBody(
+  url: string,
+  offset: number
+): Promise<ChunkResult | "eof" | null> {
   const headers = { Range: `bytes=${offset}-${offset + CHUNK_SIZE - 1}` };
   for (let attempt = 0; attempt < CHUNK_RETRIES; attempt++) {
+    if (attempt > 0) await sleep(Math.min(12_000, 1_500 * 2 ** attempt));
     await waitForDownloadSlot();
+    if (shouldDeferCacheDownload()) {
+      // Playback reclaimed bandwidth — back off and let the outer loop retry.
+      return null;
+    }
     try {
-      return await fetch(url, { headers, credentials: "same-origin" });
+      const resp = await fetch(url, { headers, credentials: "same-origin" });
+      if (resp.status === 416) return "eof";
+      if (resp.status !== 206 && resp.status !== 200) {
+        setLastError(`Server returned ${resp.status} while downloading`);
+        continue;
+      }
+      const blob = await resp.blob();
+      if (blob.size === 0) {
+        setLastError("Empty chunk received — retrying");
+        continue;
+      }
+      const rangeMatch = /bytes\s+\d+-\d+\/(\d+)/.exec(
+        resp.headers.get("content-range") || ""
+      );
+      return {
+        status: resp.status as 200 | 206,
+        blob,
+        contentType: resp.headers.get("content-type"),
+        totalFromRange: rangeMatch ? Number(rangeMatch[1]) : null,
+      };
     } catch {
-      if (attempt < CHUNK_RETRIES - 1) await sleep(2_000 * (attempt + 1));
+      setLastError("Network error while downloading — retrying");
     }
   }
   return null;
@@ -179,6 +262,11 @@ async function loadExistingParts(cache: Cache, storageKey: string): Promise<Part
       } catch {
         break;
       }
+    }
+    if (size === 0) {
+      // Corrupt empty part — delete and resume from here.
+      await cache.delete(partKey(storageKey, state.nextIndex));
+      break;
     }
     const total = Number(existing.headers.get(TOTAL_HEADER) || 0);
     if (total > 0) state.total = total;
@@ -236,7 +324,9 @@ async function assembleParts(
     const resp = await cache.match(partKey(storageKey, i));
     if (!resp) return false;
     try {
-      parts.push(await resp.blob());
+      const blob = await resp.blob();
+      if (blob.size === 0) return false;
+      parts.push(blob);
     } catch {
       return false;
     }
@@ -274,58 +364,45 @@ async function downloadTrack(cache: Cache, url: string): Promise<boolean> {
 
   while (state.total == null || state.offset < state.total) {
     await waitForDownloadSlot();
+    if (shouldDeferCacheDownload()) return false;
+
     if (!(await hasStorageRoom(CHUNK_SIZE))) {
       console.warn("[audioCache] stopping — storage quota nearly full");
       setLastError("Storage quota nearly full — downloads paused");
       return false;
     }
 
-    const resp = await fetchChunk(url, state.offset);
-    if (!resp) {
-      setLastError("Network error while downloading — will resume next play");
-      return false;
-    }
-
-    if (resp.status === 416) {
-      // Read past the end — everything we have is the whole file.
+    const chunk = await fetchChunkWithBody(url, state.offset);
+    if (chunk === "eof") {
       state.total = state.offset;
       break;
     }
-    if (resp.status === 200) {
-      // Server ignored the Range header and sent the whole file.
-      const blob = await resp.blob().catch(() => null);
-      if (!blob || blob.size === 0) return false;
+    if (!chunk) {
+      setLastError("Download paused for playback — will retry");
+      return false;
+    }
+
+    if (chunk.status === 200) {
       await deleteParts(cache, storageKey, state.nextIndex);
-      state.contentType = resp.headers.get("content-type") || state.contentType;
-      if (!(await putPart(cache, storageKey, 0, blob, state.contentType, blob.size))) {
+      state.contentType = chunk.contentType || state.contentType;
+      if (!(await putPart(cache, storageKey, 0, chunk.blob, state.contentType, chunk.blob.size))) {
         return false;
       }
       state.nextIndex = 1;
-      state.offset = blob.size;
-      state.total = blob.size;
+      state.offset = chunk.blob.size;
+      state.total = chunk.blob.size;
       break;
     }
-    if (resp.status !== 206) {
-      console.warn(`[audioCache] chunk fetch failed (${resp.status})`);
-      setLastError(`Server returned ${resp.status} while downloading`);
-      return false;
-    }
 
-    state.contentType = resp.headers.get("content-type") || state.contentType;
-    const rangeMatch = /bytes\s+\d+-\d+\/(\d+)/.exec(resp.headers.get("content-range") || "");
-    if (rangeMatch) state.total = Number(rangeMatch[1]);
+    state.contentType = chunk.contentType || state.contentType;
+    if (chunk.totalFromRange) state.total = chunk.totalFromRange;
 
-    const blob = await resp.blob().catch(() => null);
-    if (!blob || blob.size === 0) {
-      setLastError("Empty chunk received — will resume next play");
-      return false;
-    }
-    if (!(await putPart(cache, storageKey, state.nextIndex, blob, state.contentType, state.total))) {
+    if (!(await putPart(cache, storageKey, state.nextIndex, chunk.blob, state.contentType, state.total))) {
       return false;
     }
     state.nextIndex++;
-    state.offset += blob.size;
-    if (state.total == null && blob.size < CHUNK_SIZE) state.total = state.offset;
+    state.offset += chunk.blob.size;
+    if (state.total == null && chunk.blob.size < CHUNK_SIZE) state.total = state.offset;
 
     notifyCacheUpdated();
 
@@ -356,24 +433,50 @@ export async function cacheBookAudio(
     await sleep(START_DELAY_MS);
     await requestPersistentStorage();
     const cache = await caches.open(AUDIO_CACHE);
-    let done = 0;
-    for (const t of tracks) {
-      const url = t.contentUrl ? cacheStorageKey(t.contentUrl) : "";
-      if (!isCacheableUrl(url)) {
-        done++;
-        continue;
+
+    let done = tracks.length - cacheable.length;
+    let pending = cacheable;
+
+    for (let pass = 0; pass < MAX_TRACK_PASSES && pending.length > 0; pass++) {
+      // Yield entirely while playback is warming up or buffering.
+      while (shouldDeferCacheDownload()) {
+        await sleep(2_000);
       }
-      const already = await cacheHasUrl(cache, url);
-      if (already) {
-        done++;
-        onProgress?.(done, tracks.length);
-        continue;
+
+      if (pass > 0) {
+        const hasPartial = await Promise.all(
+          pending.map(async (t) => {
+            const key = cacheStorageKey(t.contentUrl);
+            return Boolean(await cache.match(partKey(key, 0)));
+          })
+        );
+        const delay = hasPartial.some(Boolean) ? PASS_RETRY_PARTIAL_MS : PASS_RETRY_DELAY_MS;
+        await sleep(delay);
       }
-      if (await downloadTrack(cache, url)) {
-        notifyCacheUpdated();
+
+      const failed: CacheableTrack[] = [];
+      for (const t of pending) {
+        while (shouldDeferCacheDownload()) {
+          await sleep(2_000);
+        }
+
+        const url = t.contentUrl;
+        const key = cacheStorageKey(url);
+        if (await cacheHasUrl(cache, key)) {
+          done++;
+          onProgress?.(done, tracks.length);
+          continue;
+        }
+        if (await downloadTrack(cache, url)) {
+          notifyCacheUpdated();
+          done++;
+          onProgress?.(done, tracks.length);
+        } else {
+          failed.push(t);
+        }
       }
-      done++;
-      onProgress?.(done, tracks.length);
+      pending = failed;
+      if (pending.length > 0 && !(await hasStorageRoom(CHUNK_SIZE))) break;
     }
   } finally {
     inFlight.delete(prefix);

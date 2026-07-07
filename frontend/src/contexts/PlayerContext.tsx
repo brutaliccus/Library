@@ -8,13 +8,8 @@ import {
   type ReactNode,
 } from "react";
 import api from "../api/client";
-import { useToast } from "./ToastContext";
-import {
-  clearMediaSessionPlayback,
-  MEDIA_SKIP_SECONDS,
-  toAbsoluteArtworkUrl,
-} from "../media/playerMediaSession";
-import { indexOfChapterAtTime, playbackScope } from "../utils/playerNav";
+import { clearMediaSessionPlayback } from "../media/playerMediaSession";
+import { indexOfChapterAtTime } from "../utils/playerNav";
 import {
   cacheBookAudio,
   clearBookCacheForTracks,
@@ -22,40 +17,18 @@ import {
   getCachedTrackObjectUrl,
 } from "../utils/audioCache";
 import { setAudioPlaybackActive, setMediaDownloadThrottled } from "../utils/mediaStorage";
+import { usePlayerProgressSync } from "../hooks/usePlayerProgressSync";
+import { usePlayerMediaSession } from "../hooks/usePlayerMediaSession";
 import {
-  registerNativeMediaHandlers,
-  syncNativeMediaSession,
-} from "../media/capacitorMediaSession";
+  npKey,
+  type AbsChapter,
+  type NowPlaying,
+  type PlaybackPosition,
+  type RDResumeInfo,
+  type Track,
+} from "../types/player";
 
-export interface Track {
-  index: number;
-  startOffset: number;
-  duration: number;
-  title: string;
-  contentUrl: string;
-  mimeType: string;
-}
-
-/** Audiobookshelf chapter markers (seconds from book start); populated for ABS playback when ABS exposes chapters. */
-export interface AbsChapter {
-  id: number;
-  title: string;
-  start: number;
-  end: number | null;
-}
-
-export interface NowPlaying {
-  source: "abs" | "rd";
-  sessionId?: string;
-  itemId?: string;
-  streamHistoryId?: number;
-  title: string;
-  author: string;
-  coverUrl: string;
-  tracks: Track[];
-  totalDuration: number;
-  absChapters?: AbsChapter[];
-}
+export type { Track, AbsChapter, NowPlaying, RDResumeInfo };
 
 interface PlayerState {
   nowPlaying: NowPlaying | null;
@@ -73,15 +46,6 @@ interface PlayerState {
   sleepTimerSecondsRemaining: number | null;
   /** Selected preset (minutes) while the timer is armed; drives UI highlighting */
   sleepTimerPresetMinutes: number | null;
-}
-
-export interface RDResumeInfo {
-  /** Global progress in seconds (used when track durations are known) */
-  startAt?: number;
-  /** Track to resume on (authoritative when durations are unknown) */
-  trackIndex?: number;
-  /** Position within that track, in seconds */
-  trackPositionSeconds?: number;
 }
 
 interface PlayerActions {
@@ -121,15 +85,6 @@ export function usePlayer(): PlayerContextType {
   return ctx;
 }
 
-const SYNC_INTERVAL = 30_000;
-
-/** Identity of a playing book, used to pair saved positions with the right title. */
-function npKey(np: NowPlaying): string {
-  return np.source === "abs"
-    ? `abs:${np.sessionId ?? np.itemId ?? ""}`
-    : `rd:${np.streamHistoryId ?? ""}`;
-}
-
 /**
  * Recalculate startOffset for every track and totalDuration from individual durations.
  * Mutates the tracks array in place for performance.
@@ -144,9 +99,7 @@ function recalcOffsets(tracks: Track[]): number {
 }
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
-  const { toast } = useToast();
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const syncTimer = useRef<ReturnType<typeof setInterval>>();
   const probeAbortRef = useRef<AbortController | null>(null);
   /**
    * The position every progress save reads from. Set to the INTENDED position
@@ -156,12 +109,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * `key` ties the position to a specific book so saves can't cross books
    * when the user switches titles mid-play.
    */
-  const lastPosRef = useRef<{
-    key: string;
-    time: number;
-    trackIndex: number;
-    trackLocal: number;
-  } | null>(null);
+  const lastPosRef = useRef<PlaybackPosition | null>(null);
   /** Seek target (track-local seconds) we're still waiting for the audio element to reach. */
   const pendingSeekRef = useRef<number | null>(null);
   /** Ticks observed below the pending seek target while audibly playing. */
@@ -185,6 +133,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     sleepTimerPresetMinutes: null,
   });
 
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  const getNowPlaying = useCallback(() => stateRef.current.nowPlaying, []);
+  const getPosition = useCallback(() => lastPosRef.current, []);
+  const { syncProgress, persistPlaybackProgress } = usePlayerProgressSync({
+    getNowPlaying,
+    getPosition,
+  });
+
   const getAudio = useCallback(() => {
     if (!audioRef.current) {
       audioRef.current = new Audio();
@@ -198,46 +156,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (!tracks.length) return localTime;
       const track = tracks[trackIndex];
       return (track?.startOffset ?? 0) + localTime;
-    },
-    []
-  );
-
-  /** Returns true when the progress save succeeded (or there was nothing to save). */
-  const syncProgress = useCallback(
-    async (
-      np: NowPlaying,
-      time: number,
-      trackIndex: number,
-      trackLocalTime?: number
-    ): Promise<boolean> => {
-      if (np.source === "abs" && np.sessionId) {
-        try {
-          await api.post(`/stream/abs/${np.sessionId}/sync`, {
-            currentTime: time,
-            duration: np.totalDuration,
-          });
-          return true;
-        } catch {
-          return false;
-        }
-      } else if (np.source === "rd" && np.streamHistoryId) {
-        try {
-          const allDurationsKnown = np.tracks.every((t) => t.duration > 0);
-          await api.post("/stream/rd/history/sync", {
-            stream_history_id: np.streamHistoryId,
-            progress_seconds: time,
-            total_seconds: np.totalDuration || 0,
-            current_track_index: trackIndex,
-            track_position_seconds:
-              trackLocalTime ?? Math.max(0, time - (np.tracks[trackIndex]?.startOffset ?? 0)),
-            track_durations: allDurationsKnown ? np.tracks.map((t) => t.duration) : undefined,
-          });
-          return true;
-        } catch {
-          return false;
-        }
-      }
-      return true;
     },
     []
   );
@@ -506,9 +424,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(timer);
   }, [state.buffering]);
 
-  const stateRef = useRef(state);
-  stateRef.current = state;
-
   useEffect(() => {
     if (state.sleepTimerEndAt == null) return;
 
@@ -536,71 +451,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [state.sleepTimerEndAt, getAudio]);
-
-  useEffect(() => {
-    syncTimer.current = setInterval(() => {
-      const np = stateRef.current.nowPlaying;
-      const pos = lastPosRef.current;
-      if (np && pos?.key === npKey(np)) {
-        void syncProgress(np, pos.time, pos.trackIndex, pos.trackLocal);
-      }
-    }, SYNC_INTERVAL);
-    return () => clearInterval(syncTimer.current);
-  }, [syncProgress]);
-
-  useEffect(() => {
-    // sendBeacon can't set Authorization headers, so the beacon endpoints take
-    // the access token as a query param instead.
-    const handler = (mode: "close" | "sync" = "close") => {
-      const np = stateRef.current.nowPlaying;
-      const pos = lastPosRef.current;
-      if (!np || pos?.key !== npKey(np)) return;
-      const token = localStorage.getItem("access_token") || "";
-      if (np.source === "abs" && np.sessionId) {
-        // "sync" keeps the session alive (app merely backgrounded and may keep
-        // playing); "close" is for real page unloads.
-        const endpoint = mode === "close" ? "close-beacon" : "sync-beacon";
-        navigator.sendBeacon?.(
-          `/api/stream/abs/${np.sessionId}/${endpoint}?token=${encodeURIComponent(token)}`,
-          new Blob(
-            [JSON.stringify({ currentTime: pos.time, duration: np.totalDuration })],
-            { type: "application/json" }
-          )
-        );
-      } else if (np.source === "rd" && np.streamHistoryId) {
-        navigator.sendBeacon?.(
-          `/api/stream/rd/history/sync-beacon?token=${encodeURIComponent(token)}`,
-          new Blob(
-            [
-              JSON.stringify({
-                stream_history_id: np.streamHistoryId,
-                progress_seconds: pos.time,
-                total_seconds: np.totalDuration || 0,
-                current_track_index: pos.trackIndex,
-                track_position_seconds: Math.max(0, pos.trackLocal),
-              }),
-            ],
-            { type: "application/json" }
-          )
-        );
-      }
-    };
-    const onUnload = () => handler("close");
-    // visibilitychange->hidden is the only signal that reliably fires before
-    // Android kills a backgrounded app; pagehide/beforeunload often never run.
-    // Use "sync" so backgrounded playback keeps its ABS session alive.
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") handler("sync");
-    };
-    window.addEventListener("beforeunload", onUnload);
-    window.addEventListener("pagehide", onUnload);
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      window.removeEventListener("beforeunload", onUnload);
-      window.removeEventListener("pagehide", onUnload);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, []);
 
   const playABS = useCallback(
     async (itemId: string) => {
@@ -833,32 +683,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setState((s) => ({ ...s, expanded: val }));
   }, []);
 
-  const persistPlaybackProgress = useCallback(
-    async (np: NowPlaying, time: number, trackIndex: number, trackLocalTime?: number) => {
-      // This is the last chance to save the listening position — retry once and
-      // tell the user if it still fails instead of silently losing progress.
-      let ok = await syncProgress(np, time, trackIndex, trackLocalTime);
-      if (!ok) {
-        await new Promise((r) => setTimeout(r, 1000));
-        ok = await syncProgress(np, time, trackIndex, trackLocalTime);
-      }
-      if (!ok) {
-        toast("Couldn't save your listening progress — check your connection", "error");
-      }
-      if (np.source === "abs" && np.sessionId) {
-        try {
-          await api.post(`/stream/abs/${np.sessionId}/close`, {
-            currentTime: time,
-            duration: np.totalDuration,
-          });
-        } catch {
-          /* progress already saved via sync above */
-        }
-      }
-    },
-    [syncProgress, toast]
-  );
-
   const dismissPlayer = useCallback(() => {
     probeAbortRef.current?.abort();
     const np = stateRef.current.nowPlaying;
@@ -958,193 +782,28 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (np.tracks.length > 1 && ti < np.tracks.length - 1) jumpToTrack(ti + 1);
   }, [seek, jumpToTrack]);
 
-  /** Ref so Media Session action handlers always call latest playback helpers */
-  const mediaActionsRef = useRef({
-    togglePlay,
-    play,
-    pause,
-    seek,
-    seekRelative,
-    skipChapterPrev,
-    skipChapterNext,
-    dismissPlayer,
-  });
-  const playActionsRef = useRef({ playABS, playRD });
-  mediaActionsRef.current = {
-    togglePlay,
-    play,
-    pause,
-    seek,
-    seekRelative,
-    skipChapterPrev,
-    skipChapterNext,
-    dismissPlayer,
-  };
-  playActionsRef.current = { playABS, playRD };
-
-  useEffect(() => {
-    void registerNativeMediaHandlers(
-      {
-        togglePlay: () => mediaActionsRef.current.togglePlay(),
-        play: () => mediaActionsRef.current.play(),
-        pause: () => mediaActionsRef.current.pause(),
-        seek: (t) => mediaActionsRef.current.seek(t),
-        seekRelative: (d) => mediaActionsRef.current.seekRelative(d),
-        skipChapterPrev: () => mediaActionsRef.current.skipChapterPrev(),
-        skipChapterNext: () => mediaActionsRef.current.skipChapterNext(),
-        dismissPlayer: () => mediaActionsRef.current.dismissPlayer(),
-      },
-      {
-        playABS: (id) => playActionsRef.current.playABS(id),
-        playRD: (...args) => playActionsRef.current.playRD(...args),
-        togglePlay: () => mediaActionsRef.current.togglePlay(),
-      }
-    );
-  }, []);
-
-  useEffect(() => {
-    if (!("mediaSession" in navigator)) return;
-
-    const nav = navigator.mediaSession;
-    const SKIP = MEDIA_SKIP_SECONDS;
-
-    nav.setActionHandler("play", () => {
-      mediaActionsRef.current.play();
-    });
-    nav.setActionHandler("pause", () => {
-      mediaActionsRef.current.pause();
-    });
-    nav.setActionHandler("stop", () => {
-      mediaActionsRef.current.dismissPlayer();
-    });
-    nav.setActionHandler("seekbackward", (d) => {
-      const sec =
-        d?.seekOffset != null && isFinite(d.seekOffset) ? d.seekOffset : SKIP;
-      mediaActionsRef.current.seekRelative(-sec);
-    });
-    nav.setActionHandler("seekforward", (d) => {
-      const sec =
-        d?.seekOffset != null && isFinite(d.seekOffset) ? d.seekOffset : SKIP;
-      mediaActionsRef.current.seekRelative(sec);
-    });
-    nav.setActionHandler("previoustrack", () => {
-      mediaActionsRef.current.skipChapterPrev();
-    });
-    nav.setActionHandler("nexttrack", () => {
-      mediaActionsRef.current.skipChapterNext();
-    });
-
-    nav.setActionHandler("seekto", (ev) => {
-      const t = ev.seekTime;
-      if (t != null && isFinite(t)) mediaActionsRef.current.seek(t);
-    });
-
-    return () => {
-      try {
-        nav.setActionHandler("play", null);
-        nav.setActionHandler("pause", null);
-        nav.setActionHandler("stop", null);
-        nav.setActionHandler("seekbackward", null);
-        nav.setActionHandler("seekforward", null);
-        nav.setActionHandler("previoustrack", null);
-        nav.setActionHandler("nexttrack", null);
-        nav.setActionHandler("seekto", null);
-      } catch {
-        /* ignore */
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!("mediaSession" in navigator)) return;
-    if (!state.nowPlaying) {
-      clearMediaSessionPlayback();
-      return;
-    }
-
-    const np = state.nowPlaying;
-    const scope = playbackScope(np, state.currentTime, state.currentTrackIndex);
-    const trackLabel =
-      np.tracks.length > 1 && np.tracks[state.currentTrackIndex]?.title
-        ? np.tracks[state.currentTrackIndex].title
-        : "";
-
-    const artUrl = toAbsoluteArtworkUrl(np.coverUrl);
-    const artwork: MediaImage[] = artUrl
-      ? [
-          { src: artUrl, sizes: "512x512", type: "image/jpeg" },
-          { src: artUrl, sizes: "192x192", type: "image/jpeg" },
-        ]
-      : [];
-
-    try {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: scope.label || np.title,
-        artist: np.author || "Audiobook",
-        album: trackLabel || np.title,
-        artwork,
-      });
-    } catch {
-      /* invalid artwork URL etc */
-    }
-  }, [state.nowPlaying, state.currentTrackIndex, state.currentTime]);
-
-  useEffect(() => {
-    if (!("mediaSession" in navigator) || !state.nowPlaying) return;
-    navigator.mediaSession.playbackState =
-      state.isPlaying && !state.buffering ? "playing" : "paused";
-  }, [state.isPlaying, state.buffering, state.nowPlaying]);
-
-  useEffect(() => {
-    if (!("mediaSession" in navigator) || !state.nowPlaying) return;
-    const ms = navigator.mediaSession as MediaSession & {
-      setPositionState?: (state: MediaPositionState | null) => void;
-    };
-    if (typeof ms.setPositionState !== "function") return;
-
-    const scope = playbackScope(
-      state.nowPlaying,
-      state.currentTime,
-      state.currentTrackIndex
-    );
-    const d = scope.duration;
-    const pos = scope.position;
-    if (!isFinite(d) || d <= 0) return;
-
-    try {
-      ms.setPositionState({
-        duration: d,
-        playbackRate: Math.max(state.playbackRate, 0.25),
-        position: Math.min(Math.max(pos, 0), d),
-      });
-    } catch {
-      /* invalid combo during seeks */
-    }
-  }, [
-    state.currentTime,
-    state.currentTrackIndex,
-    state.playbackRate,
-    state.nowPlaying,
-    state.isPlaying,
-  ]);
-
-  useEffect(() => {
-    void syncNativeMediaSession(
-      state.nowPlaying,
-      state.isPlaying,
-      state.currentTime,
-      state.currentTrackIndex,
-      state.playbackRate,
-      state.buffering
-    );
-  }, [
-    state.nowPlaying,
-    state.isPlaying,
-    state.currentTime,
-    state.currentTrackIndex,
-    state.playbackRate,
-    state.buffering,
-  ]);
+  // Lock screen / browser / Android Auto controls and metadata.
+  usePlayerMediaSession(
+    {
+      nowPlaying: state.nowPlaying,
+      isPlaying: state.isPlaying,
+      buffering: state.buffering,
+      currentTime: state.currentTime,
+      currentTrackIndex: state.currentTrackIndex,
+      playbackRate: state.playbackRate,
+    },
+    {
+      togglePlay,
+      play,
+      pause,
+      seek,
+      seekRelative,
+      skipChapterPrev,
+      skipChapterNext,
+      dismissPlayer,
+    },
+    { playABS, playRD }
+  );
 
   const value: PlayerContextType = {
     ...state,

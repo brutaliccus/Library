@@ -1,0 +1,70 @@
+services:
+  app:
+    build: .
+    container_name: audiobook-request
+    ports:
+      - "8085:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - ./backend/static:/app/static:ro
+      - /mnt/Audiobooks:/audiobooks
+      - /mnt/eBooks:/ebooks
+    env_file: .env
+    environment:
+      - FLARESOLVERR_URL=http://flaresolverr:8191
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
+      - prowlarr
+      - flaresolverr
+    restart: unless-stopped
+
+  prowlarr:
+    image: linuxserver/prowlarr:latest
+    container_name: audiobook-prowlarr
+    ports:
+      - "9696:9696"
+    volumes:
+      - ./prowlarr-config:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
+      - flaresolverr
+    restart: unless-stopped
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: audiobook-flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - TZ=America/New_York
+    ports:
+      - "8191:8191"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    restart: unless-stopped
+
+  jackett:
+    image: linuxserver/jackett:latest
+    container_name: audiobook-jackett
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - ./jackett-config:/config
+    ports:
+      - "9117:9117"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    restart: unless-stopped

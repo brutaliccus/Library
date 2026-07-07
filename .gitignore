@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Build output
+backend/static/
+frontend/android/app/build/
+frontend/android/build/
+frontend/android/.gradle/
+frontend/android/capacitor-cordova-android-plugins/build/
+frontend/android/local.properties
+*.jks
+*.keystore
+library-site-deploy.zip
+
+# Data
+data/
+*.db
+*.db-wal
+*.db-shm
+backups/
+
+# Logs
+*.log
+
+# Config (contains API keys / runtime state)
+.env
+prowlarr-config/
+jackett-config/
+auto-m4b-config/
+
+# IDE
+.vscode/
+.idea/
+*.swp

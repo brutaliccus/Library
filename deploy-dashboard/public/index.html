@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Library Site Deploy</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      margin: 0;
+      padding: 1.5rem;
+      min-height: 100vh;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin-bottom: 1rem; color: #f8fafc; }
+    .card {
+      background: #1e293b;
+      border-radius: 0.5rem;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+      border: 1px solid #334155;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+    .status-badge {
+      padding: 0.35rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.875rem;
+      font-weight: 500;
+    }
+    .status-idle { background: #334155; color: #94a3b8; }
+    .status-running { background: #1e40af; color: #93c5fd; }
+    .status-success { background: #166534; color: #86efac; }
+    .status-failed { background: #991b1b; color: #fca5a5; }
+    .btn {
+      padding: 0.5rem 1rem;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-deploy {
+      background: #2563eb;
+      color: white;
+    }
+    .btn-deploy:hover:not(:disabled) { background: #1d4ed8; }
+    .log-box {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 0.375rem;
+      padding: 1rem;
+      font-family: "Consolas", "Monaco", monospace;
+      font-size: 0.8rem;
+      line-height: 1.5;
+      max-height: 400px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-line { margin: 0.1em 0; }
+    .log-stderr { color: #f87171; }
+    .log-system { color: #94a3b8; font-style: italic; }
+    .meta { font-size: 0.8rem; color: #64748b; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Library Site → Pi Deploy</h1>
+    <div class="card">
+      <div class="status-row">
+        <span id="statusBadge" class="status-badge status-idle">Idle</span>
+        <button id="deployBtn" class="btn btn-deploy">Deploy</button>
+        <span id="meta" class="meta"></span>
+      </div>
+      <div class="log-box" id="logBox"></div>
+    </div>
+  </div>
+  <script>
+    const statusBadge = document.getElementById("statusBadge");
+    const deployBtn = document.getElementById("deployBtn");
+    const meta = document.getElementById("meta");
+    const logBox = document.getElementById("logBox");
+
+    function setStatus(s) {
+      statusBadge.textContent = s.status.charAt(0).toUpperCase() + s.status.slice(1);
+      statusBadge.className = "status-badge status-" + s.status;
+      deployBtn.disabled = s.status === "running";
+      if (s.startedAt) {
+        const start = new Date(s.startedAt);
+        meta.textContent = s.finishedAt
+          ? `Started ${start.toLocaleString()} · Finished ${new Date(s.finishedAt).toLocaleString()}`
+          : `Started ${start.toLocaleString()}`;
+      } else {
+        meta.textContent = "";
+      }
+    }
+
+    function appendLog(entry) {
+      const div = document.createElement("div");
+      div.className = "log-line log-" + (entry.type || "stdout");
+      div.textContent = entry.line;
+      logBox.appendChild(div);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function loadState() {
+      fetch("/api/state")
+        .then((r) => r.json())
+        .then((s) => {
+          setStatus(s);
+          logBox.innerHTML = "";
+          s.log.forEach(appendLog);
+        })
+        .catch((e) => (logBox.textContent = "Failed to load state: " + e.message));
+    }
+
+    function connectStream() {
+      const es = new EventSource("/api/stream");
+      es.addEventListener("state", (e) => {
+        const s = JSON.parse(e.data);
+        setStatus(s);
+      });
+      es.addEventListener("log", (e) => {
+        appendLog(JSON.parse(e.data));
+      });
+      es.onerror = () => {
+        es.close();
+        setTimeout(connectStream, 2000);
+      };
+    }
+
+    deployBtn.addEventListener("click", () => {
+      fetch("/api/deploy", { method: "POST" })
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.ok) {
+            logBox.innerHTML = "";
+            setStatus({ status: "running", startedAt: new Date().toISOString() });
+          } else {
+            alert(d.message || "Deploy failed to start");
+          }
+        })
+        .catch((e) => alert("Error: " + e.message));
+    });
+
+    loadState();
+    connectStream();
+  </script>
+</body>
+</html>

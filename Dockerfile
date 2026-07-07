@@ -10,6 +10,8 @@ COPY requirements.txt .
 RUN pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r requirements.txt
 
+COPY alembic.ini .
+COPY migrations/ migrations/
 COPY app/ app/
 COPY backend/static/ static/
 

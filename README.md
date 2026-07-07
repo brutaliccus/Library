@@ -158,16 +158,13 @@ npm run build
 
 ## Database Backups
 
-`data/app.db` holds the torrent cache, users, listening progress, and admin settings. Back it up nightly on the Pi with the included script (uses SQLite's online backup, safe while the app is running):
+`data/app.db` holds the torrent cache, users, listening progress, and admin settings. `.\deploy.ps1` installs a nightly backup cron on the Pi automatically (03:15, 14-day retention). Backups land in `data/backups/` as gzipped snapshots.
+
+To install or verify the cron manually:
 
 ```bash
-chmod +x "/opt/stacks/Library Site/scripts/backup_db.sh"
-crontab -e
-# add:
-15 3 * * * "/opt/stacks/Library Site/scripts/backup_db.sh" >> "/opt/stacks/Library Site/data/backups/backup.log" 2>&1
+bash scripts/install_backup_cron.sh
 ```
-
-Backups land in `data/backups/` as gzipped snapshots and are pruned after 14 days (override with `RETENTION_DAYS`).
 
 ## CI Checks
 

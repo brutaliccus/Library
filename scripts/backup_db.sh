@@ -12,6 +12,8 @@
 #
 # Optional overrides:
 #   DB_PATH=/path/to/app.db BACKUP_DIR=/path/to/backups RETENTION_DAYS=30 ./backup_db.sh
+#
+# Cron is installed automatically by deploy.ps1 (via scripts/install_backup_cron.sh).
 
 set -euo pipefail
 

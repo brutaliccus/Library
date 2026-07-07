@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, func, delete, or_, update
+from sqlalchemy import select, func, delete, or_, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
@@ -158,6 +158,62 @@ async def upsert_torrents(results: list[dict], db: AsyncSession | None = None) -
         return await _do(session)
 
 
+def _fts_phrase(normalized: str) -> str:
+    """FTS5 phrase query for already-normalized text (alphanumeric + spaces)."""
+    return f'"{normalized}"'
+
+
+async def _candidate_rows_fts(
+    db: AsyncSession, base_norm: str, author_norm: str, limit: int
+) -> list[IndexerTorrent]:
+    """Candidate lookup via the FTS5 index (fast at any table size)."""
+    clauses = [f"title_norm : {_fts_phrase(base_norm)}"]
+    if author_norm:
+        clauses.append(f"author_norm : {_fts_phrase(author_norm)}")
+        # Author name often appears in the title itself ("Sanderson - Mistborn").
+        clauses.append(f"title_norm : {_fts_phrase(author_norm)}")
+    match_query = " OR ".join(clauses)
+
+    id_rows = await db.execute(
+        text(
+            "SELECT rowid FROM indexer_torrents_fts "
+            "WHERE indexer_torrents_fts MATCH :match_q LIMIT :lim"
+        ),
+        {"match_q": match_query, "lim": limit},
+    )
+    ids = [r[0] for r in id_rows]
+    if not ids:
+        return []
+
+    rows: list[IndexerTorrent] = []
+    for chunk in _chunked(ids):
+        rows.extend(
+            (
+                await db.execute(
+                    select(IndexerTorrent).where(
+                        IndexerTorrent.id.in_(chunk),
+                        IndexerTorrent.is_active.is_(True),
+                    )
+                )
+            ).scalars().all()
+        )
+    return rows
+
+
+async def _candidate_rows_like(
+    db: AsyncSession, base_norm: str, author_norm: str, limit: int
+) -> list[IndexerTorrent]:
+    """Legacy full-scan fallback (used only if the FTS table is unavailable)."""
+    q = select(IndexerTorrent).where(IndexerTorrent.is_active.is_(True))
+    q = q.where(
+        or_(
+            IndexerTorrent.title_norm.contains(base_norm[:40]),
+            IndexerTorrent.author_norm.contains(author_norm[:30]) if author_norm else False,
+        )
+    )
+    return list((await db.execute(q.limit(limit))).scalars().all())
+
+
 async def get_torrents_for_book(
     ctx: BookSearchContext,
     tiers: tuple[str, ...] = ("exact", "likely", "weak"),
@@ -165,17 +221,20 @@ async def get_torrents_for_book(
 ) -> list[dict]:
     """Return cached torrents ranked for a book context."""
     async with async_session() as db:
-        q = select(IndexerTorrent).where(IndexerTorrent.is_active.is_(True))
         base_norm = _normalize_text(ctx.base_title)
         author_norm = _normalize_text(ctx.author)
-        if base_norm:
-            q = q.where(
-                or_(
-                    IndexerTorrent.title_norm.contains(base_norm[:40]),
-                    IndexerTorrent.author_norm.contains(author_norm[:30]) if author_norm else False,
+        if not base_norm:
+            rows = (
+                await db.execute(
+                    select(IndexerTorrent).where(IndexerTorrent.is_active.is_(True)).limit(500)
                 )
-            )
-        rows = (await db.execute(q.limit(500))).scalars().all()
+            ).scalars().all()
+        else:
+            try:
+                rows = await _candidate_rows_fts(db, base_norm, author_norm, 500)
+            except Exception as e:
+                logger.warning("FTS torrent lookup failed, falling back to LIKE scan: %s", e)
+                rows = await _candidate_rows_like(db, base_norm, author_norm, 500)
 
     raw = [torrent_row_to_api(r) for r in rows]
     relevant, _ = filter_irrelevant_results(raw, ctx)

@@ -41,6 +41,8 @@ class ScraperConfig:
     match_batch_size: int
     non_book_prune_every_n_jobs: int
     search_history_limit: int
+    rss_every_n_jobs: int
+    rss_limit_per_indexer: int
     extra_queries: str
 
 
@@ -126,6 +128,16 @@ FIELDS: list[SettingField] = [
         "int", 0, 200,
     ),
     SettingField(
+        "rss_every_n_jobs", "RSS ingest every N jobs",
+        "Pull each indexer's latest-releases feed every Nth job — cheap way to catch new uploads. 0 = off.",
+        "int", 0, 100,
+    ),
+    SettingField(
+        "rss_limit_per_indexer", "RSS results per indexer",
+        "Result cap for each indexer's recent-releases feed.",
+        "int", 25, 500,
+    ),
+    SettingField(
         "extra_queries", "Extra crawl queries",
         "Custom queries added to the rotation (one per line).",
         "text",
@@ -152,6 +164,8 @@ def env_defaults() -> dict[str, Any]:
         "match_batch_size": s.scraper_match_batch_size,
         "non_book_prune_every_n_jobs": 10,
         "search_history_limit": 30,
+        "rss_every_n_jobs": 5,
+        "rss_limit_per_indexer": 100,
         "extra_queries": "",
     }
 

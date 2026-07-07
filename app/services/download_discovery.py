@@ -460,13 +460,10 @@ def is_mismatched_series_book(result: dict, ctx: BookSearchContext) -> bool:
     return True
 
 
-def merge_indexer_results(
-    primary: list[dict],
-    secondary: list[dict],
-) -> list[dict]:
-    """Merge torrent lists; primary wins on duplicate hash (e.g. ABB-only pass first)."""
+def merge_indexer_results(*batches: list[dict]) -> list[dict]:
+    """Merge torrent lists by info hash; the best-seeded copy of a duplicate wins."""
     merged: dict[str, dict] = {}
-    for batch in (primary, secondary):
+    for batch in batches:
         for r in batch:
             key = (r.get("infoHash") or "").lower()
             if not key:

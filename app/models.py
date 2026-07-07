@@ -257,3 +257,5 @@ class ScraperState(Base):
     last_query: Mapped[str | None] = mapped_column(String(256), nullable=True)
     last_upserted_count: Mapped[int] = mapped_column(Integer, default=0)
     last_matches_created: Mapped[int] = mapped_column(Integer, default=0)
+    last_rss_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_rss_upserted: Mapped[int] = mapped_column(Integer, default=0)

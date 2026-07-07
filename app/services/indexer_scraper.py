@@ -26,6 +26,8 @@ settings = get_settings()
 _scraper_task: asyncio.Task | None = None
 _last_job_indexer_counts: dict[str, int] = {"abb": 0, "knaben": 0}
 _jobs_since_nonbook_prune = 0
+_jobs_since_rss = 0
+_last_rss_counts: dict[str, int] = {}
 
 # Book-focused queries first; no single-letter noise (wastes Prowlarr time on Knaben junk).
 _BASE_QUERIES: list[str] = [
@@ -111,8 +113,36 @@ async def _search_with_retry(query: str, cfg: ScraperConfig) -> tuple[list[dict]
     raise last_err
 
 
+async def _run_rss_job(cfg: ScraperConfig) -> int:
+    """Ingest each trusted indexer's latest-releases feed (Torznab empty query).
+
+    Keyword rotation keeps re-fetching the same popular torrents; the recent
+    feed is how genuinely NEW uploads enter the cache cheaply.
+    """
+    global _last_rss_counts
+    results, counts = await prowlarr.fetch_recent_scraper_releases(
+        limit_per_indexer=cfg.rss_limit_per_indexer,
+        timeout=cfg.prowlarr_timeout,
+    )
+    _last_rss_counts = counts
+    upserted = await indexer_cache.upsert_torrents(results)
+
+    async with async_session() as db:
+        state = (await db.execute(select(ScraperState).limit(1))).scalar_one()
+        state.last_rss_run_at = _utcnow()
+        state.last_rss_upserted = upserted
+        await db.commit()
+
+    logger.info(
+        "Indexer scraper RSS: upserted %s torrents from recent feeds (%s)",
+        upserted,
+        ", ".join(f"{k}={v}" for k, v in counts.items()) or "no indexers",
+    )
+    return upserted
+
+
 async def _run_scrape_job() -> None:
-    global _jobs_since_nonbook_prune
+    global _jobs_since_nonbook_prune, _jobs_since_rss
 
     cfg = await scraper_settings.get_scraper_config()
     state = await _get_or_create_state()
@@ -173,6 +203,16 @@ async def _run_scrape_job() -> None:
             tasks.append(asyncio.create_task(run_one(query)))
         if tasks:
             await asyncio.gather(*tasks)
+
+        # Recent-releases feed every Nth job (0 = disabled).
+        if cfg.rss_every_n_jobs > 0:
+            _jobs_since_rss += 1
+            if _jobs_since_rss >= cfg.rss_every_n_jobs:
+                _jobs_since_rss = 0
+                try:
+                    total_upserted += await _run_rss_job(cfg)
+                except Exception as e:
+                    logger.warning("Indexer scraper RSS ingest failed: %s", e)
 
         # One catalog match pass per job (cheaper than per query on a Pi).
         total_matches = await catalog_match.run_match_batch(cfg.match_batch_size)
@@ -427,6 +467,10 @@ async def get_status() -> dict:
         "torrentsTotal": total,
         "lastRunAt": state.last_run_at.isoformat() if state.last_run_at else None,
         "lastDebridRunAt": state.last_debrid_run_at.isoformat() if state.last_debrid_run_at else None,
+        "lastRssRunAt": state.last_rss_run_at.isoformat() if state.last_rss_run_at else None,
+        "lastRssUpserted": state.last_rss_upserted or 0,
+        "rssEveryNJobs": cfg.rss_every_n_jobs,
+        "lastRssIndexerResults": dict(_last_rss_counts),
         "lastQueryIndex": state.last_query_index,
         "queryQueueSize": len(queries),
         "currentQuery": current_query,

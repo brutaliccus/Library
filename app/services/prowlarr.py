@@ -333,6 +333,157 @@ async def search_scraper_indexers(
     return merged, counts
 
 
+_TORZNAB_NS = "{http://torznab.com/schemas/2015/feed}"
+
+
+def _parse_torznab_feed(xml_text: str, indexer_name: str) -> list[dict[str, Any]]:
+    """Parse a Torznab RSS feed into the same result shape as search()."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        logger.warning("Bad Torznab XML from %s: %s", indexer_name, e)
+        return []
+
+    results: list[dict[str, Any]] = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        if not title:
+            continue
+
+        attrs: dict[str, str] = {}
+        for a in item.findall(f"{_TORZNAB_NS}attr"):
+            name = a.get("name") or ""
+            if name:
+                attrs.setdefault(name.lower(), a.get("value") or "")
+
+        size = 0
+        size_text = item.findtext("size") or ""
+        enclosure = item.find("enclosure")
+        if size_text.isdigit():
+            size = int(size_text)
+        elif enclosure is not None and (enclosure.get("length") or "").isdigit():
+            size = int(enclosure.get("length") or 0)
+
+        cat_ids = [
+            int(a.get("value") or 0)
+            for a in item.findall(f"{_TORZNAB_NS}attr")
+            if (a.get("name") or "").lower() == "category" and (a.get("value") or "").isdigit()
+        ]
+        raw_cats = [{"id": cid, "name": ""} for cid in cat_ids]
+
+        if not is_book_related(raw_cats, title=title, indexer=indexer_name):
+            continue
+
+        download_url = item.findtext("link") or (
+            enclosure.get("url") if enclosure is not None else ""
+        ) or ""
+        guid = item.findtext("guid") or ""
+        magnet = attrs.get("magneturl") or ""
+        info_hash = attrs.get("infohash") or ""
+        if not magnet:
+            if guid.startswith("magnet:"):
+                magnet = guid
+            elif download_url.startswith("magnet:"):
+                magnet = download_url
+            elif info_hash:
+                magnet = f"magnet:?xt=urn:btih:{info_hash}&dn={title}"
+        if not info_hash and magnet:
+            parsed = extract_info_hash(magnet, None, download_url)
+            if parsed:
+                info_hash = parsed
+
+        def _int_attr(key: str) -> int:
+            v = attrs.get(key) or ""
+            return int(v) if v.isdigit() else 0
+
+        media_type = detect_media_type(title, raw_cats, size)
+        if (
+            _is_audiobookbay_indexer(indexer_name)
+            and media_type == "unknown"
+            and size > SIZE_AUDIOBOOK_MIN
+        ):
+            media_type = "audiobook"
+
+        results.append({
+            "title": title,
+            "size": size,
+            "seeders": _int_attr("seeders"),
+            "leechers": max(0, _int_attr("peers") - _int_attr("seeders")),
+            "indexer": indexer_name,
+            "publishDate": item.findtext("pubDate"),
+            "magnetUrl": magnet or None,
+            "downloadUrl": download_url or None,
+            "guid": guid or None,
+            "infoHash": info_hash.lower() if info_hash else "",
+            "infoUrl": item.findtext("comments"),
+            "categories": raw_cats,
+            "mediaType": media_type,
+        })
+    return results
+
+
+async def fetch_recent_releases(
+    indexer_id: int,
+    indexer_name: str,
+    limit: int = 100,
+    timeout: int = 60,
+) -> list[dict[str, Any]]:
+    """Latest releases from one indexer via Prowlarr's Torznab feed (empty query).
+
+    Much cheaper than keyword searches for keeping the cache stocked with
+    genuinely new content — this is the same feed Sonarr/Radarr poll for RSS sync.
+    """
+    if not settings.prowlarr_api_key:
+        return []
+    url = f"{settings.prowlarr_url}/api/v1/indexer/{indexer_id}/newznab"
+    params = {
+        "t": "search",
+        "q": "",
+        "limit": str(limit),
+        "apikey": settings.prowlarr_api_key,
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, params=params, timeout=timeout)
+        resp.raise_for_status()
+    results = _parse_torznab_feed(resp.text, indexer_name)
+    logger.info("Torznab recent feed %s: %s book-related results", indexer_name, len(results))
+    return results
+
+
+async def fetch_recent_scraper_releases(
+    limit_per_indexer: int = 100,
+    timeout: int = 60,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Recent-release feeds from all trusted scraper indexers, merged by hash."""
+    import asyncio
+    from app.services.download_discovery import merge_indexer_results
+
+    indexers = await get_trusted_indexer_info()
+    if not indexers:
+        return [], {}
+
+    async def _one(idx: dict) -> list[dict[str, Any]]:
+        return await fetch_recent_releases(
+            idx["id"], idx["name"], limit=limit_per_indexer, timeout=timeout
+        )
+
+    gathered = await asyncio.gather(*[_one(i) for i in indexers], return_exceptions=True)
+    batches: list[list[dict[str, Any]]] = []
+    counts: dict[str, int] = {}
+    for idx, batch in zip(indexers, gathered):
+        if isinstance(batch, Exception):
+            logger.warning("Recent feed failed for %s: %s", idx["name"], batch)
+            counts[idx["name"]] = 0
+            continue
+        batches.append(batch)
+        counts[idx["name"]] = len(batch)
+
+    merged = merge_indexer_results(*batches) if batches else []
+    return merged, counts
+
+
 async def search_audiobookbay_multi(queries: list[str]) -> list[dict[str, Any]]:
     """Search only ABB so results are not dropped by the global Prowlarr result cap."""
     iid = await get_audiobookbay_indexer_id()

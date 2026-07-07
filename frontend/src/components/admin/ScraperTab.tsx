@@ -25,6 +25,10 @@ export interface ScraperStatus {
   torrentsTotal: number;
   lastRunAt: string | null;
   lastDebridRunAt: string | null;
+  lastRssRunAt?: string | null;
+  lastRssUpserted?: number;
+  rssEveryNJobs?: number;
+  lastRssIndexerResults?: Record<string, number>;
   lastQueryIndex: number;
   queryQueueSize: number;
   currentQuery: string;
@@ -571,6 +575,14 @@ export default function ScraperTab() {
             <div className="flex justify-between gap-4">
               <span className="text-gray-400">Last debrid batch</span>
               <span className="text-gray-200">{formatWhen(data.lastDebridRunAt)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-gray-400">Last RSS ingest</span>
+              <span className="text-gray-200">
+                {(data.rssEveryNJobs ?? 0) > 0
+                  ? `${formatWhen(data.lastRssRunAt ?? null)} · ${data.lastRssUpserted ?? 0} upserted`
+                  : "off"}
+              </span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-gray-400">Debrid interval</span>

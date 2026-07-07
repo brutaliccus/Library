@@ -156,6 +156,28 @@ npm run build
 # Output goes to ../backend/static/
 ```
 
+## Database Backups
+
+`data/app.db` holds the torrent cache, users, listening progress, and admin settings. Back it up nightly on the Pi with the included script (uses SQLite's online backup, safe while the app is running):
+
+```bash
+chmod +x "/opt/stacks/Library Site/scripts/backup_db.sh"
+crontab -e
+# add:
+15 3 * * * "/opt/stacks/Library Site/scripts/backup_db.sh" >> "/opt/stacks/Library Site/data/backups/backup.log" 2>&1
+```
+
+Backups land in `data/backups/` as gzipped snapshots and are pruned after 14 days (override with `RETENTION_DAYS`).
+
+## CI Checks
+
+Before deploying, run the pre-deploy check suite (backend tests, frontend type-check, Android compile):
+
+```powershell
+.\scripts\check.ps1            # all checks
+.\scripts\check.ps1 -SkipAndroid  # skip the slow gradle step
+```
+
 ## Download Pipeline
 
 1. User searches for an audiobook (search proxied to Prowlarr)

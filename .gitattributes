@@ -1,0 +1,5 @@
+# Shell scripts run on the Pi — CRLF breaks bash, force LF regardless of
+# the Windows checkout's core.autocrlf setting.
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf

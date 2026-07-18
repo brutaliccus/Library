@@ -8,18 +8,54 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
-      - ./backend/static:/app/static:ro
-      - /mnt/Audiobooks:/audiobooks
-      - /mnt/eBooks:/ebooks
+      # Host library mounts — override via .env (see .env.example)
+      - ${AUDIOBOOK_HOST_DIR:-./media/audiobooks}:/audiobooks
+      - ${EBOOK_HOST_DIR:-./media/ebooks}:/ebooks
+      - ${OPENLIBRARY_HOST_DIR:-./media/openlibrary}:/openlibrary
     env_file: .env
     environment:
       - FLARESOLVERR_URL=http://flaresolverr:8191
+      - JACKETT_URL=http://audiobook-jackett:9117
+      # Only ABB Flare/RSS/live paths use this (see audiobookbay.py) — not the whole stack.
+      - ABB_PROXY_URL=http://gluetun:8888
+      - PYTHONUNBUFFERED=1
     dns:
       - 1.1.1.1
       - 8.8.8.8
     depends_on:
       - prowlarr
       - flaresolverr
+      - gluetun
+    restart: unless-stopped
+
+  # Mullvad WireGuard — HTTP proxy only. Jackett/Prowlarr/app stay on the LAN
+  # bridge; ABB FlareSolverr sessions attach to this proxy so only ABB egress
+  # pays the VPN latency.
+  gluetun:
+    image: qmcgaw/gluetun:v3.39.1
+    container_name: audiobook-gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    env_file:
+      - .env
+      - path: ./data/mullvad.env
+        required: false
+    environment:
+      - VPN_SERVICE_PROVIDER=mullvad
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES}
+      - SERVER_COUNTRIES=${MULLVAD_COUNTRY:-USA}
+      - HTTPPROXY=on
+      - UPDATER_PERIOD=24h
+      - TZ=${TZ:-UTC}
+    # Proxy stays on the compose network (gluetun:8888). Do not publish Jackett here.
+    expose:
+      - "8888"
+    volumes:
+      - ./data/gluetun:/gluetun
     restart: unless-stopped
 
   prowlarr:
@@ -30,9 +66,9 @@ services:
     volumes:
       - ./prowlarr-config:/config
     environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=America/New_York
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-UTC}
     dns:
       - 1.1.1.1
       - 8.8.8.8
@@ -43,23 +79,28 @@ services:
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: audiobook-flaresolverr
+    shm_size: "256mb"
     environment:
       - LOG_LEVEL=info
-      - TZ=America/New_York
+      - TZ=${TZ:-UTC}
+      - BROWSER_TIMEOUT=300000
     ports:
       - "8191:8191"
     dns:
       - 1.1.1.1
       - 8.8.8.8
+    depends_on:
+      - gluetun
     restart: unless-stopped
 
+  # Normal bridge network — Knaben/other indexers are NOT slowed by Mullvad.
   jackett:
     image: linuxserver/jackett:latest
     container_name: audiobook-jackett
     environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=America/New_York
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-UTC}
     volumes:
       - ./jackett-config:/config
     ports:

@@ -1,44 +1,96 @@
-# Python
+# --- Python ---
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
+.eggs/
 venv/
 .venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
 
-# Node
+# --- Node / frontend ---
 node_modules/
 frontend/dist/
+frontend/public/pdfjs/
 *.tsbuildinfo
 
-# Build output
-backend/static/
+# Capacitor / Android local build output (source stays tracked)
 frontend/android/app/build/
 frontend/android/build/
 frontend/android/.gradle/
 frontend/android/capacitor-cordova-android-plugins/build/
 frontend/android/local.properties
+frontend/android/app/release/
 *.jks
 *.keystore
-library-site-deploy.zip
+*.apk
+*.aab
 
-# Data
+# --- Build / deploy artifacts (not needed to self-host) ---
+backend/static/
+library-site-deploy.zip
+library-site-deploy.tar.gz
+deploy-*.log
+*.log
+
+# Personal / operator-only deploy helpers (keep local; not for public clone)
+deploy.ps1
+deploy-to-pi.ps1
+deploy.local.ps1
+deploy-dashboard/
+
+# --- Runtime data & secrets (never commit) ---
+.env
+.env.local
+.env.*.local
 data/
 *.db
 *.db-wal
 *.db-shm
 backups/
-
-# Logs
-*.log
-
-# Config (contains API keys / runtime state)
-.env
+media/
 prowlarr-config/
 jackett-config/
 auto-m4b-config/
 
-# IDE
+# --- Local-only / unrelated trees ---
+libraforge/
+tools/
+
+# One-off probes, diagnostics, and experiment scripts
+scripts/dev/
+scripts/abb_full_scrape.py
+scripts/import_abb_stage.py
+scripts/build_subjects_on_ssd.sh
+scripts/dinotopia_*.py
+scripts/download_dinotopia.py
+scripts/find_dinotopia.py
+scripts/diagnose_catalog_match.py
+scripts/fix_cache_now.py
+scripts/refresh_debrid_post_deploy.py
+scripts/check_scraper.py
+scripts/run_check_scraper.sh
+scripts/scan_kavita.py
+scripts/test_*.py
+scripts/install_libraforge.sh
+scripts/make_deploy_archive.py
+scripts/run_flaresolverr_local.ps1
+
+# Internal planning / sibling-product docs
+docs/EREADER-PAGINATION-PLAN.md
+docs/libraforge.md
+nginx/library.freiverse.com.conf
+
+# Misc junk
+eb_*.png
+.DS_Store
+Thumbs.db
 .vscode/
 .idea/
 *.swp
+*~

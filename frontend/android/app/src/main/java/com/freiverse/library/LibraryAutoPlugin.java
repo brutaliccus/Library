@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory;
 import android.os.Bundle;
 import android.util.Base64;
 import android.util.Log;
+import androidx.core.content.ContextCompat;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -15,7 +16,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.ArrayList;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -30,6 +30,8 @@ public class LibraryAutoPlugin extends Plugin
     private static final String TAG = "LibraryAuto";
 
     private final Map<String, PluginCall> actionHandlers = new HashMap<>();
+    private String cachedArtworkUrl = null;
+    private Bitmap cachedArtwork = null;
 
     @Override
     public void load() {
@@ -121,6 +123,7 @@ public class LibraryAutoPlugin extends Plugin
         intent.addFlags(
             android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                 | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | android.content.Intent.FLAG_ACTIVITY_NEW_TASK
         );
         getActivity().startActivity(intent);
     }
@@ -129,12 +132,32 @@ public class LibraryAutoPlugin extends Plugin
     public void syncPlayback(PluginCall call) {
         boolean active = call.getBoolean("active", false);
         boolean playing = call.getBoolean("playing", false);
+        boolean positionOnly = call.getBoolean("positionOnly", false);
+        double positionSec = call.getDouble("position", 0.0);
+        float playbackRate = call.getFloat("playbackRate", 1.0f);
+
+        if (!active) {
+            cachedArtworkUrl = null;
+            cachedArtwork = null;
+            LibraryAutoBridge.getInstance().clear();
+            call.resolve();
+            return;
+        }
+
+        if (positionOnly) {
+            LibraryAutoBridge.getInstance().updatePosition(
+                playing,
+                Math.round(positionSec * 1000),
+                playbackRate
+            );
+            call.resolve();
+            return;
+        }
+
         String title = call.getString("title", "");
         String artist = call.getString("artist", "");
         String album = call.getString("album", "");
         double durationSec = call.getDouble("duration", 0.0);
-        double positionSec = call.getDouble("position", 0.0);
-        float playbackRate = call.getFloat("playbackRate", 1.0f);
 
         Bitmap artwork = null;
         try {
@@ -144,7 +167,7 @@ public class LibraryAutoPlugin extends Plugin
                 for (JSONObject artworkJson : artworkList) {
                     String src = artworkJson.optString("src", null);
                     if (src != null) {
-                        artwork = urlToBitmap(src);
+                        artwork = getCachedArtwork(src);
                         break;
                     }
                 }
@@ -153,23 +176,39 @@ public class LibraryAutoPlugin extends Plugin
             Log.w(TAG, "Unable to load artwork", ex);
         }
 
-        if (!active) {
-            LibraryAutoBridge.getInstance().clear();
-        } else {
-            LibraryAutoBridge.getInstance().update(
-                title,
-                artist,
-                album,
-                artwork,
-                true,
-                playing,
-                Math.round(durationSec * 1000),
-                Math.round(positionSec * 1000),
-                playbackRate
+        LibraryAutoBridge.getInstance().update(
+            title,
+            artist,
+            album,
+            artwork,
+            true,
+            playing,
+            Math.round(durationSec * 1000),
+            Math.round(positionSec * 1000),
+            playbackRate
+        );
+        android.content.Context ctx = getContext();
+        if (ctx != null) {
+            android.content.Intent intent = new android.content.Intent(
+                ctx,
+                LibraryMediaBrowserService.class
             );
+            ContextCompat.startForegroundService(ctx, intent);
         }
 
         call.resolve();
+    }
+
+    private Bitmap getCachedArtwork(String url) throws IOException {
+        if (url != null && url.equals(cachedArtworkUrl) && cachedArtwork != null) {
+            return cachedArtwork;
+        }
+        Bitmap bitmap = urlToBitmap(url);
+        if (bitmap != null) {
+            cachedArtworkUrl = url;
+            cachedArtwork = bitmap;
+        }
+        return bitmap;
     }
 
     @PluginMethod(returnType = PluginMethod.RETURN_CALLBACK)
@@ -185,8 +224,19 @@ public class LibraryAutoPlugin extends Plugin
 
     @Override
     public void onAction(String action, Bundle extras) {
-        if ("playmedia".equals(action) || "play".equals(action)) {
+        // Only foreground when picking a title from the browse tree — not for
+        // play/pause transport controls (bringing the WebView forward mid-resume
+        // races audio.play() and breaks Android Auto / lock-screen play).
+        if ("playmedia".equals(action)) {
             bringActivityToForeground();
+            android.content.Context ctx = getContext();
+            if (ctx != null) {
+                android.content.Intent serviceIntent = new android.content.Intent(
+                    ctx,
+                    LibraryMediaBrowserService.class
+                );
+                ContextCompat.startForegroundService(ctx, serviceIntent);
+            }
         }
 
         PluginCall handler = actionHandlers.get(action);

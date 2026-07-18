@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { LocalNotifications } from "@capacitor/local-notifications";
+import { isNativePushOptedIn, NATIVE_PUSH_PREF_EVENT } from "./usePushNotifications";
 import { useWebSocket } from "./useWebSocket";
 
 let permissionRequested = false;
@@ -23,7 +24,7 @@ export async function showNativeNotification(
   body: string,
   extra?: { url?: string }
 ): Promise<void> {
-  if (!Capacitor.isNativePlatform()) return;
+  if (!Capacitor.isNativePlatform() || !isNativePushOptedIn()) return;
   const ok = await ensureNotificationPermission();
   if (!ok) return;
 
@@ -56,6 +57,15 @@ interface WSMessage {
  */
 export function useNativeNotifications(enabled: boolean) {
   const seen = useRef(new Set<string>());
+  const [pushOptedIn, setPushOptedIn] = useState(isNativePushOptedIn);
+
+  useEffect(() => {
+    const onPref = () => setPushOptedIn(isNativePushOptedIn());
+    window.addEventListener(NATIVE_PUSH_PREF_EVENT, onPref);
+    return () => window.removeEventListener(NATIVE_PUSH_PREF_EVENT, onPref);
+  }, []);
+
+  const active = enabled && pushOptedIn;
 
   const onMessage = useCallback((msg: WSMessage) => {
     if (!Capacitor.isNativePlatform()) return;
@@ -96,10 +106,10 @@ export function useNativeNotifications(enabled: boolean) {
     }
   }, []);
 
-  useWebSocket(enabled ? onMessage : undefined);
+  useWebSocket(active ? onMessage : undefined);
 
   useEffect(() => {
-    if (!enabled || !Capacitor.isNativePlatform()) return;
+    if (!active || !Capacitor.isNativePlatform()) return;
     void ensureNotificationPermission();
-  }, [enabled]);
+  }, [active]);
 }

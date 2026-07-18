@@ -13,8 +13,12 @@ import ChangePassword from "./pages/ChangePassword";
 import Home from "./pages/Home";
 import SearchResults from "./pages/SearchResults";
 import BookDetailPage from "./pages/BookDetail";
+import SeriesPage from "./pages/SeriesPage";
+import ShelfPage from "./pages/ShelfPage";
+import GenreHubPage from "./pages/GenreHubPage";
 import RequestsPage from "./pages/Requests";
 import AdminPage from "./pages/Admin";
+import InstanceSetup from "./pages/InstanceSetup";
 import MyLibrary from "./pages/MyLibrary";
 import LibraryBookDetail from "./pages/LibraryBookDetail";
 import Ereader from "./pages/Ereader";
@@ -63,10 +67,14 @@ export default function App() {
   const handleGenreToggle = useCallback(() => setGenreMobileOpen((v) => !v), []);
   const handleGenreMobileClose = useCallback(() => setGenreMobileOpen(false), []);
 
-  const showGenreButton = location.pathname === "/" || location.pathname === "/search";
+  const showGenreButton =
+    location.pathname === "/" ||
+    location.pathname === "/search" ||
+    location.pathname.startsWith("/genre/") ||
+    location.pathname.startsWith("/shelf/");
 
   return (
-    <div className={`min-h-screen bg-gray-950 ${nowPlaying && !expanded ? "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]" : ""}`}>
+    <div className={`min-h-screen bg-gray-950 overflow-x-hidden w-full max-w-[100vw] ${nowPlaying && !expanded ? "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]" : ""}`}>
       {user && !user.mustChangePassword && (
         <Navbar
           onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
@@ -120,6 +128,36 @@ export default function App() {
           }
         />
         <Route
+          path="/series/:volumeId"
+          element={
+            <ProtectedRoute>
+              <SeriesPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/shelf/:slug"
+          element={
+            <ProtectedRoute>
+              <ShelfPage
+                genreMobileOpen={genreMobileOpen}
+                onGenreMobileClose={handleGenreMobileClose}
+              />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/genre/:slug"
+          element={
+            <ProtectedRoute>
+              <GenreHubPage
+                genreMobileOpen={genreMobileOpen}
+                onGenreMobileClose={handleGenreMobileClose}
+              />
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="/my-library"
           element={
             <ProtectedRoute>
@@ -164,6 +202,14 @@ export default function App() {
           element={
             <AdminRoute>
               <AdminPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/setup"
+          element={
+            <AdminRoute>
+              <InstanceSetup />
             </AdminRoute>
           }
         />

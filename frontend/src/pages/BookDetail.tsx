@@ -6,7 +6,7 @@ import { useToast } from "../contexts/ToastContext";
 import StarRating from "../components/StarRating";
 import DownloadPanel from "../components/DownloadPanel";
 import {
-  BookOpen, ArrowLeft, Headphones, Loader2, Library, Check, Play,
+  BookOpen, ArrowLeft, Headphones, Loader2, Library, Check, Play, Bell, BellOff,
 } from "lucide-react";
 import type { BookDetail as BookDetailType } from "../types/book";
 import { useState, useCallback, useRef, useMemo } from "react";
@@ -71,17 +71,22 @@ export default function BookDetailPage() {
   const { data: book, isLoading, error } = useQuery({
     queryKey: ["book-detail", volumeId],
     queryFn: async () => {
-      const { data } = await api.get(`/books/${volumeId}`);
+      const { data } = await api.get(`/books/${encodeURIComponent(volumeId!)}`);
       return data as BookDetailType;
     },
     enabled: !!volumeId,
   });
 
   const { data: grRating } = useQuery({
-    queryKey: ["goodreads-rating", volumeId],
+    queryKey: ["book-rating", volumeId],
     queryFn: async () => {
-      const { data } = await api.get(`/books/rating/${volumeId}`);
-      return data as { goodreadsRating: number; goodreadsCount: number; goodreadsReviewCount: number };
+      const { data } = await api.get(`/books/rating/${encodeURIComponent(volumeId!)}`);
+      return data as {
+        goodreadsRating: number;
+        goodreadsCount: number;
+        goodreadsReviewCount: number;
+        source?: string;
+      };
     },
     enabled: !!volumeId,
     staleTime: 60 * 60 * 1000,
@@ -89,10 +94,10 @@ export default function BookDetailPage() {
     refetchOnWindowFocus: false,
   });
 
-  const { data: seriesData } = useQuery({
+  const { data: seriesData, isLoading: seriesLoading } = useQuery({
     queryKey: ["book-series", volumeId],
     queryFn: async () => {
-      const { data } = await api.get(`/books/series/${volumeId}`);
+      const { data } = await api.get(`/books/series/${encodeURIComponent(volumeId!)}`);
       return data as {
         seriesName: string | null;
         books: Array<{ id: string; title: string; subtitle: string; coverUrl: string; authors: string[]; sequence: string; publishedDate: string }>;
@@ -165,8 +170,69 @@ export default function BookDetailPage() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const { data: availability } = useQuery({
+    queryKey: ["book-availability", volumeId],
+    queryFn: async () => {
+      const { data } = await api.get(`/books/availability/${encodeURIComponent(volumeId!)}`);
+      return data as { available: boolean; matchCount?: number };
+    },
+    enabled: !!volumeId,
+    staleTime: 60 * 1000,
+  });
+
+  const { data: alertStatus } = useQuery({
+    queryKey: ["availability-alert", volumeId],
+    queryFn: async () => {
+      const { data } = await api.get(
+        `/books/availability-alerts/${encodeURIComponent(volumeId!)}`
+      );
+      return data as { watching: boolean };
+    },
+    enabled: !!volumeId && availability?.available === false,
+    staleTime: 30 * 1000,
+  });
+
   const canRead = !!ebookChapterId || !!ebookMatch?.chapterId;
   const readChapterId = ebookChapterId ?? ebookMatch?.chapterId ?? 0;
+
+  const notifyMutation = useMutation({
+    mutationFn: async (watch: boolean) => {
+      if (watch) {
+        const { data } = await api.post("/books/availability-alerts", {
+          volumeId,
+          title: book?.title || "",
+          author: book?.authors?.join(", ") || "",
+          coverUrl: book?.coverUrlLarge || book?.coverUrl || "",
+        });
+        return data as { watching: boolean; alreadyAvailable?: boolean; message?: string };
+      }
+      const { data } = await api.delete(
+        `/books/availability-alerts/${encodeURIComponent(volumeId!)}`
+      );
+      return data as { watching: boolean };
+    },
+    onSuccess: (data: {
+      watching: boolean;
+      alreadyAvailable?: boolean;
+      message?: string;
+    }) => {
+      queryClient.invalidateQueries({ queryKey: ["availability-alert", volumeId] });
+      queryClient.invalidateQueries({ queryKey: ["book-availability", volumeId] });
+      if (data.alreadyAvailable) {
+        toast(data.message || "Already available to download", "success");
+        return;
+      }
+      toast(
+        data.watching
+          ? "We'll notify you when this is in the cache"
+          : "Notification cancelled",
+        "success"
+      );
+    },
+    onError: (err: any) => {
+      toast(err.response?.data?.detail || "Could not update notification", "error");
+    },
+  });
 
   const addToLibMutation = useMutation({
     mutationFn: async () => {
@@ -200,8 +266,12 @@ export default function BookDetailPage() {
     setAbsLoading(true);
     try {
       await playABS(itemId);
-    } catch {
-      toast("Failed to start playback", "error");
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message.startsWith("Offline")
+          ? err.message
+          : "Failed to start playback";
+      toast(msg, "error");
     } finally {
       setAbsLoading(false);
     }
@@ -370,6 +440,32 @@ export default function BookDetailPage() {
             {compact ? "Add" : "+ to Personal Collection"}
           </button>
         )}
+        {availability?.available === false && (
+          <button
+            onClick={() => notifyMutation.mutate(!alertStatus?.watching)}
+            disabled={notifyMutation.isPending}
+            className={`${base} ${
+              alertStatus?.watching
+                ? "bg-amber-900/40 text-amber-200 border border-amber-700/50 hover:bg-amber-900/60"
+                : "bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 hover:border-gray-600"
+            } transition-colors disabled:opacity-50`}
+          >
+            {notifyMutation.isPending ? (
+              <Loader2 size={compact ? 14 : 16} className="animate-spin" />
+            ) : alertStatus?.watching ? (
+              <BellOff size={compact ? 14 : 16} />
+            ) : (
+              <Bell size={compact ? 14 : 16} />
+            )}
+            {compact
+              ? alertStatus?.watching
+                ? "Watching"
+                : "Notify"
+              : alertStatus?.watching
+                ? "Cancel notify"
+                : "Notify me when available"}
+          </button>
+        )}
       </>
     );
   };
@@ -391,14 +487,17 @@ export default function BookDetailPage() {
         {grRating && grRating.goodreadsRating > 0 ? (
           <div className="flex items-center gap-2">
             <StarRating rating={grRating.goodreadsRating} count={grRating.goodreadsCount} size={16} />
-            <span className="text-[11px] text-gray-500 font-medium">Goodreads</span>
+            <span className="text-[11px] text-gray-500 font-medium">
+              {grRating.source === "goodreads" ? "Goodreads" : "Hardcover"}
+            </span>
           </div>
         ) : book.averageRating > 0 ? (
           <StarRating rating={book.averageRating} count={book.ratingsCount} size={16} />
         ) : null}
         {grRating && grRating.goodreadsReviewCount > 0 && (
           <p className="text-[11px] text-gray-500">
-            {grRating.goodreadsReviewCount.toLocaleString()} reviews on Goodreads
+            {grRating.goodreadsReviewCount.toLocaleString()} reviews
+            {grRating.source === "goodreads" ? " on Goodreads" : " on Hardcover"}
           </p>
         )}
       </div>
@@ -498,20 +597,35 @@ export default function BookDetailPage() {
         </div>
       </div>
 
-      {seriesData?.seriesName && seriesData.books.length > 1 && (
+      {seriesLoading && (
         <div className="mt-10">
-          <h2 className="text-lg font-semibold text-gray-100 mb-3">
-            More in {seriesData.seriesName}
-            <span className="text-sm text-gray-500 font-normal ml-2">
-              ({seriesData.books.length} books)
-            </span>
-          </h2>
+          <p className="text-sm text-gray-500">Looking up series…</p>
+        </div>
+      )}
+
+      {!seriesLoading && seriesData?.seriesName && seriesData.books.length > 1 && (
+        <div className="mt-10">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <h2 className="text-lg font-semibold text-gray-100">
+              More in {seriesData.seriesName}
+              <span className="text-sm text-gray-500 font-normal ml-2">
+                ({seriesData.books.length} books)
+              </span>
+            </h2>
+            <button
+              type="button"
+              onClick={() => navigate(`/series/${encodeURIComponent(volumeId!)}`)}
+              className="shrink-0 px-3 py-1.5 rounded-lg bg-brand-900/40 border border-brand-700/50 text-sm font-medium text-brand-300 hover:bg-brand-900/60"
+            >
+              More in this series
+            </button>
+          </div>
           <div className="grid grid-flow-col auto-cols-[20%] sm:auto-cols-[14%] md:auto-cols-[10%] lg:auto-cols-[8%] xl:auto-cols-[6.5%] gap-2 overflow-x-auto pb-2 scroll-smooth scrollbar-hide">
             {seriesData.books.map((sb) => (
               <button
                 key={sb.id}
                 onClick={() => {
-                  if (sb.id !== volumeId) window.location.href = `/book/${encodeURIComponent(sb.id)}`;
+                  if (sb.id !== volumeId) navigate(`/book/${encodeURIComponent(sb.id)}`);
                 }}
                 className={`group text-left flex flex-col rounded-lg overflow-hidden border transition-all duration-200 hover:-translate-y-0.5 h-full ${
                   sb.id === volumeId

@@ -1063,6 +1063,23 @@ async def _resolve_rd_background(
         magnet = magnet_link
         torrent_bytes: bytes | None = None
 
+        if (
+            not magnet
+            and download_url
+            and "audiobookbay" in (download_url or "").lower()
+        ):
+            task["detail"] = "Resolving AudioBook Bay magnet…"
+            try:
+                from app.services import audiobookbay
+
+                m, _h = await audiobookbay.resolve_magnet_from_details(
+                    download_url, title=title or ""
+                )
+                if m:
+                    magnet = m
+            except Exception as e:
+                logger.debug("ABB magnet resolve failed for %s: %s", download_url, e)
+
         if not magnet and download_url:
             task["detail"] = "Resolving download link from indexer..."
             try:
@@ -1524,7 +1541,9 @@ async def _smart_stream_background(
             task["progress"] = int((i / total_tries) * 50)
 
             try:
-                resolved = await _try_resolve_single(magnet, dl, provider=provider)
+                resolved = await _try_resolve_single(
+                    magnet, dl, provider=provider, title=result.get("title") or title
+                )
                 if resolved:
                     tracks, resolved_torrent_id = resolved
                     task["provider"] = provider
@@ -1581,12 +1600,28 @@ async def _try_resolve_single(
     magnet_link: str | None,
     download_url: str | None,
     provider: str = "rd",
+    title: str = "",
 ) -> tuple[list[dict], str] | None:
     """Try to resolve a single result on a debrid provider.
     Returns (tracks, torrent_id) or None."""
     client_mod = debrid.get_client(provider)
     magnet = magnet_link
     torrent_bytes: bytes | None = None
+
+    # Direct ABB detail pages need a hash scrape (Jackett normally does this).
+    if (
+        not magnet
+        and download_url
+        and "audiobookbay" in download_url.lower()
+    ):
+        try:
+            from app.services import audiobookbay
+
+            m, _h = await audiobookbay.resolve_magnet_from_details(download_url, title=title)
+            if m:
+                magnet = m
+        except Exception as e:
+            logger.debug("ABB magnet resolve failed for %s: %s", download_url, e)
 
     if not magnet and download_url:
         try:

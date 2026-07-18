@@ -32,7 +32,6 @@ export default function SearchBar({ onSearch, isLoading }: Props) {
         onChange={(e) => setValue(e.target.value)}
         placeholder="Search for an audiobook..."
         className="w-full pl-12 pr-12 py-3.5 bg-gray-800 border border-gray-700 rounded-xl text-base text-gray-100 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500"
-        autoFocus
       />
       {value && (
         <button

@@ -29,6 +29,19 @@ export interface ScraperStatus {
   lastRssUpserted?: number;
   rssEveryNJobs?: number;
   lastRssIndexerResults?: Record<string, number>;
+  knabenCrawl?: {
+    phase?: string;
+    category?: string | null;
+    categoryIndex?: number;
+    categoriesTotal?: number;
+    shard?: string | null;
+    shardLabel?: string;
+    shardIndex?: number;
+    shardsTotal?: number;
+    offset?: number;
+    pagesPerJob?: number;
+    lastBatch?: Record<string, unknown>;
+  };
   lastQueryIndex: number;
   queryQueueSize: number;
   currentQuery: string;
@@ -47,17 +60,25 @@ export interface ScraperStatus {
   matchBatchSize: number;
   configuredIndexers?: { id: number; name: string; kind: string }[];
   abbConfigured?: boolean;
+  abbMode?: "rss-only" | "author-crawl" | "deep";
+  abbRssOnly?: boolean;
+  knabenRssOnly?: boolean;
+  foreignTitlePrune?: boolean;
   knabenConfigured?: boolean;
   lastJobIndexerResults?: { abb: number; knaben: number };
   stats: {
     mediaTypes: Record<string, number>;
     indexers: Record<string, number>;
+    indexersByKind?: { audiobookbay: number; knaben: number; other: number };
     matchTiers: Record<string, number>;
     catalogVolumesMatched: number;
+    catalogVolumesAvailable?: number;
     catalogMatchesTotal: number;
     rdCached: number;
     torboxCached: number;
     pendingDebridChecks: number;
+    checkedDebridCount?: number;
+    debridProvidersConfigured?: string[];
   };
   recentTorrents: {
     title: string;
@@ -67,6 +88,28 @@ export interface ScraperStatus {
     firstSeenAt: string | null;
     rdCached: boolean;
   }[];
+  debridRescan?: {
+    running?: boolean;
+    queued?: number;
+    checked?: number;
+    preloaded?: number;
+    pending?: number;
+    batchSize?: number;
+    startedAt?: string;
+    finishedAt?: string;
+    error?: string;
+  };
+  catalogRelink?: {
+    running?: boolean;
+    total?: number;
+    scanned?: number;
+    linked?: number;
+    matches?: number;
+    pruned?: number;
+    startedAt?: string;
+    finishedAt?: string;
+    error?: string;
+  };
   config?: Record<string, number | string>;
 }
 
@@ -74,14 +117,14 @@ interface ScraperSettingField {
   key: string;
   label: string;
   description: string;
-  type: "int" | "text";
+  type: "int" | "text" | "bool";
   min: number | null;
   max: number | null;
 }
 
 interface ScraperSettingsPayload {
-  settings: Record<string, number | string>;
-  defaults: Record<string, number | string>;
+  settings: Record<string, number | string | boolean>;
+  defaults: Record<string, number | string | boolean>;
   fields: ScraperSettingField[];
 }
 
@@ -134,10 +177,10 @@ function StatusBadge({ status, enabled }: { status: string; enabled: boolean }) 
 
 function StatCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
   return (
-    <div className="bg-gray-800/80 border border-gray-700 rounded-xl p-4">
-      <p className="text-xs text-gray-500 uppercase tracking-wide">{label}</p>
-      <p className="text-2xl font-bold text-gray-100 mt-1 tabular-nums">{value}</p>
-      {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
+    <div className="bg-gray-800/80 border border-gray-700 rounded-xl p-3 sm:p-4 min-w-0">
+      <p className="text-[10px] sm:text-xs text-gray-500 uppercase tracking-wide">{label}</p>
+      <p className="text-xl sm:text-2xl font-bold text-gray-100 mt-1 tabular-nums">{value}</p>
+      {sub && <p className="text-[10px] sm:text-xs text-gray-400 mt-1 break-words leading-snug">{sub}</p>}
     </div>
   );
 }
@@ -216,7 +259,7 @@ function ScraperTuningCard() {
   const save = useMutation({
     mutationFn: async () => {
       if (!data) return null;
-      const updates: Record<string, number | string> = {};
+      const updates: Record<string, number | string | boolean> = {};
       for (const f of data.fields) {
         const raw = draft[f.key] ?? "";
         if (String(data.settings[f.key] ?? "") === raw) continue;
@@ -224,6 +267,8 @@ function ScraperTuningCard() {
           const n = Number(raw);
           if (!Number.isFinite(n)) throw new Error(`"${f.label}" must be a number`);
           updates[f.key] = Math.round(n);
+        } else if (f.type === "bool") {
+          updates[f.key] = raw === "true";
         } else {
           updates[f.key] = raw;
         }
@@ -265,6 +310,7 @@ function ScraperTuningCard() {
     );
   }
 
+  const boolFields = data.fields.filter((f) => f.type === "bool");
   const numberFields = data.fields.filter((f) => f.type === "int");
   const textFields = data.fields.filter((f) => f.type === "text");
 
@@ -298,6 +344,32 @@ function ScraperTuningCard() {
         Overrides are stored in the database and take effect on the next scrape job — no restart
         needed. Tune these down if the Pi struggles, up if it&apos;s coasting.
       </p>
+
+      {boolFields.length > 0 && (
+        <div className="space-y-3 border border-gray-700/80 rounded-lg p-3 bg-gray-900/40">
+          {boolFields.map((f) => {
+            const on = (draft[f.key] ?? "") === "true";
+            return (
+              <label key={f.key} className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={(e) =>
+                    setDraft((d) => ({ ...d, [f.key]: e.target.checked ? "true" : "false" }))
+                  }
+                  className="mt-0.5 rounded border-gray-600 bg-gray-900 text-brand-500 focus:ring-brand-500"
+                />
+                <span className="min-w-0">
+                  <span className="block text-xs font-medium text-gray-200">{f.label}</span>
+                  <span className="block text-[11px] text-gray-500 mt-0.5 leading-snug">
+                    {f.description} Default: {String(data.defaults[f.key])}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {numberFields.map((f) => (
@@ -348,8 +420,12 @@ export default function ScraperTab() {
     },
     refetchInterval: (query) => {
       const s = query.state.data?.status;
-      return s === "running" ? 3_000 : 15_000;
+      const rescan = query.state.data?.debridRescan?.running;
+      const relink = query.state.data?.catalogRelink?.running;
+      if (query.state.fetchFailureCount > 0) return 30_000;
+      return s === "running" || rescan || relink ? 12_000 : 20_000;
     },
+    retry: 1,
   });
 
   const toggle = useMutation({
@@ -377,6 +453,24 @@ export default function ScraperTab() {
     },
   });
 
+  const clearJobErrors = useMutation({
+    mutationFn: async () => {
+      const { data: res } = await api.post("/admin/scraper-clear-job-errors?force_stop=true");
+      return res as { status?: ScraperStatus };
+    },
+    onSuccess: (res) => {
+      if (res.status) {
+        queryClient.setQueryData(["admin-scraper-status"], res.status);
+      } else {
+        queryClient.invalidateQueries({ queryKey: ["admin-scraper-status"] });
+      }
+      toast("Job errors cleared — you can re-run rescan / re-link", "success");
+    },
+    onError: (err: any) => {
+      toast(err.response?.data?.detail || "Failed to clear job errors", "error");
+    },
+  });
+
   const runNow = useMutation({
     mutationFn: async () => {
       const { data: res } = await api.post("/admin/scraper-run-now");
@@ -391,6 +485,59 @@ export default function ScraperTab() {
     },
   });
 
+  const rescanAllDebrid = useMutation({
+    mutationFn: async () => {
+      const { data: res } = await api.post("/admin/scraper-rescan-all-debrid");
+      return res as {
+        ok: boolean;
+        queued?: number;
+        error?: string;
+        progress?: ScraperStatus["debridRescan"];
+      };
+    },
+    onSuccess: (res) => {
+      if (!res.ok) {
+        toast(res.error || "Debrid rescan already running", "info");
+        return;
+      }
+      queryClient.invalidateQueries({ queryKey: ["admin-scraper-status"] });
+      toast(
+        `Queued ${res.queued ?? 0} torrents for debrid cache rescan. This runs in the background.`,
+        "success",
+      );
+    },
+    onError: (err: any) => {
+      toast(err.response?.data?.detail || "Failed to start debrid rescan", "error");
+    },
+  });
+
+  const relinkCatalog = useMutation({
+    mutationFn: async () => {
+      const { data: res } = await api.post("/admin/scraper-relink-catalog", {
+        prune_unmatched: true,
+      });
+      return res as {
+        ok: boolean;
+        error?: string;
+        progress?: ScraperStatus["catalogRelink"];
+      };
+    },
+    onSuccess: (res) => {
+      if (!res.ok) {
+        toast(res.error || "Catalog re-link already running", "info");
+        return;
+      }
+      queryClient.invalidateQueries({ queryKey: ["admin-scraper-status"] });
+      toast(
+        "Re-linking cached torrents against the local catalog (prunes non-matches). Runs in the background.",
+        "success",
+      );
+    },
+    onError: (err: any) => {
+      toast(err.response?.data?.detail || "Failed to start catalog re-link", "error");
+    },
+  });
+
   const queuePosition = useMemo(() => {
     if (!data?.queryQueueSize) return "—";
     return `${(data.lastQueryIndex % data.queryQueueSize) + 1} / ${data.queryQueueSize}`;
@@ -402,9 +549,13 @@ export default function ScraperTab() {
   if (!data) return null;
 
   const isRunning = data.status === "running";
+  const debridRescan = data.debridRescan;
+  const debridRescanRunning = Boolean(debridRescan?.running);
+  const catalogRelink = data.catalogRelink;
+  const catalogRelinkRunning = Boolean(catalogRelink?.running);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 min-w-0 max-w-full overflow-x-hidden">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -442,6 +593,32 @@ export default function ScraperTab() {
             Run now
           </button>
           <button
+            onClick={() => rescanAllDebrid.mutate()}
+            disabled={rescanAllDebrid.isPending || debridRescanRunning}
+            title="Re-check every cached torrent against RD/Torbox and submit catalog matches for caching"
+            className="flex items-center gap-1.5 px-3 py-2 bg-violet-900/40 text-violet-200 text-sm rounded-lg hover:bg-violet-900/60 border border-violet-800/50 disabled:opacity-50"
+          >
+            {rescanAllDebrid.isPending || debridRescanRunning ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Database size={14} />
+            )}
+            Rescan debrid
+          </button>
+          <button
+            onClick={() => relinkCatalog.mutate()}
+            disabled={relinkCatalog.isPending || catalogRelinkRunning}
+            title="Re-match every cached torrent against the local Open Library catalog and prune entries that match nothing (non-book noise)"
+            className="flex items-center gap-1.5 px-3 py-2 bg-sky-900/40 text-sky-200 text-sm rounded-lg hover:bg-sky-900/60 border border-sky-800/50 disabled:opacity-50"
+          >
+            {relinkCatalog.isPending || catalogRelinkRunning ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Link2 size={14} />
+            )}
+            Re-link catalog
+          </button>
+          <button
             onClick={() => toggle.mutate(!data.enabled)}
             disabled={toggle.isPending || !data.configEnabled}
             className={`flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg border disabled:opacity-50 ${
@@ -455,6 +632,78 @@ export default function ScraperTab() {
           </button>
         </div>
       </div>
+
+      {debridRescanRunning && debridRescan && (
+        <div className="p-3 bg-violet-900/20 border border-violet-800/40 rounded-xl text-sm text-violet-200">
+          <p className="font-medium flex items-center gap-2">
+            <Loader2 size={14} className="animate-spin shrink-0" />
+            Full debrid rescan in progress
+          </p>
+          <p className="text-xs text-violet-300/90 mt-1">
+            Checked {debridRescan.checked ?? 0} of {debridRescan.queued ?? data.torrentsTotal}
+            {debridRescan.preloaded != null && debridRescan.preloaded > 0
+              ? ` · ${debridRescan.preloaded} preloaded to debrid`
+              : ""}
+            {debridRescan.pending != null ? ` · ${debridRescan.pending} remaining` : ""}
+          </p>
+        </div>
+      )}
+
+      {catalogRelinkRunning && catalogRelink && (
+        <div className="p-3 bg-sky-900/20 border border-sky-800/40 rounded-xl text-sm text-sky-200">
+          <p className="font-medium flex items-center gap-2">
+            <Loader2 size={14} className="animate-spin shrink-0" />
+            Catalog re-link in progress
+          </p>
+          <p className="text-xs text-sky-300/90 mt-1">
+            Scanned {catalogRelink.scanned ?? 0} of {catalogRelink.total ?? data.torrentsTotal}
+            {catalogRelink.linked != null ? ` · ${catalogRelink.linked} linked` : ""}
+            {catalogRelink.pruned != null && catalogRelink.pruned > 0
+              ? ` · ${catalogRelink.pruned} pruned`
+              : ""}
+          </p>
+        </div>
+      )}
+
+      {catalogRelink?.error && !catalogRelinkRunning && (
+        <div className="p-3 bg-red-900/20 border border-red-800/40 rounded-xl text-sm text-red-300 flex gap-2 justify-between">
+          <div className="min-w-0">
+            <p className="font-medium">Catalog re-link failed</p>
+            <p className="text-red-400/90 mt-0.5 break-words">{catalogRelink.error}</p>
+            <p className="text-xs text-red-400/60 mt-1">
+              Dismiss stale errors after a deploy, then re-run Catalog re-link.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => clearJobErrors.mutate()}
+            disabled={clearJobErrors.isPending}
+            className="shrink-0 px-2 py-1 text-xs bg-red-900/40 hover:bg-red-900/60 rounded border border-red-800/50 h-fit"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {debridRescan?.error && !debridRescanRunning && (
+        <div className="p-3 bg-red-900/20 border border-red-800/40 rounded-xl text-sm text-red-300 flex gap-2 justify-between">
+          <div className="min-w-0">
+            <p className="font-medium">Debrid rescan failed</p>
+            <p className="text-red-400/90 mt-0.5 break-words">{debridRescan.error}</p>
+            <p className="text-xs text-red-400/60 mt-1">
+              Dismiss stale errors after a deploy, then re-run Rescan debrid.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => clearJobErrors.mutate()}
+            disabled={clearJobErrors.isPending}
+            className="shrink-0 px-2 py-1 text-xs bg-red-900/40 hover:bg-red-900/60 rounded border border-red-800/50 h-fit"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {!data.configEnabled && (
         <div className="p-3 bg-amber-900/20 border border-amber-800/40 rounded-xl text-sm text-amber-300">
@@ -483,6 +732,46 @@ export default function ScraperTab() {
             >
               Dismiss
             </button>
+          )}
+        </div>
+      )}
+
+      {data.knabenCrawl && !data.knabenRssOnly && (
+        <div className="bg-gray-800 border border-sky-800/40 rounded-xl p-4 space-y-2">
+          <h3 className="text-sm font-semibold text-gray-100">Knaben full category crawl</h3>
+          <p className="text-xs text-gray-500">
+            Sweeps Knaben&apos;s Audiobook then EBook categories (API caps at 10k per query, so title
+            slices fill the long tail). After both finish, RSS polling keeps new uploads flowing.
+          </p>
+          {data.knabenCrawl.phase === "maintenance" ? (
+            <p className="text-sm text-sky-300 flex items-center gap-2">
+              <CheckCircle2 size={16} className="shrink-0" />
+              Full sweep complete — RSS maintenance active each scrape job
+            </p>
+          ) : (
+            <div className="text-sm text-gray-300 space-y-1">
+              <p>
+                <span className="text-gray-400">Category:</span>{" "}
+                {data.knabenCrawl.category ?? "—"}
+                {data.knabenCrawl.categoriesTotal != null &&
+                  data.knabenCrawl.categoryIndex != null &&
+                  ` (${data.knabenCrawl.categoryIndex + 1}/${data.knabenCrawl.categoriesTotal})`}
+              </p>
+              <p>
+                <span className="text-gray-400">Slice:</span>{" "}
+                {data.knabenCrawl.shardLabel ?? data.knabenCrawl.shard ?? "—"}
+                {data.knabenCrawl.shardsTotal != null &&
+                  data.knabenCrawl.shardIndex != null &&
+                  ` · ${data.knabenCrawl.shardIndex + 1}/${data.knabenCrawl.shardsTotal}`}
+              </p>
+              <p>
+                <span className="text-gray-400">Offset:</span>{" "}
+                {(data.knabenCrawl.offset ?? 0).toLocaleString()}
+                {data.knabenCrawl.pagesPerJob
+                  ? ` · ${data.knabenCrawl.pagesPerJob} pages/job (~${(data.knabenCrawl.pagesPerJob * 100).toLocaleString()} torrents)`
+                  : ""}
+              </p>
+            </div>
           )}
         </div>
       )}
@@ -520,6 +809,35 @@ export default function ScraperTab() {
               <code className="text-amber-200">PROWLARR_TRUSTED_INDEXER_NAMES</code> to match your indexer name.
             </p>
           )}
+          {data.abbConfigured !== false && data.abbMode && (
+            <p className="text-xs text-gray-400">
+              ABB ingest mode:{" "}
+              <span className="text-gray-200">
+                {data.abbMode === "rss-only"
+                  ? "RSS only (recent posts via Mullvad Flare — Jackett stays on LAN)"
+                  : data.abbMode === "author-crawl"
+                    ? "Author / A–Z deep crawl"
+                    : "Direct deep scrape"}
+              </span>
+              {data.abbMode === "rss-only" && data.rssEveryNJobs
+                ? ` · polled every ${data.rssEveryNJobs} job(s)`
+                : null}
+              {" · "}
+              live download search uses Flare→Mullvad when VPN is configured
+            </p>
+          )}
+          {data.knabenRssOnly && (
+            <p className="text-xs text-gray-400">
+              Knaben ingest mode:{" "}
+              <span className="text-gray-200">RSS only</span> (full category crawl paused)
+            </p>
+          )}
+          {data.foreignTitlePrune !== false && (
+            <p className="text-xs text-gray-400">
+              Foreign-script titles:{" "}
+              <span className="text-gray-200">pruning on</span> (≥50% non-Latin letters)
+            </p>
+          )}
           {data.lastJobIndexerResults && (
             <p className="text-xs text-gray-400">
               Last job raw results: ABB {data.lastJobIndexerResults.abb}, Knaben{" "}
@@ -535,12 +853,16 @@ export default function ScraperTab() {
         <StatCard
           label="Catalog matches"
           value={data.stats.catalogMatchesTotal}
-          sub={`${data.stats.catalogVolumesMatched} books linked`}
+          sub={`${data.stats.catalogVolumesAvailable ?? data.stats.catalogVolumesMatched} downloadable · ${data.stats.catalogVolumesMatched} linked total`}
         />
         <StatCard
           label="RD instant"
           value={data.stats.rdCached}
-          sub={`${data.stats.torboxCached} on Torbox`}
+          sub={
+            (data.stats.debridProvidersConfigured?.length ?? 0) === 0
+              ? "No debrid API keys configured"
+              : `${data.stats.torboxCached} on Torbox · ${data.stats.checkedDebridCount ?? 0} checked`
+          }
         />
         <StatCard
           label="Queue position"
@@ -558,8 +880,8 @@ export default function ScraperTab() {
           </h3>
           <div className="space-y-2 text-sm">
             <div className="flex justify-between gap-4">
-              <span className="text-gray-400">Scrape interval</span>
-              <span className="text-gray-200">
+              <span className="text-gray-400 shrink-0">Scrape interval</span>
+              <span className="text-gray-200 text-right break-words min-w-0">
                 {data.intervalSeconds}s · {data.queriesPerJob} queries/job
                 {data.queriesPerHour != null && ` (~${data.queriesPerHour}/hr)`}
               </span>
@@ -581,7 +903,9 @@ export default function ScraperTab() {
               <span className="text-gray-200">
                 {(data.rssEveryNJobs ?? 0) > 0
                   ? `${formatWhen(data.lastRssRunAt ?? null)} · ${data.lastRssUpserted ?? 0} upserted`
-                  : "off"}
+                  : data.knabenCrawl?.phase === "maintenance"
+                    ? `Knaben RSS each job · ${formatWhen(data.lastRssRunAt ?? null)}`
+                    : "Prowlarr off · Knaben RSS after full crawl"}
               </span>
             </div>
             <div className="flex justify-between gap-4">
@@ -668,11 +992,36 @@ export default function ScraperTab() {
           <BreakdownBar items={data.stats.matchTiers} />
         </div>
         <div className="bg-gray-800 border border-gray-700 rounded-xl p-4">
-          <h3 className="text-sm font-semibold text-gray-100 mb-3">By indexer</h3>
+          <h3 className="text-sm font-semibold text-gray-100 mb-3">By indexer (cached)</h3>
+          {data.stats.indexersByKind ? (
+            <div className="space-y-2 mb-3 text-sm">
+              <div className="flex justify-between gap-2">
+                <span className="text-brand-300">AudioBook Bay</span>
+                <span className="text-gray-200 font-medium tabular-nums">
+                  {data.stats.indexersByKind.audiobookbay}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-sky-300">Knaben</span>
+                <span className="text-gray-200 font-medium tabular-nums">
+                  {data.stats.indexersByKind.knaben}
+                </span>
+              </div>
+              {data.stats.indexersByKind.other > 0 && (
+                <div className="flex justify-between gap-2">
+                  <span className="text-gray-400">Other</span>
+                  <span className="text-gray-200 font-medium tabular-nums">
+                    {data.stats.indexersByKind.other}
+                  </span>
+                </div>
+              )}
+            </div>
+          ) : null}
           {Object.keys(data.stats.indexers).length === 0 ? (
             <p className="text-sm text-gray-500">No data yet</p>
           ) : (
-            <div className="space-y-1.5 text-sm">
+            <div className="space-y-1.5 text-sm border-t border-gray-700/60 pt-2">
+              <p className="text-xs text-gray-500 mb-1">Prowlarr indexer names</p>
               {Object.entries(data.stats.indexers).map(([name, count]) => (
                 <div key={name} className="flex justify-between gap-2">
                   <span className="text-gray-400 truncate">{name}</span>

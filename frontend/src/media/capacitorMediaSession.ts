@@ -25,6 +25,21 @@ type MediaSessionPlugin = typeof import("@capgo/capacitor-media-session").MediaS
 
 let nativeMs: MediaSessionPlugin | null = null;
 let nativeHandlersRegistered = false;
+let notificationPermissionRequested = false;
+
+async function ensurePlaybackNotificationPermission(): Promise<void> {
+  if (Capacitor.getPlatform() !== "android" || notificationPermissionRequested) return;
+  notificationPermissionRequested = true;
+  try {
+    const { LocalNotifications } = await import("@capacitor/local-notifications");
+    const perm = await LocalNotifications.checkPermissions();
+    if (perm.display !== "granted") {
+      await LocalNotifications.requestPermissions();
+    }
+  } catch {
+    /* plugin unavailable */
+  }
+}
 
 async function getNativeMediaSession(): Promise<MediaSessionPlugin | null> {
   if (!isNativeApp()) return null;
@@ -58,6 +73,8 @@ export async function registerNativeMediaHandlers(
     } catch (err) {
       console.warn("Android Auto registration failed:", err);
     }
+    // Phone lock screen + Android Auto use LibraryMediaBrowserService's session.
+    return;
   }
 
   const ms = await getNativeMediaSession();
@@ -115,6 +132,9 @@ export async function syncNativeMediaSession(
   const effectivelyPlaying = isPlaying && !buffering;
 
   if (Capacitor.getPlatform() === "android") {
+    if (np) {
+      await ensurePlaybackNotificationPermission();
+    }
     const { syncAndroidAutoPlayback } = await import("./libraryAuto");
     await syncAndroidAutoPlayback(
       np,
@@ -123,6 +143,7 @@ export async function syncNativeMediaSession(
       trackIndex,
       playbackRate
     );
+    return;
   }
 
   const ms = await getNativeMediaSession();

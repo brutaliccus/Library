@@ -131,3 +131,23 @@ def test_fts_candidate_lookup_is_used(fts_session):
             assert cnt == 1
 
     asyncio.run(run())
+
+
+def test_fts_does_not_return_author_only_matches(fts_session):
+    """Author must not alone surface every book by that writer."""
+
+    async def run():
+        await indexer_cache.upsert_torrents(
+            [
+                _fake_result("d" * 40, "Matt Dinniman - Dungeon Crawler Carl M4B"),
+                _fake_result("e" * 40, "Matt Dinniman - Operation Bounce House M4B"),
+            ]
+        )
+        results = await indexer_cache.get_torrents_for_book(
+            _ctx("Operation Bounce House", "Matt Dinniman")
+        )
+        titles = [r["title"] for r in results]
+        assert any("Operation Bounce House" in t for t in titles)
+        assert not any("Dungeon Crawler Carl" in t for t in titles)
+
+    asyncio.run(run())

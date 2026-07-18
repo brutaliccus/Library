@@ -48,7 +48,7 @@ let downloadThrottled = false;
 let throttleWaiters: Array<() => void> = [];
 
 /** Grace period after play starts before background caching may begin. */
-const CACHE_WARMUP_MS = 90_000;
+const CACHE_WARMUP_MS = 25_000;
 
 /** True while a book is loaded in the player. */
 export function setAudioPlaybackActive(active: boolean): void {

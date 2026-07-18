@@ -18,8 +18,18 @@ _cache: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 300  # 5 minutes
 
 
-def _headers() -> dict[str, str]:
-    return {"x-api-key": settings.kavita_api_key}
+async def _conn() -> tuple[str, str, int]:
+    """Effective Kavita URL/key/library (DB override → env)."""
+    try:
+        from app.services import instance_settings as inst
+
+        return await inst.get_kavita_connection()
+    except Exception:
+        return settings.kavita_url, settings.kavita_api_key, settings.kavita_library_id
+
+
+def _headers(api_key: str) -> dict[str, str]:
+    return {"x-api-key": api_key}
 
 
 def _cache_get(key: str) -> Any | None:
@@ -40,28 +50,30 @@ def invalidate_cache() -> None:
 
 
 async def scan_all_libraries() -> None:
-    if not settings.kavita_api_key:
+    url, key, _ = await _conn()
+    if not key:
         return
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            f"{settings.kavita_url}/api/Library/scan-all",
-            headers=_headers(),
+            f"{url}/api/Library/scan-all",
+            headers=_headers(key),
             timeout=60,
         )
         resp.raise_for_status()
 
 
 async def scan_library(library_id: int | None = None) -> None:
-    if not settings.kavita_api_key:
+    url, key, default_lid = await _conn()
+    if not key:
         return
-    lid = library_id or settings.kavita_library_id
+    lid = library_id or default_lid
     if not lid:
         await scan_all_libraries()
         return
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            f"{settings.kavita_url}/api/Library/scan",
-            headers=_headers(),
+            f"{url}/api/Library/scan",
+            headers=_headers(key),
             params={"libraryId": lid},
             timeout=60,
         )
@@ -70,14 +82,15 @@ async def scan_library(library_id: int | None = None) -> None:
 
 async def search_library(query: str) -> list[dict]:
     """Search Kavita library; returns list of {title, author} for matching."""
-    if not settings.kavita_api_key:
+    url, key, _ = await _conn()
+    if not key:
         return []
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{settings.kavita_url}/api/Search/search",
+                f"{url}/api/Search/search",
                 params={"queryString": query, "includeChapterAndFiles": True},
-                headers=_headers(),
+                headers=_headers(key),
                 timeout=15,
             )
             resp.raise_for_status()
@@ -85,13 +98,11 @@ async def search_library(query: str) -> list[dict]:
     except Exception:
         return []
 
-    # Build a seriesId -> author map from chapters (which carry writer info)
-    series_authors: dict[int, str] = {}
+    series_authors: dict[str, str] = {}
     for ch in data.get("chapters", []) or []:
         writers = ch.get("writers") or []
         if writers:
             author_name = writers[0].get("name", "")
-            # Chapters reference their series via volumeId -> we match by title instead
             ch_title = ch.get("title") or ch.get("titleName") or ""
             if author_name and ch_title:
                 series_authors[ch_title] = author_name
@@ -104,7 +115,6 @@ async def search_library(query: str) -> list[dict]:
             continue
         seen.add(name)
         author = ""
-        # Try to find author from matching chapter data
         for ch_title, ch_author in series_authors.items():
             if ch_title == name or name in ch_title or ch_title in name:
                 author = ch_author
@@ -114,12 +124,10 @@ async def search_library(query: str) -> list[dict]:
 
 
 async def health_check() -> bool:
+    url, _, _ = await _conn()
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{settings.kavita_url}/api/health",
-                timeout=5,
-            )
+            resp = await client.get(f"{url}/api/health", timeout=5)
             return resp.status_code == 200
     except Exception:
         return False
@@ -127,9 +135,10 @@ async def health_check() -> bool:
 
 async def get_all_series(library_id: int | None = None, formats: list[int] | None = None) -> list[dict]:
     """Fetch all series from Kavita; optionally filter by format (e.g. EBOOK_FORMATS for ebooks)."""
-    if not settings.kavita_api_key:
+    url, key, default_lid = await _conn()
+    if not key:
         return []
-    lid = library_id or settings.kavita_library_id
+    lid = library_id or default_lid
     cache_key = f"kavita_series:{lid}:{','.join(map(str, formats or []))}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -137,15 +146,14 @@ async def get_all_series(library_id: int | None = None, formats: list[int] | Non
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{settings.kavita_url}/api/Series/all-v2",
-                headers={**_headers(), "Content-Type": "application/json"},
+                f"{url}/api/Series/all-v2",
+                headers={**_headers(key), "Content-Type": "application/json"},
                 json={},
                 params={"PageSize": 0},
                 timeout=30,
             )
             resp.raise_for_status()
             data = resp.json()
-        # Kavita returns array directly, or sometimes {items: [...]} for pagination
         items = data if isinstance(data, list) else (data.get("items", []) if isinstance(data, dict) else [])
         if not isinstance(items, list):
             items = []
@@ -160,14 +168,15 @@ async def get_all_series(library_id: int | None = None, formats: list[int] | Non
 
 async def get_series_volumes(series_id: int) -> list[dict]:
     """Get volumes and chapters for a series."""
-    if not settings.kavita_api_key:
+    url, key, _ = await _conn()
+    if not key:
         return []
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{settings.kavita_url}/api/Series/volumes",
+                f"{url}/api/Series/volumes",
                 params={"seriesId": series_id},
-                headers=_headers(),
+                headers=_headers(key),
                 timeout=15,
             )
             resp.raise_for_status()
@@ -199,24 +208,46 @@ async def get_chapter_file_path(chapter_id: int) -> Path | None:
 
 
 def _kavita_path_to_local(kavita_path: str) -> Path | None:
-    """Map Kavita library paths (/manga/...) to the mounted ebook directory."""
+    """Map Kavita library paths to the mounted ebook directory."""
     if not kavita_path:
         return None
-    rel = kavita_path.strip().lstrip("/")
-    if rel.startswith("manga/"):
-        rel = rel[6:]
-    return Path(settings.ebook_dir) / rel
+    raw = kavita_path.strip()
+    as_abs = Path(raw)
+    if as_abs.is_file():
+        return as_abs
+
+    rel = raw.lstrip("/")
+    ebook_root = Path(settings.ebook_dir)
+
+    candidates: list[Path] = []
+    parts = rel.split("/", 1)
+    if len(parts) == 2 and parts[0].lower() in {
+        "manga", "books", "ebooks", "ebook", "library", "comics", "pdf", "pdfs",
+    }:
+        candidates.append(ebook_root / parts[1])
+    elif len(parts) == 2:
+        candidates.append(ebook_root / parts[1])
+    candidates.append(ebook_root / rel)
+
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                return cand
+        except OSError:
+            continue
+    return candidates[0] if candidates else None
 
 
 async def get_book_info(chapter_id: int) -> dict | None:
     """Get EPUB/PDF metadata for the reader (caches the file on Kavita)."""
-    if not settings.kavita_api_key:
+    url, key, _ = await _conn()
+    if not key:
         return None
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{settings.kavita_url}/api/Book/{chapter_id}/book-info",
-                headers=_headers(),
+                f"{url}/api/Book/{chapter_id}/book-info",
+                headers=_headers(key),
                 timeout=30,
             )
             resp.raise_for_status()
@@ -228,13 +259,14 @@ async def get_book_info(chapter_id: int) -> dict | None:
 
 async def get_book_chapters(chapter_id: int) -> list[dict]:
     """Get TOC / page mappings for an EPUB chapter."""
-    if not settings.kavita_api_key:
+    url, key, _ = await _conn()
+    if not key:
         return []
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{settings.kavita_url}/api/Book/{chapter_id}/chapters",
-                headers=_headers(),
+                f"{url}/api/Book/{chapter_id}/chapters",
+                headers=_headers(key),
                 timeout=15,
             )
             resp.raise_for_status()
@@ -247,14 +279,15 @@ async def get_book_chapters(chapter_id: int) -> list[dict]:
 
 async def get_book_page(chapter_id: int, page: int) -> str | None:
     """Get a single page HTML for an EPUB chapter."""
-    if not settings.kavita_api_key:
+    url, key, _ = await _conn()
+    if not key:
         return None
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{settings.kavita_url}/api/Book/{chapter_id}/book-page",
+                f"{url}/api/Book/{chapter_id}/book-page",
                 params={"page": page},
-                headers=_headers(),
+                headers=_headers(key),
                 timeout=30,
             )
             resp.raise_for_status()
@@ -266,14 +299,15 @@ async def get_book_page(chapter_id: int, page: int) -> str | None:
 
 async def get_book_resources(chapter_id: int, file_path: str) -> bytes | None:
     """Fetch a resource (image, font, etc.) from within an EPUB."""
-    if not settings.kavita_api_key:
+    url, key, _ = await _conn()
+    if not key:
         return None
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{settings.kavita_url}/api/Book/{chapter_id}/book-resources",
+                f"{url}/api/Book/{chapter_id}/book-resources",
                 params={"file": file_path},
-                headers=_headers(),
+                headers=_headers(key),
                 timeout=15,
             )
             resp.raise_for_status()

@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
-import { BookOpen, Download } from "lucide-react";
+import { useState } from "react";
+import { BookOpen, Check, Download, HelpCircle } from "lucide-react";
 import type { BookSummary } from "../types/book";
 
 interface Props {
@@ -8,6 +9,12 @@ interface Props {
 
 export default function BookCard({ book }: Props) {
   const navigate = useNavigate();
+  const [coverFailed, setCoverFailed] = useState(false);
+  const showCover = Boolean(book.coverUrl) && !coverFailed;
+  const avail = book.availability;
+  const inLibrary = Boolean(avail?.inLibrary);
+  const cached = Boolean(avail?.available);
+  const catalogOnly = Boolean(avail?.catalogOnly) || (!cached && !inLibrary);
 
   return (
     <button
@@ -15,26 +22,41 @@ export default function BookCard({ book }: Props) {
       className="group text-left flex flex-col bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-gray-600 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-black/20 hover:-translate-y-0.5 h-full"
     >
       <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
-        {book.coverUrl ? (
+        {showCover ? (
           <img
             src={book.coverUrl}
             alt={book.title}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
             loading="lazy"
+            onError={() => setCoverFailed(true)}
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-gray-700">
             <BookOpen size={20} />
           </div>
         )}
-        {book.availability?.available && (
+        {inLibrary ? (
           <span
             className="absolute top-1 right-1 flex items-center gap-0.5 px-1 py-0.5 rounded bg-emerald-900/90 text-emerald-300 text-[8px] font-medium"
-            title="Available to download"
+            title="Already in library"
+          >
+            <Check size={8} strokeWidth={3} />
+          </span>
+        ) : cached ? (
+          <span
+            className="absolute top-1 right-1 flex items-center gap-0.5 px-1 py-0.5 rounded bg-emerald-900/90 text-emerald-300 text-[8px] font-medium"
+            title="Cached — available to download"
           >
             <Download size={8} />
           </span>
-        )}
+        ) : catalogOnly ? (
+          <span
+            className="absolute top-1 right-1 flex items-center gap-0.5 px-1 py-0.5 rounded bg-amber-950/90 text-amber-300 text-[8px] font-medium"
+            title="In catalog — not yet cached"
+          >
+            <HelpCircle size={8} />
+          </span>
+        ) : null}
       </div>
       <div className="p-1.5 flex flex-col gap-0.5 h-14">
         <h3 className="text-[10px] font-semibold text-gray-100 line-clamp-2 leading-tight">

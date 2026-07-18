@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,14 +18,41 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+_shelf_refresh_task: asyncio.Task | None = None
+
+
+async def _daily_shelf_refresh_loop() -> None:
+    """Ensure trending / new-releases rebuild at least once per UTC day."""
+    # First pass shortly after boot so cold starts don't wait for a visitor.
+    await asyncio.sleep(15)
+    while True:
+        try:
+            from app.routers.books import refresh_daily_shelves
+
+            await refresh_daily_shelves(force=False)
+        except Exception as e:
+            logger.warning("Daily shelf refresh loop error: %s", e)
+        # Check hourly; rebuild only when the UTC day rolled over.
+        await asyncio.sleep(3600)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _shelf_refresh_task
     logger.info("Starting up -- initializing database")
     await init_db()
+    try:
+        from app.services.instance_settings import apply_runtime_overrides
+
+        await apply_runtime_overrides()
+    except Exception as e:
+        logger.warning("Runtime config overrides skipped: %s", e)
     await resume_interrupted_downloads()
     start_scraper()
+    _shelf_refresh_task = asyncio.create_task(_daily_shelf_refresh_loop())
     yield
+    if _shelf_refresh_task and not _shelf_refresh_task.done():
+        _shelf_refresh_task.cancel()
     stop_scraper()
     logger.info("Shutting down")
 

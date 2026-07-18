@@ -3,9 +3,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useState, useEffect, FormEvent } from "react";
 import api from "../api/client";
 import BookGrid from "../components/BookGrid";
+import CacheReleaseCard, { type CacheReleaseCardData } from "../components/CacheReleaseCard";
 import GenreSidebar from "../components/GenreSidebar";
 import type { Genre } from "../components/GenreSidebar";
-import { Search, ChevronLeft, ChevronRight, Library, BookOpen, Headphones } from "lucide-react";
+import { Search, ChevronLeft, ChevronRight, Library, BookOpen, Headphones, HardDrive, Loader2 } from "lucide-react";
 import type { BookSummary } from "../types/book";
 
 interface LibrarySearchHit {
@@ -23,8 +24,7 @@ function buildSearchQuery(q: string, categories: string[]): string {
 
   if (categories.length === 1) {
     const c = categories[0];
-    if (c === "all") return "subject:fiction";
-    if (c === "available") return "__available__";
+    if (c === "all" || c === "available") return "__available__";
     if (c === "popular") return "__popular__";
     if (c === "new") return "__new__";
     return `__genre__:${c}`;
@@ -71,7 +71,9 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
   const [searchParams, setSearchParams] = useSearchParams();
   const q = searchParams.get("q") || "";
   const categoryParam = searchParams.get("category") || "";
-  const advancedSearch = searchParams.get("advanced") === "1";
+  // Default: show all catalog hits (cached / in-library / not-yet-cached).
+  // Pass available=1 to filter to cached downloads only.
+  const availableOnlyFilter = searchParams.get("available") === "1";
   const page = parseInt(searchParams.get("page") || "1", 10);
   const pageSize = 20;
 
@@ -112,15 +114,12 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
   });
 
   const isCategoryBrowse = activeCategories.length > 0 && !q.trim();
-  const isAvailableBrowse = activeCategories.includes("available");
-  const isBrowseAll =
-    activeCategories.includes("all") ||
-    activeCategories.includes("popular") ||
-    activeCategories.includes("new");
+  const isAvailableBrowse =
+    activeCategories.includes("available") || activeCategories.includes("all");
 
   const { data, isLoading } = useQuery({
-    queryKey: ["book-search", searchQuery, page, advancedSearch, isCategoryBrowse, isBrowseAll, isAvailableBrowse],
-    queryFn: async () => {
+    queryKey: ["book-search", searchQuery, page, availableOnlyFilter, isCategoryBrowse, isAvailableBrowse],
+    queryFn: async (): Promise<{ books: BookSummary[]; totalItems: number; page: number; source?: string } | null> => {
       if (!searchQuery) return null;
 
       if (searchQuery === "__available__" || isAvailableBrowse) {
@@ -132,45 +131,17 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
         return data as { books: BookSummary[]; totalItems: number; page: number; source?: string };
       }
 
-      // Category shelves named "All" / Popular / New → full Google catalog
-      if (isBrowseAll || advancedSearch) {
+      const availableOnly = availableOnlyFilter;
+
+      if (isCategoryBrowse || searchQuery.includes("+")) {
         const params = new URLSearchParams({
           q: searchQuery,
-          page: page.toString(),
-          pageSize: pageSize.toString(),
-          available_only: "false",
-        });
-        const { data } = await api.get(`/books/search?${params.toString()}`);
-        return data as { books: BookSummary[]; totalItems: number; page: number; source?: string };
-      }
-
-      // Genre/category browse → try available filter (backend falls back to full shelf if empty)
-      if (isCategoryBrowse) {
-        const params = new URLSearchParams({
-          q: searchQuery,
-          page: page.toString(),
-          pageSize: pageSize.toString(),
-          available_only: "true",
-        });
-        const { data } = await api.get(`/books/search?${params.toString()}`);
-        return data as { books: BookSummary[]; totalItems: number; page: number; source?: string };
-      }
-
-      // Free-text search → default to available-only unless advanced
-      const availableOnly = !advancedSearch;
-
-      if (searchQuery.includes("+")) {
-        const parts = searchQuery.split("+").filter(Boolean);
-        const slugs = parts.map((p) => p.replace("__genre__:", ""));
-        const firstSlug = slugs[0];
-        const params = new URLSearchParams({
-          q: `__genre__:${firstSlug}`,
           page: page.toString(),
           pageSize: pageSize.toString(),
           available_only: String(availableOnly),
         });
         const { data } = await api.get(`/books/search?${params.toString()}`);
-        return data as { books: BookSummary[]; totalItems: number; page: number };
+        return data as { books: BookSummary[]; totalItems: number; page: number; source?: string };
       }
 
       const params = new URLSearchParams({
@@ -185,11 +156,65 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
     enabled: searchQuery.length >= 1,
   });
 
-  const toggleAdvancedSearch = () => {
+  const showCacheReleases = q.trim().length >= 2 && activeCategories.length === 0;
+
+  const { data: cacheReleases, isLoading: cacheReleasesLoading } = useQuery({
+    queryKey: ["cache-releases", q],
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        q: q.trim(),
+        limit: "24",
+        unmatched_only: "true",
+      });
+      const { data } = await api.get(`/search/cache-releases?${params}`);
+      return data as { releases: CacheReleaseCardData[]; count: number };
+    },
+    enabled: showCacheReleases,
+    staleTime: 60 * 1000,
+  });
+
+  const bookCount = Array.isArray(data?.books) ? data.books.length : 0;
+
+  const catalogEmpty =
+    showCacheReleases &&
+    !isLoading &&
+    Boolean(data) &&
+    bookCount === 0;
+
+  // Only hit live ABB after catalog truly returns empty — never while OL is
+  // still loading (that was stacking Jackett/Flare work on top of catalog work).
+  const { data: abbReleases, isLoading: abbReleasesLoading, isFetching: abbFetching } = useQuery({
+    queryKey: ["abb-releases", q],
+    queryFn: async () => {
+      const params = new URLSearchParams({ q: q.trim(), limit: "24" });
+      const { data } = await api.get(`/search/abb-releases?${params}`);
+      return data as {
+        releases: CacheReleaseCardData[];
+        count: number;
+        source?: string;
+        timedOut?: boolean;
+      };
+    },
+    enabled: catalogEmpty,
+    staleTime: 60 * 1000,
+  });
+
+  const abbEnabled = catalogEmpty;
+  const searchProgress: string[] = [];
+  if (isLoading) searchProgress.push("Searching catalog…");
+  if (cacheReleasesLoading) searchProgress.push("Checking indexer cache…");
+  if (abbEnabled && (abbReleasesLoading || abbFetching)) {
+    searchProgress.push("Searching AudioBookBay…");
+  }
+
+  const toggleAvailableFilter = () => {
     const params: Record<string, string> = {};
     if (q) params.q = q;
     if (categoryParam) params.category = categoryParam;
-    if (!advancedSearch) params.advanced = "1";
+    // Default is full catalog; available=1 limits to cached downloads.
+    if (!availableOnlyFilter) {
+      params.available = "1";
+    }
     setSearchParams(params);
   };
 
@@ -197,15 +222,24 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
     e.preventDefault();
     const trimmed = inputValue.trim();
     if (trimmed.length >= 2) {
-      setSearchParams({ q: trimmed });
+      const params: Record<string, string> = { q: trimmed };
+      if (availableOnlyFilter) params.available = "1";
+      if (categoryParam) params.category = categoryParam;
+      setSearchParams(params);
     }
   };
 
   const handleGenreSelect = (slugs: string[]) => {
     if (slugs.length === 0) {
-      setSearchParams(q ? { q } : {});
+      const params: Record<string, string> = {};
+      if (q) params.q = q;
+      if (availableOnlyFilter) params.available = "1";
+      setSearchParams(params);
     } else {
-      setSearchParams({ category: slugs.join(",") });
+      const params: Record<string, string> = { category: slugs.join(",") };
+      if (q) params.q = q;
+      if (availableOnlyFilter) params.available = "1";
+      setSearchParams(params);
     }
   };
 
@@ -213,11 +247,12 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
     const params: Record<string, string> = { page: p.toString() };
     if (q) params.q = q;
     if (categoryParam) params.category = categoryParam;
+    if (availableOnlyFilter) params.available = "1";
     setSearchParams(params);
     window.scrollTo(0, 0);
   };
 
-  const totalPages = data ? Math.ceil(Math.min(data.totalItems, 200) / pageSize) : 0;
+  const totalPages = data ? Math.ceil(data.totalItems / pageSize) : 0;
   const heading = buildHeading(q, activeCategories, genres);
 
   return (
@@ -256,33 +291,37 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
         <div className="flex-1 min-w-0">
           {heading && <h1 className="text-2xl font-bold text-gray-100 mb-6">{heading}</h1>}
 
+          {searchProgress.length > 0 && (
+            <div className="mb-4 flex items-start gap-2 rounded-lg border border-gray-800 bg-gray-900/50 px-3 py-2 text-sm text-gray-300">
+              <Loader2 size={16} className="mt-0.5 shrink-0 animate-spin text-brand-400" />
+              <div className="space-y-0.5">
+                {searchProgress.map((line) => (
+                  <p key={line}>{line}</p>
+                ))}
+              </div>
+            </div>
+          )}
+
           {(q || activeCategories.length > 0) && (
             <div className="flex flex-wrap items-center gap-3 mb-4 text-sm">
-              {isBrowseAll || advancedSearch ? (
-                <span className="text-gray-400">
-                  Showing full catalog from Google Books.
-                </span>
-              ) : isAvailableBrowse ? (
-                <span className="text-gray-400">
-                  Books with downloads ready in our indexer cache.
-                </span>
-              ) : isCategoryBrowse ? (
+              {availableOnlyFilter ? (
                 <span className="text-gray-400">
                   Showing books with downloads in our indexer cache.
-                  {data?.books?.length === 0 && " The scraper is still building — try All or Advanced search."}
+                  {data?.books?.length === 0 && " The scraper is still building matches — check back soon."}
                 </span>
               ) : (
                 <span className="text-gray-400">
-                  Showing books available to download from our indexers.
+                  Showing catalog matches: green download = cached, green check = in library,
+                  yellow ? = not yet cached.
                 </span>
               )}
-              {!isBrowseAll && (
+              {q.trim() && (
                 <button
                   type="button"
-                  onClick={toggleAdvancedSearch}
+                  onClick={toggleAvailableFilter}
                   className="text-brand-400 hover:text-brand-300 font-medium"
                 >
-                  {advancedSearch ? "Show available only" : "Advanced search (full catalog)"}
+                  {availableOnlyFilter ? "Show full catalog" : "Available downloads only"}
                 </button>
               )}
             </div>
@@ -347,6 +386,62 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
             isLoading={isLoading}
             skeletonCount={pageSize}
           />
+
+          {showCacheReleases && (
+            <section className="mt-10 mb-4">
+              <div className="flex items-center gap-2 mb-3">
+                <HardDrive size={18} className="text-amber-400" />
+                <h2 className="text-lg font-semibold text-gray-100">Cached releases</h2>
+              </div>
+              <p className="text-sm text-gray-500 mb-4">
+                Indexer torrents matching your search — including titles without an Open Library
+                catalog match. Open a card to download or stream.
+              </p>
+              {cacheReleasesLoading ? (
+                <p className="text-sm text-gray-500">Searching indexer cache...</p>
+              ) : cacheReleases?.releases?.length ? (
+                <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
+                  {cacheReleases.releases.map((r) => (
+                    <CacheReleaseCard key={r.id} release={r} />
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">No unmatched cached releases for this search.</p>
+              )}
+            </section>
+          )}
+
+          {(catalogEmpty || (abbEnabled && (abbReleases?.releases?.length || abbReleasesLoading || abbFetching))) && (
+            <section className="mt-10 mb-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Headphones size={18} className="text-sky-400" />
+                <h2 className="text-lg font-semibold text-gray-100">AudioBookBay results</h2>
+              </div>
+              <p className="text-sm text-gray-500 mb-4">
+                {catalogEmpty
+                  ? "No Open Library matches — searching AudioBookBay for niche titles."
+                  : "Also checking AudioBookBay while the catalog search finishes…"}
+              </p>
+              {abbReleasesLoading || abbFetching ? (
+                <p className="text-sm text-gray-500 flex items-center gap-2">
+                  <Loader2 size={14} className="animate-spin" />
+                  Searching AudioBookBay (usually under ~20s)…
+                </p>
+              ) : abbReleases?.releases?.length ? (
+                <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
+                  {abbReleases.releases.map((r) => (
+                    <CacheReleaseCard key={`abb-${r.id}`} release={r} />
+                  ))}
+                </div>
+              ) : abbReleases?.timedOut ? (
+                <p className="text-sm text-amber-500/90">
+                  AudioBookBay timed out — try again, or open Find Downloads from a close catalog match.
+                </p>
+              ) : catalogEmpty ? (
+                <p className="text-sm text-gray-500">No AudioBookBay hits for this search.</p>
+              ) : null}
+            </section>
+          )}
 
           {totalPages > 1 && (
             <div className="flex items-center justify-center gap-4 mt-8">

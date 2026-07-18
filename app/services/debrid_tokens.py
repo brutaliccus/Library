@@ -13,7 +13,7 @@ spawned from a request inherit the requesting user's tokens automatically.
 import logging
 from contextvars import ContextVar
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.config import get_settings
 
@@ -41,9 +41,52 @@ def clear_tokens() -> None:
     set_tokens("", "")
 
 
+async def apply_server_debrid_tokens() -> None:
+    """Resolve debrid tokens for background jobs (scraper cache enrichment).
+
+    Uses server env tokens when set; otherwise merges tokens from all library
+    groups so Torbox/RD keys stored on a user group still enrich the cache.
+    """
+    clear_tokens()
+    rd = settings.real_debrid_api_token or ""
+    torbox = settings.torbox_api_token or ""
+    if rd and torbox:
+        set_tokens(rd, torbox)
+        return
+    try:
+        from app.database import async_session
+        from app.models import LibraryGroup
+
+        async with async_session() as db:
+            groups = (
+                await db.execute(
+                    select(LibraryGroup)
+                    .where(
+                        or_(
+                            LibraryGroup.real_debrid_api_token != "",
+                            LibraryGroup.torbox_api_token != "",
+                        )
+                    )
+                    .order_by(LibraryGroup.id.asc())
+                )
+            ).scalars().all()
+            for group in groups:
+                if not rd and group.real_debrid_api_token:
+                    rd = group.real_debrid_api_token
+                if not torbox and group.torbox_api_token:
+                    torbox = group.torbox_api_token
+                if rd and torbox:
+                    break
+        set_tokens(rd, torbox)
+    except Exception as e:
+        logger.warning("apply_server_debrid_tokens failed: %s", e)
+
+
 async def apply_tokens_for_user_id(user_id: int | None) -> None:
     """Load the user's library-group tokens into the current context.
-    Missing user/group or empty tokens -> env fallback stays in effect."""
+
+    Missing user/group or empty tokens -> env fallback stays in effect.
+    """
     clear_tokens()
     if not user_id:
         return

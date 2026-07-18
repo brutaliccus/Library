@@ -24,6 +24,13 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { getProgress, clearProgress } from "../utils/readingProgress";
+import { isBookCached } from "../utils/audioCache";
+import {
+  getOfflineProgress,
+  getRdOfflineManifest,
+  isLikelyOffline,
+  progressKeyForRd,
+} from "../utils/offlinePlayback";
 
 interface LibraryItem {
   id: number;
@@ -228,8 +235,12 @@ export default function MyLibrary() {
     async (itemId: string) => {
       try {
         await playABS(itemId);
-      } catch {
-        toast("Failed to start playback", "error");
+      } catch (err) {
+        const msg =
+          err instanceof Error && err.message.startsWith("Offline")
+            ? err.message
+            : "Failed to start playback";
+        toast(msg, "error");
       }
     },
     [playABS, toast]
@@ -238,23 +249,64 @@ export default function MyLibrary() {
   const handlePlayRD = useCallback(
     async (item: LibraryItem) => {
       if (item.streamStatus !== "ready" || item.tracks.length === 0) return;
+
+      const startOffline = async (): Promise<boolean> => {
+        const manifest = getRdOfflineManifest({ libraryItemId: item.id });
+        const tracks = manifest?.tracks?.length ? manifest.tracks : item.tracks;
+        if (!tracks?.length) return false;
+        if (!(await isBookCached(tracks))) return false;
+        const local = getOfflineProgress(progressKeyForRd({ libraryItemId: item.id }) || "");
+        playRD(
+          tracks,
+          manifest?.title || item.title,
+          manifest?.author || item.author,
+          manifest?.coverUrl || item.coverUrl,
+          manifest?.streamHistoryId,
+          {
+            startAt: local?.time || 0,
+            trackIndex: local?.trackIndex || 0,
+            trackPositionSeconds: local?.trackLocal || 0,
+          },
+          item.id
+        );
+        return true;
+      };
+
+      if (isLikelyOffline()) {
+        if (await startOffline()) return;
+        toast("Offline playback unavailable — download this book while online first", "error");
+        return;
+      }
+
       try {
         // /play returns a StreamHistory id (the library item id is NOT one) so
         // playback progress actually saves, plus the last saved position.
         const { data } = await api.post(`/library/${item.id}/play`);
+        const local = getOfflineProgress(progressKeyForRd({ libraryItemId: item.id }) || "");
+        const serverStart = data.progressSeconds || 0;
+        const resume =
+          local && local.time > serverStart + 5
+            ? {
+                startAt: local.time,
+                trackIndex: local.trackIndex,
+                trackPositionSeconds: local.trackLocal,
+              }
+            : {
+                startAt: serverStart,
+                trackIndex: data.currentTrackIndex || 0,
+                trackPositionSeconds: data.trackPositionSeconds || 0,
+              };
         playRD(
           data.tracks?.length > 0 ? data.tracks : item.tracks,
           item.title,
           item.author,
           item.coverUrl,
           data.streamHistoryId ?? undefined,
-          {
-            startAt: data.progressSeconds || 0,
-            trackIndex: data.currentTrackIndex || 0,
-            trackPositionSeconds: data.trackPositionSeconds || 0,
-          }
+          resume,
+          item.id
         );
       } catch {
+        if (await startOffline()) return;
         toast("Could not start playback — check your connection and try again", "error");
       }
     },

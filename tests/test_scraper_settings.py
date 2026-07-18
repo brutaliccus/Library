@@ -26,9 +26,20 @@ def test_coerce_clamps_int_bounds():
     assert ss._coerce(field, "60") == 60
 
 
-def test_coerce_text_passthrough():
-    field = ss._FIELD_BY_KEY["extra_queries"]
-    assert ss._coerce(field, "brandon sanderson\nlitrpg") == "brandon sanderson\nlitrpg"
+def test_coerce_bool():
+    field = ss._FIELD_BY_KEY["foreign_title_prune"]
+    assert ss._coerce(field, True) is True
+    assert ss._coerce(field, "false") is False
+    assert ss._coerce(field, "1") is True
+    assert ss._coerce(field, 0) is False
+
+
+def test_mode_toggle_defaults_are_on():
+    defaults = ss.env_defaults()
+    assert defaults["abb_rss_only"] is True
+    assert defaults["knaben_rss_only"] is True
+    assert defaults["foreign_title_prune"] is True
+
 
 
 def test_extra_queries_parsing():

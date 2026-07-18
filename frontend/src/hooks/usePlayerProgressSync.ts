@@ -10,8 +10,53 @@ import { useCallback, useEffect } from "react";
 import api from "../api/client";
 import { useToast } from "../contexts/ToastContext";
 import { npKey, type NowPlaying, type PlaybackPosition } from "../types/player";
+import {
+  isLikelyOffline,
+  progressKeyForAbs,
+  progressKeyForRd,
+  saveOfflineProgress,
+} from "../utils/offlinePlayback";
 
 const SYNC_INTERVAL = 30_000;
+
+function persistLocalProgress(
+  np: NowPlaying,
+  time: number,
+  trackIndex: number,
+  trackLocalTime?: number
+): void {
+  const trackLocal = trackLocalTime ?? Math.max(0, time - (np.tracks[trackIndex]?.startOffset ?? 0));
+  if (np.source === "abs" && np.itemId) {
+    saveOfflineProgress(progressKeyForAbs(np.itemId), {
+      time,
+      trackIndex,
+      trackLocal,
+    });
+    return;
+  }
+  if (np.source === "rd") {
+    const key = progressKeyForRd({
+      libraryItemId: np.libraryItemId,
+      streamHistoryId: np.streamHistoryId,
+    });
+    if (key) {
+      saveOfflineProgress(key, { time, trackIndex, trackLocal });
+    }
+    // Also mirror under the alternate key so lib↔history lookups both resume.
+    if (np.libraryItemId != null && np.streamHistoryId != null) {
+      saveOfflineProgress(progressKeyForRd({ streamHistoryId: np.streamHistoryId })!, {
+        time,
+        trackIndex,
+        trackLocal,
+      });
+      saveOfflineProgress(progressKeyForRd({ libraryItemId: np.libraryItemId })!, {
+        time,
+        trackIndex,
+        trackLocal,
+      });
+    }
+  }
+}
 
 interface ProgressSyncSources {
   /** Latest nowPlaying without re-subscribing effects to state changes. */
@@ -31,6 +76,13 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
       trackIndex: number,
       trackLocalTime?: number
     ): Promise<boolean> => {
+      // Always keep a local resume point so offline replay works without ABS/API.
+      persistLocalProgress(np, time, trackIndex, trackLocalTime);
+
+      // Offline / no live session: local save is enough.
+      if (isLikelyOffline()) return true;
+      if (np.source === "abs" && !np.sessionId) return true;
+
       if (np.source === "abs" && np.sessionId) {
         try {
           await api.post(`/stream/abs/${np.sessionId}/sync`, {
@@ -39,7 +91,8 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
           });
           return true;
         } catch {
-          return false;
+          // Local progress already saved; only treat as failure when online.
+          return isLikelyOffline();
         }
       } else if (np.source === "rd" && np.streamHistoryId) {
         try {
@@ -55,7 +108,7 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
           });
           return true;
         } catch {
-          return false;
+          return isLikelyOffline();
         }
       }
       return true;
@@ -72,10 +125,11 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
         await new Promise((r) => setTimeout(r, 1000));
         ok = await syncProgress(np, time, trackIndex, trackLocalTime);
       }
-      if (!ok) {
+      // Don't nag about network saves when we're offline — local progress is enough.
+      if (!ok && !isLikelyOffline()) {
         toast("Couldn't save your listening progress — check your connection", "error");
       }
-      if (np.source === "abs" && np.sessionId) {
+      if (np.source === "abs" && np.sessionId && !isLikelyOffline()) {
         try {
           await api.post(`/stream/abs/${np.sessionId}/close`, {
             currentTime: time,
@@ -108,6 +162,9 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
       const np = getNowPlaying();
       const pos = getPosition();
       if (!np || pos?.key !== npKey(np)) return;
+      // Always persist locally first (works offline).
+      persistLocalProgress(np, pos.time, pos.trackIndex, pos.trackLocal);
+      if (isLikelyOffline()) return;
       const token = localStorage.getItem("access_token") || "";
       if (np.source === "abs" && np.sessionId) {
         // "sync" keeps the session alive (app merely backgrounded and may keep

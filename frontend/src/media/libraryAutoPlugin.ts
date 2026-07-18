@@ -31,6 +31,8 @@ interface LibraryAutoPlugin {
     position?: number;
     playbackRate?: number;
     artwork?: { src: string; sizes?: string; type?: string }[];
+    /** When true, only update transport state (position/playing) — no metadata or artwork. */
+    positionOnly?: boolean;
   }): Promise<void>;
   setActionHandler(
     options: { action: LibraryAutoAction },

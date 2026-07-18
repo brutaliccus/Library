@@ -14,13 +14,23 @@ import {
   cacheBookAudio,
   clearBookCacheForTracks,
   clearAbsBookCache,
-  getCachedTrackObjectUrlFast,
+  getCachedTrackObjectUrl,
+  isBookCached,
+  isTrackFullyCached,
 } from "../utils/audioCache";
 import {
   setAudioPlaybackActive,
   setMediaDownloadPaused,
   setMediaDownloadThrottled,
 } from "../utils/mediaStorage";
+import {
+  getAbsOfflineManifest,
+  getOfflineProgress,
+  isLikelyOffline,
+  progressKeyForAbs,
+  saveAbsOfflineManifest,
+  saveRdOfflineManifest,
+} from "../utils/offlinePlayback";
 import { usePlayerProgressSync } from "../hooks/usePlayerProgressSync";
 import { usePlayerMediaSession } from "../hooks/usePlayerMediaSession";
 import {
@@ -60,7 +70,8 @@ interface PlayerActions {
     author?: string,
     coverUrl?: string,
     streamHistoryId?: number,
-    resume?: number | RDResumeInfo
+    resume?: number | RDResumeInfo,
+    libraryItemId?: number
   ) => void;
   togglePlay: () => void;
   seek: (time: number) => void;
@@ -233,7 +244,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
       suppressPauseIntentRef.current = true;
       audio.pause();
-      suppressPauseIntentRef.current = false;
       const seq = ++loadSeqRef.current;
 
       if (trackObjectUrlRef.current) {
@@ -276,29 +286,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         audio.addEventListener("canplay", tryPlay, { once: true });
       };
 
-      // Start streaming immediately — never block on a slow Cache API blob read.
-      beginPlayback(track.contentUrl, null);
-
-      // If the track is already fully cached (small enough for RAM), swap in.
+      // Cached books: play from blob (offline). Uncached: stream immediately.
       void (async () => {
-        let objectUrl: string | null = null;
         try {
-          objectUrl = await getCachedTrackObjectUrlFast(track.contentUrl);
-        } catch {
-          /* fall back to streaming */
-        }
-        if (!objectUrl || seq !== loadSeqRef.current) {
-          if (objectUrl) URL.revokeObjectURL(objectUrl);
-          return;
-        }
-        // Only swap before playback has advanced — avoids a mid-play src reset.
-        if (audio.paused && audio.currentTime < 0.5) {
-          if (trackObjectUrlRef.current) {
-            URL.revokeObjectURL(trackObjectUrlRef.current);
+          if (await isTrackFullyCached(track.contentUrl)) {
+            const objectUrl = await getCachedTrackObjectUrl(track.contentUrl);
+            if (objectUrl && seq === loadSeqRef.current) {
+              beginPlayback(objectUrl, objectUrl);
+              return;
+            }
           }
-          beginPlayback(objectUrl, objectUrl);
-        } else {
-          URL.revokeObjectURL(objectUrl);
+        } catch {
+          /* fall through to stream */
+        }
+        if (seq === loadSeqRef.current) {
+          beginPlayback(track.contentUrl, null);
         }
       })();
 
@@ -429,6 +431,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const onPlaying = () => {
       retryCountRef.current = 0;
+      suppressPauseIntentRef.current = false;
       setState((s) => ({ ...s, isPlaying: true, buffering: false }));
     };
     const onPause = () => {
@@ -446,7 +449,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const onWaiting = () => setState((s) => ({ ...s, buffering: true }));
     const onCanPlay = () => setState((s) => ({ ...s, buffering: false }));
     const onError = () => {
-      console.warn("[player] audio error — retrying load");
+      if (retryCountRef.current >= MAX_PLAYBACK_RETRIES - 1) {
+        console.warn("[player] audio error — giving up after retries");
+      }
       schedulePlaybackRetry();
     };
     const onStalled = () => {
@@ -458,6 +463,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const ti = stateRef.current.currentTrackIndex;
       if (!np) return;
       if (ti < np.tracks.length - 1) {
+        playIntentRef.current = true;
+        suppressPauseIntentRef.current = true;
         loadTrack(np, ti + 1, 0);
       } else {
         setState((s) => ({ ...s, isPlaying: false }));
@@ -499,10 +506,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
   }, [getAudio, globalTime, loadTrack, syncProgress, schedulePlaybackRetry]);
 
-  // Pause background cache immediately while buffering; soft-throttle if it persists.
+  // Defer cache only while audio is actively loading or playing — not when paused.
   useEffect(() => {
-    setAudioPlaybackActive(Boolean(state.nowPlaying));
-  }, [state.nowPlaying]);
+    setAudioPlaybackActive(state.isPlaying || state.buffering);
+  }, [state.isPlaying, state.buffering]);
 
   useEffect(() => {
     setMediaDownloadPaused(state.buffering);
@@ -563,68 +570,157 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       probeAbortRef.current?.abort();
       retryCountRef.current = 0;
       playIntentRef.current = true;
+
+      const startFromManifest = async () => {
+        const manifest = getAbsOfflineManifest(itemId);
+        if (!manifest?.tracks.length) return false;
+        if (!(await isBookCached(manifest.tracks))) return false;
+
+        const local = getOfflineProgress(progressKeyForAbs(itemId));
+        const np: NowPlaying = {
+          source: "abs",
+          // No live ABS session offline — progress stays local until next online play.
+          itemId,
+          title: manifest.title,
+          author: manifest.author,
+          coverUrl: manifest.coverUrl,
+          tracks: manifest.tracks,
+          totalDuration: manifest.totalDuration,
+          absChapters: manifest.absChapters,
+        };
+
+        const startOffset = local?.time ?? 0;
+        let trackIdx = local?.trackIndex ?? 0;
+        let localStart = local?.trackLocal ?? 0;
+        if (local == null && startOffset > 0) {
+          for (let i = 0; i < np.tracks.length; i++) {
+            const t = np.tracks[i];
+            if (startOffset >= t.startOffset && startOffset < t.startOffset + t.duration) {
+              trackIdx = i;
+              localStart = startOffset - t.startOffset;
+              break;
+            }
+          }
+        } else if (local != null) {
+          trackIdx = Math.min(Math.max(0, local.trackIndex), np.tracks.length - 1);
+          localStart = Math.max(0, local.trackLocal);
+        }
+
+        setState((s) => ({
+          ...s,
+          nowPlaying: np,
+          currentTime: (np.tracks[trackIdx]?.startOffset ?? 0) + localStart,
+          duration: np.totalDuration,
+          currentTrackIndex: trackIdx,
+          expanded: false,
+        }));
+        loadTrack(np, trackIdx, localStart);
+        return true;
+      };
+
+      // Prefer cached metadata when already offline — skip a doomed /play round-trip.
+      if (isLikelyOffline()) {
+        if (await startFromManifest()) return;
+        throw new Error("Offline playback unavailable — download this book while online first");
+      }
+
       // Wake storage / ABS ahead of the play handshake (fire-and-forget).
       void api.post(`/stream/abs/${itemId}/warmup`).catch(() => {});
 
-      const { data } = await api.post(`/stream/abs/${itemId}/play`);
+      try {
+        const { data } = await api.post(`/stream/abs/${itemId}/play`);
 
-      const np: NowPlaying = {
-        source: "abs",
-        sessionId: data.sessionId,
-        itemId,
-        title: data.title,
-        author: data.author,
-        coverUrl: data.coverUrl,
-        tracks: data.tracks,
-        totalDuration: data.duration,
-      };
-      setState((s) => ({
-        ...s,
-        nowPlaying: np,
-        currentTime: data.startOffset || 0,
-        duration: data.duration,
-        currentTrackIndex: 0,
-        expanded: false,
-      }));
+        const np: NowPlaying = {
+          source: "abs",
+          sessionId: data.sessionId,
+          itemId,
+          title: data.title,
+          author: data.author,
+          coverUrl: data.coverUrl,
+          tracks: data.tracks,
+          totalDuration: data.duration,
+        };
 
-      const startOffset = data.startOffset || 0;
-      let trackIdx = 0;
-      let localStart = startOffset;
-      for (let i = 0; i < np.tracks.length; i++) {
-        const t = np.tracks[i];
-        if (startOffset >= t.startOffset && startOffset < t.startOffset + t.duration) {
-          trackIdx = i;
-          localStart = startOffset - t.startOffset;
-          break;
+        // Prefer local offline progress when it's newer than ABS (listened offline).
+        const local = getOfflineProgress(progressKeyForAbs(itemId));
+        let startOffset = data.startOffset || 0;
+        if (local && local.updatedAt > Date.now() - 7 * 24 * 60 * 60 * 1000 && local.time > startOffset + 5) {
+          startOffset = local.time;
         }
+
+        setState((s) => ({
+          ...s,
+          nowPlaying: np,
+          currentTime: startOffset,
+          duration: data.duration,
+          currentTrackIndex: 0,
+          expanded: false,
+        }));
+
+        let trackIdx = 0;
+        let localStart = startOffset;
+        if (local && Math.abs(local.time - startOffset) < 2) {
+          trackIdx = Math.min(Math.max(0, local.trackIndex), np.tracks.length - 1);
+          localStart = Math.max(0, local.trackLocal);
+        } else {
+          for (let i = 0; i < np.tracks.length; i++) {
+            const t = np.tracks[i];
+            if (startOffset >= t.startOffset && startOffset < t.startOffset + t.duration) {
+              trackIdx = i;
+              localStart = startOffset - t.startOffset;
+              break;
+            }
+          }
+        }
+        loadTrack(np, trackIdx, localStart);
+
+        saveAbsOfflineManifest({
+          itemId,
+          title: data.title,
+          author: data.author || "",
+          coverUrl: data.coverUrl || "",
+          tracks: data.tracks,
+          totalDuration: data.duration || 0,
+        });
+
+        // Download tracks locally while they stream (ABS + debrid)
+        void cacheBookAudio(np.tracks);
+
+        // Chapters are optional for playback — load after audio starts so play feels faster.
+        void api
+          .get<{ chapters: AbsChapter[] }>(`/stream/abs/${itemId}/chapters`)
+          .then((chaptersResp) => {
+            const rawCh = chaptersResp.data?.chapters;
+            if (!Array.isArray(rawCh) || rawCh.length === 0) return;
+            const absChapters = rawCh.map((c: unknown, i: number) => {
+              const o = c as Record<string, unknown>;
+              const endRaw = o.end;
+              return {
+                id: typeof o.id === "number" ? o.id : i,
+                title: String(o.title ?? `Chapter ${i + 1}`),
+                start: Number(o.start) || 0,
+                end: endRaw != null && endRaw !== "" ? Number(endRaw) : null,
+              } satisfies AbsChapter;
+            });
+            saveAbsOfflineManifest({
+              itemId,
+              title: data.title,
+              author: data.author || "",
+              coverUrl: data.coverUrl || "",
+              tracks: data.tracks,
+              totalDuration: data.duration || 0,
+              absChapters,
+            });
+            setState((s) => {
+              if (s.nowPlaying?.source !== "abs" || s.nowPlaying.itemId !== itemId) return s;
+              return { ...s, nowPlaying: { ...s.nowPlaying, absChapters } };
+            });
+          })
+          .catch(() => {});
+      } catch (err) {
+        if (await startFromManifest()) return;
+        throw err;
       }
-      loadTrack(np, trackIdx, localStart);
-
-      // Download tracks locally while they stream (ABS + debrid)
-      void cacheBookAudio(np.tracks);
-
-      // Chapters are optional for playback — load after audio starts so play feels faster.
-      void api
-        .get<{ chapters: AbsChapter[] }>(`/stream/abs/${itemId}/chapters`)
-        .then((chaptersResp) => {
-          const rawCh = chaptersResp.data?.chapters;
-          if (!Array.isArray(rawCh) || rawCh.length === 0) return;
-          const absChapters = rawCh.map((c: unknown, i: number) => {
-            const o = c as Record<string, unknown>;
-            const endRaw = o.end;
-            return {
-              id: typeof o.id === "number" ? o.id : i,
-              title: String(o.title ?? `Chapter ${i + 1}`),
-              start: Number(o.start) || 0,
-              end: endRaw != null && endRaw !== "" ? Number(endRaw) : null,
-            } satisfies AbsChapter;
-          });
-          setState((s) => {
-            if (s.nowPlaying?.source !== "abs" || s.nowPlaying.itemId !== itemId) return s;
-            return { ...s, nowPlaying: { ...s.nowPlaying, absChapters } };
-          });
-        })
-        .catch(() => {});
     },
     [loadTrack]
   );
@@ -636,7 +732,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       author?: string,
       coverUrl?: string,
       streamHistoryId?: number,
-      resume: number | RDResumeInfo = 0
+      resume: number | RDResumeInfo = 0,
+      libraryItemId?: number
     ) => {
       probeAbortRef.current?.abort();
       retryCountRef.current = 0;
@@ -646,6 +743,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const np: NowPlaying = {
         source: "rd",
         streamHistoryId,
+        libraryItemId,
         title,
         author: author || "",
         coverUrl: coverUrl || "",
@@ -705,12 +803,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         trackLocal: localStart,
       };
 
-      // Probe remaining tracks in the background to discover durations
-      probeAllTracks(tracksCopy, trackIdx);
+      saveRdOfflineManifest({
+        libraryItemId,
+        streamHistoryId,
+        title,
+        author: author || "",
+        coverUrl: coverUrl || "",
+        tracks: tracksCopy,
+        totalDuration,
+      });
 
-      // Download the whole book to local storage while it streams, so
-      // pausing and resuming later never has to touch the debrid service.
-      void cacheBookAudio(tracksCopy);
+      if (!isLikelyOffline()) {
+        // Probe remaining tracks in the background to discover durations
+        probeAllTracks(tracksCopy, trackIdx);
+
+        // Download the whole book to local storage while it streams, so
+        // pausing and resuming later never has to touch the debrid service.
+        void cacheBookAudio(tracksCopy);
+      }
     },
     [loadTrack, probeAllTracks]
   );
@@ -731,7 +841,32 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // "pause" would start playback.
   const play = useCallback(() => {
     playIntentRef.current = true;
-    getAudio().play().catch(() => {});
+    const audio = getAudio();
+    const np = stateRef.current.nowPlaying;
+    if (!np) return;
+
+    const reloadAtPosition = () => {
+      const ti = stateRef.current.currentTrackIndex;
+      const local = lastPosRef.current?.trackLocal ?? audio.currentTime ?? 0;
+      suppressPauseIntentRef.current = true;
+      loadTrackRef.current(np, ti, Math.max(0, local));
+    };
+
+    if (!audio.src || audio.error) {
+      reloadAtPosition();
+      return;
+    }
+
+    const attemptPlay = (retriesLeft: number) => {
+      audio.play().catch(() => {
+        if (retriesLeft > 0) {
+          setTimeout(() => attemptPlay(retriesLeft - 1), 350);
+        } else {
+          reloadAtPosition();
+        }
+      });
+    };
+    attemptPlay(3);
   }, [getAudio]);
 
   const pause = useCallback(() => {
@@ -894,7 +1029,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const ch = np.absChapters;
     if (ch?.length) {
       const idx = indexOfChapterAtTime(ch, t);
-      if (idx < ch.length - 1) seek(ch[idx + 1].start);
+      if (idx < ch.length - 1) {
+        seek(ch[idx + 1].start);
+        return;
+      }
+      // Last chapter marker but more audio files remain — advance track.
+      const ti = stateRef.current.currentTrackIndex;
+      if (np.tracks.length > 1 && ti < np.tracks.length - 1) {
+        playIntentRef.current = true;
+        suppressPauseIntentRef.current = true;
+        jumpToTrack(ti + 1);
+      }
       return;
     }
     const ti = stateRef.current.currentTrackIndex;

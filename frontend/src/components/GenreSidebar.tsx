@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { ChevronRight, X } from "lucide-react";
 
 export interface SubGenre {
@@ -16,12 +17,22 @@ export interface Genre {
 interface Props {
   genres: Genre[];
   activeSlugs?: string[];
-  onSelect: (slugs: string[]) => void;
+  /** filter = multi-select for search; navigate = browse pages (home). */
+  mode?: "filter" | "navigate";
+  onSelect?: (slugs: string[]) => void;
   mobileOpen?: boolean;
   onMobileClose?: () => void;
 }
 
-export default function GenreSidebar({ genres, activeSlugs = [], onSelect, mobileOpen = false, onMobileClose }: Props) {
+export default function GenreSidebar({
+  genres,
+  activeSlugs = [],
+  mode = "filter",
+  onSelect,
+  mobileOpen = false,
+  onMobileClose,
+}: Props) {
+  const navigate = useNavigate();
   const [expandedSlugs, setExpandedSlugs] = useState<Set<string>>(() => {
     const initial = new Set<string>();
     for (const g of genres) {
@@ -57,7 +68,19 @@ export default function GenreSidebar({ genres, activeSlugs = [], onSelect, mobil
     activeSlugs.includes(genre.slug) ||
     genre.children.some((c) => activeSlugs.includes(c.slug));
 
-  const handleParentClick = (genre: Genre) => {
+  const closeMobile = () => onMobileClose?.();
+
+  const goParent = (genre: Genre) => {
+    closeMobile();
+    if (mode === "navigate") {
+      if (genre.children.length > 0) {
+        navigate(`/genre/${encodeURIComponent(genre.slug)}`);
+      } else {
+        navigate(`/shelf/${encodeURIComponent(genre.slug)}`);
+      }
+      return;
+    }
+    if (!onSelect) return;
     if (activeSlugs.includes(genre.slug)) {
       onSelect(activeSlugs.filter(
         (s) => s !== genre.slug && !genre.children.some((c) => c.slug === s),
@@ -70,7 +93,13 @@ export default function GenreSidebar({ genres, activeSlugs = [], onSelect, mobil
     }
   };
 
-  const handleChildClick = (parent: Genre, child: SubGenre) => {
+  const goChild = (parent: Genre, child: SubGenre) => {
+    closeMobile();
+    if (mode === "navigate") {
+      navigate(`/shelf/${encodeURIComponent(child.slug)}`);
+      return;
+    }
+    if (!onSelect) return;
     const parentRemoved = activeSlugs.filter((s) => s !== parent.slug);
     if (parentRemoved.includes(child.slug)) {
       onSelect(parentRemoved.filter((s) => s !== child.slug));
@@ -79,10 +108,19 @@ export default function GenreSidebar({ genres, activeSlugs = [], onSelect, mobil
     }
   };
 
-  const closeMobile = () => onMobileClose?.();
+  const goSpecial = (slug: string) => {
+    closeMobile();
+    if (mode === "navigate") {
+      navigate(`/shelf/${encodeURIComponent(slug)}`);
+      return;
+    }
+    if (!onSelect) return;
+    const active = activeSlugs.includes(slug);
+    onSelect(active ? [] : [slug]);
+  };
 
   const specials = [
-    { slug: "all", name: "All Books" },
+    { slug: "all", name: "All Available" },
     { slug: "available", name: "Available to Download" },
     { slug: "popular", name: "Popular" },
     { slug: "new", name: "New Releases" },
@@ -99,10 +137,7 @@ export default function GenreSidebar({ genres, activeSlugs = [], onSelect, mobil
         return (
           <button
             key={s.slug}
-            onClick={() => {
-              onSelect(active ? [] : [s.slug]);
-              closeMobile();
-            }}
+            onClick={() => goSpecial(s.slug)}
             className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors ${
               active
                 ? "bg-brand-600/20 text-brand-300 font-medium"
@@ -130,9 +165,8 @@ export default function GenreSidebar({ genres, activeSlugs = [], onSelect, mobil
             <div className="flex items-center">
               <button
                 onClick={() => {
-                  handleParentClick(genre);
-                  if (!expanded && hasChildren) toggleExpand(genre.slug);
-                  closeMobile();
+                  goParent(genre);
+                  if (mode === "filter" && !expanded && hasChildren) toggleExpand(genre.slug);
                 }}
                 className={`flex-1 text-left px-3 py-2 text-sm rounded-lg transition-colors ${
                   active
@@ -163,10 +197,7 @@ export default function GenreSidebar({ genres, activeSlugs = [], onSelect, mobil
                   return (
                     <button
                       key={child.slug}
-                      onClick={() => {
-                        handleChildClick(genre, child);
-                        closeMobile();
-                      }}
+                      onClick={() => goChild(genre, child)}
                       className={`w-full text-left px-3 py-1.5 text-[13px] rounded-md transition-colors ${
                         childActive
                           ? "bg-brand-600/15 text-brand-300 font-medium"
@@ -187,7 +218,6 @@ export default function GenreSidebar({ genres, activeSlugs = [], onSelect, mobil
 
   return (
     <>
-      {/* Mobile drawer overlay */}
       {mobileOpen && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <div
@@ -209,7 +239,6 @@ export default function GenreSidebar({ genres, activeSlugs = [], onSelect, mobil
         </div>
       )}
 
-      {/* Desktop sidebar */}
       <div className="hidden lg:block w-52 shrink-0 sticky top-[4.5rem] max-h-[calc(100vh-5rem)] overflow-y-auto pr-2 scrollbar-hide">
         {sidebarContent}
       </div>

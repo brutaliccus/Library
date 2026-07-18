@@ -200,3 +200,61 @@ def test_generic_series_book3():
     )
     assert tier == "exact"
     assert is_relevant_torrent("Robert Jordan - The Dragon Reborn [M4B]", ctx)
+
+
+def bounce_house_ctx():
+    """Standalone Dinniman title — author overlap must not keep other books."""
+    return resolve_book_search_context(
+        title="Operation Bounce House",
+        author="Matt Dinniman",
+    )
+
+
+@pytest.mark.parametrize("release", [
+    "Matt Dinniman - Dungeon Crawler Carl [M4B]",
+    "Dungeon Crawler Carl - 01 - Dungeon Crawler Carl",
+    "Matt Dinniman - Carl's Doomsday Scenario",
+    "The Butcher's Masquerade - Matt Dinniman",
+    "Matt Dinniman Audiobook Collection",
+])
+def test_author_alone_does_not_keep_wrong_title(release):
+    assert not is_relevant_torrent(release, bounce_house_ctx()), f"Kept: {release}"
+
+
+@pytest.mark.parametrize("release", [
+    "Matt Dinniman - Operation Bounce House [M4B]",
+    "Operation Bounce House - Matt Dinniman",
+    "Operation Bounce House (2024) 64k",
+])
+def test_bounce_house_title_kept(release):
+    assert is_relevant_torrent(release, bounce_house_ctx()), f"Dropped: {release}"
+
+
+def test_knaben_queries_prefer_title_not_author_only():
+    from app.services.download_discovery import build_knaben_queries
+
+    qs = build_knaben_queries(bounce_house_ctx())
+    assert "Matt Dinniman" not in qs
+    assert any("Operation Bounce House" in q for q in qs)
+    assert any("Operation Bounce House" in q and "Matt Dinniman" in q for q in qs)
+
+
+def test_aa_query_is_title_first():
+    from app.services.download_discovery import build_annas_archive_query
+
+    q = build_annas_archive_query(bounce_house_ctx())
+    assert q == "Operation Bounce House"
+    assert "Matt Dinniman" not in q
+
+
+def test_author_catalog_filtered_from_aa_ranking():
+    from app.services.download_discovery import rank_indexer_results
+
+    results = [
+        {"title": "Matt Dinniman - Dungeon Crawler Carl", "source": "annas_archive"},
+        {"title": "Operation Bounce House - Matt Dinniman", "source": "annas_archive"},
+    ]
+    ranked = rank_indexer_results(results, bounce_house_ctx())
+    titles = [r["title"] for r in ranked]
+    assert any("Operation Bounce House" in t for t in titles)
+    assert not any("Dungeon Crawler Carl" in t for t in titles)

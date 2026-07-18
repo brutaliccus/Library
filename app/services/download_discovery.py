@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from difflib import SequenceMatcher
+
+from rapidfuzz import fuzz
 
 from app.utils.book_series import (
     book_one_shares_series_title,
@@ -134,6 +135,37 @@ def build_prowlarr_queries(ctx: BookSearchContext, max_queries: int = 6) -> list
     return unique[:max_queries]
 
 
+def build_knaben_queries(ctx: BookSearchContext, max_queries: int = 6) -> list[str]:
+    """Knaben title search — never author-only (that floods with unrelated books)."""
+    queries: list[str] = []
+    author = ctx.author.split(",")[0].strip() if ctx.author else ""
+    base = ctx.base_title
+
+    # Prefer the volume title when it differs from the series name
+    if ctx.title and ctx.title.lower().strip() != base.lower().strip():
+        queries.append(ctx.title)
+        if author:
+            queries.append(f"{ctx.title} {author}")
+
+    queries.append(base)
+    if author:
+        queries.append(f"{base} {author}")
+    if ctx.target_index:
+        n = format_index_for_query(ctx.target_index)
+        queries.append(f"{base} book {n}")
+        if author:
+            queries.append(f"{base} book {n} {author}")
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for q in queries:
+        key = q.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(q)
+    return unique[:max_queries]
+
+
 def build_audiobookbay_queries(ctx: BookSearchContext, max_queries: int = 6) -> list[str]:
     """Unquoted queries — match how ABB's site search works (no Prowlarr quote syntax)."""
     queries: list[str] = []
@@ -167,15 +199,28 @@ def build_audiobookbay_queries(ctx: BookSearchContext, max_queries: int = 6) -> 
     return unique[:max_queries]
 
 
+def resolve_abb_search_query(
+    ctx: BookSearchContext,
+    abb_query: str | None = None,
+) -> str:
+    """Primary ABB/Jackett query — manual override or first auto-built term."""
+    manual = (abb_query or "").strip()
+    if manual:
+        return manual
+    built = build_audiobookbay_queries(ctx)
+    if built:
+        return built[0]
+    return ctx.base_title or ctx.title or ""
+
+
 def build_annas_archive_query(ctx: BookSearchContext) -> str:
+    """Title-first AA query — do not append author (that returns the whole catalog)."""
+    if ctx.title and (ctx.base_title or "").lower().strip() != (ctx.title or "").lower().strip():
+        return (ctx.title or "").strip()
     if ctx.target_index:
         n = format_index_for_query(ctx.target_index)
-        q = f"{ctx.base_title} book {n}"
-    else:
-        q = ctx.base_title
-    if ctx.author:
-        q += f" {ctx.author.split(',')[0].strip()}"
-    return q
+        return f"{ctx.base_title} book {n}".strip()
+    return (ctx.base_title or ctx.title or "").strip()
 
 
 def _tokenize(text: str) -> set[str]:
@@ -204,9 +249,11 @@ def _clean_for_fuzzy(text: str) -> str:
 
 
 def _fuzzy_title_score(needle: str, release_title: str) -> float:
-    """Stremio-style fuzzy match: compare the book title against each dash/colon
-    separated segment of the release name, so junk (author, bitrate, year tags)
-    in other segments doesn't drag the score down."""
+    """rapidfuzz title match against the whole release and dash/colon segments.
+
+    token_set_ratio ignores extra release junk tokens; WRatio helps short
+    punctuation/ordering variants. Author alone never drives this score.
+    """
     n = _clean_for_fuzzy(needle)
     if not n:
         return 0.0
@@ -215,12 +262,20 @@ def _fuzzy_title_score(needle: str, release_title: str) -> float:
         return 0.0
     if n in whole:
         return 1.0
-    best = SequenceMatcher(None, n, whole).ratio()
+
+    def _pair(a: str, b: str) -> float:
+        return max(
+            fuzz.token_set_ratio(a, b),
+            fuzz.WRatio(a, b),
+            fuzz.partial_ratio(a, b) if len(a) >= 8 else 0.0,
+        ) / 100.0
+
+    best = _pair(n, whole)
     for seg in _RELEASE_SEG_RE.split(release_title):
         s = _clean_for_fuzzy(seg)
         if len(s) < 3:
             continue
-        best = max(best, SequenceMatcher(None, n, s).ratio())
+        best = max(best, _pair(n, s))
     return best
 
 
@@ -251,8 +306,18 @@ def _significant_tokens(*texts: str) -> set[str]:
     return out
 
 
+def _title_is_series_only(ctx: BookSearchContext) -> bool:
+    book_tokens = _significant_tokens(ctx.title, ctx.subtitle)
+    series_tokens = _significant_tokens(ctx.base_title)
+    return (
+        not book_tokens
+        or book_tokens == series_tokens
+        or (bool(book_tokens) and book_tokens <= series_tokens)
+    )
+
+
 def is_relevant_torrent(result_title: str, ctx: BookSearchContext) -> bool:
-    """Drop indexer noise with no meaningful overlap to the book/series we searched for."""
+    """Title-first gate: author may boost scores elsewhere, never keep a row alone."""
     rt = (result_title or "").strip()
     if not rt:
         return False
@@ -263,29 +328,24 @@ def is_relevant_torrent(result_title: str, ctx: BookSearchContext) -> bool:
     lower = rt.lower()
     book_tokens = _significant_tokens(ctx.title, ctx.subtitle)
     series_tokens = _significant_tokens(ctx.base_title)
-    title_is_series_only = (
-        not book_tokens
-        or book_tokens == series_tokens
-        or (book_tokens and book_tokens <= series_tokens)
-    )
+    title_is_series_only = _title_is_series_only(ctx)
     book_hits = sum(1 for t in book_tokens if t in lower)
     series_hits = sum(1 for t in series_tokens if t in lower)
-
     relevance = _title_relevance(rt, ctx)
-    if relevance >= 0.5:
-        return True
-    if relevance >= 0.35 and (title_is_series_only or book_hits >= 1):
+
+    # Strong title/series fuzzy match is enough on its own
+    if relevance >= 0.58:
         return True
 
     if book_tokens and not title_is_series_only:
-        # Volume has its own title (e.g. "Parade of Horribles") — require those words, not just "Carl".
+        # Distinct volume title ("Operation Bounce House") — require title words.
         if book_hits < 1:
             return False
         if book_hits >= 2:
             return True
         if book_hits == 1 and any(len(t) >= 5 and t in lower for t in book_tokens):
             return True
-        if book_hits >= 1 and series_hits >= 2:
+        if book_hits >= 1 and series_hits >= 1 and relevance >= 0.40:
             if ctx.target_index:
                 try:
                     target = float(ctx.target_index)
@@ -295,7 +355,7 @@ def is_relevant_torrent(result_title: str, ctx: BookSearchContext) -> bool:
                 except ValueError:
                     pass
             return True
-        return False
+        return relevance >= 0.50 and book_hits >= 1
 
     if series_tokens and title_is_series_only:
         if ctx.target_index:
@@ -307,17 +367,11 @@ def is_relevant_torrent(result_title: str, ctx: BookSearchContext) -> bool:
             except ValueError:
                 pass
         need = 2 if len(series_tokens) >= 3 else 1
-        if series_hits >= need:
+        if series_hits >= need and relevance >= 0.40:
             return True
+        return relevance >= 0.55
 
-    if ctx.author:
-        author_tokens = [w for w in ctx.author.lower().split() if len(w) > 2]
-        if author_tokens and all(w in lower for w in author_tokens[:1]):
-            if series_hits >= 1 or relevance >= 0.2:
-                return True
-
-    # No author confirmation and no meaningful title/series overlap → noise.
-    return relevance >= 0.34
+    return relevance >= 0.58
 
 
 def filter_irrelevant_results(
@@ -327,10 +381,6 @@ def filter_irrelevant_results(
     kept: list[dict] = []
     dropped = 0
     for r in results:
-        # AA results are already scoped by the AA search query; don't apply torrent heuristics.
-        if r.get("source") == "annas_archive":
-            kept.append(r)
-            continue
         if is_relevant_torrent(r.get("title", ""), ctx):
             kept.append(r)
         else:
@@ -343,7 +393,6 @@ def filter_irrelevant_results(
             ctx.target_index,
         )
     return kept, dropped
-
 
 def _title_relevance(result_title: str, ctx: BookSearchContext) -> float:
     """Overlap with book title first; series-only overlap is down-weighted when the volume has its own title."""
@@ -358,22 +407,23 @@ def _title_relevance(result_title: str, ctx: BookSearchContext) -> float:
     scores: list[float] = []
     if ctx.title:
         scores.append(_token_overlap(ctx.title, result_title))
-        # Fuzzy segment match catches punctuation/apostrophe/ordering variants
-        scores.append(_fuzzy_title_score(ctx.title, result_title) * 0.95)
+        scores.append(_fuzzy_title_score(ctx.title, result_title))
     if ctx.subtitle:
         scores.append(_token_overlap(ctx.subtitle, result_title))
+        scores.append(_fuzzy_title_score(ctx.subtitle, result_title) * 0.9)
     series_rel = max(
         _token_overlap(ctx.base_title, result_title),
-        _fuzzy_title_score(ctx.base_title, result_title) * 0.95,
+        _fuzzy_title_score(ctx.base_title, result_title),
     )
-    scores.append(series_rel * 0.45 if distinct_book_title else series_rel)
+    # Distinct volume titles: series overlap is supporting evidence only
+    scores.append(series_rel * 0.40 if distinct_book_title else series_rel)
     return max(scores) if scores else 0.0
 
 
 def score_torrent_title(result_title: str, ctx: BookSearchContext) -> tuple[float, str]:
     """Return (score, tier) where tier is exact | likely | weak.
 
-    Tiers are for sorting/filtering in the UI — not whether Prowlarr found the torrent.
+    Title relevance drives the score; author is a small tie-break only.
     ABB posts often omit 'Book 1' and use '01' or years in parentheses; we avoid
     treating release years as the wrong volume.
     """
@@ -382,7 +432,8 @@ def score_torrent_title(result_title: str, ctx: BookSearchContext) -> tuple[floa
     relevance = _title_relevance(rt, ctx)
     score = relevance * 40.0
 
-    if ctx.author:
+    # Author boost only after title relevance is already present
+    if ctx.author and relevance >= 0.35:
         author_tokens = [w for w in ctx.author.lower().split() if len(w) > 2]
         if author_tokens and any(w in lower for w in author_tokens[:2]):
             score += 10.0
@@ -478,10 +529,18 @@ def rank_indexer_results(results: list[dict], ctx: BookSearchContext) -> list[di
     scored: list[tuple[float, dict]] = []
     for r in results:
         if r.get("source") == "annas_archive":
+            if not is_relevant_torrent(r.get("title", ""), ctx):
+                continue
             rel = _title_relevance(r.get("title", ""), ctx)
             row = dict(r)
-            row["matchScore"] = round(max(45.0, rel * 50.0), 1)
-            row["matchTier"] = "exact" if rel >= 0.45 else "likely"
+            # No artificial floor — weak AA hits must not look like strong matches
+            row["matchScore"] = round(rel * 55.0, 1)
+            if rel >= 0.72:
+                row["matchTier"] = "exact"
+            elif rel >= 0.50:
+                row["matchTier"] = "likely"
+            else:
+                row["matchTier"] = "weak"
             scored.append((row["matchScore"], row))
             continue
         s, tier = score_torrent_title(r.get("title", ""), ctx)

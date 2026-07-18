@@ -135,26 +135,44 @@ async def download_file(
             last_bytes = 0
             speed_bps = 0.0
 
-            with open(dest_path, "wb") as f:
-                async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
-                    if first:
-                        first = False
-                        if _looks_like_html(chunk):
-                            raise RuntimeError("Download URL returned HTML instead of file (content sniff)")
-                    f.write(chunk)
-                    bytes_done += len(chunk)
+            try:
+                with open(dest_path, "wb") as f:
+                    async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
+                        if first:
+                            first = False
+                            if _looks_like_html(chunk):
+                                raise RuntimeError(
+                                    "Download URL returned HTML instead of file (content sniff)"
+                                )
+                        f.write(chunk)
+                        bytes_done += len(chunk)
 
-                    if on_progress:
-                        now = time.monotonic()
-                        if now - last_report >= 0.4:
-                            elapsed = now - last_report
-                            if elapsed > 0:
-                                speed_bps = (bytes_done - last_bytes) / elapsed
-                            last_report = now
-                            last_bytes = bytes_done
-                            result = on_progress(bytes_done, total_bytes, speed_bps)
-                            if asyncio.iscoroutine(result):
-                                await result
+                        if on_progress:
+                            now = time.monotonic()
+                            if now - last_report >= 0.4:
+                                elapsed = now - last_report
+                                if elapsed > 0:
+                                    speed_bps = (bytes_done - last_bytes) / elapsed
+                                last_report = now
+                                last_bytes = bytes_done
+                                result = on_progress(bytes_done, total_bytes, speed_bps)
+                                if asyncio.iscoroutine(result):
+                                    await result
+            except Exception:
+                try:
+                    dest_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+
+            if total_bytes is not None and bytes_done < total_bytes:
+                try:
+                    dest_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"Incomplete download: received {bytes_done} of {total_bytes} bytes"
+                )
 
             if on_progress:
                 result = on_progress(bytes_done, total_bytes, 0.0)

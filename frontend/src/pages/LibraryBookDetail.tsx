@@ -72,8 +72,12 @@ export default function LibraryBookDetail() {
     setPlayLoading(true);
     try {
       await playABS(item.itemId);
-    } catch {
-      toast("Failed to start playback", "error");
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message.startsWith("Offline")
+          ? err.message
+          : "Failed to start playback";
+      toast(msg, "error");
     } finally {
       setPlayLoading(false);
     }

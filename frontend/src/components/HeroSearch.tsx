@@ -20,18 +20,10 @@ export default function HeroSearch() {
         Find your next read
       </h1>
       <p className="text-gray-400 mb-8">
-        Search thousands of books, then download audiobooks and ebooks to your library
+        Search books you can download — matched against our indexer cache
       </p>
       <p className="text-xs text-gray-500 mb-4">
-        By default we show books with downloads ready.{" "}
-        <button
-          type="button"
-          onClick={() => navigate("/search?advanced=1")}
-          className="text-brand-400 hover:text-brand-300"
-        >
-          Advanced search
-        </button>{" "}
-        searches the full catalog.
+        Catalog powered by Open Library. Only books with cached torrents show by default.
       </p>
       <form onSubmit={handleSubmit} className="relative max-w-xl mx-auto">
         <Search
@@ -44,7 +36,6 @@ export default function HeroSearch() {
           onChange={(e) => setValue(e.target.value)}
           placeholder="Search by title, author, or ISBN..."
           className="w-full pl-12 pr-24 py-4 bg-gray-800 border border-gray-700 rounded-2xl text-base text-gray-100 shadow-lg focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500"
-          autoFocus
         />
         <button
           type="submit"

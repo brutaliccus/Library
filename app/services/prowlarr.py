@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import re
 import time
+import unicodedata
 from typing import Any
 
 import httpx
@@ -9,6 +11,48 @@ from app.services.real_debrid import extract_info_hash
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Reject titles where non-Latin letters are at least this fraction of all letters.
+# Accented Latin (French/Spanish/German) still counts as Latin and is kept.
+FOREIGN_SCRIPT_RATIO = 0.5
+
+# Strip release noise before measuring script ratio so `[m4b]` / `(2024)` / `1080p`
+# can't dilute a CJK/Cyrillic title under the threshold.
+_FOREIGN_NOISE_RE = re.compile(
+    r"\[.*?\]|\(.*?\)|\{.*?\}|"
+    r"\b(19|20)\d{2}\b|"
+    r"\.(m4b|m4a|epub|pdf|mobi|mp3|azw3|flac|aac|ogg|iso)\b|"
+    r"\b(audiobook|ebook|unabridged|abridged|m4b|epub|pdf|mp3|flac|"
+    r"1080p|720p|480p|2160p|4k|bluray|web-dl)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_latin_letter(ch: str) -> bool:
+    """True for Latin-script letters (including diacritics); False for other scripts."""
+    if not ch.isalpha():
+        return False
+    # UNICODE name is "LATIN …" for basic + extended Latin. Fallback for any letter
+    # whose category is Letter but name lookup fails: treat as non-Latin (safer).
+    name = unicodedata.name(ch, "")
+    return name.startswith("LATIN ")
+
+
+def title_is_mostly_foreign_script(
+    title: str, *, threshold: float = FOREIGN_SCRIPT_RATIO,
+) -> bool:
+    """True when ≥ ``threshold`` of the title's letters are non-Latin script.
+
+    Digits, punctuation, whitespace, and common release tags (``.m4b``, ``[2024]``,
+    ``audiobook``) are ignored so they don't dilute CJK/Cyrillic/Hangul titles.
+    Empty / letter-less titles return False (not foreign — just uninformative).
+    """
+    cleaned = _FOREIGN_NOISE_RE.sub(" ", title or "")
+    letters = [c for c in cleaned if c.isalpha()]
+    if not letters:
+        return False
+    foreign = sum(1 for c in letters if not _is_latin_letter(c))
+    return (foreign / len(letters)) >= threshold
 
 # Empty = query all enabled indexers; Prowlarr still returns mixed results and we filter client-side.
 # Forcing Torznab categories (3030/7020) on this host made some searches hang on FlareSolverr indexers.
@@ -41,6 +85,8 @@ SIZE_EBOOK_MAX = 50 * 1024 * 1024  # 50 MB
 def _standard_cat_ids(categories: list[dict]) -> set[int]:
     ids = set()
     for c in categories:
+        if not isinstance(c, dict):
+            continue
         cat_id = c.get("id")
         if cat_id and cat_id < 100000:
             ids.add(cat_id)
@@ -76,10 +122,12 @@ def _is_knaben_indexer(indexer: str) -> bool:
 
 # Knaben is a general torrent indexer — reject obvious non-book results.
 _NON_BOOK_TITLE = re.compile(
-    r"\.(mp4|mkv|avi|wmv|flv|webm|exe|msi|iso)\b"
-    r"|\b(?:1080p|720p|2160p|4k|x264|x265|hevc|bluray|web-dl|webrip)\b"
-    r"|\b(?:season|s\d{2}e\d{2}|complete\s+series)\b"
-    r"|\b(?:pre-?activated|crack|keygen|ftuapps)\b",
+    r"\.(mp4|mkv|avi|wmv|flv|webm|ts|m2ts|exe|msi|iso)\b"
+    r"|\b(?:1080p|720p|480p|2160p|4k|x264|x265|hevc|bluray|web-dl|webrip|mpeg2)\b"
+    r"|\b\d{3,4}x\d{3,4}\b"
+    r"|\b(?:season|s\d{2}e\d{2}|complete\s+series|tv\s+mini\s+series|mini\s+series)\b"
+    r"|\b(?:pre-?activated|crack|keygen|ftuapps)\b"
+    r"|\b(?:onlyfans|brazzers|bellesa|pornhub|xvideos|xxx)\b",
     re.IGNORECASE,
 )
 
@@ -92,6 +140,9 @@ def is_book_related(
     categories: list[dict],
     title: str = "",
     indexer: str = "",
+    *,
+    media_type: str | None = None,
+    size_bytes: int = 0,
 ) -> bool:
     """Return True if the result is potentially a book (audiobook or ebook)."""
     if _is_audiobookbay_indexer(indexer):
@@ -100,8 +151,17 @@ def is_book_related(
         return False
     if AUDIOBOOK_KEYWORDS.search(title) or EBOOK_KEYWORDS.search(title):
         return True
+    if media_type in ("audiobook", "ebook"):
+        return True
     if _is_knaben_indexer(indexer):
-        # Knaben indexes everything — require book signals, not blind trust.
+        cat_ids = _standard_cat_ids(categories)
+        # Torznab-mapped audiobook/ebook only — not generic audio (3010 MP3, 3040 lossless).
+        if cat_ids & (AUDIOBOOK_CATS | EBOOK_CATS):
+            return True
+        if cat_ids and any((cid // 1000) in BOOK_RELATED_RANGES for cid in cat_ids):
+            return True
+        if size_bytes > SIZE_AUDIOBOOK_MIN:
+            return True
         return False
     for c in categories:
         name = (c.get("name") or "").lower()
@@ -290,9 +350,16 @@ async def search_scraper_indexers(
     abb_limit: int | None = None,
     knaben_limit: int | None = None,
     timeout: int | None = None,
+    *,
+    skip_abb: bool = False,
 ) -> tuple[list[dict], dict[str, int]]:
-    """Search ABB and Knaben separately so Knaben cannot crowd out ABB in the shared limit."""
+    """Search ABB and Knaben separately so Knaben cannot crowd out ABB in the shared limit.
+
+    ``skip_abb`` is set by background RSS-only mode so keyword crawl doesn't hit
+    ABB (live download search still calls ``search_audiobookbay_multi`` directly).
+    """
     import asyncio
+    from app.services import audiobookbay
     from app.services.download_discovery import merge_indexer_results
 
     abb_limit = max(25, int(abb_limit if abb_limit is not None else settings.prowlarr_abb_search_limit))
@@ -300,16 +367,27 @@ async def search_scraper_indexers(
     timeout = max(15, int(timeout if timeout is not None else settings.scraper_prowlarr_timeout))
 
     async def _abb() -> list[dict]:
-        iid = await get_audiobookbay_indexer_id()
-        if not iid:
+        if skip_abb:
             return []
-        return await search(query, indexer_ids=[iid], limit=abb_limit, timeout=timeout)
+        # Default: Jackett ABB (~2 listing pages). Deep scrape only when explicitly enabled.
+        if settings.abb_deep_search_enabled:
+            try:
+                pages = max(1, min(3, int(getattr(settings, "abb_scraper_max_pages", 2) or 2)))
+                deep = await audiobookbay.search_deep(
+                    query, max_pages=pages, resolve_hashes=False
+                )
+                if deep:
+                    return deep[:abb_limit]
+            except Exception as e:
+                logger.warning("Scraper ABB deep search failed for %r: %s", query, e)
+        rows = await search_audiobookbay_multi([query])
+        return rows[:abb_limit]
 
     async def _knaben() -> list[dict]:
-        ids = await get_knaben_indexer_ids()
-        if not ids:
+        if not await get_knaben_indexer_ids():
             return []
-        return await search(query, indexer_ids=ids, limit=knaben_limit, timeout=timeout)
+        rows = await search_knaben_multi([query], limit=knaben_limit, timeout=timeout)
+        return rows[:knaben_limit]
 
     abb_res, knab_res = await asyncio.gather(_abb(), _knaben(), return_exceptions=True)
 
@@ -373,7 +451,17 @@ def _parse_torznab_feed(xml_text: str, indexer_name: str) -> list[dict[str, Any]
         ]
         raw_cats = [{"id": cid, "name": ""} for cid in cat_ids]
 
-        if not is_book_related(raw_cats, title=title, indexer=indexer_name):
+        media_type = detect_media_type(title, raw_cats, size)
+        if (
+            _is_audiobookbay_indexer(indexer_name)
+            and media_type == "unknown"
+            and size > SIZE_AUDIOBOOK_MIN
+        ):
+            media_type = "audiobook"
+
+        if not is_book_related(
+            raw_cats, title=title, indexer=indexer_name, media_type=media_type, size_bytes=size,
+        ):
             continue
 
         download_url = item.findtext("link") or (
@@ -397,14 +485,6 @@ def _parse_torznab_feed(xml_text: str, indexer_name: str) -> list[dict[str, Any]
         def _int_attr(key: str) -> int:
             v = attrs.get(key) or ""
             return int(v) if v.isdigit() else 0
-
-        media_type = detect_media_type(title, raw_cats, size)
-        if (
-            _is_audiobookbay_indexer(indexer_name)
-            and media_type == "unknown"
-            and size > SIZE_AUDIOBOOK_MIN
-        ):
-            media_type = "audiobook"
 
         results.append({
             "title": title,
@@ -455,51 +535,301 @@ async def fetch_recent_releases(
 async def fetch_recent_scraper_releases(
     limit_per_indexer: int = 100,
     timeout: int = 60,
+    *,
+    include_abb_flare: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Recent-release feeds from all trusted scraper indexers, merged by hash."""
+    """Recent-release feeds from trusted scraper indexers, merged by hash.
+
+    Background scraper should keep ``include_abb_flare=False`` — ABB via
+    FlareSolverr/Chromium is reserved for occasional live book searches.
+    When ``include_abb_flare`` is True and Mullvad ``abb_proxy_url`` is set,
+    ABB recent posts are fetched via Flare+VPN.
+    """
     import asyncio
     from app.services.download_discovery import merge_indexer_results
 
     indexers = await get_trusted_indexer_info()
-    if not indexers:
-        return [], {}
+    proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
+    # Never use Jackett→ABB from the home IP for recent feeds.
+    indexers = [i for i in indexers if not _is_audiobookbay_indexer(i.get("name") or "")]
 
-    async def _one(idx: dict) -> list[dict[str, Any]]:
-        return await fetch_recent_releases(
-            idx["id"], idx["name"], limit=limit_per_indexer, timeout=timeout
-        )
-
-    gathered = await asyncio.gather(*[_one(i) for i in indexers], return_exceptions=True)
-    batches: list[list[dict[str, Any]]] = []
     counts: dict[str, int] = {}
-    for idx, batch in zip(indexers, gathered):
-        if isinstance(batch, Exception):
-            logger.warning("Recent feed failed for %s: %s", idx["name"], batch)
-            counts[idx["name"]] = 0
-            continue
-        batches.append(batch)
-        counts[idx["name"]] = len(batch)
+    batches: list[list[dict[str, Any]]] = []
+
+    if include_abb_flare and proxy:
+        from app.services import audiobookbay
+
+        try:
+            abb_rows = await audiobookbay.fetch_recent_listings(max_pages=1)
+            abb_rows = await enrich_audiobookbay_for_cache(abb_rows[:limit_per_indexer])
+            batches.append(abb_rows)
+            counts["AudioBookBay(VPN)"] = len(abb_rows)
+        except Exception as e:
+            logger.warning("ABB VPN recent feed failed: %s", e)
+            counts["AudioBookBay(VPN)"] = 0
+    elif proxy:
+        counts["AudioBookBay(VPN)"] = 0  # skipped — Flare reserved for live search
+
+    if indexers:
+        async def _one(idx: dict) -> list[dict[str, Any]]:
+            return await fetch_recent_releases(
+                idx["id"], idx["name"], limit=limit_per_indexer, timeout=timeout
+            )
+
+        gathered = await asyncio.gather(*[_one(i) for i in indexers], return_exceptions=True)
+        for idx, batch in zip(indexers, gathered):
+            if isinstance(batch, Exception):
+                logger.warning("Recent feed failed for %s: %s", idx["name"], batch)
+                counts[idx["name"]] = 0
+                continue
+            batches.append(batch)
+            counts[idx["name"]] = len(batch)
 
     merged = merge_indexer_results(*batches) if batches else []
+    if not proxy:
+        abb = [r for r in merged if _is_audiobookbay_indexer(r.get("indexer") or "")]
+        other = [r for r in merged if r not in abb]
+        if abb:
+            abb = await enrich_audiobookbay_for_cache(abb)
+            merged = merge_indexer_results(abb, other)
     return merged, counts
 
 
-async def search_audiobookbay_multi(queries: list[str]) -> list[dict[str, Any]]:
-    """Search only ABB so results are not dropped by the global Prowlarr result cap."""
+async def enrich_audiobookbay_for_cache(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+    timeout: float | None = None,
+) -> list[dict[str, Any]]:
+    """Resolve ABB info hashes so Jackett Torznab rows can be upserted."""
+    if not rows:
+        return rows
+    if all((r.get("infoHash") or "").strip() for r in rows):
+        return rows
+    from app.services.audiobookbay import resolve_hashes_for_results
+
+    cap = max(
+        0,
+        int(
+            limit
+            if limit is not None
+            else min(
+                settings.abb_resolve_hash_limit,
+                getattr(settings, "abb_scraper_resolve_hash_limit", 12) or 12,
+            )
+        ),
+    )
+    if cap <= 0:
+        return rows
+    try:
+        coro = resolve_hashes_for_results(rows, limit=cap)
+        if timeout is not None and timeout > 0:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        return await coro
+    except Exception as e:
+        logger.warning("ABB hash enrich for cache failed: %s", e or type(e).__name__)
+        return rows
+
+
+async def search_audiobookbay_multi(
+    queries: list[str],
+    *,
+    jackett_timeout: int | None = None,
+    prowlarr_timeout: int | None = None,
+    allow_flare_fallback: bool = True,
+) -> list[dict[str, Any]]:
+    """Search ABB for live download UI.
+
+    Jackett Torznab first (~1–3s). Direct Mullvad Flare multi-page scrape is a
+    fallback only — it commonly takes 30–90s and made live search feel hung.
+    """
+    if not queries:
+        return []
+    query = queries[0]
+    limit = max(25, int(settings.prowlarr_abb_search_limit))
+    # Live UI must fail fast; do not inherit the 180s Jackett/Flare deploy budget.
+    jt = max(10, int(jackett_timeout if jackett_timeout is not None else 25))
+
+    jackett_rows = await search_jackett_audiobookbay(query, limit=limit, timeout=jt)
+    if jackett_rows:
+        logger.info("ABB Jackett direct: %s results for %r", len(jackett_rows), query[:60])
+        # Torznab magnets already carry infoHash — skip Flare detail crawls here.
+        return await enrich_audiobookbay_for_cache(jackett_rows, limit=0)
+
+    proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
+    if allow_flare_fallback and proxy:
+        from app.services import audiobookbay
+
+        try:
+            deep = await asyncio.wait_for(
+                audiobookbay.search_deep(
+                    query, max_pages=2, resolve_hashes=False, for_live=True,
+                ),
+                timeout=35.0,
+            )
+            if deep:
+                logger.info(
+                    "ABB via Mullvad Flare (fallback): %s results for %r",
+                    len(deep[:limit]),
+                    query[:60],
+                )
+                return await enrich_audiobookbay_for_cache(deep[:limit], timeout=8.0)
+        except asyncio.TimeoutError:
+            logger.warning("ABB Mullvad Flare fallback timed out after 35s for %r", query[:60])
+        except Exception as e:
+            logger.warning("ABB Mullvad Flare fallback failed for %r: %s", query[:60], e)
+
     iid = await get_audiobookbay_indexer_id()
     if not iid:
         return []
-    limit = max(25, int(settings.prowlarr_abb_search_limit))
-    return await search_multi(queries, indexer_ids=[iid], limit=limit)
+    try:
+        return await search(
+            query,
+            indexer_ids=[iid],
+            limit=limit,
+            timeout=prowlarr_timeout if prowlarr_timeout is not None else 30,
+        )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 400:
+            logger.warning("Prowlarr ABB indexer unavailable — fix Jackett/FlareSolverr or re-enable in Prowlarr")
+            return []
+        raise
 
 
-async def search_trusted_indexers_multi(queries: list[str]) -> list[dict[str, Any]]:
-    """Search ABB, Knaben, and other trusted indexers (not every tracker in Prowlarr)."""
-    indexer_ids = await get_trusted_indexer_ids()
-    if not indexer_ids:
+async def search_jackett_audiobookbay(
+    query: str, limit: int = 150, timeout: int | None = None
+) -> list[dict[str, Any]]:
+    """Bypass Prowlarr when its ABB indexer is marked unavailable."""
+    base = (settings.jackett_url or "").rstrip("/")
+    key = (settings.jackett_api_key or "").strip()
+    if not base or not key:
         return []
-    per_call = max(50, int(settings.prowlarr_abb_search_limit))
-    return await search_multi(queries, indexer_ids=indexer_ids, limit=per_call)
+
+    url = f"{base}/api/v2.0/indexers/audiobookbay/results/torznab/api"
+    read_timeout = max(
+        15,
+        int(
+            timeout
+            if timeout is not None
+            else getattr(settings, "jackett_abb_timeout", 180) or 180
+        ),
+    )
+    http_timeout = httpx.Timeout(read_timeout, connect=12.0)
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                url,
+                params={"apikey": key, "t": "search", "q": query, "limit": str(limit)},
+                timeout=http_timeout,
+            )
+            if resp.status_code >= 400:
+                logger.warning("Jackett ABB HTTP %s: %s", resp.status_code, resp.text[:200])
+                return []
+        return _parse_torznab_feed(resp.text, "AudioBookBay")
+    except httpx.TimeoutException:
+        logger.warning("Jackett ABB search timed out after %ss for %r", read_timeout, query[:60])
+        return []
+    except Exception as e:
+        logger.warning("Jackett ABB search failed: %s", e)
+        return []
+
+
+async def search_knaben_multi(
+    queries: list[str],
+    *,
+    limit: int | None = None,
+    timeout: int | None = None,
+) -> list[dict[str, Any]]:
+    """Search Knaben via direct API (includes unseeded audiobooks Prowlarr drops)."""
+    from app.services import knaben
+
+    if not queries:
+        return []
+    ids = await get_knaben_indexer_ids()
+    if not ids:
+        return []
+    effective_limit = max(50, int(limit if limit is not None else settings.prowlarr_search_limit))
+    return await knaben.search_multi(queries, limit=effective_limit, timeout=timeout)
+
+
+async def search_trusted_indexers_multi(
+    queries: list[str],
+    *,
+    knaben_queries: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Search ABB via Jackett (~2 pages) + Knaben, then merge.
+
+    When abb_deep_search_enabled is on, ABB uses direct multi-page scrape instead.
+    """
+    import asyncio
+    from app.services import audiobookbay
+    from app.services.download_discovery import merge_indexer_results
+
+    if not queries:
+        return []
+
+    async def _abb() -> list[dict[str, Any]]:
+        # Non-progressive path (smart-stream / fallback): one primary query, serial pages.
+        if settings.abb_deep_search_enabled:
+            try:
+                deep = await audiobookbay.search_deep_multi(queries, resolve_hashes=False)
+                if deep:
+                    return deep
+                logger.warning("ABB deep search empty — falling back to Prowlarr/Jackett")
+            except Exception as e:
+                logger.warning("ABB deep search failed, falling back to Prowlarr: %s", e)
+        return await search_audiobookbay_multi(queries[:1] if queries else [])
+
+    knab_q = knaben_queries if knaben_queries else queries
+
+    async def _knaben() -> list[dict[str, Any]]:
+        return await search_knaben_multi(knab_q)
+
+    abb_res, knab_res = await asyncio.gather(_abb(), _knaben(), return_exceptions=True)
+    abb_list: list[dict[str, Any]] = []
+    knab_list: list[dict[str, Any]] = []
+    if isinstance(abb_res, Exception):
+        logger.warning("Trusted ABB search failed: %s", abb_res)
+    else:
+        abb_list = abb_res
+    if isinstance(knab_res, Exception):
+        logger.warning("Trusted Knaben search failed: %s", knab_res)
+    else:
+        knab_list = knab_res
+
+    # Also include any other trusted indexers (comma-list in settings) via shared call.
+    other_ids = []
+    try:
+        trusted = await get_trusted_indexer_info()
+        abb_id = await get_audiobookbay_indexer_id()
+        knaben_ids = set(await get_knaben_indexer_ids())
+        for idx in trusted:
+            iid = int(idx["id"])
+            if idx.get("kind") == "other" and iid != abb_id and iid not in knaben_ids:
+                other_ids.append(iid)
+    except Exception:
+        other_ids = []
+
+    other_list: list[dict[str, Any]] = []
+    if other_ids:
+        try:
+            other_list = await search_multi(
+                queries,
+                indexer_ids=other_ids,
+                limit=max(50, int(settings.prowlarr_search_limit)),
+            )
+        except Exception as e:
+            logger.warning("Other trusted indexer search failed: %s", e)
+
+    merged = merge_indexer_results(abb_list, knab_list, other_list)
+    logger.info(
+        "Trusted multi-search: ABB=%s Knaben=%s other=%s → %s merged",
+        len(abb_list),
+        len(knab_list),
+        len(other_list),
+        len(merged),
+    )
+    return merged
 
 
 async def search_multi(
@@ -507,6 +837,7 @@ async def search_multi(
     categories: list[int] | None = None,
     indexer_ids: list[int] | None = None,
     limit: int | None = None,
+    timeout: int | None = None,
 ) -> list[dict[str, Any]]:
     """Run several Prowlarr searches and merge by info hash (best seeders kept)."""
     import asyncio
@@ -514,11 +845,17 @@ async def search_multi(
     if not queries:
         return []
     if len(queries) == 1:
-        return await search(queries[0], categories=categories, indexer_ids=indexer_ids, limit=limit)
+        return await search(
+            queries[0],
+            categories=categories,
+            indexer_ids=indexer_ids,
+            limit=limit,
+            timeout=timeout,
+        )
 
     gathered = await asyncio.gather(
         *[
-            search(q, categories=categories, indexer_ids=indexer_ids, limit=limit)
+            search(q, categories=categories, indexer_ids=indexer_ids, limit=limit, timeout=timeout)
             for q in queries
         ],
         return_exceptions=True,
@@ -592,7 +929,22 @@ async def search(
         item_title = item.get("title", "") or ""
         item_indexer = item.get("indexer", "") or ""
 
-        if not is_book_related(raw_cats, title=item_title, indexer=item_indexer):
+        size = item.get("size", 0)
+        media_type = detect_media_type(item_title, raw_cats, size)
+        if (
+            _is_audiobookbay_indexer(item_indexer)
+            and media_type == "unknown"
+            and size > SIZE_AUDIOBOOK_MIN
+        ):
+            media_type = "audiobook"
+
+        if not is_book_related(
+            raw_cats,
+            title=item_title,
+            indexer=item_indexer,
+            media_type=media_type,
+            size_bytes=size,
+        ):
             skipped_category += 1
             continue
 
@@ -613,15 +965,6 @@ async def search(
             parsed = extract_info_hash(magnet, None, download_url)
             if parsed:
                 info_hash = parsed
-
-        size = item.get("size", 0)
-        media_type = detect_media_type(item_title, raw_cats, size)
-        if (
-            _is_audiobookbay_indexer(item_indexer)
-            and media_type == "unknown"
-            and size > SIZE_AUDIOBOOK_MIN
-        ):
-            media_type = "audiobook"
 
         results.append({
             "title": item_title or "Unknown",

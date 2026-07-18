@@ -22,6 +22,8 @@ export interface NowPlaying {
   sessionId?: string;
   itemId?: string;
   streamHistoryId?: number;
+  /** Streaming library item id (My Library) — used for offline progress keys */
+  libraryItemId?: number;
   title: string;
   author: string;
   coverUrl: string;

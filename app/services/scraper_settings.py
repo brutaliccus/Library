@@ -44,6 +44,11 @@ class ScraperConfig:
     rss_every_n_jobs: int
     rss_limit_per_indexer: int
     extra_queries: str
+    knaben_crawl_tasks_per_job: int
+    # Mode toggles (admin UI). Defaults favor RSS maintenance + foreign prune.
+    abb_rss_only: bool
+    knaben_rss_only: bool
+    foreign_title_prune: bool
 
 
 @dataclass(frozen=True)
@@ -51,12 +56,29 @@ class SettingField:
     key: str
     label: str
     description: str
-    type: str  # "int" | "text"
+    type: str  # "int" | "text" | "bool"
     min: int | None = None
     max: int | None = None
 
 
 FIELDS: list[SettingField] = [
+    SettingField(
+        "abb_rss_only", "ABB RSS-only mode",
+        "Background: only poll ABB recent-releases (no author/deep scrape, no keyword ABB crawl). "
+        "Live download search still uses Jackett ABB and auto-saves finds.",
+        "bool",
+    ),
+    SettingField(
+        "knaben_rss_only", "Knaben RSS-only mode",
+        "Background: only poll Knaben RSS for new uploads (skip the full category API crawl).",
+        "bool",
+    ),
+    SettingField(
+        "foreign_title_prune", "Prune foreign-script titles",
+        "Drop titles that are ≥50% non-Latin script (CJK/Cyrillic/Hangul/…) from the cache "
+        "and never re-record them on future scrapes.",
+        "bool",
+    ),
     SettingField(
         "interval_seconds", "Scrape interval (s)",
         "Pause between scrape jobs. Lower = faster crawl, more Prowlarr/CPU load.",
@@ -94,8 +116,13 @@ FIELDS: list[SettingField] = [
     ),
     SettingField(
         "knaben_search_limit", "Knaben results per query",
-        "Result cap for the Knaben search.",
+        "Result cap for live Knaben title searches (paginated up to 10×100 per query).",
         "int", 25, 1000,
+    ),
+    SettingField(
+        "knaben_crawl_tasks_per_job", "Knaben crawl pages per job",
+        "API pages (×100 torrents) per job while sweeping categories. Ignored when Knaben RSS-only is on. 0 = off.",
+        "int", 0, 20,
     ),
     SettingField(
         "debrid_batch_size", "Debrid batch size",
@@ -149,6 +176,10 @@ _FIELD_BY_KEY = {f.key: f for f in FIELDS}
 
 def env_defaults() -> dict[str, Any]:
     s = get_settings()
+    rss_n = s.scraper_rss_every_n_jobs
+    if rss_n is None:
+        # Default RSS cadence is every job when we ship ABB RSS-only by default.
+        rss_n = 1
     return {
         "interval_seconds": s.scraper_interval_seconds,
         "queries_per_job": s.scraper_queries_per_job,
@@ -158,19 +189,35 @@ def env_defaults() -> dict[str, Any]:
         "search_retries": s.scraper_search_retries,
         "abb_search_limit": s.prowlarr_abb_search_limit,
         "knaben_search_limit": s.prowlarr_search_limit,
+        "knaben_crawl_tasks_per_job": s.scraper_knaben_crawl_tasks_per_job,
         "debrid_batch_size": s.scraper_debrid_batch_size,
         "debrid_interval_hours": s.scraper_debrid_interval_hours,
         "prune_stale_days": s.scraper_prune_stale_days,
         "match_batch_size": s.scraper_match_batch_size,
         "non_book_prune_every_n_jobs": 10,
-        "search_history_limit": 30,
-        "rss_every_n_jobs": 5,
+        "search_history_limit": 0,
+        "rss_every_n_jobs": rss_n,
         "rss_limit_per_indexer": 100,
         "extra_queries": "",
+        # Defaults ON — RSS maintenance + foreign prune. Admin can turn off.
+        "abb_rss_only": True,
+        "knaben_rss_only": True,
+        "foreign_title_prune": True,
     }
 
 
 def _coerce(field: SettingField, value: Any) -> Any:
+    if field.type == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        s = str(value).strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off", ""):
+            return False
+        raise ValueError(f"not a boolean: {value!r}")
     if field.type == "int":
         v = int(value)
         if field.min is not None:

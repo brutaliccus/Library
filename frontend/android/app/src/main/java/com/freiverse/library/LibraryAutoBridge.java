@@ -24,8 +24,7 @@ public final class LibraryAutoBridge {
 
     public static final String MEDIA_ROOT_ID = "library_root";
     public static final String CONTINUE_ID = "continue";
-    public static final String ABS_ID = "abs";
-    public static final String STORE_ID = "store";
+    public static final String LIBRARY_ID = "library";
     public static final String NOW_PLAYING_ID = "now_playing";
 
     private static final long BROWSE_TIMEOUT_MS = 12_000;
@@ -75,13 +74,14 @@ public final class LibraryAutoBridge {
     private long durationMs = 0;
     private long positionMs = 0;
     private float playbackSpeed = 1.0f;
+    private long lastNotificationUpdateMs = 0;
 
     private LibraryAutoBridge() {}
 
     public void attach(LibraryMediaBrowserService service, MediaSessionCompat session) {
         serviceRef = new WeakReference<>(service);
         sessionRef = new WeakReference<>(session);
-        refreshSession();
+        refreshSession(true);
     }
 
     public void setBrowseRequestEmitter(BrowseRequestEmitter emitter) {
@@ -109,17 +109,44 @@ public final class LibraryAutoBridge {
         long positionMs,
         float playbackSpeed
     ) {
+        boolean wasActive = this.active;
+        String previousRootKey = nowPlayingRootKey();
+
         this.title = title != null ? title : "";
         this.artist = artist != null ? artist : "";
         this.album = album != null ? album : "";
-        this.artwork = artwork;
+        if (artwork != null) {
+            this.artwork = artwork;
+        } else if (!active) {
+            this.artwork = null;
+        }
         this.active = active;
         this.playing = playing;
         this.durationMs = Math.max(0, durationMs);
         this.positionMs = Math.max(0, positionMs);
         this.playbackSpeed = playbackSpeed > 0 ? playbackSpeed : 1.0f;
-        refreshSession();
-        notifyRootChanged();
+
+        boolean rootChanged =
+            wasActive != active || !previousRootKey.equals(nowPlayingRootKey());
+        refreshSession(true);
+        if (rootChanged) {
+            notifyRootChanged();
+        }
+    }
+
+    /** Position / transport-only sync — avoids rebuilding browse tree artwork. */
+    public void updatePosition(boolean playing, long positionMs, float playbackSpeed) {
+        this.playing = playing;
+        this.positionMs = Math.max(0, positionMs);
+        this.playbackSpeed = playbackSpeed > 0 ? playbackSpeed : 1.0f;
+        refreshSession(false);
+    }
+
+    private String nowPlayingRootKey() {
+        if (!active) {
+            return "";
+        }
+        return title + "|" + artist + "|" + (artwork != null ? "art" : "noart");
     }
 
     /**
@@ -133,7 +160,28 @@ public final class LibraryAutoBridge {
             return;
         }
         this.playing = playing;
-        refreshSession();
+        refreshSession(false);
+    }
+
+    public boolean isActive() {
+        return active;
+    }
+
+    public boolean isPlaying() {
+        return playing;
+    }
+
+    public String getTitle() {
+        return title;
+    }
+
+    public String getArtist() {
+        return artist;
+    }
+
+    @Nullable
+    public Bitmap getArtwork() {
+        return artwork;
     }
 
     public void clear() {
@@ -153,8 +201,7 @@ public final class LibraryAutoBridge {
     public List<MediaBrowserCompat.MediaItem> buildRootChildren() {
         List<MediaBrowserCompat.MediaItem> items = new ArrayList<>();
         items.add(browsable(CONTINUE_ID, "Continue Listening", "In progress"));
-        items.add(browsable(ABS_ID, "Audiobookshelf", "Your library"));
-        items.add(browsable(STORE_ID, "Store", "Genres — library titles only"));
+        items.add(browsable(LIBRARY_ID, "Library", "All audiobooks A–Z"));
 
         if (active) {
             MediaDescriptionCompat description = new MediaDescriptionCompat.Builder()
@@ -250,11 +297,11 @@ public final class LibraryAutoBridge {
         }
     }
 
-    private void refreshSession() {
+    private void refreshSession(boolean metadataMayHaveChanged) {
         // MediaSessionCompat updates must happen on the main thread; Capacitor
         // plugin methods (syncPlayback) arrive on a bridge worker thread.
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post(this::refreshSession);
+            mainHandler.post(() -> refreshSession(metadataMayHaveChanged));
             return;
         }
 
@@ -286,17 +333,37 @@ public final class LibraryAutoBridge {
 
         if (!active) {
             session.setMetadata(null);
+            LibraryMediaBrowserService service = serviceRef.get();
+            if (service != null) {
+                service.stopForegroundPlayback();
+            }
             return;
         }
 
-        MediaMetadataCompat metadata = new MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-            .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
-            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
-            .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork)
-            .build();
-        session.setMetadata(metadata);
+        if (metadataMayHaveChanged) {
+            MediaMetadataCompat metadata = new MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
+                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
+                .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork)
+                .build();
+            session.setMetadata(metadata);
+        }
         session.setActive(true);
+
+        LibraryMediaBrowserService service = serviceRef.get();
+        if (service != null) {
+            if (active) {
+                service.promoteToForeground();
+                long now = System.currentTimeMillis();
+                if (metadataMayHaveChanged || now - lastNotificationUpdateMs >= 5_000) {
+                    lastNotificationUpdateMs = now;
+                    service.updateForegroundNotification();
+                }
+            } else {
+                service.stopForegroundPlayback();
+            }
+        }
     }
 }

@@ -18,7 +18,7 @@ def _host_for_docker(url: str) -> str:
 class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
     database_url: str = "sqlite+aiosqlite:///data/app.db"
-    app_url: str = "https://library.freiverse.com"
+    app_url: str = "https://library.example.com"
 
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
@@ -28,9 +28,31 @@ class Settings(BaseSettings):
     # Max seconds to wait for Prowlarr to query all indexers (each indexer can add latency).
     prowlarr_search_timeout: int = 90
     # Max results per Prowlarr API call (global search is one cap for all indexers combined).
-    prowlarr_search_limit: int = 250
+    prowlarr_search_limit: int = 500
     # Dedicated AudioBook Bay-only searches (own cap so ABB is not crowded out).
     prowlarr_abb_search_limit: int = 150
+    # Direct multi-page ABB scrape (bypasses Jackett's hardcoded 2-page cap).
+    # MUST stay serial + delayed — parallel FlareSolverr tabs crash the Pi.
+    abb_deep_search_enabled: bool = False
+    abb_live_search_enabled: bool = False
+    abb_deep_search_pages: int = 6
+    abb_live_search_pages: int = 6
+    abb_flaresolverr_timeout: float = 180.0
+    abb_flaresolverr_disable_media: bool = True
+    abb_mirror_max_tries: int = 3
+    abb_mirror_retries: int = 3
+    abb_flare_session_ttl: float = 600.0
+    abb_resolve_hash_limit: int = 25
+    abb_scraper_resolve_hash_limit: int = 12
+    rd_gap_probe_batch: int = 20
+    abb_author_crawl_enabled: bool = False
+    abb_deep_page_delay_seconds: float = 2.5
+    # Env seed for the admin "ABB RSS-only" toggle (Admin → Cache → Tuning is
+    # the runtime source of truth). When True, no author/deep Flare crawl —
+    # only Jackett recent-releases RSS. Live Jackett ABB search still works.
+    abb_rss_only: bool = True
+    # Background scraper uses fewer pages than live UI (same serial lock).
+    abb_scraper_max_pages: int = 4
     # False = book downloads search ABB only (matches site search). True = query every Prowlarr indexer (noisy).
     prowlarr_all_indexers_for_books: bool = False
     # Optional comma-separated extra Prowlarr indexer names (ABB + Knaben are auto-detected).
@@ -43,7 +65,7 @@ class Settings(BaseSettings):
     # Background indexer scraper (DMM-style cache)
     scraper_enabled: bool = True
     scraper_interval_seconds: int = 30
-    scraper_queries_per_job: int = 8
+    scraper_queries_per_job: int = 12
     scraper_query_delay_seconds: int = 2
     scraper_prowlarr_timeout: int = 120
     scraper_prowlarr_concurrency: int = 2
@@ -52,6 +74,10 @@ class Settings(BaseSettings):
     scraper_debrid_interval_hours: int = 1
     scraper_prune_stale_days: int = 30
     scraper_match_batch_size: int = 200
+    scraper_knaben_crawl_tasks_per_job: int = 8
+    # Override scraper RSS cadence (jobs between recent-release polls). None = 1 when
+    # abb_rss_only else 3.
+    scraper_rss_every_n_jobs: int | None = None
 
     real_debrid_api_token: str = ""
     torbox_api_token: str = ""
@@ -65,9 +91,44 @@ class Settings(BaseSettings):
     kavita_library_id: int = 0
 
     google_books_api_key: str = ""
+    # Max seconds to wait for Google Books before falling back to Open Library.
+    google_books_search_timeout: float = 12.0
+    google_books_max_429_retries: int = 1
+    # Open Library requires a descriptive User-Agent; generic clients get rate-limited/IP-banned.
+    open_library_user_agent: str = "LibrarySite/1.0 (+https://library.example.com)"
+
+    # Local Open Library catalog built from the monthly data dumps (see
+    # scripts/ol_import_dumps.py). Lives on the big external drive. When present
+    # it replaces live Open Library API calls for torrent matching + book lookups,
+    # so the scraper never hammers (and gets IP-banned by) openlibrary.org.
+    ol_catalog_enabled: bool = True
+    # Query DB lives on the fast SSD (mapped from ./data) so store searches are
+    # snappy; the bulky raw dumps stay on the big external HDD.
+    ol_catalog_db_path: str = "/app/data/ol_catalog.db"
+    ol_dumps_dir: str = "/openlibrary/dumps"
+    # Include the huge editions dump (~10 GB gz) only for ISBN lookups. Most torrent
+    # release names lack ISBNs; title FTS on works is enough for catalog matching.
+    ol_catalog_include_editions: bool = False
+    max_ebook_bytes: int = 1_073_741_824  # 1 GiB — skip Knaben ebook packs / comic archives
     nyt_api_key: str = ""  # NYT Books API for real bestsellers (optional, free at developer.nytimes.com)
+    # ISBNdb — larger commercial book metadata (~100M+ titles). Optional; Admin → Integrations.
+    isbndb_api_key: str = ""
+    # Hardcover GraphQL — ratings, series graphs, curated lists (no user-library sync).
+    # Token from hardcover.app/account/api. Optional; Admin → Integrations.
+    hardcover_api_key: str = ""
     aa_account_id: str = ""
     flaresolverr_url: str = ""
+
+    # Jackett on the normal Docker bridge (not behind Mullvad).
+    jackett_url: str = "http://audiobook-jackett:9117"
+    jackett_api_key: str = ""
+    jackett_abb_timeout: int = 180
+    # HTTP/SOCKS proxy for ABB only (gluetun Mullvad). FlareSolverr ABB sessions
+    # and ABB live/RSS paths use this — Knaben/Jackett/other traffic does not.
+    abb_proxy_url: str = "http://gluetun:8888"
+    # Optional env seed for Mullvad; prefer Admin → Integrations (stored in DB +
+    # written to data/mullvad.env for gluetun). Never commit the real number.
+    mullvad_account_number: str = ""
 
     audiobook_dir: str = "/audiobooks"
     ebook_dir: str = "/ebooks"
@@ -79,6 +140,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def fix_docker_urls(self) -> "Settings":
+        # Env abb_rss_only turns off background Flare scrapes only. Live Jackett
+        # ABB search is separate; abb_live_search_enabled (Flare multi-page) stays
+        # at its own env default (False) and is not force-cleared so tests/opt-in work.
+        if self.abb_rss_only:
+            self.abb_author_crawl_enabled = False
+            self.abb_deep_search_enabled = False
         # In Docker, localhost can't reach host services; use host.docker.internal
         if os.path.exists("/.dockerenv"):
             self.abs_url = _host_for_docker(self.abs_url)

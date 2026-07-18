@@ -15,12 +15,17 @@ const config: CapacitorConfig = {
   appName: "Library",
   webDir: "../backend/static",
   server: {
-    url: "https://library.freiverse.com",
+    url: "https://library.example.com",
     androidScheme: "https",
   },
   android: {
     allowMixedContent: false,
     backgroundColor: "#030712", // matches the app's gray-950 background
+  },
+  plugins: {
+    MediaSession: {
+      foregroundService: "always",
+    },
   },
 };
 

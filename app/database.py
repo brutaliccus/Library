@@ -1,9 +1,10 @@
 import asyncio
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 
@@ -21,7 +22,62 @@ def _ensure_db_dir(url: str) -> None:
 settings = get_settings()
 _ensure_db_dir(settings.database_url)
 
-engine = create_async_engine(settings.database_url, echo=False)
+_connect_args: dict = {}
+_engine_kwargs: dict = {"echo": False}
+if settings.database_url.startswith("sqlite"):
+    # Wait up to 30s when the scraper holds the DB during heavy ingest on a Pi.
+    _connect_args["timeout"] = 30
+    # SQLite + many background tasks (scraper, debrid rescan, preload, API)
+    # exhausts the default QueuePool (5+10). NullPool opens/closes per checkout
+    # and avoids "QueuePool limit … connection timed out" under concurrency.
+    _engine_kwargs["poolclass"] = NullPool
+
+engine = create_async_engine(
+    settings.database_url,
+    connect_args=_connect_args,
+    **_engine_kwargs,
+)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _sqlite_pragmas(dbapi_connection, connection_record):
+    if not settings.database_url.startswith("sqlite"):
+        return
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.close()
+
+
+def is_sqlite_lock_error(exc: BaseException) -> bool:
+    """True for SQLite locked/busy errors (SQLAlchemy or raw sqlite3)."""
+    msg = str(exc).lower()
+    if "locked" in msg or "busy" in msg:
+        return True
+    orig = getattr(exc, "orig", None)
+    if orig is not None and orig is not exc:
+        return is_sqlite_lock_error(orig)
+    return False
+
+
+async def run_with_sqlite_retry(coro_factory, *, attempts: int = 6, base_delay: float = 0.5):
+    """Retry coroutines that hit SQLite database is locked / busy."""
+    last_err: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            if not is_sqlite_lock_error(e):
+                raise
+            last_err = e
+            if attempt >= attempts - 1:
+                raise
+            await asyncio.sleep(base_delay * (2**attempt))
+    if last_err:
+        raise last_err
+    return None
+
+
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent

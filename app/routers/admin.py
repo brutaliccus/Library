@@ -2,6 +2,8 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -330,58 +332,9 @@ async def rematch_abs_item(
 
 @router.get("/health")
 async def system_health(_admin: User = Depends(require_admin)):
-    import shutil
+    from app.services.health_checks import collect_system_health
 
-    rd_info = None
-    try:
-        rd_info = await real_debrid.get_user_info()
-    except Exception:
-        pass
-
-    torbox_info = None
-    from app.services import torbox
-    from app.config import get_settings as _gs
-    if _gs().torbox_api_token:
-        try:
-            torbox_info = await torbox.get_user_info()
-        except Exception:
-            pass
-
-    abs_ok = await audiobookshelf.health_check()
-    kavita_ok = await kavita.health_check()
-
-    from app.config import get_settings
-    settings = get_settings()
-
-    disk = shutil.disk_usage(settings.audiobook_dir)
-
-    return {
-        "real_debrid": {
-            "connected": rd_info is not None,
-            "username": rd_info.get("username") if rd_info else None,
-            "premium": rd_info.get("premium") if rd_info else None,
-            "points": rd_info.get("points") if rd_info else None,
-        },
-        "torbox": {
-            "configured": bool(_gs().torbox_api_token),
-            "connected": torbox_info is not None,
-            "username": (torbox_info or {}).get("email") or (torbox_info or {}).get("customer"),
-            "plan": (torbox_info or {}).get("plan"),
-        },
-        "audiobookshelf": {
-            "connected": abs_ok,
-            "url": settings.abs_url,
-        },
-        "kavita": {
-            "connected": kavita_ok,
-            "url": settings.kavita_url,
-        },
-        "disk": {
-            "total_gb": round(disk.total / (1024**3), 1),
-            "used_gb": round(disk.used / (1024**3), 1),
-            "free_gb": round(disk.free / (1024**3), 1),
-        },
-    }
+    return await collect_system_health()
 
 
 @router.get("/kavita-debug")
@@ -471,14 +424,62 @@ async def scraper_run_now(_admin: User = Depends(require_admin)):
 
 @router.post("/scraper-clear-error")
 async def scraper_clear_error(_admin: User = Depends(require_admin)):
+    """Clear scraper last_error and dismiss failed debrid-rescan / catalog-relink banners."""
     from app.services import indexer_scraper
     await indexer_scraper.clear_error()
+    await indexer_scraper.clear_job_errors(force_stop=False)
     return await indexer_scraper.get_status()
+
+
+@router.post("/scraper-clear-job-errors")
+async def scraper_clear_job_errors(
+    force_stop: bool = False,
+    _admin: User = Depends(require_admin),
+):
+    """Dismiss debrid/relink error banners. force_stop=true also marks stuck runs idle."""
+    from app.services import indexer_scraper
+    result = await indexer_scraper.clear_job_errors(force_stop=force_stop)
+    status = await indexer_scraper.get_status()
+    return {**result, "status": status}
+
+
+@router.post("/scraper-refresh-debrid")
+async def scraper_refresh_debrid(_admin: User = Depends(require_admin)):
+    """Re-probe Torbox/RD instant flags for cached torrents."""
+    from app.services import indexer_scraper
+    result = await indexer_scraper.refresh_debrid_cache()
+    status = await indexer_scraper.get_status()
+    return {**result, "status": status}
+
+
+@router.post("/scraper-rescan-all-debrid")
+async def scraper_rescan_all_debrid(_admin: User = Depends(require_admin)):
+    """Re-queue every cached torrent for debrid cache checks and catalog preload."""
+    from app.services import indexer_scraper
+    return await indexer_scraper.start_full_debrid_rescan()
+
+
+class CatalogRelinkRequest(BaseModel):
+    # When true (default), deactivate book torrents that match no catalog entry
+    # after re-linking (miscategorised non-book noise).
+    prune_unmatched: bool = True
+
+
+@router.post("/scraper-relink-catalog")
+async def scraper_relink_catalog(
+    body: CatalogRelinkRequest | None = None,
+    _admin: User = Depends(require_admin),
+):
+    """Re-link every cached torrent against the local Open Library catalog and
+    prune entries that match nothing (backfill after the OL ban)."""
+    from app.services import indexer_scraper
+    prune = body.prune_unmatched if body else True
+    return await indexer_scraper.start_catalog_relink(prune_unmatched=prune)
 
 
 class ScraperSettingsUpdate(BaseModel):
     # Partial update: any subset of the fields declared in scraper_settings.FIELDS.
-    updates: dict[str, int | str]
+    updates: dict[str, int | str | bool]
 
 
 def _scraper_settings_payload(cfg) -> dict:
@@ -515,3 +516,197 @@ async def reset_scraper_settings(_admin: User = Depends(require_admin)):
     from app.services import scraper_settings
     cfg = await scraper_settings.reset_scraper_config()
     return _scraper_settings_payload(cfg)
+
+
+class IntegrationKeysUpdate(BaseModel):
+    # Only fields that are present are updated. Send "" to clear a key.
+    nyt_api_key: str | None = None
+    isbndb_api_key: str | None = None
+    hardcover_api_key: str | None = None
+    mullvad_account_number: str | None = None
+
+
+def _mask(secret: str) -> str:
+    """Show only the last 4 chars so admins can confirm which key is stored."""
+    if not secret:
+        return ""
+    return ("*" * max(0, len(secret) - 4)) + secret[-4:]
+
+
+MULLVAD_SETTING = "integrations.mullvad_account_number"
+_MULLVAD_ENV_PATH = Path("/app/data/mullvad.env")
+
+
+def _normalize_mullvad_account(raw: str) -> str:
+    """Strip spaces/dashes — Mullvad account numbers are 16 digits."""
+    return re.sub(r"\D", "", (raw or "").strip())
+
+
+def _write_mullvad_env_file(account: str, *, private_key: str = "", addresses: str = "") -> None:
+    """Keep gluetun env in sync under ./data (bind-mounted). Restart gluetun to apply."""
+    try:
+        _MULLVAD_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if private_key and addresses:
+            from app.services.mullvad import write_gluetun_env
+
+            write_gluetun_env(
+                str(_MULLVAD_ENV_PATH),
+                private_key=private_key,
+                addresses=addresses,
+                account=account,
+            )
+        elif account:
+            # Account alone is not enough for WireGuard — keys required.
+            _MULLVAD_ENV_PATH.write_text(
+                f"MULLVAD_ACCOUNT_NUMBER={account}\n", encoding="utf-8"
+            )
+        elif _MULLVAD_ENV_PATH.exists():
+            _MULLVAD_ENV_PATH.unlink()
+    except Exception as e:  # pragma: no cover
+        logger.warning("Failed to write mullvad.env: %s", e)
+
+
+async def _resolve_mullvad_account() -> tuple[str, str]:
+    """Return (stored_override, effective) Mullvad account digits."""
+    from app.config import get_settings
+    from app.services import app_settings
+
+    env_key = _normalize_mullvad_account(get_settings().mullvad_account_number or "")
+    stored = _normalize_mullvad_account(
+        await app_settings.get_setting(MULLVAD_SETTING, default="")
+    )
+    return stored, stored or env_key
+
+
+async def _integrations_payload() -> dict:
+    from app.services import nyt_books, isbndb, hardcover, app_settings
+
+    stored = await app_settings.get_setting(nyt_books.API_KEY_SETTING, default="")
+    effective = await nyt_books.get_api_key()
+    isbn_stored = await app_settings.get_setting(isbndb.API_KEY_SETTING, default="")
+    isbn_effective = await isbndb.get_api_key()
+    hc_stored = await app_settings.get_setting(hardcover.API_KEY_SETTING, default="")
+    hc_effective = await hardcover.get_api_key()
+    mullvad_stored, mullvad_eff = await _resolve_mullvad_account()
+    wg_key = await app_settings.get_setting("integrations.mullvad_wg_private_key", default="")
+    wg_addr = await app_settings.get_setting("integrations.mullvad_wg_addresses", default="")
+    return {
+        "nyt": {
+            "configured": bool(effective),
+            # True when the key comes from the admin override (not just env).
+            "overridden": bool(stored),
+            "hint": _mask(effective),
+        },
+        "isbndb": {
+            "configured": bool(isbn_effective),
+            "overridden": bool(isbn_stored),
+            "hint": _mask(isbn_effective),
+        },
+        "hardcover": {
+            "configured": bool(hc_effective),
+            "overridden": bool(hc_stored),
+            "hint": _mask(hc_effective.replace("Bearer ", "") if hc_effective else ""),
+        },
+        "mullvad": {
+            "configured": bool(mullvad_eff),
+            "overridden": bool(mullvad_stored),
+            "hint": _mask(mullvad_eff),
+            "wireguardReady": bool(wg_key and wg_addr),
+            "wireguardHint": _mask(wg_addr) if wg_addr else "",
+            "note": "Only ABB traffic uses Mullvad (FlareSolverr → gluetun:8888). "
+                    "Jackett/Knaben/Prowlarr stay on your LAN. Saving an account "
+                    "auto-registers WireGuard keys into data/mullvad.env — then "
+                    "restart: docker compose up -d gluetun",
+        },
+    }
+
+
+@router.get("/integrations")
+async def get_integrations(_admin: User = Depends(require_admin)):
+    return await _integrations_payload()
+
+
+@router.put("/integrations")
+async def update_integrations(
+    body: IntegrationKeysUpdate,
+    _admin: User = Depends(require_admin),
+):
+    from app.services import nyt_books, isbndb, hardcover, app_settings
+
+    if body.nyt_api_key is not None:
+        await app_settings.set_setting(nyt_books.API_KEY_SETTING, body.nyt_api_key.strip())
+    if body.isbndb_api_key is not None:
+        await app_settings.set_setting(isbndb.API_KEY_SETTING, body.isbndb_api_key.strip())
+    if body.hardcover_api_key is not None:
+        await app_settings.set_setting(hardcover.API_KEY_SETTING, body.hardcover_api_key.strip())
+    if body.mullvad_account_number is not None:
+        digits = _normalize_mullvad_account(body.mullvad_account_number)
+        await app_settings.set_setting(MULLVAD_SETTING, digits)
+        if digits:
+            import asyncio
+            from app.services import mullvad as mullvad_svc
+
+            try:
+                priv, addr = await asyncio.to_thread(mullvad_svc.register_wireguard, digits)
+                await app_settings.set_setting("integrations.mullvad_wg_private_key", priv)
+                await app_settings.set_setting("integrations.mullvad_wg_addresses", addr)
+                _write_mullvad_env_file(digits, private_key=priv, addresses=addr)
+            except Exception as e:
+                logger.exception("Mullvad WireGuard registration failed")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Mullvad WireGuard registration failed: {e}",
+                ) from e
+        else:
+            await app_settings.set_setting("integrations.mullvad_wg_private_key", "")
+            await app_settings.set_setting("integrations.mullvad_wg_addresses", "")
+            _write_mullvad_env_file("")
+    try:
+        from app.services.instance_settings import apply_runtime_overrides, invalidate_cache
+
+        invalidate_cache()
+        await apply_runtime_overrides()
+    except Exception:
+        pass
+    return await _integrations_payload()
+
+
+class ConfigUpdate(BaseModel):
+    """Partial map of setting key → value. Empty string clears a DB override."""
+    settings: dict[str, str | None]
+
+
+@router.get("/config")
+async def get_instance_config(_admin: User = Depends(require_admin)):
+    from app.services import instance_settings as inst
+
+    return await inst.list_config()
+
+
+@router.put("/config")
+async def update_instance_config(
+    body: ConfigUpdate,
+    _admin: User = Depends(require_admin),
+):
+    from app.services import instance_settings as inst
+
+    try:
+        return await inst.update_config(body.settings or {})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/setup-status")
+async def get_setup_status(_admin: User = Depends(require_admin)):
+    from app.services import instance_settings as inst
+
+    return await inst.setup_status()
+
+
+@router.post("/setup-defaults")
+async def post_setup_defaults(_admin: User = Depends(require_admin)):
+    """Apply recommended RSS-only scraper defaults (safe for Pi)."""
+    from app.services import instance_settings as inst
+
+    await inst.apply_setup_defaults()
+    return await inst.setup_status()

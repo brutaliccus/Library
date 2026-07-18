@@ -1,18 +1,24 @@
+import json
 import asyncio
 import logging
 import re
 import time
 from difflib import SequenceMatcher
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
 from app.models import User
 from app.utils.auth import get_current_user
 from app.services import prowlarr, audiobookshelf, kavita, annas_archive, debrid, real_debrid
+from app.services import audiobookbay
 from app.services.download_discovery import (
     build_annas_archive_query,
     build_audiobookbay_queries,
+    resolve_abb_search_query,
+    build_knaben_queries,
     build_prowlarr_queries,
     build_search_result_payload,
     filter_irrelevant_results,
@@ -183,11 +189,30 @@ def _info_hash_for_result(result: dict) -> str | None:
     )
 
 
-async def _annotate_rd_cached(results: list[dict]) -> list[dict]:
+async def _annotate_rd_cached_from_db(results: list[dict]) -> list[dict]:
+    """Use rdCached/torboxCached already on cache rows — no live API calls."""
+    annotated = []
+    for r in results:
+        rd_hit = bool(r.get("rdCached"))
+        tb_hit = bool(r.get("torboxCached"))
+        providers = [p for p, hit in ((debrid.RD, rd_hit), (debrid.TORBOX, tb_hit)) if hit]
+        annotated.append({
+            **r,
+            "rdCached": rd_hit,
+            "torboxCached": tb_hit,
+            "cachedProviders": providers,
+        })
+    return annotated
+
+
+async def _annotate_rd_cached(results: list[dict], *, live: bool = True) -> list[dict]:
     """Mark indexer torrents already cached on any configured debrid provider
     (instant after add). Does not filter results."""
     if not results:
         return results
+
+    if not live:
+        return await _annotate_rd_cached_from_db(results)
 
     def _blank(r: dict) -> dict:
         return {**r, "rdCached": False, "torboxCached": False, "cachedProviders": []}
@@ -206,16 +231,25 @@ async def _annotate_rd_cached(results: list[dict]) -> list[dict]:
         return [_blank(r) for r in results]
 
     if not debrid.available_providers():
-        logger.warning("Debrid instant cache: no provider tokens set — Instant badges disabled")
-        return [_blank(r) for r in results]
+        logger.warning("Debrid instant cache: no provider tokens set — using DB flags")
+        return await _annotate_rd_cached_from_db(results)
 
-    cached = await debrid.check_cached_all(hashes)
+    live_hashes = set(hashes[:40])
+    try:
+        cached = await asyncio.wait_for(debrid.check_cached_all(list(live_hashes)), timeout=20.0)
+    except asyncio.TimeoutError:
+        logger.warning("Debrid instant cache: live check timed out — using DB flags")
+        return await _annotate_rd_cached_from_db(results)
 
     annotated = []
     for r in results:
         h = _info_hash_for_result(r)
-        rd_hit = bool(h and h in cached.get(debrid.RD, set()))
-        tb_hit = bool(h and h in cached.get(debrid.TORBOX, set()))
+        if h and h in live_hashes:
+            rd_hit = bool(h in cached.get(debrid.RD, set()))
+            tb_hit = bool(h in cached.get(debrid.TORBOX, set()))
+        else:
+            rd_hit = bool(r.get("rdCached"))
+            tb_hit = bool(r.get("torboxCached"))
         providers = [p for p, hit in ((debrid.RD, rd_hit), (debrid.TORBOX, tb_hit)) if hit]
         annotated.append({
             **r,
@@ -226,10 +260,10 @@ async def _annotate_rd_cached(results: list[dict]) -> list[dict]:
 
     n_cached = sum(1 for x in annotated if x.get("cachedProviders"))
     logger.info(
-        "Debrid instant cache: %s of %s indexer torrents cached (%s hashes checked; rd=%s torbox=%s)",
+        "Debrid instant cache: %s of %s indexer torrents cached (%s live hashes; rd=%s torbox=%s)",
         n_cached,
         len(annotated),
-        len(hashes),
+        len(live_hashes),
         sum(1 for x in annotated if x.get("rdCached")),
         sum(1 for x in annotated if x.get("torboxCached")),
     )
@@ -242,6 +276,7 @@ async def _run_indexer_discovery(
     subtitle: str | None,
     series_name: str | None,
     series_index: str | None,
+    abb_query: str | None = None,
 ) -> tuple[dict, object]:
     """Prowlarr search with series-aware queries; ranks full pool, returns curated list."""
     if not title:
@@ -263,6 +298,8 @@ async def _run_indexer_discovery(
         series_index=series_index,
     )
     abb_queries = build_audiobookbay_queries(ctx)
+    knaben_queries = build_knaben_queries(ctx)
+    primary_abb = resolve_abb_search_query(ctx, abb_query)
     use_all_indexers = settings.prowlarr_all_indexers_for_books
     general_queries = build_prowlarr_queries(ctx) if use_all_indexers else []
 
@@ -271,15 +308,18 @@ async def _run_indexer_discovery(
         ctx.base_title,
         ctx.target_index,
         "all-indexers" if use_all_indexers else "abb-knaben-trusted",
-        abb_queries,
+        primary_abb,
     )
 
     trusted_results: list = []
     general_results: list = []
 
-    if abb_queries:
+    if primary_abb:
         try:
-            trusted_results = await prowlarr.search_trusted_indexers_multi(abb_queries)
+            trusted_results = await prowlarr.search_trusted_indexers_multi(
+                [primary_abb],
+                knaben_queries=knaben_queries,
+            )
         except Exception as e:
             logger.warning("ABB/trusted indexer search failed: %s", e)
 
@@ -299,12 +339,128 @@ async def _run_indexer_discovery(
     )
 
     indexer_results = merge_indexer_results(trusted_results, general_results)
-    if not indexer_results and abb_queries:
-        logger.info("ABB/trusted empty — retry single query %r", abb_queries[0])
-        indexer_results = await prowlarr.search_trusted_indexers_multi([abb_queries[0]])
+    if not indexer_results and primary_abb:
+        logger.info("ABB/trusted empty — retry query %r", primary_abb)
+        indexer_results = await prowlarr.search_trusted_indexers_multi(
+            [primary_abb],
+            knaben_queries=knaben_queries,
+        )
 
     payload = build_search_result_payload(indexer_results, ctx, settings.search_results_max_return)
     return payload, ctx
+
+
+@router.get("/cache-releases")
+async def search_cache_releases(
+    q: str = Query(..., min_length=2, description="Search query matching torrent titles"),
+    limit: int = Query(24, ge=1, le=60),
+    unmatched_only: bool = Query(
+        True,
+        description="Prefer torrents without an Open Library catalog match",
+    ),
+    _user: User = Depends(get_current_user),
+):
+    """Cached indexer releases for store search cards (including unmatched torrents)."""
+    releases = await indexer_cache.search_cache_releases(
+        q, limit=limit, unmatched_only=unmatched_only,
+    )
+    return {"releases": releases, "count": len(releases)}
+
+
+@router.get("/abb-releases")
+async def search_abb_releases(
+    q: str = Query(..., min_length=2, description="Title/author query for AudioBookBay"),
+    limit: int = Query(24, ge=1, le=48),
+    _user: User = Depends(get_current_user),
+):
+    """Live AudioBookBay search for niche titles missing from Open Library.
+
+    Uses a short Jackett-only path (no Flare multi-page crawl) so store search
+    does not hang for minutes. Upserts hits into the indexer cache for detail pages.
+    """
+    from app.services.catalog_match import _clean_release_text
+
+    query = (q or "").strip()
+    if len(query) < 2:
+        return {"releases": [], "count": 0, "timedOut": False}
+
+    rows: list[dict] = []
+    timed_out = False
+    try:
+        # Store fallback must stay snappy — skip Mullvad Flare deep scrape.
+        rows = await asyncio.wait_for(
+            prowlarr.search_jackett_audiobookbay(query, limit=max(limit, 40), timeout=18),
+            timeout=22.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("ABB store fallback timed out for %r", query[:60])
+        timed_out = True
+        rows = []
+    except Exception as e:
+        logger.warning("ABB fallback search failed for %r: %s", query[:60], e)
+        rows = []
+
+    if not rows and not timed_out:
+        # Brief Prowlarr ABB indexer fallback (still capped).
+        try:
+            iid = await prowlarr.get_audiobookbay_indexer_id()
+            if iid:
+                rows = await asyncio.wait_for(
+                    prowlarr.search(
+                        query, indexer_ids=[iid], limit=max(limit, 40), timeout=15,
+                    ),
+                    timeout=18.0,
+                )
+        except asyncio.TimeoutError:
+            timed_out = True
+            rows = []
+        except Exception as e:
+            logger.debug("ABB Prowlarr fallback failed: %s", e)
+
+    if not rows:
+        return {"releases": [], "count": 0, "timedOut": timed_out, "source": "abb"}
+
+    try:
+        await indexer_cache.upsert_torrents(rows)
+    except Exception as e:
+        logger.debug("ABB upsert failed: %s", e)
+
+    # Prefer cache-card builder so covers / availability match the shelf UI.
+    cards = await indexer_cache.search_cache_releases(
+        query, limit=limit, unmatched_only=False,
+    )
+    if cards:
+        return {"releases": cards, "count": len(cards), "source": "abb", "timedOut": timed_out}
+
+    # Build minimal cards if FTS didn't pick them up yet.
+    releases = []
+    for item in rows[:limit]:
+        info_hash = (item.get("infoHash") or "").strip().lower()
+        if not info_hash:
+            continue
+        title_raw = item.get("title") or ""
+        display = _clean_release_text(title_raw) or title_raw
+        author = ""
+        if " - " in display:
+            parts = [p.strip() for p in display.split(" - ") if p.strip()]
+            if len(parts) >= 2:
+                if len(parts[0]) >= len(parts[-1]):
+                    display, author = parts[0], parts[-1]
+                else:
+                    author, display = parts[0], parts[-1]
+        releases.append({
+            "id": f"cache:{info_hash}",
+            "volumeId": f"cache:{info_hash}",
+            "title": display[:200],
+            "authors": [author] if author else [],
+            "coverUrl": "",
+            "mediaType": item.get("mediaType") or "audiobook",
+            "rdCached": item.get("rdCached"),
+            "torboxCached": item.get("torboxCached"),
+            "availability": {"available": True},
+            "source": "abb",
+        })
+    return {"releases": releases, "count": len(releases), "source": "abb", "timedOut": timed_out}
 
 
 @router.get("")
@@ -317,6 +473,7 @@ async def search_audiobooks(
     series_index: str = Query(None, description="Book number in series (e.g. 1)"),
     exclude_aa: bool = Query(False, description="Exclude Anna's Archive (for progressive loading)"),
     live: bool = Query(False, description="Live Prowlarr search; false reads from indexer cache"),
+    abb_query: str | None = Query(None, description="Override AudioBook Bay / Jackett search terms"),
     _user: User = Depends(get_current_user),
 ):
     # Cache badges should reflect the requesting user's debrid accounts
@@ -347,18 +504,19 @@ async def search_audiobooks(
                 )
                 if live:
                     payload, discovery_ctx = await _run_indexer_discovery(
-                        title, author, subtitle, series_name, series_index
+                        title, author, subtitle, series_name, series_index, abb_query=abb_query
                     )
                     await indexer_cache.upsert_torrents(payload.get("results", []))
                     indexer_results = payload["results"]
                 else:
                     discovery_ctx = ctx
                     indexer_results = await indexer_cache.get_torrents_for_book(ctx)
-                    payload = {
-                        "totalFetched": len(indexer_results),
-                        "hiddenCount": 0,
-                        "matchCounts": {},
-                    }
+                    # Cache path stays cache-only. Supplemental live ABB/Knaben used to hang
+                    # Find Downloads at ~85% for books with no Knaben hits. Use live refresh.
+                    payload = build_search_result_payload(
+                        indexer_results, ctx, settings.search_results_max_return,
+                    )
+                    indexer_results = payload["results"]
             else:
                 ctx = resolve_book_search_context(title=q)
                 raw = await prowlarr.search_trusted_indexers_multi([q])
@@ -379,7 +537,7 @@ async def search_audiobooks(
             raise
         abs_items, kavita_items = await _enrich_with_library_timeout(library_query)
         results = _enrich_results(indexer_results, abs_items, kavita_items, "prowlarr")
-        results = await _annotate_rd_cached(results)
+        results = await _annotate_rd_cached(results, live=live)
         if discovery_ctx:
             results = order_results_for_display(results, discovery_ctx)
         logger.info(
@@ -430,7 +588,7 @@ async def search_audiobooks(
     aa_results = gathered[3] if len(gathered) > 3 and not isinstance(gathered[3], Exception) else []
 
     results = _enrich_results(indexer_results, abs_items, kavita_items, "prowlarr")
-    results = await _annotate_rd_cached(results)
+    results = await _annotate_rd_cached(results, live=True)
     if discovery_ctx:
         results = order_results_for_display(results, discovery_ctx)
     aa_enriched = _enrich_results(aa_results, abs_items, kavita_items, "annas_archive")
@@ -497,3 +655,240 @@ async def search_annas_archive(
     )
     payload = build_search_result_payload(results, ctx, settings.search_results_max_return)
     return payload
+
+
+@router.get("/live-stream")
+async def search_live_stream(
+    title: str = Query(..., min_length=1, description="Book title"),
+    author: str = Query(None, description="Book author"),
+    subtitle: str = Query(None, description="Book subtitle"),
+    series_name: str = Query(None, description="Series name"),
+    series_index: str = Query(None, description="Book number in series"),
+    abb_query: str | None = Query(None, description="Override AudioBook Bay / Jackett search terms"),
+    _user: User = Depends(get_current_user),
+):
+    """Progressive live indexer search (NDJSON).
+
+    Emits one JSON object per line:
+      {"type":"status","phase":"...","page":0,"pages":0}
+      {"type":"batch","source":"knaben"|"abb","results":[...],"totalSoFar":K}
+      {"type":"done","results":[...],"totalFetched":K,"hiddenCount":H,"matchCounts":{...}}
+      {"type":"error","detail":"..."}
+
+    ABB uses Jackett (~2 listing pages). Pass abb_query to refine terms for busy titles.
+    """
+    from app.services import debrid_tokens
+
+    await debrid_tokens.apply_tokens_for_user_id(_user.id)
+
+    ctx = resolve_book_search_context(
+        title=title,
+        subtitle=subtitle or "",
+        author=author or "",
+        series_name=series_name,
+        series_index=series_index,
+    )
+    primary_abb = resolve_abb_search_query(ctx, abb_query)
+    knaben_queries = build_knaben_queries(ctx)
+    library_query = f"{title} {subtitle}".strip() if subtitle else title
+
+    async def _ndjson() -> Any:
+        pooled: list[dict] = []
+        seen: set[str] = set()
+
+        def _merge_in(batch: list[dict]) -> list[dict]:
+            fresh: list[dict] = []
+            for r in batch:
+                key = (r.get("infoHash") or "").lower() or (
+                    r.get("downloadUrl") or r.get("guid") or f"{r.get('title')}|{r.get('indexer')}"
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                pooled.append(r)
+                fresh.append(r)
+            return fresh
+
+        def _ranked_snapshot() -> dict:
+            payload = build_search_result_payload(
+                list(pooled), ctx, settings.search_results_max_return
+            )
+            return payload
+
+        def _line(obj: dict) -> str:
+            return json.dumps(obj, default=str) + "\n"
+
+        try:
+            yield _line({"type": "status", "phase": "Searching Knaben & Jackett…", "page": 0, "pages": 0})
+
+            # Cap Knaben query fan-out — 2–3 title variants is enough for live UI.
+            knaben_task = asyncio.create_task(
+                prowlarr.search_knaben_multi(knaben_queries[:3], timeout=20)
+            )
+            # Jackett-first ABB (~1–3s). Avoid Mullvad Flare-first (often 60–90s).
+            abb_task = asyncio.create_task(
+                prowlarr.search_audiobookbay_multi(
+                    [primary_abb],
+                    jackett_timeout=25,
+                    allow_flare_fallback=True,
+                )
+            )
+
+            pending = {knaben_task: "knaben", abb_task: "abb-jackett"}
+            while pending:
+                done, _ = await asyncio.wait(pending.keys(), return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    source = pending.pop(task)
+                    try:
+                        batch = task.result()
+                    except Exception as e:
+                        logger.warning("%s live search failed: %s", source, e)
+                        batch = []
+                    if not batch:
+                        continue
+                    new = _merge_in(batch)
+                    snap = _ranked_snapshot()
+                    yield _line({
+                        "type": "batch",
+                        "source": "knaben" if source == "knaben" else "abb",
+                        "page": 1 if source != "knaben" else 0,
+                        "pages": 1 if source != "knaben" else 0,
+                        "results": snap["results"],
+                        "totalSoFar": snap["totalFetched"],
+                        "hiddenCount": snap.get("hiddenCount", 0),
+                        "matchCounts": snap.get("matchCounts", {}),
+                        "newCount": len(new),
+                        "phase": "Knaben results…" if source == "knaben" else "AudioBook Bay (Jackett)…",
+                    })
+                    if new:
+                        asyncio.create_task(indexer_cache.upsert_torrents(new))
+
+            # Deep ABB pages: live search uses FlareSolverr session reuse for multi-page results.
+            if settings.abb_live_search_enabled:
+                pages_total = max(
+                    1,
+                    min(
+                        12,
+                        int(getattr(settings, "abb_live_search_pages", None) or settings.abb_deep_search_pages or 6),
+                    ),
+                )
+                yield _line({
+                    "type": "status",
+                    "phase": f"Deep AudioBook Bay pages 1/{pages_total}…",
+                    "page": 1,
+                    "pages": pages_total,
+                })
+                try:
+                    async for page, pages, fresh in audiobookbay.iter_search_pages(
+                        primary_abb, max_pages=pages_total, for_live=True,
+                    ):
+                        new = _merge_in(fresh)
+                        if not new:
+                            if page >= pages or not fresh:
+                                break
+                            continue
+                        snap = _ranked_snapshot()
+                        yield _line({
+                            "type": "batch",
+                            "source": "abb",
+                            "page": page,
+                            "pages": pages,
+                            "results": snap["results"],
+                            "totalSoFar": snap["totalFetched"],
+                            "hiddenCount": snap.get("hiddenCount", 0),
+                            "matchCounts": snap.get("matchCounts", {}),
+                            "newCount": len(new),
+                            "phase": f"AudioBook Bay page {page}/{pages}…",
+                        })
+                        asyncio.create_task(indexer_cache.upsert_torrents(new))
+                except Exception as e:
+                    logger.warning("ABB deep pages failed (keeping Prowlarr results): %s", e)
+                    yield _line({
+                        "type": "status",
+                        "phase": "Deep ABB unavailable — showing Jackett/Knaben results",
+                        "page": 0,
+                        "pages": 0,
+                    })
+
+            yield _line({"type": "status", "phase": "Finishing…", "page": 0, "pages": 0})
+
+            snap = _ranked_snapshot()
+            # Only resolve missing ABB hashes briefly — Jackett/Knaben magnets
+            # usually already include infoHash. The old 45s Flare resolve made
+            # "search complete" hang long after results were already on screen.
+            missing_hash = [
+                r for r in (snap.get("results") or [])
+                if not (r.get("infoHash") or "").strip()
+                and "audiobookbay" in (r.get("indexer") or "").lower()
+            ]
+            if settings.abb_resolve_hash_limit > 0 and missing_hash:
+                try:
+                    enriched = await asyncio.wait_for(
+                        audiobookbay.resolve_hashes_for_results(
+                            missing_hash,
+                            limit=min(8, settings.abb_resolve_hash_limit),
+                        ),
+                        timeout=12.0,
+                    )
+                    by_url = {
+                        (r.get("downloadUrl") or r.get("guid") or ""): r for r in enriched
+                    }
+                    for i, existing in enumerate(pooled):
+                        key = existing.get("downloadUrl") or existing.get("guid") or ""
+                        if key and key in by_url:
+                            pooled[i] = {**existing, **by_url[key]}
+                    snap = _ranked_snapshot()
+                except asyncio.TimeoutError:
+                    logger.warning("ABB hash resolve timed out on finish (keeping partial hashes)")
+                except Exception as e:
+                    logger.warning("ABB hash resolve on finish failed: %s", e)
+
+            abs_items, kavita_items = await _enrich_with_library_timeout(library_query)
+            results = _enrich_results(snap["results"], abs_items, kavita_items, "prowlarr")
+            # Cap debrid probe so finish doesn't stall after results already streamed.
+            try:
+                results = await asyncio.wait_for(
+                    _annotate_rd_cached(results, live=True), timeout=8.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Live debrid annotate timed out — returning without instant flags")
+                results = await _annotate_rd_cached(results, live=False)
+            results = order_results_for_display(results, ctx)
+
+            if pooled:
+                asyncio.create_task(indexer_cache.upsert_torrents(pooled))
+
+            yield _line({
+                "type": "done",
+                "results": results,
+                "count": len(results),
+                "totalFetched": snap.get("totalFetched", len(pooled)),
+                "hiddenCount": snap.get("hiddenCount", 0),
+                "matchCounts": snap.get("matchCounts", {}),
+            })
+        except Exception as e:
+            logger.exception("live-stream search failed")
+            # If we already streamed some results, finish cleanly instead of hard-failing.
+            if pooled:
+                snap = _ranked_snapshot()
+                yield _line({
+                    "type": "done",
+                    "results": snap["results"],
+                    "count": snap["count"],
+                    "totalFetched": snap.get("totalFetched", len(pooled)),
+                    "hiddenCount": snap.get("hiddenCount", 0),
+                    "matchCounts": snap.get("matchCounts", {}),
+                    "partial": True,
+                    "detail": str(e) or "Search finished with errors",
+                })
+            else:
+                yield _line({"type": "error", "detail": str(e) or "Search failed"})
+
+    return StreamingResponse(
+        _ndjson(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )

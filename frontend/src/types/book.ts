@@ -21,7 +21,12 @@ export interface BookSummary {
     available: boolean;
     matchTier?: "exact" | "likely" | "weak";
     torrentCount?: number;
+    matchCount?: number;
     formats?: string[];
+    instantRd?: boolean;
+    instantTorbox?: boolean;
+    inLibrary?: boolean;
+    catalogOnly?: boolean;
   };
 }
 

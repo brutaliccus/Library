@@ -15,6 +15,10 @@ export { LibraryAuto } from "./libraryAutoPlugin";
 let autoHandlersRegistered = false;
 let playHandlers: AutoPlayHandlers | null = null;
 
+let lastMetaKey = "";
+let lastPosSyncAt = 0;
+const POS_SYNC_INTERVAL_MS = 1_000;
+
 export async function registerAndroidAutoHandlers(
   handlers: MediaActionHandlers,
   play?: AutoPlayHandlers
@@ -79,6 +83,7 @@ export async function syncAndroidAutoPlayback(
 
   try {
     if (!np) {
+      lastMetaKey = "";
       await LibraryAuto.syncPlayback({ active: false, playing: false });
       return;
     }
@@ -89,27 +94,47 @@ export async function syncAndroidAutoPlayback(
         ? np.tracks[trackIndex].title
         : "";
 
-    const artUrl = toAbsoluteArtworkUrl(np.coverUrl);
-    const artwork = artUrl
-      ? [
-          { src: artUrl, sizes: "512x512", type: "image/jpeg" },
-          { src: artUrl, sizes: "192x192", type: "image/jpeg" },
-        ]
-      : [];
-
     const d = scope.duration;
     const pos = scope.position;
+    const metaKey = `${scope.label}|${np.title}|${np.author}|${np.coverUrl}|${trackIndex}|${trackLabel}`;
+    const metaChanged = metaKey !== lastMetaKey;
+    const now = Date.now();
+    const posDue = now - lastPosSyncAt >= POS_SYNC_INTERVAL_MS;
+
+    if (!metaChanged && !posDue) return;
+
+    if (metaChanged) lastMetaKey = metaKey;
+    if (posDue) lastPosSyncAt = now;
+
+    if (metaChanged) {
+      const artUrl = toAbsoluteArtworkUrl(np.coverUrl);
+      const artwork = artUrl
+        ? [
+            { src: artUrl, sizes: "512x512", type: "image/jpeg" },
+            { src: artUrl, sizes: "192x192", type: "image/jpeg" },
+          ]
+        : [];
+
+      await LibraryAuto.syncPlayback({
+        active: true,
+        playing: isPlaying,
+        title: scope.label || np.title,
+        artist: np.author || "Audiobook",
+        album: trackLabel || np.title,
+        duration: isFinite(d) && d > 0 ? d : 0,
+        position: isFinite(pos) ? Math.max(0, pos) : 0,
+        playbackRate: Math.max(playbackRate, 0.25),
+        artwork,
+      });
+      return;
+    }
 
     await LibraryAuto.syncPlayback({
       active: true,
       playing: isPlaying,
-      title: scope.label || np.title,
-      artist: np.author || "Audiobook",
-      album: trackLabel || np.title,
-      duration: isFinite(d) && d > 0 ? d : 0,
       position: isFinite(pos) ? Math.max(0, pos) : 0,
       playbackRate: Math.max(playbackRate, 0.25),
-      artwork,
+      positionOnly: true,
     });
   } catch {
     /* plugin unavailable */

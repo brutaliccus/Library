@@ -41,7 +41,8 @@ export interface PlayerPlayActions {
     author?: string,
     coverUrl?: string,
     streamHistoryId?: number,
-    resume?: number | RDResumeInfo
+    resume?: number | RDResumeInfo,
+    libraryItemId?: number
   ) => void;
 }
 

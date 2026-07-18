@@ -217,6 +217,10 @@ class IndexerTorrent(Base):
     rd_cached: Mapped[bool] = mapped_column(Boolean, default=False)
     torbox_cached: Mapped[bool] = mapped_column(Boolean, default=False)
     last_debrid_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rd_debrid_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    torbox_debrid_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    rd_preloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    torbox_preloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -240,6 +244,20 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class AvailabilityAlert(Base):
+    """User watch for a catalog book that is not yet in the indexer cache."""
+    __tablename__ = "availability_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    google_volume_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(512), default="")
+    author: Mapped[str] = mapped_column(String(256), default="")
+    cover_url: Mapped[str] = mapped_column(String(1024), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ScraperState(Base):

@@ -1,8 +1,7 @@
 /**
- * Android Auto browse tree — Continue Listening, ABS library, Store (library titles only).
+ * Android Auto browse tree — Continue Listening + alphabetical Library (A–Z jump).
  */
 import api from "../api/client";
-import type { BookSummary } from "../types/book";
 import type { PluginListenerHandle } from "@capacitor/core";
 import { LibraryAuto, type BrowseChild } from "./libraryAutoPlugin";
 import { toAbsoluteArtworkUrl } from "./playerMediaSession";
@@ -11,14 +10,10 @@ export const AA_NOW_PLAYING = "now_playing";
 
 export const AA_ROOT = "library_root";
 export const AA_CONTINUE = "continue";
-export const AA_ABS = "abs";
-export const AA_STORE = "store";
-export const AA_ABS_GENRE_PREFIX = "abs/genre:";
-export const AA_ABS_UNGROUPED = "abs/ungrouped";
-export const AA_STORE_GENRE_PREFIX = "store/genre:";
+export const AA_LIBRARY = "library";
+export const AA_LIBRARY_LETTER_PREFIX = "library/letter:";
 export const AA_PLAY_ABS_PREFIX = "play/abs/";
 export const AA_PLAY_RD_HIST_PREFIX = "play/rdhist/";
-export const AA_PLAY_RD_LIB_PREFIX = "play/rdlib/";
 
 interface ABSItem {
   itemId: string;
@@ -55,35 +50,13 @@ interface RDHistoryItem {
   trackPositionSeconds: number;
 }
 
-interface RDLibraryItem {
-  id: number;
-  googleVolumeId: string;
-  title: string;
-  author: string;
-  coverUrl: string;
-  streamStatus: string;
-  tracks: RDHistoryItem["tracks"];
-  progressSeconds: number;
-}
-
-interface LibraryIndex {
-  absByTitle: Map<string, string>;
-  rdByVolumeId: Map<string, RDLibraryItem>;
-  rdByTitle: Map<string, RDLibraryItem>;
-}
-
 const rdHistPlayCache = new Map<string, RDHistoryItem>();
-const rdLibPlayCache = new Map<string, RDLibraryItem>();
 
-let libraryIndex: LibraryIndex | null = null;
-let libraryIndexAt = 0;
+let absItemsCache: ABSItem[] | null = null;
+let absItemsCacheAt = 0;
 const INDEX_TTL_MS = 5 * 60 * 1000;
 
 let browseListener: PluginListenerHandle | null = null;
-
-function normTitle(title: string): string {
-  return title.toLowerCase().replace(/\s+/g, " ").trim();
-}
 
 function coverUri(url?: string, absItemId?: string): string | undefined {
   if (url?.trim()) {
@@ -96,99 +69,64 @@ function coverUri(url?: string, absItemId?: string): string | undefined {
   return undefined;
 }
 
-function absCover(itemId: string): string | undefined {
-  return coverUri(undefined, itemId);
+function sortTitle(title: string): string {
+  return title.replace(/^(the|a|an)\s+/i, "").trim().toLowerCase();
 }
 
-function pctLabel(progress: number, durationSec?: number): string {
-  if (progress > 0 && progress <= 1) return `${Math.round(progress * 100)}%`;
-  if (durationSec && durationSec > 0) return "";
-  return "";
+function letterBucket(title: string): string {
+  const t = sortTitle(title);
+  const ch = t[0]?.toUpperCase() ?? "";
+  if (ch >= "A" && ch <= "Z") return ch;
+  return "#";
 }
 
-async function getLibraryIndex(): Promise<LibraryIndex> {
+async function getAllAbsItems(): Promise<ABSItem[]> {
   const now = Date.now();
-  if (libraryIndex && now - libraryIndexAt < INDEX_TTL_MS) {
-    return libraryIndex;
+  if (absItemsCache && now - absItemsCacheAt < INDEX_TTL_MS) {
+    return absItemsCache;
   }
 
-  const absByTitle = new Map<string, string>();
-  const rdByVolumeId = new Map<string, RDLibraryItem>();
-  const rdByTitle = new Map<string, RDLibraryItem>();
+  const all: ABSItem[] = [];
+  const seen = new Set<string>();
 
   try {
-    const [absRes, rdRes] = await Promise.all([
-      api.get("/library/abs/collection"),
-      api.get("/library"),
-    ]);
+    const { data } = await api.get("/library/abs/collection");
+    const genres = data?.genres ?? {};
+    const ungrouped: ABSItem[] = data?.ungrouped ?? [];
 
-    const genres = absRes.data?.genres ?? {};
-    const ungrouped: ABSItem[] = absRes.data?.ungrouped ?? [];
     for (const items of Object.values(genres) as ABSItem[][]) {
       for (const item of items) {
-        if (item.title && item.itemId) {
-          absByTitle.set(normTitle(item.title), item.itemId);
+        if (item.itemId && item.title && !seen.has(item.itemId)) {
+          seen.add(item.itemId);
+          all.push(item);
         }
       }
     }
     for (const item of ungrouped) {
-      if (item.title && item.itemId) {
-        absByTitle.set(normTitle(item.title), item.itemId);
+      if (item.itemId && item.title && !seen.has(item.itemId)) {
+        seen.add(item.itemId);
+        all.push(item);
       }
     }
-
-    for (const item of (rdRes.data?.items ?? []) as RDLibraryItem[]) {
-      if (item.googleVolumeId) rdByVolumeId.set(item.googleVolumeId, item);
-      if (item.title) rdByTitle.set(normTitle(item.title), item);
-    }
   } catch {
-    // Offline / logged out — empty index
+    // Offline / logged out — return stale cache if any
+    return absItemsCache ?? [];
   }
 
-  libraryIndex = { absByTitle, rdByVolumeId, rdByTitle };
-  libraryIndexAt = now;
-  return libraryIndex;
+  all.sort((a, b) => sortTitle(a.title).localeCompare(sortTitle(b.title)));
+  absItemsCache = all;
+  absItemsCacheAt = now;
+  return all;
 }
 
-function matchStoreBook(book: BookSummary, index: LibraryIndex): BrowseChild | null {
-  const rd = index.rdByVolumeId.get(book.id);
-  if (rd && rd.streamStatus === "ready" && rd.tracks?.length) {
-    const mediaId = `${AA_PLAY_RD_LIB_PREFIX}${rd.id}`;
-    rdLibPlayCache.set(mediaId, rd);
-    return {
-      mediaId,
-      title: book.title,
-      subtitle: book.authors?.[0] || rd.author || "",
-      browsable: false,
-      iconUri: coverUri(rd.coverUrl) || coverUri(book.coverUrl),
-    };
-  }
-
-  const absId = index.absByTitle.get(normTitle(book.title));
-  if (absId) {
-    return {
-      mediaId: `${AA_PLAY_ABS_PREFIX}${absId}`,
-      title: book.title,
-      subtitle: book.authors?.[0] || "",
-      browsable: false,
-      iconUri: absCover(absId) || coverUri(book.coverUrl),
-    };
-  }
-
-  const rdTitle = index.rdByTitle.get(normTitle(book.title));
-  if (rdTitle && rdTitle.streamStatus === "ready" && rdTitle.tracks?.length) {
-    const mediaId = `${AA_PLAY_RD_LIB_PREFIX}${rdTitle.id}`;
-    rdLibPlayCache.set(mediaId, rdTitle);
-    return {
-      mediaId,
-      title: book.title,
-      subtitle: book.authors?.[0] || rdTitle.author || "",
-      browsable: false,
-      iconUri: coverUri(rdTitle.coverUrl) || coverUri(book.coverUrl),
-    };
-  }
-
-  return null;
+function absItemToChild(item: ABSItem): BrowseChild {
+  return {
+    mediaId: `${AA_PLAY_ABS_PREFIX}${item.itemId}`,
+    title: item.title,
+    subtitle: item.author || "",
+    browsable: false,
+    iconUri: coverUri(item.coverUrl, item.itemId),
+  };
 }
 
 async function loadContinueListening(): Promise<BrowseChild[]> {
@@ -231,116 +169,48 @@ async function loadContinueListening(): Promise<BrowseChild[]> {
   return children.slice(0, 24);
 }
 
-async function loadAbsRoot(): Promise<BrowseChild[]> {
+async function loadLibraryRoot(): Promise<BrowseChild[]> {
+  const items = await getAllAbsItems();
+  const letters = new Set(items.map((i) => letterBucket(i.title)));
   const children: BrowseChild[] = [];
-  try {
-    const { data } = await api.get("/library/abs/collection");
-    const genres = data?.genres ?? {};
-    const ungrouped: ABSItem[] = data?.ungrouped ?? [];
 
-    for (const name of Object.keys(genres).sort()) {
-      const items = genres[name] as ABSItem[];
-      const sample = items[0];
-      children.push({
-        mediaId: `${AA_ABS_GENRE_PREFIX}${encodeURIComponent(name)}`,
-        title: name,
-        subtitle: `${items.length} title${items.length === 1 ? "" : "s"}`,
-        browsable: true,
-        iconUri: sample ? coverUri(sample.coverUrl, sample.itemId) : undefined,
-      });
-    }
-
-    if (ungrouped.length > 0) {
-      const sample = ungrouped[0];
-      children.push({
-        mediaId: AA_ABS_UNGROUPED,
-        title: "Other",
-        subtitle: `${ungrouped.length} title${ungrouped.length === 1 ? "" : "s"}`,
-        browsable: true,
-        iconUri: sample ? coverUri(sample.coverUrl, sample.itemId) : undefined,
-      });
-    }
-  } catch {
-    // ignore
+  for (let code = 65; code <= 90; code++) {
+    const letter = String.fromCharCode(code);
+    if (!letters.has(letter)) continue;
+    const count = items.filter((i) => letterBucket(i.title) === letter).length;
+    children.push({
+      mediaId: `${AA_LIBRARY_LETTER_PREFIX}${letter}`,
+      title: letter,
+      subtitle: `${count} title${count === 1 ? "" : "s"}`,
+      browsable: true,
+    });
   }
+
+  if (letters.has("#")) {
+    const count = items.filter((i) => letterBucket(i.title) === "#").length;
+    children.push({
+      mediaId: `${AA_LIBRARY_LETTER_PREFIX}#`,
+      title: "#",
+      subtitle: `${count} title${count === 1 ? "" : "s"}`,
+      browsable: true,
+    });
+  }
+
   return children;
 }
 
-async function loadAbsGenre(parentId: string): Promise<BrowseChild[]> {
-  const encoded = parentId.slice(AA_ABS_GENRE_PREFIX.length);
-  const genreName = decodeURIComponent(encoded);
-  try {
-    const { data } = await api.get("/library/abs/collection");
-    const items = (data?.genres?.[genreName] ?? []) as ABSItem[];
-    return items.slice(0, 40).map((item) => ({
-      mediaId: `${AA_PLAY_ABS_PREFIX}${item.itemId}`,
-      title: item.title,
-      subtitle: item.author || pctLabel(item.progress ?? 0),
-      browsable: false,
-      iconUri: coverUri(item.coverUrl, item.itemId),
-    }));
-  } catch {
-    return [];
-  }
-}
-
-async function loadAbsUngrouped(): Promise<BrowseChild[]> {
-  try {
-    const { data } = await api.get("/library/abs/collection");
-    const items = (data?.ungrouped ?? []) as ABSItem[];
-    return items.slice(0, 40).map((item) => ({
-      mediaId: `${AA_PLAY_ABS_PREFIX}${item.itemId}`,
-      title: item.title,
-      subtitle: item.author || "",
-      browsable: false,
-      iconUri: coverUri(item.coverUrl, item.itemId),
-    }));
-  } catch {
-    return [];
-  }
-}
-
-async function loadStoreRoot(): Promise<BrowseChild[]> {
-  try {
-    const { data } = await api.get("/books/genres");
-    const genres = data?.genres ?? [];
-    return genres.map((g: { slug: string; name: string }) => ({
-      mediaId: `${AA_STORE_GENRE_PREFIX}${g.slug}`,
-      title: g.name,
-      subtitle: "In your library only",
-      browsable: true,
-    }));
-  } catch {
-    return [];
-  }
-}
-
-async function loadStoreGenre(parentId: string): Promise<BrowseChild[]> {
-  const slug = parentId.slice(AA_STORE_GENRE_PREFIX.length);
-  try {
-    const [booksRes, index] = await Promise.all([
-      api.get(`/books/category/${encodeURIComponent(slug)}?pageSize=40`),
-      getLibraryIndex(),
-    ]);
-    const books = (booksRes.data?.books ?? []) as BookSummary[];
-    const children: BrowseChild[] = [];
-    for (const book of books) {
-      const match = matchStoreBook(book, index);
-      if (match) children.push(match);
-    }
-    return children;
-  } catch {
-    return [];
-  }
+async function loadLibraryLetter(parentId: string): Promise<BrowseChild[]> {
+  const letter = parentId.slice(AA_LIBRARY_LETTER_PREFIX.length);
+  const items = await getAllAbsItems();
+  return items
+    .filter((i) => letterBucket(i.title) === letter)
+    .map(absItemToChild);
 }
 
 export async function loadBrowseChildren(parentId: string): Promise<BrowseChild[]> {
   if (parentId === AA_CONTINUE) return loadContinueListening();
-  if (parentId === AA_ABS) return loadAbsRoot();
-  if (parentId === AA_STORE) return loadStoreRoot();
-  if (parentId.startsWith(AA_ABS_GENRE_PREFIX)) return loadAbsGenre(parentId);
-  if (parentId === AA_ABS_UNGROUPED) return loadAbsUngrouped();
-  if (parentId.startsWith(AA_STORE_GENRE_PREFIX)) return loadStoreGenre(parentId);
+  if (parentId === AA_LIBRARY) return loadLibraryRoot();
+  if (parentId.startsWith(AA_LIBRARY_LETTER_PREFIX)) return loadLibraryLetter(parentId);
   return [];
 }
 
@@ -363,6 +233,8 @@ export interface AutoPlayHandlers {
   togglePlay: () => void;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function handlePlayMediaId(
   mediaId: string,
   handlers: AutoPlayHandlers
@@ -374,12 +246,22 @@ export async function handlePlayMediaId(
 
   try {
     await LibraryAuto.bringToForeground();
+    // Give the WebView time to resume after a cold start from Android Auto.
+    await sleep(450);
   } catch {
     /* native only */
   }
 
   if (mediaId.startsWith(AA_PLAY_ABS_PREFIX)) {
-    await handlers.playABS(mediaId.slice(AA_PLAY_ABS_PREFIX.length));
+    const itemId = mediaId.slice(AA_PLAY_ABS_PREFIX.length);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        await handlers.playABS(itemId);
+        return;
+      } catch {
+        if (attempt < 3) await sleep(600 * (attempt + 1));
+      }
+    }
     return;
   }
 
@@ -403,32 +285,6 @@ export async function handlePlayMediaId(
       trackIndex: item.currentTrackIndex,
       trackPositionSeconds: item.trackPositionSeconds,
     });
-    return;
-  }
-
-  if (mediaId.startsWith(AA_PLAY_RD_LIB_PREFIX)) {
-    let item = rdLibPlayCache.get(mediaId);
-    if (!item) {
-      const libId = parseInt(mediaId.slice(AA_PLAY_RD_LIB_PREFIX.length), 10);
-      if (!isNaN(libId)) {
-        try {
-          const { data } = await api.get("/library");
-          item = (data?.items ?? []).find((i: RDLibraryItem) => i.id === libId);
-          if (item) rdLibPlayCache.set(mediaId, item);
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-    if (!item?.tracks?.length) return;
-    handlers.playRD(
-      item.tracks,
-      item.title,
-      item.author,
-      item.coverUrl,
-      undefined,
-      item.progressSeconds > 0 ? item.progressSeconds : 0
-    );
   }
 }
 

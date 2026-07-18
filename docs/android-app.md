@@ -1,7 +1,7 @@
 # Android App (Capacitor)
 
 The Android app is a thin native shell (Capacitor) that loads the hosted web
-app from `https://library.freiverse.com`. Because it points at the live
+app from your public `APP_URL` (set in `frontend/capacitor.config.ts`). Because it points at the live
 server:
 
 - Every web deploy updates the app instantly — no APK rebuilds needed.

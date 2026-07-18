@@ -112,11 +112,16 @@ async def _update_status(
     progress_total_bytes: int | None = None,
     progress_speed_bps: float | None = None,
 ):
+    # Fresh lookup — long-lived download sessions + concurrent progress writers
+    # can leave the identity map stale; never crash the pipeline on a missing row.
     result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
-    req = result.scalar_one()
+    req = result.scalar_one_or_none()
+    if req is None:
+        logger.warning("DownloadRequest %s missing during status update → %s", request_id, status)
+        return
     req.status = status
     if detail is not None:
-        req.status_detail = detail
+        req.status_detail = detail or status
     if rd_torrent_id is not None:
         req.rd_torrent_id = rd_torrent_id
     if status in ("completed", "failed"):
@@ -137,7 +142,10 @@ async def _update_status(
     if status == "completed":
         req.completed_at = datetime.now(timezone.utc)
     await db.commit()
-    await db.refresh(req)
+    try:
+        await db.refresh(req)
+    except Exception:
+        pass
 
     await ws_manager.send_to_user(req.user_id, {
         "type": "status_update",
@@ -520,7 +528,10 @@ async def process_download(request_id: int) -> None:
             result = await db.execute(
                 select(DownloadRequest).where(DownloadRequest.id == request_id)
             )
-            req = result.scalar_one()
+            req = result.scalar_one_or_none()
+            if req is None:
+                logger.warning("RD download: request %s not found", request_id)
+                return
             # Download with the requesting user's library-group RD key
             from app.services import debrid_tokens
             await debrid_tokens.apply_tokens_for_user_id(req.user_id)
@@ -538,6 +549,23 @@ async def process_download(request_id: int) -> None:
 
             if not rd_id:
                 await _update_status(db, request_id, "sent_to_rd", "Sending to Real-Debrid")
+                # ABB detail pages are HTML — scrape the info hash into a magnet first.
+                if (
+                    not link.startswith("magnet:")
+                    and "audiobookbay" in link.lower()
+                ):
+                    try:
+                        from app.services import audiobookbay
+
+                        m, _h = await audiobookbay.resolve_magnet_from_details(
+                            link, title=title or ""
+                        )
+                        if m:
+                            link = m
+                            req.magnet_link = m
+                            await db.commit()
+                    except Exception as e:
+                        logger.warning("ABB magnet resolve for request %s failed: %s", request_id, e)
                 if link.startswith("magnet:"):
                     rd_result = await real_debrid.add_magnet(link)
                 else:
@@ -632,7 +660,40 @@ async def process_download(request_id: int) -> None:
                     progress_percent=((i - 1) / total_links * 100) if total_links else 0,
                 )
                 direct_url = await real_debrid.unrestrict_link(rd_link)
-                await downloader.download_file(direct_url, dest_dir, on_progress=_on_file_progress)
+                # RD CDN / proxies occasionally drop mid-body — retry a few times.
+                last_dl_err: Exception | None = None
+                for attempt in range(3):
+                    try:
+                        await downloader.download_file(
+                            direct_url, dest_dir, on_progress=_on_file_progress
+                        )
+                        last_dl_err = None
+                        break
+                    except (
+                        httpx.RemoteProtocolError,
+                        httpx.ReadError,
+                        httpx.ReadTimeout,
+                        httpx.ConnectError,
+                        httpx.ConnectTimeout,
+                        RuntimeError,
+                    ) as e:
+                        last_dl_err = e
+                        logger.warning(
+                            "RD file download attempt %s/3 failed for request %s: %s",
+                            attempt + 1,
+                            request_id,
+                            e,
+                        )
+                        if attempt < 2:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            try:
+                                direct_url = await real_debrid.unrestrict_link(rd_link)
+                            except Exception:
+                                pass
+                if last_dl_err is not None:
+                    raise RuntimeError(
+                        f"Download failed after retries: {last_dl_err}"
+                    ) from last_dl_err
 
             if media_type == "ebook":
                 await downloader.convert_ebooks_in_dir(dest_dir)
@@ -697,20 +758,23 @@ async def process_download(request_id: int) -> None:
 
         except Exception as e:
             logger.exception(f"Download pipeline failed for request {request_id}")
+            err_msg = (str(e) or e.__class__.__name__)[:500]
             async with async_session() as err_db:
-                await _update_status(err_db, request_id, "failed", str(e)[:500])
+                await _update_status(err_db, request_id, "failed", err_msg)
                 try:
                     result = await err_db.execute(
                         select(DownloadRequest).where(DownloadRequest.id == request_id)
                     )
-                    failed_req = result.scalar_one()
+                    failed_req = result.scalar_one_or_none()
+                    if not failed_req:
+                        return
                     user_result = await err_db.execute(select(User).where(User.id == failed_req.user_id))
                     user = user_result.scalar_one_or_none()
                     username = user.username if user else "Unknown"
                     await push.notify_admins(err_db, {
                         "type": "download_failed",
                         "title": "Download Failed",
-                        "body": f"{title} (requested by {username}): {str(e)[:200]}",
+                        "body": f"{title} (requested by {username}): {err_msg[:200]}",
                         "url": "/admin?tab=requests",
                     })
                 except Exception:
@@ -724,7 +788,10 @@ async def process_aa_download(request_id: int) -> None:
             result = await db.execute(
                 select(DownloadRequest).where(DownloadRequest.id == request_id)
             )
-            req = result.scalar_one()
+            req = result.scalar_one_or_none()
+            if req is None:
+                logger.warning("AA download: request %s not found", request_id)
+                return
             title = req.title
             media_type = req.media_type or "audiobook"
             aa_md5 = req.rd_torrent_id  # repurposed: stores AA md5 hash
@@ -815,14 +882,26 @@ async def process_aa_download(request_id: int) -> None:
                     )
                     downloaded = True
                     break
-                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+                except (
+                    httpx.ConnectError,
+                    httpx.ConnectTimeout,
+                    httpx.ReadTimeout,
+                    httpx.RemoteProtocolError,
+                    httpx.ReadError,
+                    httpx.HTTPError,
+                    RuntimeError,
+                ) as e:
                     last_error = e
-                    logger.warning(f"AA download connect failed ({source_label}), trying next source: {e}")
+                    logger.warning(
+                        "AA download failed (%s), trying next source: %s",
+                        source_label,
+                        e,
+                    )
                     await _update_status(
                         db,
                         request_id,
                         "transferring",
-                        f"Source unreachable ({source_label}), trying another…",
+                        f"Source failed ({source_label}), trying another…",
                     )
                     continue
 
@@ -889,20 +968,23 @@ async def process_aa_download(request_id: int) -> None:
 
         except Exception as e:
             logger.exception(f"AA download pipeline failed for request {request_id}")
+            err_msg = (str(e) or e.__class__.__name__)[:500]
             async with async_session() as err_db:
-                await _update_status(err_db, request_id, "failed", str(e)[:500])
+                await _update_status(err_db, request_id, "failed", err_msg)
                 try:
                     result = await err_db.execute(
                         select(DownloadRequest).where(DownloadRequest.id == request_id)
                     )
-                    failed_req = result.scalar_one()
+                    failed_req = result.scalar_one_or_none()
+                    if not failed_req:
+                        return
                     user_result = await err_db.execute(select(User).where(User.id == failed_req.user_id))
                     user = user_result.scalar_one_or_none()
                     username = user.username if user else "Unknown"
                     await push.notify_admins(err_db, {
                         "type": "download_failed",
                         "title": "Download Failed",
-                        "body": f"{title} (requested by {username}): {str(e)[:200]}",
+                        "body": f"{title} (requested by {username}): {err_msg[:200]}",
                         "url": "/admin?tab=requests",
                     })
                 except Exception:

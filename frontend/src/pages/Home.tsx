@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import api from "../api/client";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
@@ -10,7 +10,7 @@ import GenreSidebar from "../components/GenreSidebar";
 import type { Genre } from "../components/GenreSidebar";
 import ContinueItemMenu, { type ContinueMenuTarget } from "../components/ContinueItemMenu";
 import { useLongPress } from "../hooks/useLongPress";
-import { Headphones, Radio, BookOpen } from "lucide-react";
+import { Headphones, Radio, BookOpen, Loader2 } from "lucide-react";
 import {
   getContinueReading,
   clearProgress as clearReadingProgress,
@@ -57,19 +57,14 @@ function ContinueTile({
   );
 }
 
-function buildCategoryUrl(slugs: string[]): string {
-  if (slugs.length === 0) return "/search";
-  return `/search?category=${slugs.join(",")}`;
+interface HomeShelf {
+  slug: string;
+  title: string;
+  genre?: string;
+  listName?: string;
+  source?: string;
+  books: BookSummary[];
 }
-
-const HOME_CAROUSELS = [
-  { slug: "fantasy", name: "Fantasy" },
-  { slug: "science-fiction", name: "Science Fiction" },
-  { slug: "mystery", name: "Mystery" },
-  { slug: "thriller", name: "Thriller" },
-  { slug: "romance", name: "Romance" },
-  { slug: "horror", name: "Horror" },
-];
 
 interface InProgressItem {
   itemId: string;
@@ -186,6 +181,8 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
       const { data } = await api.get("/stream/abs/in-progress");
       return data as { items: InProgressItem[] };
     },
+    staleTime: 60 * 1000,
+    refetchOnWindowFocus: false,
   });
 
   const { data: rdInProgressData } = useQuery({
@@ -194,6 +191,8 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
       const { data } = await api.get("/stream/rd/history/in-progress");
       return data as { items: RDHistoryItem[] };
     },
+    staleTime: 60 * 1000,
+    refetchOnWindowFocus: false,
   });
 
   const listeningItems = inProgressData?.items?.filter((i) => !i.isFinished) || [];
@@ -205,43 +204,105 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
       const { data } = await api.get("/books/genres");
       return data as { genres: Genre[] };
     },
+    staleTime: 24 * 60 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
+    refetchOnWindowFocus: false,
   });
+
+  const shelfSentinelRef = useRef<HTMLDivElement>(null);
 
   const { data: trendingData, isLoading: trendingLoading } = useQuery({
     queryKey: ["trending-books"],
     queryFn: async () => {
-      const { data } = await api.get("/books/trending");
-      return data as { books: BookSummary[] };
+      try {
+        const { data } = await api.get("/books/trending");
+        return data as { books: BookSummary[]; refreshedAt?: string };
+      } catch {
+        return { books: [] as BookSummary[] };
+      }
     },
-    staleTime: 30 * 60 * 1000,
-    gcTime: 60 * 60 * 1000,
+    // Server rebuilds daily; local persist paints instantly on reopen.
+    staleTime: 24 * 60 * 60 * 1000,
+    gcTime: 48 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
+    retry: 1,
   });
 
   const { data: newReleasesData, isLoading: newReleasesLoading } = useQuery({
     queryKey: ["new-releases"],
     queryFn: async () => {
-      const { data } = await api.get("/books/new-releases");
-      return data as { books: BookSummary[] };
+      try {
+        const { data } = await api.get("/books/new-releases");
+        return data as { books: BookSummary[]; refreshedAt?: string };
+      } catch {
+        return { books: [] as BookSummary[] };
+      }
     },
-    staleTime: 30 * 60 * 1000,
-    gcTime: 60 * 60 * 1000,
+    staleTime: 24 * 60 * 60 * 1000,
+    gcTime: 48 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
+    retry: 1,
   });
 
-  const carouselQueries = HOME_CAROUSELS.map((cat) => {
-    const { data, isLoading } = useQuery({
-      queryKey: ["category-carousel", cat.slug],
-      queryFn: async () => {
-        const { data } = await api.get(`/books/category/${cat.slug}?pageSize=20`);
-        return data as { books: BookSummary[] };
-      },
-      staleTime: 30 * 60 * 1000,
-      gcTime: 60 * 60 * 1000,
-      refetchOnWindowFocus: false,
-    });
-    return { ...cat, books: data?.books || [], isLoading };
+  const {
+    data: homeShelvesPages,
+    isLoading: homeShelvesLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ["home-shelves"],
+    queryFn: async ({ pageParam }) => {
+      try {
+        const params = new URLSearchParams({
+          page: String(pageParam),
+          pageSize: "6",
+          booksPerShelf: "12",
+        });
+        const { data } = await api.get(`/books/home-shelves?${params}`);
+        return data as {
+          shelves: HomeShelf[];
+          hasMore?: boolean;
+          totalShelves?: number;
+          page: number;
+        };
+      } catch {
+        return { shelves: [] as HomeShelf[], hasMore: false, page: pageParam as number };
+      }
+    },
+    initialPageParam: 1,
+    getNextPageParam: (last) => (last?.hasMore ? (last.page || 1) + 1 : undefined),
+    staleTime: 6 * 60 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    retry: 1,
   });
+
+  const carouselQueries = useMemo(() => {
+    const shelves = (homeShelvesPages?.pages || []).flatMap((p) => p.shelves || []);
+    return shelves.map((shelf) => ({
+      slug: shelf.slug,
+      name: shelf.listName || shelf.title || shelf.genre || shelf.slug,
+      subtitle: shelf.source?.startsWith("hardcover") ? "Curated on Hardcover" : undefined,
+      books: shelf.books || [],
+      isLoading: homeShelvesLoading && shelves.length === 0,
+    }));
+  }, [homeShelvesPages, homeShelvesLoading]);
+
+  useEffect(() => {
+    const el = shelfSentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          void fetchNextPage();
+        }
+      },
+      { rootMargin: "800px 0px", threshold: 0 }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   return (
     <div className="pb-12">
@@ -259,7 +320,7 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
         {genresData && (
           <GenreSidebar
             genres={genresData.genres}
-            onSelect={(slugs) => navigate(buildCategoryUrl(slugs))}
+            mode="navigate"
             mobileOpen={genreMobileOpen}
             onMobileClose={onGenreMobileClose}
           />
@@ -308,7 +369,15 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
                 {listeningItems.slice(0, 6).map((item) => (
                   <ContinueTile
                     key={`abs-${item.itemId}`}
-                    onClick={() => playABS(item.itemId)}
+                    onClick={() => {
+                      void playABS(item.itemId).catch((err) => {
+                        const msg =
+                          err instanceof Error && err.message.startsWith("Offline")
+                            ? err.message
+                            : "Failed to start playback";
+                        toast(msg, "error");
+                      });
+                    }}
                     onLongPress={(point) =>
                       openMenu(
                         {
@@ -371,6 +440,7 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
               title="Trending"
               books={trendingData?.books || []}
               isLoading={trendingLoading}
+              to="/shelf/popular"
             />
           </div>
 
@@ -379,6 +449,7 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
               title="New Releases"
               books={newReleasesData?.books || []}
               isLoading={newReleasesLoading}
+              to="/shelf/new"
             />
           </div>
 
@@ -387,11 +458,20 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
               <BookCarousel
                 key={cat.slug}
                 title={cat.name}
+                subtitle={cat.subtitle}
                 books={cat.books}
                 isLoading={cat.isLoading}
+                to={`/shelf/${encodeURIComponent(cat.slug)}`}
               />
             ))}
           </div>
+          <div ref={shelfSentinelRef} className="h-8" />
+          {isFetchingNextPage && (
+            <p className="text-sm text-gray-500 flex items-center justify-center gap-2 py-4">
+              <Loader2 size={16} className="animate-spin" />
+              Loading more lists…
+            </p>
+          )}
         </div>
       </div>
     </div>

@@ -1,5 +1,5 @@
 /** Bump when fetch/caching behavior changes so old caches are dropped. */
-const CACHE_VERSION = 8;
+const CACHE_VERSION = 10;
 const CACHE_NAME = `audiobook-library-v${CACHE_VERSION}`;
 /** Downloaded audiobook tracks (populated by the app, served here). Survives
  * SW updates — cleared per-book when a book is finished or progress cleared. */
@@ -217,6 +217,13 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // Never intercept document navigations. Re-fetching the SPA shell from the
+  // SW breaks auth redirects and surfaces as "network error" / Failed to fetch
+  // when the server returns 401 or the connection blips.
+  if (request.mode === "navigate") {
+    return;
+  }
+
   if (isAudioProxyUrl(request.url)) {
     event.respondWith(audioCacheFirst(request));
     return;
@@ -236,6 +243,6 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // HTML, sw.js, manifest, icons: network-only (no SW cache) so deploys propagate.
-  event.respondWith(fetch(request));
+  // Icons, manifest, etc. — pass through without respondWith so the browser
+  // handles errors normally (no uncaught promise in the SW).
 });

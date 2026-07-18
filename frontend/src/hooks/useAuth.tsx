@@ -37,20 +37,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const init = async () => {
       setSessionReady(false);
-      try {
-        const { data } = await api.get("/auth/setup-required");
-        if (data.setup_required) {
-          setSetupRequired(true);
-          setIsLoading(false);
-          setSessionReady(true);
-          return;
-        }
-      } catch {
-        // server unreachable
+      const token = localStorage.getItem("access_token");
+
+      // Optimistic paint: if we have a cached user from a prior session, show the
+      // shell immediately and validate in the background (no blank "Loading…").
+      const cachedUsername = localStorage.getItem("username");
+      const cachedRole = localStorage.getItem("user_role");
+      if (token && cachedUsername && cachedRole) {
+        setUser({
+          username: cachedUsername,
+          role: cachedRole,
+          mustChangePassword: localStorage.getItem("must_change_password") === "true",
+        });
+        setIsLoading(false);
+        setSessionReady(true);
       }
 
-      const token = localStorage.getItem("access_token");
       if (token) {
+        // Logged-in path: validate the session. Skip the /auth/setup-required
+        // round-trip entirely (a token means setup already happened).
         try {
           const { data } = await api.get("/auth/me");
           localStorage.setItem("user_role", data.role);
@@ -71,6 +76,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           localStorage.removeItem("username");
           localStorage.removeItem("must_change_password");
           setUser(null);
+          // Token was invalid — find out whether to show setup or login.
+          try {
+            const { data } = await api.get("/auth/setup-required");
+            setSetupRequired(!!data.setup_required);
+          } catch {
+            // server unreachable
+          }
+        }
+      } else {
+        // No token: only now do we need setup-required (setup vs login screen).
+        try {
+          const { data } = await api.get("/auth/setup-required");
+          setSetupRequired(!!data.setup_required);
+        } catch {
+          // server unreachable
         }
       }
       setIsLoading(false);

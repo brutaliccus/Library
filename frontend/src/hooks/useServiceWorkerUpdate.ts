@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Capacitor } from "@capacitor/core";
 
 const UPDATE_CHECK_MS = 60 * 60 * 1000;
 
@@ -13,7 +14,16 @@ export function useServiceWorkerUpdate() {
   const applyingRef = useRef(false);
 
   useEffect(() => {
-    if (import.meta.env.DEV || !("serviceWorker" in navigator)) return;
+    // Capacitor WebView: audio cache bypasses the SW, push uses LocalNotifications.
+    // An active SW here only intercepts navigations and causes fetch errors.
+    if (import.meta.env.DEV || !("serviceWorker" in navigator) || Capacitor.isNativePlatform()) {
+      if (Capacitor.isNativePlatform()) {
+        void navigator.serviceWorker?.getRegistrations().then((regs) => {
+          for (const reg of regs) void reg.unregister();
+        });
+      }
+      return;
+    }
 
     let intervalId: ReturnType<typeof setInterval> | undefined;
 

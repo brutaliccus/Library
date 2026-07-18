@@ -16,6 +16,66 @@ const queryClient = new QueryClient({
   },
 });
 
+// --- Lightweight query-cache persistence -------------------------------------
+// A reopened PWA (killed after idle) starts with an empty cache and re-fetches
+// everything against a cold server — the "takes ages" cold start. We persist a
+// whitelist of slow-changing shelves to localStorage and restore them on boot,
+// so Home paints instantly and revalidates in the background (stale-while-
+// revalidate via each query's staleTime). Only cacheable, user-agnostic shelves
+// are stored — never auth or "continue listening".
+const PERSIST_KEY = "rq-shelf-cache-v2";
+const PERSIST_PREFIXES = [
+  "trending-books",
+  "new-releases",
+  "home-shelves",
+  "category-carousel",
+  "genres",
+  "curated-slugs",
+];
+const PERSIST_MAX_AGE = 24 * 60 * 60 * 1000; // 24h
+
+try {
+  const raw = localStorage.getItem(PERSIST_KEY);
+  if (raw) {
+    const saved = JSON.parse(raw) as { t: number; entries: [unknown, unknown][] };
+    if (saved && Date.now() - saved.t < PERSIST_MAX_AGE && Array.isArray(saved.entries)) {
+      for (const [key, data] of saved.entries) {
+        // Restore with the ORIGINAL timestamp so staleTime still triggers a
+        // background refresh when appropriate (instant paint, fresh data soon).
+        queryClient.setQueryData(key as readonly unknown[], data, { updatedAt: saved.t });
+      }
+    }
+  }
+} catch {
+  // ignore corrupt/oversized cache
+}
+
+let _persistTimer: number | undefined;
+queryClient.getQueryCache().subscribe(() => {
+  if (_persistTimer !== undefined) return;
+  _persistTimer = window.setTimeout(() => {
+    _persistTimer = undefined;
+    try {
+      const entries: [unknown, unknown][] = [];
+      for (const q of queryClient.getQueryCache().getAll()) {
+        const first = Array.isArray(q.queryKey) ? String(q.queryKey[0]) : "";
+        if (
+          PERSIST_PREFIXES.includes(first) &&
+          q.state.status === "success" &&
+          q.state.data !== undefined
+        ) {
+          entries.push([q.queryKey, q.state.data]);
+        }
+      }
+      if (entries.length) {
+        localStorage.setItem(PERSIST_KEY, JSON.stringify({ t: Date.now(), entries }));
+      }
+    } catch {
+      // localStorage full/unavailable — skip persistence this round
+    }
+  }, 1500);
+});
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BrowserRouter>

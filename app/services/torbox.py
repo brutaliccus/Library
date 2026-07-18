@@ -24,6 +24,7 @@ so callers that derive filenames from links (audio filtering) keep working.
 
 import asyncio
 import logging
+import time
 from typing import Any
 from urllib.parse import quote, unquote
 
@@ -78,7 +79,98 @@ async def add_magnet(magnet_link: str) -> dict[str, Any]:
         torrent_id = payload.get("torrent_id") or payload.get("id")
         if torrent_id is None:
             raise RuntimeError(f"Torbox createtorrent returned no torrent id: {data}")
+        _invalidate_account_cache()
         return {"id": str(torrent_id)}
+
+
+_account_hash_cache: tuple[float, dict[str, str]] | None = None
+_ACCOUNT_CACHE_TTL = 300.0
+
+
+def _invalidate_account_cache() -> None:
+    global _account_hash_cache
+    _account_hash_cache = None
+
+
+def invalidate_account_cache() -> None:
+    _invalidate_account_cache()
+
+
+async def list_account_torrents() -> list[dict[str, Any]]:
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{BASE_URL}/torrents/mylist",
+            headers=_headers(),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _raise_on_error(data, "mylist")
+        payload = data.get("data")
+        if isinstance(payload, dict):
+            return [payload]
+        if isinstance(payload, list):
+            return payload
+        return []
+
+
+async def _account_hash_map(force_refresh: bool = False) -> dict[str, str]:
+    global _account_hash_cache
+    now = time.time()
+    if (
+        not force_refresh
+        and _account_hash_cache is not None
+        and now - _account_hash_cache[0] < _ACCOUNT_CACHE_TTL
+    ):
+        return _account_hash_cache[1]
+
+    mapping: dict[str, str] = {}
+    try:
+        for row in await list_account_torrents():
+            if not (row.get("download_finished") and row.get("download_present")):
+                continue
+            h = (row.get("hash") or "").lower()
+            tid = row.get("id")
+            if h and tid is not None:
+                mapping[h] = str(tid)
+    except Exception as e:
+        logger.warning("Torbox account torrent list failed: %s", e)
+        if _account_hash_cache is not None:
+            return _account_hash_cache[1]
+        return {}
+
+    _account_hash_cache = (now, mapping)
+    return mapping
+
+
+async def find_account_torrent_id(info_hash: str) -> str | None:
+    h = (info_hash or "").lower()
+    if len(h) != 40:
+        return None
+    return (await _account_hash_map()).get(h)
+
+
+async def ensure_magnet_in_account(
+    magnet_link: str,
+    info_hash: str | None = None,
+) -> dict[str, Any]:
+    from app.services.real_debrid import extract_info_hash
+
+    h = extract_info_hash(magnet_link, info_hash)
+    if h:
+        existing = await find_account_torrent_id(h)
+        if existing:
+            return {"id": existing, "existing": True}
+    try:
+        result = await add_magnet(magnet_link)
+        return {**result, "existing": False}
+    except Exception:
+        if h:
+            _invalidate_account_cache()
+            existing = await find_account_torrent_id(h)
+            if existing:
+                return {"id": existing, "existing": True}
+        raise
 
 
 async def add_torrent_file(torrent_url: str) -> dict[str, Any]:
@@ -253,7 +345,7 @@ async def get_user_info() -> dict[str, Any]:
 
 
 async def check_instant_availability(hashes: list[str]) -> set[str]:
-    """Lowercase info hashes already cached on Torbox."""
+    """Lowercase info hashes cached on Torbox infrastructure or already in account."""
     if not debrid_tokens.torbox_token():
         return set()
 
@@ -262,7 +354,7 @@ async def check_instant_availability(hashes: list[str]) -> set[str]:
         return set()
 
     available: set[str] = set()
-    batch_size = 80
+    batch_size = 40
     async with httpx.AsyncClient() as client:
         for i in range(0, len(unique), batch_size):
             batch = unique[i : i + batch_size]
@@ -290,4 +382,8 @@ async def check_instant_availability(hashes: list[str]) -> set[str]:
                     if h:
                         available.add(h.lower())
 
+    account = await _account_hash_map()
+    for h in unique:
+        if h in account:
+            available.add(h)
     return available

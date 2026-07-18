@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 NYT_BASE = "https://api.nytimes.com/svc/books/v3/lists"
+# Admin-console override key (app_settings table). Falls back to env NYT_API_KEY.
+API_KEY_SETTING = "integrations.nyt_api_key"
+
+
+async def get_api_key() -> str:
+    """Resolve the NYT API key: admin-console override first, then env."""
+    from app.services import app_settings
+
+    env_key = getattr(settings, "nyt_api_key", "") or getattr(settings, "nyt_books_api_key", "")
+    return await app_settings.get_setting(API_KEY_SETTING, default=env_key)
 # Combined print+ebook fiction is a good "trending" list; hardcover-fiction is classic
 TRENDING_LISTS = [
     "combined-print-and-e-book-fiction",
@@ -26,7 +36,7 @@ TRENDING_LISTS = [
 
 async def fetch_bestsellers(list_name: str, max_books: int = 20) -> list[dict[str, Any]]:
     """Fetch a NYT bestseller list and enrich with Google Books metadata."""
-    api_key = getattr(settings, "nyt_api_key", "") or getattr(settings, "nyt_books_api_key", "")
+    api_key = await get_api_key()
     if not api_key:
         return []
 
@@ -91,6 +101,68 @@ async def fetch_bestsellers(list_name: str, max_books: int = 20) -> list[dict[st
             "averageRating": 0,
             "ratingsCount": 0,
         })
+    return out
+
+
+async def fetch_bestseller_titles(list_name: str) -> list[dict[str, str]]:
+    """Fetch a NYT bestseller list as raw {title, author, isbn13, rank} entries.
+
+    No Google Books enrichment — callers match these against the LOCAL catalog to
+    find books we actually have. Preserves NYT rank order.
+    """
+    api_key = await get_api_key()
+    if not api_key:
+        return []
+    url = f"{NYT_BASE}/current/{list_name}.json"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, params={"api-key": api_key})
+            if resp.status_code != 200:
+                logger.warning("NYT API error %s: %s", resp.status_code, resp.text[:200])
+                return []
+            data = resp.json()
+    except Exception as e:
+        logger.warning("NYT API fetch failed: %s", e)
+        return []
+
+    out: list[dict[str, str]] = []
+    for b in data.get("results", {}).get("books", []):
+        isbn13 = b.get("primary_isbn13", "")
+        if not isbn13 and b.get("isbns"):
+            isbn13 = next(
+                (i.get("isbn13", "") for i in b.get("isbns", [])
+                 if isinstance(i, dict) and len(i.get("isbn13", "")) == 13),
+                "",
+            )
+        title = (b.get("title") or "").strip()
+        if not title:
+            continue
+        out.append({
+            "title": title,
+            "author": (b.get("author") or "").strip(),
+            "isbn13": isbn13,
+            "rank": str(b.get("rank", "")),
+        })
+    return out
+
+
+async def get_trending_titles(max_results: int = 40) -> list[dict[str, str]]:
+    """Combined NYT bestseller titles (raw) across trending lists, de-duped.
+
+    Returns [{title, author, isbn13, rank}] in list order for local matching.
+    Empty when no API key / on error (caller falls back to internal ranking).
+    """
+    seen: set[str] = set()
+    out: list[dict[str, str]] = []
+    for list_name in TRENDING_LISTS:
+        for b in await fetch_bestseller_titles(list_name):
+            key = (b["title"].lower(), b["author"].lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(b)
+            if len(out) >= max_results:
+                return out
     return out
 
 

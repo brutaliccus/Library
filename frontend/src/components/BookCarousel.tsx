@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import type { BookSummary } from "../types/book";
 import BookCard from "./BookCard";
@@ -6,12 +7,16 @@ import BookCardSkeleton from "./BookCardSkeleton";
 
 interface Props {
   title: string;
+  subtitle?: string;
   books: BookSummary[];
   isLoading?: boolean;
+  /** When set, the shelf title navigates to the full list page. */
+  to?: string;
 }
 
-export default function BookCarousel({ title, books, isLoading }: Props) {
+export default function BookCarousel({ title, subtitle, books, isLoading, to }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
 
   const scroll = (dir: "left" | "right") => {
     if (!scrollRef.current) return;
@@ -25,8 +30,24 @@ export default function BookCarousel({ title, books, isLoading }: Props) {
   return (
     <section>
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-lg font-semibold text-gray-100">{title}</h2>
-        <div className="flex gap-1">
+        <div className="min-w-0">
+          {to ? (
+            <button
+              type="button"
+              onClick={() => navigate(to)}
+              className="text-lg font-semibold text-gray-100 truncate hover:text-brand-300 transition-colors text-left"
+            >
+              {title}
+              <span className="ml-2 text-sm font-normal text-gray-500">View all</span>
+            </button>
+          ) : (
+            <h2 className="text-lg font-semibold text-gray-100 truncate">{title}</h2>
+          )}
+          {subtitle && (
+            <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>
+          )}
+        </div>
+        <div className="flex gap-1 shrink-0">
           <button
             onClick={() => scroll("left")}
             className="p-1.5 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"

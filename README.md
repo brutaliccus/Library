@@ -1,139 +1,102 @@
-# Audiobook Request System
+# Library Site
 
-A self-hosted web app for searching and requesting audiobooks. Searches torrent indexers via Prowlarr, downloads through Real-Debrid, and automatically adds books to your Audiobookshelf library.
-
-Live at: `https://library.freiverse.com`
+Self-hosted audiobook + ebook request library: search indexers, download via debrid, and sync into Audiobookshelf / Kavita.
 
 ## Features
 
-- **Search** audiobooks across multiple torrent indexers via Prowlarr
-- **One-click requests** that route through Real-Debrid for fast, seedbox-free downloads
-- **Automatic library integration** -- files are organized and an Audiobookshelf scan is triggered
-- **Account request system** -- new users request access; admin approves via the web UI
-- **Push notifications** -- get notified when a requested book finishes (users) or when admin events occur (admins: new account requests, download status, errors)
-- **Real-time status** -- WebSocket-powered live updates as your book moves through the pipeline
-- **Admin panel** -- manage users, review account requests, monitor system health
-
-## Architecture
-
-```
-User Browser
-    |
-    v (HTTPS)
-nginx (library.freiverse.com)
-    |
-    v (proxy_pass :8080)
-FastAPI Backend ──> Prowlarr ──> Torrent Indexers
-    |                               
-    v                               
-Real-Debrid API                     
-    |                               
-    v (download files)              
-Pi Storage (/audiobooks)            
-    |                               
-    v (library scan)                
-Audiobookshelf                      
-```
+- Search audiobooks and ebooks across torrent indexers (Prowlarr / Jackett)
+- One-click requests through Real-Debrid and/or TorBox
+- Automatic library integration (Audiobookshelf + Kavita)
+- Account request / approval flow
+- Web + Capacitor Android client (optional Android Auto support)
+- Push notifications and live WebSocket status
+- Admin panel with first-run setup wizard and runtime Config
 
 ## Prerequisites
 
-- Raspberry Pi (or any Linux server) with Docker and Docker Compose
-- A Real-Debrid premium account ([get API token](https://real-debrid.com/apitoken))
-- Audiobookshelf already running
-- DNS A record for `library.freiverse.com` pointing to your server
+- Linux host (or any Docker-capable machine) with Docker Compose
+- A debrid account (Real-Debrid and/or TorBox)
+- Audiobookshelf and/or Kavita already running (or reachable on your LAN)
+- A public hostname (or Tailscale Funnel) if you want HTTPS off-LAN
 
-## Quick Start
+## Quick start
 
-### 1. Clone and configure
+### Install script
 
 ```bash
-git clone <this-repo> audiobook-request
-cd audiobook-request
+chmod +x scripts/install_library.sh
+./scripts/install_library.sh /opt/library-site
+```
+
+The script clones/updates the repo, writes `.env`, creates media mount dirs, and runs `docker compose up -d --build`.
+
+### Manual
+
+```bash
+git clone <this-repo> library-site
+cd library-site
 cp .env.example .env
-# Edit .env with your API keys and paths
-nano .env
+# Edit APP_URL, SECRET_KEY, media host paths, and any API keys
+mkdir -p media/audiobooks media/ebooks media/openlibrary data
+docker compose up -d --build
 ```
 
-### 2. Start the services
+This builds the frontend inside Docker and starts:
 
-```bash
-docker compose up -d
-```
+- **app** on `127.0.0.1:8085`
+- **prowlarr**, **jackett**, **flaresolverr**, **gluetun** (optional Mullvad HTTP proxy for AudioBook Bay)
 
-This starts:
-- **audiobook-request** on `127.0.0.1:8080` (the web app)
-- **prowlarr** on `127.0.0.1:9696` (indexer manager)
+### First-run wizard
 
-### 3. Configure Prowlarr
+1. Open the site → create the **admin** account
+2. Go to **`/admin/setup`** — libraries, Prowlarr, debrid defaults, catalog APIs, scraper mode (RSS-only by default)
+3. Create or join a **library group** at `/onboarding`
+4. Later: **Admin → Config** for every runtime setting / API key
 
-1. Open `http://your-pi-ip:9696` in your browser
-2. Set up authentication when prompted
-3. Go to **Indexers** and add your preferred torrent indexers
-4. Go to **Settings > General** and copy the API Key
-5. Paste the API key into your `.env` file as `PROWLARR_API_KEY`
-6. Restart: `docker compose restart app`
+### Media mounts
 
-### 4. Set up nginx + SSL
+Compose reads host paths from `.env`:
 
-Copy the nginx config to your sites:
+| Variable | Default | Mounted as |
+|----------|---------|------------|
+| `AUDIOBOOK_HOST_DIR` | `./media/audiobooks` | `/audiobooks` |
+| `EBOOK_HOST_DIR` | `./media/ebooks` | `/ebooks` |
+| `OPENLIBRARY_HOST_DIR` | `./media/openlibrary` | `/openlibrary` |
 
-```bash
-sudo cp nginx/library.freiverse.com.conf /etc/nginx/sites-available/
-sudo ln -s /etc/nginx/sites-available/library.freiverse.com.conf /etc/nginx/sites-enabled/
-```
+Point these at your existing library folders if you already have them.
 
-Get an SSL certificate:
+### nginx + TLS (optional)
 
-```bash
-sudo certbot --nginx -d library.freiverse.com
-```
+Example configs live in `nginx/`. Point your reverse proxy at `127.0.0.1:8085`.
 
-Reload nginx:
+### Tailscale Funnel (optional)
 
-```bash
-sudo nginx -t && sudo systemctl reload nginx
-```
+See [docs/TAILSCALE_FUNNEL.md](docs/TAILSCALE_FUNNEL.md).
 
-### 5. (Optional) Tailscale Funnel for blocked networks
+## Environment variables
 
-If your main domain is blocked (e.g. at work) but Tailscale URLs work, use [Tailscale Funnel](docs/TAILSCALE_FUNNEL.md) to expose the site via `https://pihole.your-tailnet.ts.net`:
-
-```bash
-./tailscale-funnel-setup.sh
-```
-
-### 6. First-run setup
-
-1. Visit your site (e.g. `https://library.freiverse.com` or your Tailscale funnel URL)
-2. You'll be prompted to create an admin account (first user = admin)
-3. Log in and start searching!
-
-## Environment Variables
+See [`.env.example`](.env.example). Most integration keys can also be set at runtime in **Admin → Config** (DB override with env fallback).
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `SECRET_KEY` | Random string for JWT signing | Yes |
-| `DATABASE_URL` | SQLite connection string | Yes (has default) |
+| `SECRET_KEY` | JWT signing secret | Yes |
+| `DATABASE_URL` | SQLite URL | Has default |
 | `APP_URL` | Public URL of the app | Yes |
-| `PROWLARR_URL` | Prowlarr base URL | Yes |
-| `PROWLARR_API_KEY` | Prowlarr API key | Yes |
-| `REAL_DEBRID_API_TOKEN` | Real-Debrid API token | Yes |
-| `ABS_URL` | Audiobookshelf base URL | Yes |
-| `ABS_API_KEY` | Audiobookshelf API key | Yes |
-| `ABS_LIBRARY_ID` | Audiobookshelf library ID | Yes |
-| `NYT_API_KEY` | NYT Books API key (for real bestsellers in Trending) | No (free at developer.nytimes.com) |
-| `VAPID_PRIVATE_KEY` | Web Push VAPID private key (PEM) | No (for push notifications) |
-| `VAPID_PUBLIC_KEY` | Web Push VAPID public key (base64url) | No (for push) |
-| `AUDIOBOOK_DIR` | Path to audiobook storage | Yes |
+| `PROWLARR_URL` / `PROWLARR_API_KEY` | Indexer manager | Yes (or Admin → Config) |
+| `REAL_DEBRID_API_TOKEN` / `TORBOX_API_TOKEN` | Server debrid defaults | Recommended |
+| `ABS_*` / `KAVITA_*` | Library connections | At least one |
+| `HARDCOVER_API_KEY` / `NYT_API_KEY` / `ISBNDB_API_KEY` | Catalog APIs | Optional |
+| `VAPID_*` | Web Push (`python scripts/generate_vapid.py`) | Optional |
+| `AUDIOBOOK_DIR` / `EBOOK_DIR` | In-container paths | Defaults match mounts |
+| `ABB_RSS_ONLY` | Seed RSS-only scraper mode | Recommended `true` |
 
 ## Development
 
 ### Backend
 
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8080
 ```
@@ -146,70 +109,51 @@ npm install
 npm run dev
 ```
 
-The Vite dev server proxies `/api` requests to the backend at `localhost:8080`.
+Vite proxies `/api` and `/ws` to `localhost:8080`.
 
-### Build frontend for production
+### Production frontend build (local)
 
 ```bash
 cd frontend
-npm run build
-# Output goes to ../backend/static/
+npm run build   # → backend/static/ (used only for local/dev; Docker builds this in-image)
 ```
 
-## Database Backups
+### Checks
 
-`data/app.db` holds the torrent cache, users, listening progress, and admin settings. `.\deploy.ps1` installs a nightly backup cron on the Pi automatically (03:15, 14-day retention). Backups land in `data/backups/` as gzipped snapshots.
+```powershell
+.\scripts\check.ps1 -SkipAndroid
+```
 
-To install or verify the cron manually:
+## Database backups
+
+`data/app.db` holds users, cache, progress, and settings. Install a nightly cron:
 
 ```bash
 bash scripts/install_backup_cron.sh
 ```
 
-## CI Checks
+## Download pipeline
 
-Before deploying, run the pre-deploy check suite (backend tests, frontend type-check, Android compile):
+1. User searches (Prowlarr / cache)
+2. User requests a release
+3. Backend sends the magnet to Real-Debrid / TorBox
+4. Files download into `{AUDIOBOOK_DIR|EBOOK_DIR}/{Author}/{Title}/`
+5. Audiobookshelf / Kavita scan is triggered
+6. WebSocket + optional push notify the user
 
-```powershell
-.\scripts\check.ps1            # all checks
-.\scripts\check.ps1 -SkipAndroid  # skip the slow gradle step
-```
+## Account request flow
 
-## Download Pipeline
+1. Visitor requests an account on the login page
+2. Admin approves or denies in the Admin panel
+3. Approved users get a temporary password and can join a library group
 
-1. User searches for an audiobook (search proxied to Prowlarr)
-2. User clicks "Request" on a result
-3. Backend sends the magnet link to Real-Debrid
-4. Background task polls Real-Debrid until the torrent is downloaded
-5. Files are unrestricted and downloaded to `{AUDIOBOOK_DIR}/{Author}/{Title}/`
-6. Audiobookshelf library scan is triggered
-7. User gets a real-time WebSocket notification that their book is ready
-8. If push notifications are enabled, user gets a device notification when the app is closed
-
-## Push Notifications
-
-Users can enable push notifications on the **My Requests** page to get alerted when a requested book finishes downloading. Admins can enable push on the **Admin** page to receive notifications for new account requests, download status, and errors.
-
-**Setup:** Generate VAPID keys and add to `.env`:
-
-```bash
-pip install py-vapid
-python scripts/generate_vapid.py
-# Copy the output into your .env file
-```
-
-## Account Request Flow
-
-1. Visitor clicks "Request an Account" on the login page
-2. Fills out username and optional reason
-3. Admin gets a Discord notification with a link to the admin panel
-4. Admin approves or denies from the Approvals tab
-5. If approved, a temporary password is generated
-6. Visitor checks their status using the token they received
-
-## Tech Stack
+## Tech stack
 
 - **Backend**: Python 3.11, FastAPI, SQLAlchemy (async), SQLite
-- **Frontend**: React 18, Vite, TailwindCSS, TanStack Query
-- **Infrastructure**: Docker Compose, nginx, Let's Encrypt
-- **Integrations**: Prowlarr, Real-Debrid, Audiobookshelf, Discord Webhooks
+- **Frontend**: React, Vite, Tailwind CSS, TanStack Query, pdf.js
+- **Infrastructure**: Docker Compose, optional nginx / Tailscale
+- **Integrations**: Prowlarr, Jackett, FlareSolverr, Real-Debrid, TorBox, Audiobookshelf, Kavita
+
+## Android app
+
+See [docs/android-app.md](docs/android-app.md). Build from `frontend/` with Capacitor after pointing `capacitor.config.ts` at your `APP_URL`.

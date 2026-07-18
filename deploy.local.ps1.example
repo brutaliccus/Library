@@ -1,0 +1,6 @@
+# Optional local overrides for personal deploy scripts (gitignored as deploy.local.ps1).
+# Copy this file to deploy.local.ps1 if you maintain a private deploy helper.
+
+$PI_USER = "user"
+$PI_HOST = "library.local"
+$REMOTE_PATH = "/opt/library-site"

@@ -28,7 +28,7 @@ const AUDIO_CACHE = "audio-tracks-v1";
 /** Smaller chunks = less bandwidth hogging per request on a Pi link. */
 const CHUNK_SIZE = 2 * 1024 * 1024;
 /** Let playback establish its buffer before any background download starts. */
-const START_DELAY_MS = 45_000;
+const START_DELAY_MS = 12_000;
 /** Gap between chunks so playback traffic is never fully starved. */
 const INTER_CHUNK_DELAY_MS = 800;
 /** Attempts per chunk (connection AND body read) before failing the track pass. */
@@ -43,10 +43,6 @@ const PASS_RETRY_PARTIAL_MS = 2_000;
 const PART_PARAM = "audioCachePart";
 /** Chunk header carrying the full file size so resumes know the target. */
 const TOTAL_HEADER = "x-audio-total-size";
-/** Max size for in-memory blob URL playback (larger files stream from network). */
-const MAX_BLOB_PLAYBACK_BYTES = 32 * 1024 * 1024;
-/** Max wait for cache lookup before falling back to network streaming. */
-const CACHE_LOOKUP_TIMEOUT_MS = 400;
 
 export interface CacheableTrack {
   contentUrl: string;
@@ -141,38 +137,84 @@ async function cachedResponseMeta(
   }
 }
 
+/** Fast check (no blob read) — is the full track on disk? */
+export async function isTrackFullyCached(url: string): Promise<boolean> {
+  if (!cacheSupported() || !url || !isCacheableUrl(url)) return false;
+  try {
+    const cache = await caches.open(AUDIO_CACHE);
+    const key = cacheStorageKey(url);
+    if (await cache.match(key)) return true;
+    const state = await loadExistingParts(cache, key);
+    return (
+      state.nextIndex > 0 &&
+      state.total != null &&
+      state.total > 0 &&
+      state.offset >= state.total
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Build a blob URL from persisted chunk parts when assembly hasn't run yet. */
+async function objectUrlFromParts(storageKey: string): Promise<string | null> {
+  const cache = await caches.open(AUDIO_CACHE);
+  const state = await loadExistingParts(cache, storageKey);
+  if (state.nextIndex === 0) return null;
+  if (state.total != null && state.offset < state.total) return null;
+
+  const parts: Blob[] = [];
+  for (let i = 0; i < state.nextIndex; i++) {
+    const resp = await cache.match(partKey(storageKey, i));
+    if (!resp) return null;
+    const blob = await resp.blob();
+    if (blob.size === 0) return null;
+    parts.push(blob);
+  }
+  const full = new Blob(parts, { type: state.contentType });
+  if (full.size === 0) return null;
+  return URL.createObjectURL(full);
+}
+
 /**
  * Object URL for a fully-downloaded track, or null when not cached.
  * Callers own the URL and must revoke it via URL.revokeObjectURL().
  *
- * Skips very large files — reading a 200 MB blob into RAM freezes Android.
- * Those tracks still stream from the network; the on-disk cache helps the
- * next session once we add streaming-from-cache later.
+ * Android WebView cannot read the Cache API through a service worker for
+ * <audio> — this blob URL is the only offline playback path on native.
  */
 export async function getCachedTrackObjectUrl(url: string): Promise<string | null> {
+  if (!cacheSupported() || !url || !isCacheableUrl(url)) return null;
   try {
     const meta = await cachedResponseMeta(url);
-    if (!meta || meta.size > MAX_BLOB_PLAYBACK_BYTES) return null;
-    const blob = await meta.resp.blob();
-    if (blob.size === 0) return null;
-    return URL.createObjectURL(blob);
+    if (meta) {
+      const blob = await meta.resp.blob();
+      if (blob.size > 0) return URL.createObjectURL(blob);
+    }
+    return await objectUrlFromParts(cacheStorageKey(url));
   } catch {
     return null;
   }
 }
 
 /**
- * Race a cache lookup against a short timeout so playback never blocks on a
- * slow Cache API read. Returns null on miss, timeout, or oversized file.
+ * Prefer cache when the track is fully local; otherwise use the stream URL.
+ * When `cached` is returned, `revoke` must be called via URL.revokeObjectURL.
  */
-export async function getCachedTrackObjectUrlFast(
-  url: string,
-  timeoutMs = CACHE_LOOKUP_TIMEOUT_MS
-): Promise<string | null> {
-  return Promise.race([
-    getCachedTrackObjectUrl(url),
-    sleep(timeoutMs).then(() => null),
-  ]);
+export async function resolvePlaybackSource(
+  url: string
+): Promise<{ src: string; cached: boolean; revoke?: () => void }> {
+  if (await isTrackFullyCached(url)) {
+    const objectUrl = await getCachedTrackObjectUrl(url);
+    if (objectUrl) {
+      return {
+        src: objectUrl,
+        cached: true,
+        revoke: () => URL.revokeObjectURL(objectUrl),
+      };
+    }
+  }
+  return { src: url, cached: false };
 }
 
 export async function requestPersistentStorage(): Promise<void> {

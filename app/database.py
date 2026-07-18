@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 
 from sqlalchemy import event, text
@@ -7,6 +8,8 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -163,10 +166,35 @@ async def init_db():
     # Alembic's command API is synchronous — run it off the event loop.
     await asyncio.to_thread(_run_migrations)
 
+    # First-boot warm cache from the shipped seed (no-op if already populated).
+    try:
+        from app.services.indexer_seed import import_indexer_seed_if_empty
+
+        seed_result = await asyncio.to_thread(
+            import_indexer_seed_if_empty, settings.database_url
+        )
+        if seed_result.get("imported"):
+            logger.info(
+                "Loaded indexer cache seed (%s torrents)",
+                seed_result.get("counts", {}).get("indexer_torrents", 0),
+            )
+        else:
+            logger.info("Indexer seed: %s", seed_result.get("reason") or "skipped")
+    except Exception as e:
+        logger.warning("Indexer seed import skipped: %s", e)
+
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
 
     await _backfill_default_library_group()
+
+    # Prefer warm matched_volumes snapshot after a seed import.
+    try:
+        from app.services.indexer_cache import mark_summary_ready_if_populated
+
+        await mark_summary_ready_if_populated()
+    except Exception:
+        pass
 
 
 async def _backfill_default_library_group():

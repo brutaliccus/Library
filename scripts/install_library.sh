@@ -152,6 +152,8 @@ fi
 mkdir -p data prowlarr-config jackett-config
 
 c_cyan "==> Starting Docker stack"
+c_yellow "First boot imports the shipped indexer cache seed (~150 MB decompressed) if the DB is empty."
+c_yellow "Optional Open Library catalog (multi-GB) can be built later from Admin → Config."
 docker compose up -d --build
 
 c_cyan "==> Waiting for app health"

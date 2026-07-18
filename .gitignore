@@ -52,6 +52,9 @@ data/
 *.db
 *.db-wal
 *.db-shm
+# Shipped warm indexer cache (sanitized, gzipped) — tracked in git
+!seed/
+!seed/**/*.gz
 backups/
 media/
 prowlarr-config/

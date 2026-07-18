@@ -710,3 +710,34 @@ async def post_setup_defaults(_admin: User = Depends(require_admin)):
 
     await inst.apply_setup_defaults()
     return await inst.setup_status()
+
+
+@router.get("/ol-catalog")
+async def get_ol_catalog_status(_admin: User = Depends(require_admin)):
+    """Status of the local Open Library catalog DB / build job."""
+    from app.services import ol_catalog_build
+
+    return ol_catalog_build.get_status()
+
+
+class OlCatalogBuildBody(BaseModel):
+    include_editions: bool = False
+    skip_download: bool = False
+
+
+@router.post("/ol-catalog/build")
+async def start_ol_catalog_build(
+    body: OlCatalogBuildBody | None = None,
+    _admin: User = Depends(require_admin),
+):
+    """Start (or report) a long-running Open Library dump import.
+
+    Warning: multi-GB download and multi-hour build on a Pi. Opt-in only.
+    """
+    from app.services import ol_catalog_build
+
+    opts = body or OlCatalogBuildBody()
+    return await ol_catalog_build.start_build(
+        include_editions=bool(opts.include_editions),
+        skip_download=bool(opts.skip_download),
+    )

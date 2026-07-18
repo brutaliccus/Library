@@ -1,8 +1,20 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Save, Settings2, AlertTriangle, Eye, EyeOff } from "lucide-react";
+import { Save, Settings2, AlertTriangle, Eye, EyeOff, Database } from "lucide-react";
 import api from "../../api/client";
 import { useToast } from "../../contexts/ToastContext";
+
+interface OlCatalogStatus {
+  status: string;
+  message?: string;
+  catalog_ready?: boolean;
+  catalog_size_bytes?: number;
+  catalog_path?: string;
+  dumps_dir?: string;
+  warnings?: string[];
+  include_editions?: boolean;
+  log_tail?: string;
+}
 
 interface ConfigSetting {
   key: string;
@@ -39,6 +51,35 @@ export default function ConfigTab() {
     queryFn: async () => {
       const { data } = await api.get("/admin/config");
       return data as ConfigResponse;
+    },
+  });
+
+  const olQuery = useQuery({
+    queryKey: ["admin-ol-catalog"],
+    queryFn: async () => {
+      const { data } = await api.get("/admin/ol-catalog");
+      return data as OlCatalogStatus;
+    },
+    refetchInterval: (q) => (q.state.data?.status === "running" ? 5000 : false),
+  });
+
+  const olBuild = useMutation({
+    mutationFn: async (includeEditions: boolean) => {
+      const { data } = await api.post("/admin/ol-catalog/build", {
+        include_editions: includeEditions,
+        skip_download: false,
+      });
+      return data as OlCatalogStatus;
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-ol-catalog"] });
+      toast("Open Library catalog build started", "success");
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Failed to start catalog build";
+      toast(String(msg), "error");
     },
   });
 
@@ -153,6 +194,28 @@ export default function ConfigTab() {
         ))}
       </div>
 
+      {(activeGroup === "storage" || activeGroup === "catalog") && (
+        <OlCatalogPanel
+          status={olQuery.data}
+          loading={olQuery.isLoading}
+          building={olBuild.isPending || olQuery.data?.status === "running"}
+          onBuild={(includeEditions) => {
+            const editionsNote = includeEditions
+              ? "\n\nIncluding editions makes the download and final DB much larger (often 10-20+ GB)."
+              : "";
+            const ok = window.confirm(
+              "Build the local Open Library catalog?\n\n" +
+                "This downloads multi-GB dump files and can take many hours on a Pi. " +
+                "The finished database is typically several GB. " +
+                "Keep the app running until it finishes." +
+                editionsNote +
+                "\n\nContinue?"
+            );
+            if (ok) olBuild.mutate(includeEditions);
+          }}
+        />
+      )}
+
       <div className="space-y-3">
         {current.map((s) => {
           const draft = drafts[s.key];
@@ -264,6 +327,93 @@ export default function ConfigTab() {
         >
           <Save size={14} />
           Save this section
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(n?: number): string {
+  if (!n || n <= 0) return "—";
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
+  return `${Math.round(n / 1024)} KB`;
+}
+
+function OlCatalogPanel({
+  status,
+  loading,
+  building,
+  onBuild,
+}: {
+  status?: OlCatalogStatus;
+  loading: boolean;
+  building: boolean;
+  onBuild: (includeEditions: boolean) => void;
+}) {
+  const warnings = status?.warnings || [];
+  return (
+    <div className="p-4 rounded-xl border border-amber-900/50 bg-amber-950/20 space-y-3">
+      <div className="flex items-start gap-2">
+        <Database size={18} className="text-amber-400 mt-0.5 shrink-0" />
+        <div>
+          <h3 className="text-sm font-semibold text-gray-100">Open Library catalog</h3>
+          <p className="text-xs text-gray-400 mt-1">
+            Optional local metadata DB used for matching and store search. Not required to run the
+            app — the indexer cache seed already ships with the install. Build this only if you want
+            the full local Open Library catalog.
+          </p>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-amber-800/40 bg-black/20 p-3 space-y-1.5">
+        <p className="text-xs font-medium text-amber-300 inline-flex items-center gap-1">
+          <AlertTriangle size={12} /> Before you start
+        </p>
+        <ul className="text-xs text-gray-400 list-disc pl-4 space-y-1">
+          {warnings.map((w) => (
+            <li key={w}>{w}</li>
+          ))}
+          {!warnings.length && (
+            <>
+              <li>Downloads multi-GB dumps; final DB is typically several GB (much more with editions).</li>
+              <li>Can take many hours on a Raspberry Pi — leave the container running.</li>
+            </>
+          )}
+        </ul>
+      </div>
+
+      <div className="text-xs text-gray-400 space-y-0.5 font-mono">
+        <p>
+          Status:{" "}
+          <span className="text-gray-200">
+            {loading ? "…" : status?.status || "idle"}
+            {status?.catalog_ready ? " · catalog ready" : ""}
+          </span>
+        </p>
+        <p>Size: {formatBytes(status?.catalog_size_bytes)}</p>
+        {status?.catalog_path && <p className="break-all">DB: {status.catalog_path}</p>}
+        {status?.dumps_dir && <p className="break-all">Dumps: {status.dumps_dir}</p>}
+        {status?.message && <p className="text-gray-500 break-words">Last: {status.message}</p>}
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          disabled={building}
+          onClick={() => onBuild(false)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-700/80 text-white text-sm font-medium hover:bg-amber-600 disabled:opacity-40"
+        >
+          <Database size={14} />
+          {building ? "Building…" : "Generate catalog (recommended)"}
+        </button>
+        <button
+          type="button"
+          disabled={building}
+          onClick={() => onBuild(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-amber-800/60 text-amber-200/90 text-xs hover:border-amber-600 disabled:opacity-40"
+        >
+          Generate with editions (very large)
         </button>
       </div>
     </div>

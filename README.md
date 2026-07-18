@@ -19,6 +19,7 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 
 ### Search & indexer cache
 - Cache-first search against a local torrent index (fast, no indexer hammering)
+- **Shipped warm cache** (~36 MB compressed seed) imported automatically on first boot so new installs are useful immediately
 - Live Prowlarr search when you need fresher results (SSE live-stream)
 - AudioBook Bay integration (RSS ingest + Jackett live search)
 - Knaben RSS ingest (optional full crawl)
@@ -240,17 +241,17 @@ Prefer RSS-only unless you know you need the deeper coverage.
 
 ### Open Library catalog (optional)
 
-A local SQLite catalog avoids hammering live Open Library APIs during scrape/match:
+A local SQLite catalog avoids hammering live Open Library APIs during scrape/match. It is **not** required for a working install (the indexer cache seed is enough to search releases).
+
+**Admin → Config → Storage (or Catalog)** has a **Generate catalog** button with size/time warnings. That runs the same import as:
 
 ```bash
-# Import dumps into the OL catalog DB (see script help for paths)
 python scripts/ol_import_dumps.py --help
-
-# Or install a monthly refresh cron on the host
+# Monthly refresh cron (optional):
 bash scripts/install_ol_catalog_cron.sh
 ```
 
-Mount dump/working dirs via `OPENLIBRARY_HOST_DIR`. The app reads `ol_catalog.db` from the data directory when present.
+Expect multi-GB downloads and a multi-GB finished DB (much larger if you include editions). On a Pi this often takes many hours. Mount dump/working dirs via `OPENLIBRARY_HOST_DIR`.
 
 ---
 
@@ -337,6 +338,7 @@ Details: [docs/android-app.md](docs/android-app.md).
 app/                 FastAPI application (routers, services, models)
 frontend/            React SPA + Capacitor Android project
 migrations/          Alembic schema versions
+seed/                Warm indexer-cache DB (gzipped; auto-imported on first boot)
 nginx/               Reverse-proxy examples
 scripts/             Install, backup, catalog, indexer helpers
 tests/               Pytest suite

@@ -27,6 +27,7 @@ COPY alembic.ini .
 COPY migrations/ migrations/
 COPY app/ app/
 COPY scripts/ scripts/
+COPY seed/ seed/
 COPY --from=frontend /src/backend/static/ static/
 
 RUN mkdir -p /app/data

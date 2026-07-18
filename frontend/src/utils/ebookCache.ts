@@ -3,6 +3,7 @@
  * Yields bandwidth to active audiobook playback.
  */
 
+import { toAbsoluteUrl } from "../api/instanceUrl";
 import {
   cacheStorageKey,
   hasStorageRoom,
@@ -49,7 +50,8 @@ export async function requestPersistentStorage(): Promise<void> {
 }
 
 export function readerFileUrlForChapter(chapterId: number, isPdf: boolean): string {
-  return isPdf ? ebookPdfUrl(chapterId) : ebookFileUrl(chapterId);
+  const path = isPdf ? ebookPdfUrl(chapterId) : ebookFileUrl(chapterId);
+  return toAbsoluteUrl(path);
 }
 
 export async function isEbookCached(chapterId: number, isPdf = true): Promise<boolean> {

@@ -1,21 +1,16 @@
 import type { CapacitorConfig } from "@capacitor/cli";
 
 /**
- * Android app = native shell around the hosted web app.
- *
- * Pointing at the live server (instead of bundling the SPA) keeps everything
- * working with zero duplication: the service-worker audio cache, media-session
- * lock-screen controls, streaming proxy URLs, and every future deploy reaches
- * the app instantly without rebuilding the APK.
- *
- * Change `server.url` if your public URL differs (must be https).
+ * Android app ships a bundled SPA (webDir). Users enter their Library server
+ * URL in the app on first sign-in / account request (editable in Settings).
+ * No hardcoded server.url — one APK works for any self-hosted instance.
  */
 const config: CapacitorConfig = {
   appId: "com.freiverse.library",
   appName: "Library",
   webDir: "../backend/static",
   server: {
-    url: "https://library.example.com",
+    // Local bundled assets (not a remote host). Origin becomes https://localhost.
     androidScheme: "https",
   },
   android: {

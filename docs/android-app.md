@@ -1,14 +1,12 @@
 # Android App (Capacitor)
 
-The Android app is a thin native shell (Capacitor) that loads the hosted web
-app from your public `APP_URL` (set in `frontend/capacitor.config.ts`). Because it points at the live
-server:
+The Android app ships a **bundled** copy of the web UI. On first launch, users
+enter their self-hosted Library URL (HTTPS) when signing in or requesting an
+account. The URL is stored on the device and can be changed later under
+**Settings → Library server**.
 
-- Every web deploy updates the app instantly — no APK rebuilds needed.
-- The service-worker audio cache (instant resume) works the same as the PWA.
-- Lock-screen / notification media controls work via the Media Session API.
-
-The URL is set in `frontend/capacitor.config.ts` (`server.url`).
+One prebuilt APK works with any Library instance — nothing is hardcoded at build
+time.
 
 ## Building the APK
 
@@ -16,7 +14,7 @@ Prerequisites: Android Studio with an SDK installed (API 34+ recommended).
 
 ```bash
 cd frontend
-npm run android:sync   # builds the web app + syncs the android project
+npm run android:sync   # builds the web app into backend/static + syncs Android
 npm run android:open   # opens the project in Android Studio
 ```
 
@@ -38,24 +36,18 @@ In Android Studio:
    Release output (unsigned until you sign via the wizard):  
    `frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk`
 
-   From a terminal (after signing is configured in Android Studio, or for debug only):
+## First launch (users)
 
-   ```powershell
-   cd frontend\android
-   .\gradlew.bat assembleDebug    # debug APK, no wizard needed
-   .\gradlew.bat assembleRelease  # release APK (needs signing config for install)
-   ```
+1. Open the app → enter **Library server URL** (e.g. `https://library.example.com`)
+2. Create the admin account, sign in, or request an account
+3. Change the URL anytime in **Settings → Library server** (signs you out)
 
-## Changing the app icon / name
+Your server must allow CORS from the Capacitor WebView origin (`https://localhost`).
+Current backend builds already include this.
 
-- Name: `frontend/android/app/src/main/res/values/strings.xml`
-- Icons: replace the `mipmap-*` folders under `frontend/android/app/src/main/res/`
-  (Android Studio: right-click `res` > New > Image Asset).
+## Notes
 
-## Re-syncing after config changes
-
-Any change to `capacitor.config.ts` requires:
-
-```bash
-cd frontend && npx cap sync android
-```
+- Rebuild/sync the APK when you want UI changes in the store build (`npm run android:sync`).
+- Streaming, offline cache, media session, and Android Auto still work; API calls
+  use the stored server URL instead of same-origin.
+- Prefer HTTPS for the library URL. Cleartext HTTP may be blocked by Android.

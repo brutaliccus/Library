@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { BookOpen, UserPlus, CheckCircle2 } from "lucide-react";
-import axios from "axios";
+import api, { applyApiBaseUrl } from "../api/client";
+import ServerUrlField, { commitServerUrl } from "../components/ServerUrlField";
+import { getStoredInstanceUrl, isNativeApp } from "../api/instanceUrl";
 
 export default function RequestAccount() {
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [reason, setReason] = useState("");
+  const [serverUrl, setServerUrl] = useState(() => getStoredInstanceUrl() || "");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [token, setToken] = useState<string | null>(null);
@@ -16,14 +19,29 @@ export default function RequestAccount() {
     setError("");
     setLoading(true);
     try {
-      const { data } = await axios.post("/api/auth/request-account", {
+      if (isNativeApp()) {
+        const saved = commitServerUrl(serverUrl);
+        if (!saved) {
+          setError("Enter your Library server URL, e.g. https://library.example.com");
+          setLoading(false);
+          return;
+        }
+        applyApiBaseUrl();
+      }
+      const { data } = await api.post("/auth/request-account", {
         username,
         email: email || null,
         reason: reason || null,
       });
       setToken(data.token);
     } catch (err: any) {
-      setError(err.response?.data?.detail || "Failed to submit request");
+      const detail = err.response?.data?.detail;
+      setError(
+        detail ||
+          (err.code === "ERR_NETWORK"
+            ? "Could not reach that server. Check the URL and your network."
+            : "Failed to submit request")
+      );
     } finally {
       setLoading(false);
     }
@@ -85,6 +103,14 @@ export default function RequestAccount() {
             <div className="p-3 bg-red-900/30 text-red-400 text-sm rounded-lg">{error}</div>
           )}
 
+          {isNativeApp() && (
+            <ServerUrlField
+              value={serverUrl}
+              onChange={setServerUrl}
+              autoFocus={!serverUrl}
+            />
+          )}
+
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1">
               Desired Username *
@@ -95,7 +121,7 @@ export default function RequestAccount() {
               onChange={(e) => setUsername(e.target.value)}
               className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               required
-              autoFocus
+              autoFocus={!isNativeApp() || !!serverUrl}
             />
           </div>
 

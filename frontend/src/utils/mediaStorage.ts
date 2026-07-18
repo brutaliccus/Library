@@ -29,7 +29,15 @@ export async function hasStorageRoom(extraBytes = 0): Promise<boolean> {
 /** Normalize cache keys so relative/absolute URLs and stray query params match. */
 export function cacheStorageKey(url: string): string {
   try {
-    const u = new URL(url, window.location.origin);
+    // Lazy import avoided — keep sync; origin from localStorage on native.
+    let base = window.location.origin;
+    try {
+      const stored = localStorage.getItem("library_instance_url");
+      if (stored) base = stored.replace(/\/+$/, "");
+    } catch {
+      // ignore
+    }
+    const u = new URL(url, base);
     return `${u.origin}${u.pathname}`;
   } catch {
     return url;

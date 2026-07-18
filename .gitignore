@@ -56,7 +56,8 @@ data/
 !seed/
 !seed/**/*.gz
 backups/
-media/
+# Host media mount dirs (repo root only — do not ignore frontend/src/media)
+/media/
 prowlarr-config/
 jackett-config/
 auto-m4b-config/

@@ -2,12 +2,17 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { BookOpen, LogIn } from "lucide-react";
+import ServerUrlField, { commitServerUrl } from "../components/ServerUrlField";
+import { isNativeApp, needsInstanceUrl, getStoredInstanceUrl } from "../api/instanceUrl";
+import { applyApiBaseUrl } from "../api/client";
+import api from "../api/client";
 
 export default function Login() {
-  const { login, setup, setupRequired } = useAuth();
+  const { login, setup, setupRequired, refreshSetupRequired } = useAuth();
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [serverUrl, setServerUrl] = useState(() => getStoredInstanceUrl() || "");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -16,14 +21,41 @@ export default function Login() {
     setError("");
     setLoading(true);
     try {
-      if (setupRequired) {
+      if (isNativeApp()) {
+        const saved = commitServerUrl(serverUrl);
+        if (!saved) {
+          setError("Enter your Library server URL, e.g. https://library.example.com");
+          setLoading(false);
+          return;
+        }
+        applyApiBaseUrl();
+        // Re-check setup vs login now that we can reach the server.
+        await refreshSetupRequired();
+      }
+      // After URL save, setupRequired may have just updated — re-read via API.
+      let doSetup = setupRequired;
+      if (isNativeApp()) {
+        try {
+          const { data } = await api.get("/auth/setup-required");
+          doSetup = !!data.setup_required;
+        } catch {
+          // fall back to context flag
+        }
+      }
+      if (doSetup) {
         await setup(username, password);
       } else {
         await login(username, password);
       }
       navigate("/");
     } catch (err: any) {
-      setError(err.response?.data?.detail || "Login failed");
+      const detail = err.response?.data?.detail;
+      const msg =
+        detail ||
+        (err.code === "ERR_NETWORK"
+          ? "Could not reach that server. Check the URL and your network."
+          : "Login failed");
+      setError(String(msg));
     } finally {
       setLoading(false);
     }
@@ -38,9 +70,11 @@ export default function Login() {
           </div>
           <h1 className="text-2xl font-bold text-gray-100">Audiobook Library</h1>
           <p className="text-sm text-gray-400 mt-1">
-            {setupRequired
-              ? "Create your admin account to get started"
-              : "Sign in to request audiobooks"}
+            {needsInstanceUrl()
+              ? "Enter your Library URL, then create or sign in to your account"
+              : setupRequired
+                ? "Create your admin account to get started"
+                : "Sign in to request audiobooks"}
           </p>
         </div>
 
@@ -54,6 +88,14 @@ export default function Login() {
             </div>
           )}
 
+          {isNativeApp() && (
+            <ServerUrlField
+              value={serverUrl}
+              onChange={setServerUrl}
+              autoFocus={!serverUrl}
+            />
+          )}
+
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1">
               Username
@@ -64,7 +106,7 @@ export default function Login() {
               onChange={(e) => setUsername(e.target.value)}
               className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               required
-              autoFocus
+              autoFocus={!isNativeApp() || !!serverUrl}
             />
           </div>
 

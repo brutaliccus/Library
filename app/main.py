@@ -66,7 +66,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.app_url, "http://localhost:5173"],
+    allow_origins=[
+        settings.app_url,
+        "http://localhost:5173",
+        # Capacitor Android WebView (androidScheme: https) + iOS
+        "https://localhost",
+        "capacitor://localhost",
+        "ionic://localhost",
+    ],
     allow_origin_regex=r"https://.*\.ts\.net",  # Tailscale Funnel URLs
     allow_credentials=True,
     allow_methods=["*"],

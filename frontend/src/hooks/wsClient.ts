@@ -2,6 +2,7 @@ import {
   AUTH_TOKEN_REFRESHED_EVENT,
   refreshAccessTokenIfNeeded,
 } from "../api/client";
+import { getApiOrigin } from "../api/instanceUrl";
 
 export interface WSMessage {
   type: string;
@@ -24,8 +25,17 @@ let connecting = false;
 const listeners = new Set<Listener>();
 
 function wsUrl(token: string): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/requests/ws?token=${encodeURIComponent(token)}`;
+  const origin = getApiOrigin() || window.location.origin;
+  let host = window.location.host;
+  let protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  try {
+    const u = new URL(origin);
+    host = u.host;
+    protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  } catch {
+    // keep window.location
+  }
+  return `${protocol}//${host}/api/requests/ws?token=${encodeURIComponent(token)}`;
 }
 
 function scheduleReconnect(delayMs = 5000) {

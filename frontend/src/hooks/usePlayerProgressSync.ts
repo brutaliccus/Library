@@ -8,6 +8,7 @@
  */
 import { useCallback, useEffect } from "react";
 import api from "../api/client";
+import { toAbsoluteUrl } from "../api/instanceUrl";
 import { useToast } from "../contexts/ToastContext";
 import { npKey, type NowPlaying, type PlaybackPosition } from "../types/player";
 import {
@@ -171,7 +172,9 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
         // playing); "close" is for real page unloads.
         const endpoint = mode === "close" ? "close-beacon" : "sync-beacon";
         navigator.sendBeacon?.(
-          `/api/stream/abs/${np.sessionId}/${endpoint}?token=${encodeURIComponent(token)}`,
+          toAbsoluteUrl(
+            `/api/stream/abs/${np.sessionId}/${endpoint}?token=${encodeURIComponent(token)}`
+          ),
           new Blob(
             [JSON.stringify({ currentTime: pos.time, duration: np.totalDuration })],
             { type: "application/json" }
@@ -179,7 +182,9 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
         );
       } else if (np.source === "rd" && np.streamHistoryId) {
         navigator.sendBeacon?.(
-          `/api/stream/rd/history/sync-beacon?token=${encodeURIComponent(token)}`,
+          toAbsoluteUrl(
+            `/api/stream/rd/history/sync-beacon?token=${encodeURIComponent(token)}`
+          ),
           new Blob(
             [
               JSON.stringify({

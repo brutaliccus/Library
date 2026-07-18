@@ -64,7 +64,8 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 - Native notifications on the Android app
 
 ### Android app
-- Capacitor shell loading your hosted `APP_URL` (deploys update the app without rebuilding)
+- Capacitor APK with bundled UI — users enter their Library URL on sign-in (editable in Settings)
+- One prebuilt APK works with any self-hosted instance
 - Lock-screen / notification media controls
 - Android Auto: Continue Listening and A-Z library browse  
   See [docs/android-app.md](docs/android-app.md)
@@ -320,15 +321,13 @@ Docker production builds use a multi-stage image and do not require this step on
 
 ### Android
 
-Point `frontend/capacitor.config.ts` `server.url` at your HTTPS `APP_URL`, then:
-
 ```bash
 cd frontend
 npm run android:sync
 npm run android:open
 ```
 
-Details: [docs/android-app.md](docs/android-app.md).
+Users enter their Library HTTPS URL in the app (not at build time). Details: [docs/android-app.md](docs/android-app.md).
 
 ---
 

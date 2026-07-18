@@ -1,7 +1,9 @@
 import { useState, useEffect } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { BookOpen, Clock, CheckCircle2, XCircle, Search } from "lucide-react";
-import axios from "axios";
+import api, { applyApiBaseUrl } from "../api/client";
+import ServerUrlField, { commitServerUrl } from "../components/ServerUrlField";
+import { getStoredInstanceUrl, isNativeApp } from "../api/instanceUrl";
 
 interface StatusData {
   status: string;
@@ -13,6 +15,7 @@ interface StatusData {
 export default function AccountStatus() {
   const [searchParams] = useSearchParams();
   const [token, setToken] = useState(searchParams.get("token") || "");
+  const [serverUrl, setServerUrl] = useState(() => getStoredInstanceUrl() || "");
   const [data, setData] = useState<StatusData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -22,7 +25,16 @@ export default function AccountStatus() {
     setError("");
     setLoading(true);
     try {
-      const { data } = await axios.get(`/api/auth/account-status/${t.trim()}`);
+      if (isNativeApp()) {
+        const saved = commitServerUrl(serverUrl);
+        if (!saved) {
+          setError("Enter your Library server URL first.");
+          setLoading(false);
+          return;
+        }
+        applyApiBaseUrl();
+      }
+      const { data } = await api.get(`/auth/account-status/${t.trim()}`);
       setData(data);
     } catch {
       setError("Request not found. Check your token and try again.");
@@ -72,6 +84,9 @@ export default function AccountStatus() {
         </div>
 
         <div className="bg-gray-800 rounded-2xl shadow-lg border border-gray-700 p-6 space-y-4">
+          {isNativeApp() && (
+            <ServerUrlField value={serverUrl} onChange={setServerUrl} />
+          )}
           <div className="flex gap-2">
             <input
               type="text"

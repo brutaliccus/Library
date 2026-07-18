@@ -6,7 +6,8 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import api from "../api/client";
+import api, { applyApiBaseUrl } from "../api/client";
+import { needsInstanceUrl } from "../api/instanceUrl";
 
 interface AuthUser {
   username: string;
@@ -24,6 +25,8 @@ interface AuthContextType {
   setup: (username: string, password: string) => Promise<void>;
   logout: () => void;
   clearMustChangePassword: () => void;
+  /** Re-fetch whether the instance still needs first-admin setup. */
+  refreshSetupRequired: () => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -34,9 +37,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [sessionReady, setSessionReady] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
 
+  const refreshSetupRequired = useCallback(async () => {
+    applyApiBaseUrl();
+    try {
+      const { data } = await api.get("/auth/setup-required");
+      const needed = !!data.setup_required;
+      setSetupRequired(needed);
+      return needed;
+    } catch {
+      return setupRequired;
+    }
+  }, [setupRequired]);
+
   useEffect(() => {
     const init = async () => {
       setSessionReady(false);
+      applyApiBaseUrl();
+
+      // Native APK with no server URL yet — show login so the user can enter it.
+      if (needsInstanceUrl()) {
+        setUser(null);
+        setSetupRequired(false);
+        setIsLoading(false);
+        setSessionReady(true);
+        return;
+      }
+
       const token = localStorage.getItem("access_token");
 
       // Optimistic paint: if we have a cached user from a prior session, show the
@@ -136,7 +162,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, isLoading, sessionReady, setupRequired, login, setup, logout, clearMustChangePassword }}
+      value={{
+        user,
+        isLoading,
+        sessionReady,
+        setupRequired,
+        login,
+        setup,
+        logout,
+        clearMustChangePassword,
+        refreshSetupRequired,
+      }}
     >
       {children}
     </AuthContext.Provider>

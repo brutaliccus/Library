@@ -1,10 +1,18 @@
 import axios from "axios";
+import { getApiBaseUrl, toAbsoluteUrl } from "./instanceUrl";
 
 const api = axios.create({
-  baseURL: "/api",
+  baseURL: getApiBaseUrl(),
 });
 
+/** Call after the user changes the library server URL (native APK). */
+export function applyApiBaseUrl(): void {
+  api.defaults.baseURL = getApiBaseUrl();
+}
+
 api.interceptors.request.use((config) => {
+  // Keep baseURL current in case it changed mid-session.
+  config.baseURL = getApiBaseUrl();
   const token = localStorage.getItem("access_token");
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
@@ -26,6 +34,22 @@ function parseJwtExpMs(token: string): number | null {
   }
 }
 
+async function postRefresh(refreshToken: string): Promise<string> {
+  const { data } = await axios.post(
+    toAbsoluteUrl("/api/auth/refresh"),
+    { refresh_token: refreshToken }
+  );
+  localStorage.setItem("access_token", data.access_token);
+  localStorage.setItem("refresh_token", data.refresh_token);
+  localStorage.setItem("user_role", data.role);
+  localStorage.setItem("username", data.username);
+  localStorage.setItem("must_change_password", String(data.must_change_password));
+  window.dispatchEvent(
+    new CustomEvent(AUTH_TOKEN_REFRESHED_EVENT, { detail: data.access_token })
+  );
+  return data.access_token as string;
+}
+
 /** Refresh when missing, expired, or expiring within skewMs (used by WebSocket). */
 export async function refreshAccessTokenIfNeeded(skewMs = 120_000): Promise<string | null> {
   const token = localStorage.getItem("access_token");
@@ -38,22 +62,9 @@ export async function refreshAccessTokenIfNeeded(skewMs = 120_000): Promise<stri
 
   try {
     if (!refreshPromise) {
-      refreshPromise = axios
-        .post("/api/auth/refresh", { refresh_token: refreshToken })
-        .then(({ data }) => {
-          localStorage.setItem("access_token", data.access_token);
-          localStorage.setItem("refresh_token", data.refresh_token);
-          localStorage.setItem("user_role", data.role);
-          localStorage.setItem("username", data.username);
-          localStorage.setItem("must_change_password", String(data.must_change_password));
-          window.dispatchEvent(
-            new CustomEvent(AUTH_TOKEN_REFRESHED_EVENT, { detail: data.access_token })
-          );
-          return data.access_token as string;
-        })
-        .finally(() => {
-          refreshPromise = null;
-        });
+      refreshPromise = postRefresh(refreshToken).finally(() => {
+        refreshPromise = null;
+      });
     }
     return await refreshPromise;
   } catch {
@@ -72,25 +83,9 @@ api.interceptors.response.use(
       if (refreshToken) {
         try {
           if (!refreshPromise) {
-            refreshPromise = axios
-              .post("/api/auth/refresh", { refresh_token: refreshToken })
-              .then(({ data }) => {
-                localStorage.setItem("access_token", data.access_token);
-                localStorage.setItem("refresh_token", data.refresh_token);
-                localStorage.setItem("user_role", data.role);
-                localStorage.setItem("username", data.username);
-                localStorage.setItem(
-                  "must_change_password",
-                  String(data.must_change_password)
-                );
-                window.dispatchEvent(
-                  new CustomEvent(AUTH_TOKEN_REFRESHED_EVENT, { detail: data.access_token })
-                );
-                return data.access_token;
-              })
-              .finally(() => {
-                refreshPromise = null;
-              });
+            refreshPromise = postRefresh(refreshToken).finally(() => {
+              refreshPromise = null;
+            });
           }
           const newToken = await refreshPromise;
           original.headers.Authorization = `Bearer ${newToken}`;

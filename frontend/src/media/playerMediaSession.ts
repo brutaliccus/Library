@@ -1,10 +1,13 @@
+import { getApiOrigin } from "../api/instanceUrl";
+
 /** Seconds — keep in sync with AudiobookTransport skip buttons */
 export const MEDIA_SKIP_SECONDS = 15;
 
 export function toAbsoluteArtworkUrl(url: string): string {
   if (!url.trim()) return "";
   try {
-    return new URL(url, window.location.origin).href;
+    const base = getApiOrigin() || window.location.origin;
+    return new URL(url, base).href;
   } catch {
     return url;
   }

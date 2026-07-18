@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { toAbsoluteUrl } from "../api/instanceUrl";
 
 /** Fetches image with auth token so img-like sources work for protected endpoints. */
 interface Props {
@@ -19,7 +20,7 @@ export default function AuthImage({ src, alt, className, fallback }: Props) {
     }
     let revoked = false;
     const token = localStorage.getItem("access_token");
-    const url = src.startsWith("/") ? `${window.location.origin}${src}` : src;
+    const url = src.startsWith("/") ? toAbsoluteUrl(src) : src;
     fetch(url, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       credentials: "include",

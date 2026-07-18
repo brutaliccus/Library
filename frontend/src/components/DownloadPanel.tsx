@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import api from "../api/client";
+import { toAbsoluteUrl } from "../api/instanceUrl";
 import { useToast } from "../contexts/ToastContext";
 import { usePlayer } from "../contexts/PlayerContext";
 import ResultCard from "./ResultCard";
@@ -250,7 +251,7 @@ export default function DownloadPanel({
     setAaTrigger((n) => n + 1);
 
     const token = localStorage.getItem("access_token") || "";
-    const url = `/api/search/live-stream?${searchParams.toString()}`;
+    const url = toAbsoluteUrl(`/api/search/live-stream?${searchParams.toString()}`);
 
     armLiveTimeout(ac, false);
 

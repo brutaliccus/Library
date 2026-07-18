@@ -5,7 +5,7 @@ import { useAuth } from "../hooks/useAuth";
 import { useToast } from "../contexts/ToastContext";
 import { useLibraryGroup } from "../hooks/useLibraryGroup";
 import type { KeySource } from "../hooks/useLibraryGroup";
-import api from "../api/client";
+import api, { applyApiBaseUrl } from "../api/client";
 import {
   audioCacheUsageBytes,
   audioCacheEntryCount,
@@ -15,8 +15,10 @@ import {
 import { ebookCacheUsageBytes, ebookCacheEntryCount, clearAllEbookCache } from "../utils/ebookCache";
 import {
   Settings as SettingsIcon, EyeOff, Shield, Zap, HardDrive, Trash2,
-  Library, Copy, RefreshCw, KeyRound, ChevronUp, ChevronDown,
+  Library, Copy, RefreshCw, KeyRound, ChevronUp, ChevronDown, Globe,
 } from "lucide-react";
+import ServerUrlField, { commitServerUrl } from "../components/ServerUrlField";
+import { getStoredInstanceUrl, isNativeApp } from "../api/instanceUrl";
 
 interface UserSettings {
   private_mode: boolean;
@@ -340,6 +342,53 @@ function LibraryGroupSection() {
   );
 }
 
+function ServerUrlSettings() {
+  const { toast } = useToast();
+  const { logout } = useAuth();
+  const [serverUrl, setServerUrl] = useState(() => getStoredInstanceUrl() || "");
+
+  if (!isNativeApp()) return null;
+
+  const save = () => {
+    const saved = commitServerUrl(serverUrl);
+    if (!saved) {
+      toast("Enter a valid Library URL (https://…)", "error");
+      return;
+    }
+    applyApiBaseUrl();
+    toast("Library server URL updated. Sign in again if requests fail.", "success");
+    // Changing servers invalidates the old session — send user to login.
+    logout();
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+      <div className="flex items-start gap-4">
+        <div className="p-2 bg-gray-800 rounded-lg shrink-0">
+          <Globe size={20} className="text-sky-400" />
+        </div>
+        <div className="flex-1 min-w-0 space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-100">Library server</h3>
+            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+              Address of your self-hosted Library. Changing it signs you out so you can
+              reconnect to the new server.
+            </p>
+          </div>
+          <ServerUrlField value={serverUrl} onChange={setServerUrl} forceShow />
+          <button
+            type="button"
+            onClick={save}
+            className="px-3 py-2 rounded-lg bg-sky-700/80 text-white text-sm font-medium hover:bg-sky-600"
+          >
+            Save server URL
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Settings() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -455,6 +504,7 @@ export default function Settings() {
       </div>
 
       <div className="space-y-4">
+        <ServerUrlSettings />
         <DebridKeysSection />
         <LibraryGroupSection />
 

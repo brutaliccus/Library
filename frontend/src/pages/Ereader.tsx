@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import api from "../api/client";
+import { toAbsoluteUrl } from "../api/instanceUrl";
 import PdfViewer from "../components/PdfViewer";
 import { cacheBookEbook } from "../utils/ebookCache";
 import { getProgress, saveProgress } from "../utils/readingProgress";
@@ -268,7 +269,7 @@ export default function Ereader() {
       totalKavitaPages: bookInfo.pages,
       bookTitle: bookInfo.bookTitle,
       seriesName: bookInfo.seriesName,
-      coverUrl: `/api/library/reader/cover/chapter/${cid}`,
+      coverUrl: toAbsoluteUrl(`/api/library/reader/cover/chapter/${cid}`),
     });
   }, [cid, bookInfo, page, viewportPage, totalViewportPages]);
 

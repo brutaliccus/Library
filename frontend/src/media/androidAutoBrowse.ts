@@ -230,6 +230,8 @@ export interface AutoPlayHandlers {
           trackPositionSeconds?: number;
         }
   ) => void;
+  /** Explicit resume (not toggle) — required after phone-call / car interruptions. */
+  play: () => void;
   togglePlay: () => void;
 }
 
@@ -239,17 +241,18 @@ export async function handlePlayMediaId(
   mediaId: string,
   handlers: AutoPlayHandlers
 ): Promise<void> {
-  if (mediaId === AA_NOW_PLAYING) {
-    handlers.togglePlay();
-    return;
-  }
-
   try {
     await LibraryAuto.bringToForeground();
-    // Give the WebView time to resume after a cold start from Android Auto.
+    // Give the WebView time to resume after a cold start / interruption.
     await sleep(450);
   } catch {
     /* native only */
+  }
+
+  if (mediaId === AA_NOW_PLAYING) {
+    // Explicit play — toggle would invert if native/web state desynced after a call.
+    handlers.play();
+    return;
   }
 
   if (mediaId.startsWith(AA_PLAY_ABS_PREFIX)) {

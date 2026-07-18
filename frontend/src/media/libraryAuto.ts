@@ -8,6 +8,7 @@ import {
   startAndroidAutoBrowseListener,
   type AutoPlayHandlers,
 } from "./androidAutoBrowse";
+import { saveAaResumeSnapshot } from "./aaResumeSnapshot";
 
 export type { LibraryAutoAction, BrowseChild } from "./libraryAutoPlugin";
 export { LibraryAuto } from "./libraryAutoPlugin";
@@ -18,6 +19,19 @@ let playHandlers: AutoPlayHandlers | null = null;
 let lastMetaKey = "";
 let lastPosSyncAt = 0;
 const POS_SYNC_INTERVAL_MS = 1_000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Wake the WebView before transport play so audio.play() isn't rejected while frozen. */
+async function withWebViewReady(fn: () => void): Promise<void> {
+  try {
+    await LibraryAuto.bringToForeground();
+    await sleep(350);
+  } catch {
+    /* native only */
+  }
+  fn();
+}
 
 export async function registerAndroidAutoHandlers(
   handlers: MediaActionHandlers,
@@ -40,7 +54,12 @@ export async function registerAndroidAutoHandlers(
         mediaId?: string;
       }) => void;
     }> = [
-      { action: "play", fn: () => handlers.play() },
+      {
+        action: "play",
+        fn: () => {
+          void withWebViewReady(() => handlers.play());
+        },
+      },
       { action: "pause", fn: () => handlers.pause() },
       { action: "stop", fn: () => handlers.dismissPlayer() },
       { action: "seekbackward", fn: () => handlers.seekRelative(-SKIP) },
@@ -106,6 +125,16 @@ export async function syncAndroidAutoPlayback(
     if (metaChanged) lastMetaKey = metaKey;
     if (posDue) lastPosSyncAt = now;
 
+    const safePos = isFinite(pos) ? Math.max(0, pos) : 0;
+    if ("source" in np && (np.source === "abs" || np.source === "rd")) {
+      saveAaResumeSnapshot(
+        np as import("../types/player").NowPlaying,
+        safePos,
+        trackIndex,
+        Math.max(0, globalTime - (np.tracks[trackIndex]?.startOffset ?? 0))
+      );
+    }
+
     if (metaChanged) {
       const artUrl = toAbsoluteArtworkUrl(np.coverUrl);
       const artwork = artUrl
@@ -122,7 +151,7 @@ export async function syncAndroidAutoPlayback(
         artist: np.author || "Audiobook",
         album: trackLabel || np.title,
         duration: isFinite(d) && d > 0 ? d : 0,
-        position: isFinite(pos) ? Math.max(0, pos) : 0,
+        position: safePos,
         playbackRate: Math.max(playbackRate, 0.25),
         artwork,
       });
@@ -132,7 +161,7 @@ export async function syncAndroidAutoPlayback(
     await LibraryAuto.syncPlayback({
       active: true,
       playing: isPlaying,
-      position: isFinite(pos) ? Math.max(0, pos) : 0,
+      position: safePos,
       playbackRate: Math.max(playbackRate, 0.25),
       positionOnly: true,
     });

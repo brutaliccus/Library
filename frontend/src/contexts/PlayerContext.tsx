@@ -843,7 +843,49 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     playIntentRef.current = true;
     const audio = getAudio();
     const np = stateRef.current.nowPlaying;
-    if (!np) return;
+
+    // After car power-cycle the WebView may have no in-memory book — restore
+    // from the Android Auto resume snapshot and start that title.
+    if (!np) {
+      void (async () => {
+        try {
+          const { loadAaResumeSnapshot } = await import("../media/aaResumeSnapshot");
+          const { LibraryAuto } = await import("../media/libraryAuto");
+          const snap = loadAaResumeSnapshot();
+          if (!snap) return;
+          try {
+            await LibraryAuto.bringToForeground();
+          } catch {
+            /* ignore */
+          }
+          if (snap.source === "abs" && snap.itemId) {
+            await playABS(snap.itemId);
+          } else if (snap.source === "rd" && snap.streamHistoryId) {
+            const { data } = await api.get("/stream/rd/history/in-progress");
+            const item = (data?.items ?? []).find(
+              (i: { id: number }) => i.id === snap.streamHistoryId
+            );
+            if (item?.tracks?.length) {
+              playRD(
+                item.tracks,
+                item.title || snap.title,
+                item.author || snap.author,
+                item.coverUrl || snap.coverUrl,
+                item.id,
+                {
+                  startAt: snap.position,
+                  trackIndex: snap.trackIndex,
+                  trackPositionSeconds: snap.trackLocal,
+                }
+              );
+            }
+          }
+        } catch (e) {
+          console.warn("[player] AA resume snapshot failed", e);
+        }
+      })();
+      return;
+    }
 
     const reloadAtPosition = () => {
       const ti = stateRef.current.currentTrackIndex;
@@ -858,16 +900,27 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
 
     const attemptPlay = (retriesLeft: number) => {
-      audio.play().catch(() => {
-        if (retriesLeft > 0) {
-          setTimeout(() => attemptPlay(retriesLeft - 1), 350);
-        } else {
-          reloadAtPosition();
+      audio.play().catch((err) => {
+        const name = err instanceof Error ? err.name : "";
+        // Locked / frozen WebView — wake and retry (Android Auto after a call).
+        if (name === "NotAllowedError" || retriesLeft > 0) {
+          void import("../media/libraryAuto")
+            .then(({ LibraryAuto }) => LibraryAuto.bringToForeground())
+            .catch(() => {})
+            .finally(() => {
+              if (retriesLeft > 0) {
+                setTimeout(() => attemptPlay(retriesLeft - 1), 450);
+              } else {
+                reloadAtPosition();
+              }
+            });
+          return;
         }
+        reloadAtPosition();
       });
     };
-    attemptPlay(3);
-  }, [getAudio]);
+    attemptPlay(5);
+  }, [getAudio, playABS, playRD]);
 
   const pause = useCallback(() => {
     playIntentRef.current = false;

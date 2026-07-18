@@ -3,6 +3,8 @@ package com.freiverse.library;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Base64;
 import android.util.Log;
 import androidx.core.content.ContextCompat;
@@ -28,10 +30,24 @@ public class LibraryAutoPlugin extends Plugin
     implements LibraryAutoBridge.ActionListener, LibraryAutoBridge.BrowseRequestEmitter {
 
     private static final String TAG = "LibraryAuto";
+    /** Delay so a frozen WebView can resume before audio.play(). */
+    private static final long PLAY_WAKE_DELAY_MS = 400;
 
     private final Map<String, PluginCall> actionHandlers = new HashMap<>();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final List<PendingAction> pendingActions = new ArrayList<>();
     private String cachedArtworkUrl = null;
     private Bitmap cachedArtwork = null;
+
+    private static final class PendingAction {
+        final String action;
+        final Bundle extras;
+
+        PendingAction(String action, Bundle extras) {
+            this.action = action;
+            this.extras = extras;
+        }
+    }
 
     @Override
     public void load() {
@@ -102,7 +118,7 @@ public class LibraryAutoPlugin extends Plugin
                 Log.w(TAG, "Failed to parse browse children", ex);
             }
 
-            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            new Handler(Looper.getMainLooper()).post(() -> {
                 LibraryAutoBridge.getInstance().resolveBrowseChildren(rid, nodes);
                 call.resolve();
             });
@@ -116,16 +132,39 @@ public class LibraryAutoPlugin extends Plugin
     }
 
     private void bringActivityToForeground() {
-        if (getActivity() == null || getContext() == null) {
+        android.content.Context ctx = getContext();
+        if (ctx == null) {
             return;
         }
-        android.content.Intent intent = new android.content.Intent(getContext(), getActivity().getClass());
+        android.content.Intent intent = new android.content.Intent(ctx, MainActivity.class);
         intent.addFlags(
             android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                 | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
                 | android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
         );
-        getActivity().startActivity(intent);
+        intent.putExtra("library_media_resume", true);
+        try {
+            ctx.startActivity(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "bringActivityToForeground failed", e);
+        }
+    }
+
+    private void ensurePlaybackService() {
+        android.content.Context ctx = getContext();
+        if (ctx == null) {
+            return;
+        }
+        android.content.Intent serviceIntent = new android.content.Intent(
+            ctx,
+            LibraryMediaBrowserService.class
+        );
+        try {
+            ContextCompat.startForegroundService(ctx, serviceIntent);
+        } catch (Exception e) {
+            Log.w(TAG, "startForegroundService failed", e);
+        }
     }
 
     @PluginMethod
@@ -187,14 +226,7 @@ public class LibraryAutoPlugin extends Plugin
             Math.round(positionSec * 1000),
             playbackRate
         );
-        android.content.Context ctx = getContext();
-        if (ctx != null) {
-            android.content.Intent intent = new android.content.Intent(
-                ctx,
-                LibraryMediaBrowserService.class
-            );
-            ContextCompat.startForegroundService(ctx, intent);
-        }
+        ensurePlaybackService();
 
         call.resolve();
     }
@@ -217,28 +249,71 @@ public class LibraryAutoPlugin extends Plugin
         String action = call.getString("action");
         if (action != null) {
             actionHandlers.put(action, call);
+            flushPendingFor(action);
         } else {
             call.resolve();
         }
     }
 
-    @Override
-    public void onAction(String action, Bundle extras) {
-        // Only foreground when picking a title from the browse tree — not for
-        // play/pause transport controls (bringing the WebView forward mid-resume
-        // races audio.play() and breaks Android Auto / lock-screen play).
-        if ("playmedia".equals(action)) {
-            bringActivityToForeground();
-            android.content.Context ctx = getContext();
-            if (ctx != null) {
-                android.content.Intent serviceIntent = new android.content.Intent(
-                    ctx,
-                    LibraryMediaBrowserService.class
-                );
-                ContextCompat.startForegroundService(ctx, serviceIntent);
+    private void flushPendingFor(String action) {
+        List<PendingAction> due = new ArrayList<>();
+        synchronized (pendingActions) {
+            for (int i = pendingActions.size() - 1; i >= 0; i--) {
+                if (action.equals(pendingActions.get(i).action)) {
+                    due.add(0, pendingActions.remove(i));
+                }
             }
         }
+        for (PendingAction p : due) {
+            deliverToJs(p.action, p.extras);
+        }
+    }
 
+    @Override
+    public void onAction(String action, Bundle extras) {
+        boolean needsWake =
+            "play".equals(action)
+                || "playmedia".equals(action)
+                || "seekto".equals(action);
+
+        if (needsWake) {
+            bringActivityToForeground();
+            ensurePlaybackService();
+        }
+
+        PluginCall handler = actionHandlers.get(action);
+        boolean missing =
+            handler == null || PluginCall.CALLBACK_ID_DANGLING.equals(handler.getCallbackId());
+
+        if (missing) {
+            Log.d(TAG, "Queueing AA action until JS handler ready: " + action);
+            synchronized (pendingActions) {
+                pendingActions.add(new PendingAction(action, extras));
+                while (pendingActions.size() > 8) {
+                    pendingActions.remove(0);
+                }
+            }
+            // Retry delivery after WebView has a chance to re-register handlers.
+            mainHandler.postDelayed(() -> {
+                PluginCall h = actionHandlers.get(action);
+                if (h != null && !PluginCall.CALLBACK_ID_DANGLING.equals(h.getCallbackId())) {
+                    flushPendingFor(action);
+                }
+            }, PLAY_WAKE_DELAY_MS + 200);
+            return;
+        }
+
+        if ("play".equals(action) || "playmedia".equals(action)) {
+            // Soft-wake first, then deliver play so audio.play() isn't rejected
+            // by a still-frozen WebView (phone call / car reconnect).
+            mainHandler.postDelayed(() -> deliverToJs(action, extras), PLAY_WAKE_DELAY_MS);
+            return;
+        }
+
+        deliverToJs(action, extras);
+    }
+
+    private void deliverToJs(String action, Bundle extras) {
         PluginCall handler = actionHandlers.get(action);
         if (handler == null || PluginCall.CALLBACK_ID_DANGLING.equals(handler.getCallbackId())) {
             Log.d(TAG, "No JS handler for action: " + action);

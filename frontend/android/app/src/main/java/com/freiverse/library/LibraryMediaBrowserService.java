@@ -8,6 +8,8 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
@@ -27,6 +29,7 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
     private MediaSessionCompat mediaSession;
     private boolean foregroundActive = false;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     @Override
     public void onCreate() {
@@ -37,14 +40,17 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS
                 | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
         );
+        mediaSession.setSessionActivity(LibraryAutoBridge.sessionActivityIntent(this));
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
             @Override
             public void onPlay() {
+                LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
+                bridge.requestAudioFocusForPlay();
                 // Flip the session state immediately so the Android Auto button
                 // updates without waiting for the (possibly throttled) WebView
                 // round-trip. The next syncPlayback from JS confirms/corrects it.
-                LibraryAutoBridge.getInstance().setPlayingOptimistic(true);
-                LibraryAutoBridge.getInstance().dispatch("play", null);
+                bridge.setPlayingOptimistic(true);
+                bridge.dispatch("play", null);
             }
 
             @Override
@@ -55,6 +61,7 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
             @Override
             public void onStop() {
+                LibraryAutoBridge.getInstance().abandonAudioFocus();
                 LibraryAutoBridge.getInstance().dispatch("stop", null);
             }
 
@@ -87,6 +94,7 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
             @Override
             public void onPlayFromMediaId(String mediaId, Bundle extras) {
+                LibraryAutoBridge.getInstance().requestAudioFocusForPlay();
                 Bundle payload = new Bundle();
                 payload.putString("mediaId", mediaId);
                 LibraryAutoBridge.getInstance().dispatch("playmedia", payload);
@@ -96,11 +104,17 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
         setSessionToken(mediaSession.getSessionToken());
         LibraryAutoBridge.getInstance().attach(this, mediaSession);
         createNotificationChannel();
+
+        // If we restored a paused session after process death, show Now Playing in AA.
+        if (LibraryAutoBridge.getInstance().isActive()) {
+            mainHandler.post(this::promoteToForeground);
+        }
     }
 
     @Override
     public void onDestroy() {
         stopForegroundPlayback();
+        LibraryAutoBridge.getInstance().abandonAudioFocus();
         if (mediaSession != null) {
             mediaSession.setActive(false);
             mediaSession.release();
@@ -208,18 +222,18 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             title = "Library";
         }
 
-        Intent launchIntent = new Intent(this, MainActivity.class);
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent contentIntent = PendingIntent.getActivity(
-            this,
-            0,
-            launchIntent,
-            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
-        );
+        PendingIntent contentIntent = LibraryAutoBridge.sessionActivityIntent(this);
 
         MediaStyle style = new MediaStyle()
             .setMediaSession(mediaSession.getSessionToken())
-            .setShowActionsInCompactView(0, 1, 2);
+            .setShowActionsInCompactView(0, 1, 2)
+            .setShowCancelButton(true)
+            .setCancelButtonIntent(
+                MediaButtonReceiver.buildMediaButtonPendingIntent(
+                    this,
+                    PlaybackStateCompat.ACTION_STOP
+                )
+            );
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_notification)

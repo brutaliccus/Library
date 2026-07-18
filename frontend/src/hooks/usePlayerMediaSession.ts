@@ -81,6 +81,7 @@ export function usePlayerMediaSession(
       {
         playABS: (id) => playActionsRef.current.playABS(id),
         playRD: (...args) => playActionsRef.current.playRD(...args),
+        play: () => actionsRef.current.play(),
         togglePlay: () => actionsRef.current.togglePlay(),
       }
     );

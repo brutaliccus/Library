@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Install / bootstrap Freiverse Library Site on a Linux host (Docker Compose).
+# Install / bootstrap Library on a Linux host (Docker Compose).
 # Usage:
-#   curl -fsSL … | bash          # or
-#   ./scripts/install_library.sh [/opt/stacks/Library\ Site]
+#   curl -fsSL https://raw.githubusercontent.com/brutaliccus/Library/main/scripts/install_library.sh | bash
+#   ./scripts/install_library.sh [/opt/library]
 set -euo pipefail
 
-TARGET="${1:-/opt/stacks/Library Site}"
-REPO_URL="${LIBRARY_SITE_REPO:-https://github.com/Freiverse/Library-Site.git}"
+TARGET="${1:-/opt/library}"
+REPO_URL="${LIBRARY_SITE_REPO:-https://github.com/brutaliccus/Library.git}"
 BRANCH="${LIBRARY_SITE_BRANCH:-main}"
 
 c_cyan() { printf '\033[36m%s\033[0m\n' "$*"; }
@@ -42,7 +42,7 @@ yes_no() {
   [[ "$val" =~ ^[Yy] ]]
 }
 
-c_cyan "==> Freiverse Library Site installer"
+c_cyan "==> Library installer"
 echo "Target directory: $TARGET"
 
 if ! command -v docker >/dev/null 2>&1; then

@@ -9,6 +9,88 @@ SERIES_PATTERNS = [
     re.compile(r"^(.+?)\s+(\d+)$"),
 ]
 
+# ABS / folder style: "Book 01 - Harry Potter and the Philosopher's Stone"
+_BOOK_NN_PREFIX = re.compile(
+    r"^(?:Book|Bk|Vol\.?|Volume)\s*0*(\d+(?:\.\d+)?)\s*[-–:—]\s*(.+)$",
+    re.IGNORECASE,
+)
+_AND_THE = re.compile(r"^(.+?)\s+and\s+the\s+.+$", re.IGNORECASE)
+_PAREN_SERIES = re.compile(
+    r"[\(\[]\s*(?P<series>[^)\]]+?)\s*(?:,\s*(?:Book|Vol\.?|#)?\s*\d+(?:\.\d+)?)?\s*[\)\]]\s*$",
+    re.IGNORECASE,
+)
+
+# Media-format labels that must never appear as series/genre shelves
+JUNK_LIBRARY_LABELS = frozenset({
+    "audiobook", "audiobooks", "ebook", "ebooks", "unabridged", "abridged",
+    "mp3", "m4b", "m4a", "epub", "pdf", "retail", "graphicaudio",
+    "fiction", "literature", "general", "adult", "young adult", "ya",
+})
+
+
+def is_junk_library_label(name: str | None) -> bool:
+    n = (name or "").strip().lower()
+    return not n or n in JUNK_LIBRARY_LABELS
+
+
+def library_series_from_title(title: str) -> tuple[str, str] | None:
+    """Infer (series_name, sequence) for local library shelves.
+
+    Prefer store-style title cues over ABS folder junk. Handles:
+    - ``Book 01 - Harry Potter and the Philosopher's Stone`` → Harry Potter / 1
+    - ``Phoenix and Ashes (Elemental Masters, Book 3)`` → Elemental Masters / 3
+    - standard ``Series Name Book 2`` patterns via ``detect_series_from_title``
+    """
+    t = (title or "").strip()
+    if not t:
+        return None
+
+    m = _BOOK_NN_PREFIX.match(t)
+    if m:
+        seq, rest = m.group(1), m.group(2).strip()
+        nested = detect_series_from_title(rest)
+        if nested and not is_junk_library_label(nested[0]):
+            return nested[0], seq
+        paren = _PAREN_SERIES.search(rest)
+        if paren:
+            series = re.sub(
+                r",?\s*(?:Book|Vol\.?)\s*\d+(?:\.\d+)?\s*$",
+                "",
+                paren.group("series"),
+                flags=re.IGNORECASE,
+            ).strip()
+            if series and not is_junk_library_label(series):
+                return series, seq
+        and_the = _AND_THE.match(rest)
+        if and_the:
+            series = and_the.group(1).strip()
+            if series and not is_junk_library_label(series):
+                return series, seq
+        if ":" in rest:
+            series = rest.split(":", 1)[0].strip()
+            if series and not is_junk_library_label(series):
+                return series, seq
+        return None
+
+    paren = _PAREN_SERIES.search(t)
+    if paren:
+        series = re.sub(
+            r",?\s*(?:Book|Vol\.?)\s*\d+(?:\.\d+)?\s*$",
+            "",
+            paren.group("series"),
+            flags=re.IGNORECASE,
+        ).strip()
+        seq_m = re.search(r"(?:Book|Vol\.?|#)\s*(\d+(?:\.\d+)?)", paren.group(0), re.I)
+        seq = seq_m.group(1) if seq_m else ""
+        if series and not is_junk_library_label(series):
+            return series, seq
+
+    detected = detect_series_from_title(t)
+    if detected and not is_junk_library_label(detected[0]):
+        return detected
+    return None
+
+
 TORRENT_BOOK_NUM_PATTERNS = [
     re.compile(r"\b(?:book|bk)\s*[#.]?\s*0*(\d+(?:\.\d+)?)\b", re.IGNORECASE),
     re.compile(r"#[\s]*0*(\d+(?:\.\d+)?)\b"),

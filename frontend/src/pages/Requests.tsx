@@ -39,6 +39,13 @@ function hasActiveDownloads(requests: DownloadRequestProgress[] | undefined): bo
 const ACTIVE = new Set(["pending", "sent_to_rd", "downloading_rd", "transferring", "organizing"]);
 const RETRYABLE = new Set(["failed", "cancelled"]);
 
+function catalogBookPath(volumeId: string | null | undefined, title: string): string {
+  if (volumeId && !volumeId.startsWith("rd:")) {
+    return `/book/${encodeURIComponent(volumeId)}`;
+  }
+  return `/search?q=${encodeURIComponent(title)}`;
+}
+
 export default function RequestsPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -92,27 +99,50 @@ export default function RequestsPage() {
 
   const openRequest = useCallback(
     async (req: DownloadRequestProgress) => {
+      // Failed / cancelled → Find Downloads (catalog book page) without re-searching when possible
       if (req.status === "failed" || req.status === "cancelled") {
-        if (req.google_volume_id && !req.google_volume_id.startsWith("rd:")) {
-          navigate(`/book/${encodeURIComponent(req.google_volume_id)}`);
-          return;
-        }
-        navigate(`/search?q=${encodeURIComponent(req.title)}`);
+        navigate(catalogBookPath(req.google_volume_id, req.title));
         return;
       }
 
       if (req.status === "completed") {
+        // Ebooks: resolve Kavita chapter directly (more reliable than unified search)
+        if (req.media_type === "ebook") {
+          try {
+            const params = new URLSearchParams({ title: req.title });
+            if (req.author) params.set("author", req.author);
+            const { data } = await api.get(`/library/ebook-match?${params}`);
+            const chapterId = (data as { chapterId?: number | null })?.chapterId;
+            if (chapterId != null) {
+              navigate(`/read/${chapterId}`);
+              return;
+            }
+          } catch {
+            /* fall through */
+          }
+        }
+
         try {
-          const media = req.media_type === "ebook" ? "ebooks" : req.media_type === "audiobook" ? "audiobooks" : "all";
+          const media =
+            req.media_type === "ebook"
+              ? "ebooks"
+              : req.media_type === "audiobook"
+                ? "audiobooks"
+                : "all";
           const { data } = await api.get(
             `/library/search?q=${encodeURIComponent(req.title)}&media=${media}`
           );
-          const results = (data as { results?: Array<{
-            source: string;
-            itemId?: string;
-            chapterId?: number;
-            title?: string;
-          }> })?.results || [];
+          const results =
+            (
+              data as {
+                results?: Array<{
+                  source: string;
+                  itemId?: string;
+                  chapterId?: number;
+                  title?: string;
+                }>;
+              }
+            )?.results || [];
           const titleLower = req.title.toLowerCase();
           const match =
             results.find((r) => (r.title || "").toLowerCase() === titleLower) ||
@@ -132,15 +162,14 @@ export default function RequestsPage() {
         } catch {
           /* fall through */
         }
-        if (req.google_volume_id && !req.google_volume_id.startsWith("rd:")) {
-          navigate(`/book/${encodeURIComponent(req.google_volume_id)}`);
-          return;
-        }
-        navigate(`/library?q=${encodeURIComponent(req.title)}`);
+
+        // Never navigate to `/library` — that route does not exist and falls
+        // through to `/libraries` (server picker). Prefer catalog book / search.
+        navigate(catalogBookPath(req.google_volume_id, req.title));
         return;
       }
 
-      // In-progress: still allow jumping to catalog / search
+      // In-progress
       if (req.google_volume_id && !req.google_volume_id.startsWith("rd:")) {
         navigate(`/book/${encodeURIComponent(req.google_volume_id)}`);
       }
@@ -205,7 +234,11 @@ export default function RequestsPage() {
           {requests.map((req) => {
             const canCancel = ACTIVE.has(req.status);
             const canRetry = RETRYABLE.has(req.status);
-            const clickable = req.status === "completed" || req.status === "failed" || req.status === "cancelled" || !!req.google_volume_id;
+            const clickable =
+              req.status === "completed" ||
+              req.status === "failed" ||
+              req.status === "cancelled" ||
+              !!req.google_volume_id;
             return (
               <div
                 key={req.id}

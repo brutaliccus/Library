@@ -17,21 +17,26 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from app.database import get_db, async_session
 from app.models import User, StreamingLibraryItem, DownloadRequest
 from app.utils.auth import get_current_user
-from app.services import debrid, debrid_tokens, audiobookshelf, kavita
+from app.services import debrid, debrid_tokens, audiobookshelf, kavita, google_books
 from app.services import kavita_ebook_match
 from app.services.google_books import GENRE_TAXONOMY
+from app.utils.book_series import is_junk_library_label, library_series_from_title
 from app.routers.stream import tracks_with_stable_urls
 
 logger = logging.getLogger(__name__)
 
 # Build a lookup: lowercased sub-genre name/keyword -> top-level genre name
+# Same taxonomy as store `/books/genres` (GENRE_TAXONOMY).
 _GENRE_TO_TOPLEVEL: dict[str, str] = {}
+_TAXONOMY_TOP_NAMES: set[str] = set()
+
 
 def _build_genre_lookup() -> None:
     if _GENRE_TO_TOPLEVEL:
         return
     for top in GENRE_TAXONOMY:
         top_name = top["name"]
+        _TAXONOMY_TOP_NAMES.add(top_name)
         _GENRE_TO_TOPLEVEL[top_name.lower()] = top_name
         _GENRE_TO_TOPLEVEL[top["slug"]] = top_name
         for child in top.get("children", []):
@@ -42,46 +47,43 @@ def _build_genre_lookup() -> None:
                     _GENRE_TO_TOPLEVEL.setdefault(word, top_name)
 
 
-def _map_to_toplevel(genre: str) -> str:
-    """Map an ABS genre string to a top-level genre name."""
+def _map_to_toplevel(genre: str) -> str | None:
+    """Map a source genre to a store top-level taxonomy name, or None if junk/unknown."""
     _build_genre_lookup()
-    low = genre.lower().strip()
+    low = (genre or "").lower().strip()
+    if not low or is_junk_library_label(low):
+        return None
     if low in _GENRE_TO_TOPLEVEL:
         return _GENRE_TO_TOPLEVEL[low]
+    # Prefer longer key matches so "science fiction" beats "fiction" fragments
+    best: tuple[int, str] | None = None
     for key, val in _GENRE_TO_TOPLEVEL.items():
+        if len(key) < 4:
+            continue
         if key in low or low in key:
-            return val
-    return genre
-
-
-_SERIES_IN_PARENS = re.compile(
-    r"[\(\[]\s*(?P<series>[^\)\]]+?)\s*(?:,\s*(?:Book|Vol\.?|#)?\s*\d+)?\s*[\)\]]\s*$",
-    re.IGNORECASE,
-)
-_SERIES_HASH = re.compile(
-    r"^(?P<series>.+?)\s+#?\d+\s*[:\-–]\s+",
-    re.IGNORECASE,
-)
+            score = len(key)
+            if best is None or score > best[0]:
+                best = (score, val)
+    return best[1] if best else None
 
 
 def _infer_series_name(title: str) -> str:
-    """Best-effort series label from a book title (store-like grouping for ebooks)."""
-    t = (title or "").strip()
-    if not t:
-        return ""
-    m = _SERIES_IN_PARENS.search(t)
-    if m:
-        series = m.group("series").strip()
-        # Drop trailing ", Book 3" variants already handled; also strip "Book N" alone
-        series = re.sub(r",?\s*(?:Book|Vol\.?)\s*\d+\s*$", "", series, flags=re.IGNORECASE).strip()
-        if series and len(series) > 1:
-            return series
-    m = _SERIES_HASH.match(t)
-    if m:
-        series = m.group("series").strip()
-        if series and len(series) > 1:
-            return series
-    return ""
+    """Store-aligned series label from a book title (shared with abs series shelves)."""
+    detected = library_series_from_title(title)
+    return detected[0] if detected else ""
+
+
+def _normalize_item_genres(raw_genres: list) -> list[str]:
+    """Collapse ABS/Kavita genres onto store taxonomy tops; drop media-type junk."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for g in raw_genres or []:
+        label = g if isinstance(g, str) else (g.get("name") or g.get("title") or "")
+        top = _map_to_toplevel(str(label))
+        if top and top not in seen:
+            seen.add(top)
+            out.append(top)
+    return out
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 
@@ -205,13 +207,50 @@ async def get_library(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Personal Collection — explicit adds only (synthetic rd: stream autos are hidden)."""
     stmt = (
         select(StreamingLibraryItem)
         .where(StreamingLibraryItem.user_id == user.id)
         .order_by(StreamingLibraryItem.created_at.desc())
     )
     rows = (await db.execute(stmt)).scalars().all()
-    return {"items": [_serialize(item) for item in rows]}
+    keep: list[StreamingLibraryItem] = []
+    dirty = False
+    need_cover: list[StreamingLibraryItem] = []
+    for item in rows:
+        vid = item.google_volume_id or ""
+        if vid.startswith("rd:"):
+            # Legacy stream/request auto-adds — remove so PC stays curated.
+            await db.delete(item)
+            dirty = True
+            continue
+        if item.genre:
+            mapped = _map_to_toplevel(item.genre)
+            if mapped and mapped != item.genre:
+                item.genre = mapped
+                dirty = True
+            elif mapped is None and is_junk_library_label(item.genre):
+                item.genre = ""
+                dirty = True
+        if not (item.cover_url or "").strip() and vid:
+            need_cover.append(item)
+        keep.append(item)
+
+    if need_cover:
+        async def _fill(it: StreamingLibraryItem) -> None:
+            nonlocal dirty
+            cover = await _lookup_cover_for_volume(
+                it.google_volume_id, it.title, it.author or ""
+            )
+            if cover:
+                it.cover_url = cover
+                dirty = True
+
+        await asyncio.gather(*[_fill(it) for it in need_cover[:12]])
+
+    if dirty:
+        await db.commit()
+    return {"items": [_serialize(item) for item in keep]}
 
 
 @router.post("")
@@ -441,7 +480,7 @@ async def abs_collection(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return all ABS library items grouped by top-level genre."""
+    """Return all ABS library items grouped by store top-level genres."""
     hidden_titles = await _get_private_titles_for_others(user.id, db)
     items = await audiobookshelf.get_all_items()
     genres: dict[str, list] = {}
@@ -450,23 +489,30 @@ async def abs_collection(
     for item in items:
         if _is_hidden(item.get("title", ""), hidden_titles):
             continue
-        item_genres = item.get("genres", [])
-        if not item_genres:
+        # Attach store-aligned genres + series for client filters
+        mapped = _normalize_item_genres(item.get("genres") or [])
+        item = {**item, "genres": mapped}
+        series_bits = []
+        for s in item.get("series") or []:
+            name = (s.get("name") or "").strip()
+            if name and not is_junk_library_label(name):
+                series_bits.append(s)
+        if not series_bits:
+            inferred = library_series_from_title(item.get("title") or "")
+            if inferred:
+                series_bits = [{"id": "", "name": inferred[0], "sequence": inferred[1]}]
+        item["series"] = series_bits
+
+        if not mapped:
             ungrouped.append(item)
-        else:
-            placed = False
-            for g in item_genres:
-                top = _map_to_toplevel(g)
-                seen_in_genre.setdefault(top, set())
-                if item["itemId"] not in seen_in_genre[top]:
-                    genres.setdefault(top, []).append(item)
-                    seen_in_genre[top].add(item["itemId"])
-                placed = True
-            if not placed:
-                ungrouped.append(item)
+            continue
+        for top in mapped:
+            seen_in_genre.setdefault(top, set())
+            if item["itemId"] not in seen_in_genre[top]:
+                genres.setdefault(top, []).append(item)
+                seen_in_genre[top].add(item["itemId"])
     visible = sum(len(v) for v in genres.values()) + len(ungrouped)
     sorted_genres = dict(sorted(genres.items(), key=lambda x: x[0]))
-    # Newest first within each bucket (ABS addedAt is epoch ms)
     for bucket in sorted_genres.values():
         bucket.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
     ungrouped.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
@@ -479,11 +525,78 @@ async def abs_collection(
 
 @router.get("/abs/series")
 async def abs_series(
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Return all series from ABS library."""
-    series = await audiobookshelf.get_all_series()
-    return {"series": series}
+    """Series shelves using ABS metadata when valid, else store-style title inference.
+
+    Filters media-type junk names like \"Audiobook\" that ABS sometimes stores as series.
+    """
+    hidden_titles = await _get_private_titles_for_others(user.id, db)
+    items = await audiobookshelf.get_all_items()
+    groups: dict[str, dict] = {}
+
+    def _add(series_name: str, item: dict, sequence: str) -> None:
+        key = series_name.strip()
+        if not key or is_junk_library_label(key):
+            return
+        bucket = groups.setdefault(
+            key.lower(),
+            {
+                "id": f"lib:{key.lower()}",
+                "name": key,
+                "books": [],
+                "bookCount": 0,
+                "totalDuration": 0,
+                "coverUrl": "",
+                "_seen": set(),
+            },
+        )
+        iid = item.get("itemId") or ""
+        if iid in bucket["_seen"]:
+            return
+        bucket["_seen"].add(iid)
+        book = {**item, "sequence": sequence or ""}
+        bucket["books"].append(book)
+        bucket["bookCount"] = len(bucket["books"])
+        bucket["totalDuration"] = round(
+            sum(float(b.get("duration") or 0) for b in bucket["books"])
+        )
+        if not bucket["coverUrl"] and book.get("coverUrl"):
+            bucket["coverUrl"] = book["coverUrl"]
+
+    for item in items:
+        title = item.get("title") or ""
+        if _is_hidden(title, hidden_titles):
+            continue
+        placed = False
+        for s in item.get("series") or []:
+            name = (s.get("name") or "").strip()
+            if name and not is_junk_library_label(name):
+                _add(name, item, str(s.get("sequence") or ""))
+                placed = True
+        if not placed:
+            inferred = library_series_from_title(title)
+            if inferred:
+                _add(inferred[0], item, inferred[1])
+
+    series_list = []
+    for bucket in groups.values():
+        books = bucket.pop("books")
+        bucket.pop("_seen", None)
+        try:
+            books.sort(key=lambda b: float(b.get("sequence") or "999"))
+        except (ValueError, TypeError):
+            books.sort(key=lambda b: str(b.get("sequence") or ""))
+        # Only show real series (2+ books). Singles clutter the shelf.
+        if len(books) < 2:
+            continue
+        bucket["books"] = books
+        bucket["bookCount"] = len(books)
+        series_list.append(bucket)
+
+    series_list.sort(key=lambda s: s["name"].lower())
+    return {"series": series_list}
 
 
 @router.get("/abs/item/{item_id}")
@@ -569,22 +682,8 @@ async def kavita_collection(
         author = ""
         if writers:
             author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
-        genres_raw = meta.get("genres") or []
-        genres: list[str] = []
-        seen_g: set[str] = set()
-        for g in genres_raw:
-            if isinstance(g, dict):
-                label = g.get("title") or g.get("name") or ""
-            else:
-                label = str(g)
-            if not label:
-                continue
-            top = _map_to_toplevel(label)
-            if top not in seen_g:
-                seen_g.add(top)
-                genres.append(top)
-
-        # Kavita series name is often the book title; prefer parenthetical / "Book N" series cues.
+        genres = _normalize_item_genres(meta.get("genres") or [])
+        # Kavita series name is often the book title; prefer store-style title cues.
         series_name = _infer_series_name(name) or ""
 
         added_at = s.get("created") or s.get("lastChapterAdded") or meta.get("releaseYear") or 0
@@ -1278,6 +1377,33 @@ async def _get_user_item(item_id: int, user_id: int, db: AsyncSession) -> Stream
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
     return item
+
+
+async def _lookup_cover_for_volume(volume_id: str, title: str, author: str) -> str:
+    """Best-effort cover for Personal Collection rows missing artwork."""
+    try:
+        book = await google_books.get_volume(volume_id)
+        if book:
+            book = await google_books.enrich_cover_if_missing(book)
+            cover = (book.get("coverUrl") or book.get("coverUrlLarge") or "").strip()
+            if cover:
+                return cover
+    except Exception:
+        logger.debug("cover lookup by volume failed for %s", volume_id, exc_info=True)
+    if not title:
+        return ""
+    try:
+        q = f'intitle:"{title}"'
+        if author:
+            q += f" inauthor:{author}"
+        result = await google_books.search_volumes(q, max_results=3)
+        for b in (result or {}).get("books") or []:
+            cover = (b.get("coverUrl") or "").strip()
+            if cover:
+                return cover
+    except Exception:
+        logger.debug("cover lookup by search failed for %s", title, exc_info=True)
+    return ""
 
 
 def _serialize(item: StreamingLibraryItem) -> dict:

@@ -8,6 +8,10 @@ interface ThemeIconPlugin {
 
 const ThemeIcon = registerPlugin<ThemeIconPlugin>("ThemeIcon");
 
+/** Avoid redundant native alias toggles (each can restart the activity). */
+let lastNativeTheme: ThemeId | null = null;
+let lastFaviconTheme: ThemeId | null = null;
+
 /** Hex accents used for meta theme-color (matches icon backgrounds). */
 const THEME_META: Record<ThemeId, { themeColor: string }> = {
   ocean: { themeColor: "#030712" },
@@ -44,6 +48,8 @@ function ensureLink(rel: string, sizes?: string): HTMLLinkElement {
 export function applyThemedFavicons(themeRaw: string): void {
   if (typeof document === "undefined") return;
   const theme = normalizeThemeId(themeRaw);
+  if (lastFaviconTheme === theme) return;
+  lastFaviconTheme = theme;
   const bust = `v=${theme}`;
   const icon192 = `/icons/icon-192-${theme}.png?${bust}`;
   const icon512 = `/icons/icon-512-${theme}.png?${bust}`;
@@ -68,10 +74,13 @@ export function applyThemedFavicons(themeRaw: string): void {
 export async function applyNativeAppIconTheme(themeRaw: string): Promise<void> {
   if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android") return;
   const theme = normalizeThemeId(themeRaw);
+  if (lastNativeTheme === theme) return;
+  lastNativeTheme = theme;
   try {
     await ThemeIcon.setTheme({ theme });
   } catch {
-    /* plugin missing on older APKs */
+    /* plugin missing on older APKs — allow retry next time */
+    lastNativeTheme = null;
   }
 }
 

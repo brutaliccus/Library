@@ -148,3 +148,53 @@ select {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/*
+  Fiction-style EPUB body: first-line indent for paragraphs/dialogue.
+  Tailwind Typography (`prose`) and embedded EPUB <style> blocks often reset
+  indent. Use high-specificity + !important so reading content wins in WebView.
+*/
+.reader-content.prose p,
+.reader-content p {
+  text-indent: 1.5em !important;
+  margin-top: 0 !important;
+  margin-bottom: 0.15em !important;
+  line-height: inherit;
+}
+
+/* Chapter openings / after headings traditionally skip the indent */
+.reader-content.prose > p:first-child,
+.reader-content > p:first-child,
+.reader-content.prose h1 + p,
+.reader-content.prose h2 + p,
+.reader-content.prose h3 + p,
+.reader-content.prose h4 + p,
+.reader-content.prose h5 + p,
+.reader-content.prose h6 + p,
+.reader-content.prose hr + p,
+.reader-content h1 + p,
+.reader-content h2 + p,
+.reader-content h3 + p,
+.reader-content h4 + p,
+.reader-content h5 + p,
+.reader-content h6 + p,
+.reader-content hr + p {
+  text-indent: 0 !important;
+}
+
+/* Scene-break spacers (empty paragraphs) shouldn't indent */
+.reader-content p:empty,
+.reader-content p:blank {
+  text-indent: 0 !important;
+  min-height: 1em;
+}
+
+.reader-content blockquote {
+  text-indent: 0 !important;
+  margin: 1em 1.25em;
+}
+
+.reader-content.prose blockquote p,
+.reader-content blockquote p {
+  text-indent: 0 !important;
+}

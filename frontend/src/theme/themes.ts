@@ -3,6 +3,9 @@ export type ThemeId = (typeof THEME_IDS)[number];
 
 export const DEFAULT_THEME: ThemeId = "ocean";
 
+/** Persisted so cold start / settings-loading don't flash DEFAULT then re-apply native icons. */
+export const THEME_STORAGE_KEY = "library-ui-theme";
+
 export interface ThemeMeta {
   id: ThemeId;
   label: string;
@@ -46,16 +49,46 @@ export function normalizeThemeId(value: string | null | undefined): ThemeId {
   return isThemeId(value) ? value : DEFAULT_THEME;
 }
 
-export function applyThemeToDocument(theme: ThemeId): void {
+/** Last explicitly chosen theme, or null if never stored. */
+export function readCachedTheme(): ThemeId | null {
+  try {
+    const raw = localStorage.getItem(THEME_STORAGE_KEY);
+    return isThemeId(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeCachedTheme(theme: ThemeId): void {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Apply CSS theme tokens immediately (no native icon I/O). */
+export function applyThemeCss(theme: ThemeId): void {
   try {
     document.documentElement.setAttribute("data-theme", theme);
   } catch {
     /* ignore */
   }
+  writeCachedTheme(theme);
+}
+
+export function applyThemeToDocument(theme: ThemeId): void {
+  applyThemeCss(theme);
   // Browser tab favicon + Android launcher / Android Auto icons.
   void import("./themeIcon")
     .then((m) => m.applyAppIconTheme(theme))
     .catch(() => {
       /* ignore */
     });
+}
+
+/** Call once before React mounts so first paint matches last theme. */
+export function bootstrapThemeFromCache(): void {
+  const cached = readCachedTheme();
+  if (cached) applyThemeCss(cached);
 }

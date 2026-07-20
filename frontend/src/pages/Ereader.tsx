@@ -667,7 +667,7 @@ export default function Ereader() {
                 }}
               >
                 <div
-                  className="reader-content max-w-2xl w-full bg-gray-900/30 rounded-lg p-6 md:p-10 text-gray-100 leading-relaxed prose prose-invert max-w-none select-none [&_img]:max-w-full [&_img]:h-auto"
+                  className="reader-content max-w-2xl w-full bg-gray-900/30 rounded-lg p-6 md:p-10 text-gray-100 leading-relaxed prose prose-invert prose-p:my-0 max-w-none select-none [&_img]:max-w-full [&_img]:h-auto"
                   dangerouslySetInnerHTML={{ __html: content }}
                   style={{ paddingBottom: "2rem" }}
                 />

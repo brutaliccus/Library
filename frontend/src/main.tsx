@@ -8,7 +8,11 @@ import { PlayerProvider } from "./contexts/PlayerContext";
 import ToastContainer from "./components/Toast";
 import UpdateBanner from "./components/UpdateBanner";
 import App from "./App";
+import { bootstrapThemeFromCache } from "./theme/themes";
 import "./index.css";
+
+// Paint last-chosen theme before React mounts (avoids ocean→real bounce).
+bootstrapThemeFromCache();
 
 const queryClient = new QueryClient({
   defaultOptions: {

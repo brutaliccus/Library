@@ -44,25 +44,58 @@ public final class ThemeIconHelper {
         }
     }
 
+    /**
+     * Enable the target launcher/AA components first, then disable the others.
+     * Disabling the currently-active launcher alias (or briefly having zero
+     * launchers) can kill the process even with DONT_KILL_APP — which showed up
+     * as "theme change crashes twice then stabilizes" when JS also re-applied
+     * a speculative default theme on reload.
+     */
     public static void apply(Context context, String themeRaw) {
         String theme = normalize(themeRaw);
+        String saved = getSavedTheme(context);
+        if (theme.equals(saved) && isTargetEnabled(context, theme)) {
+            return;
+        }
+
         PackageManager pm = context.getPackageManager();
         String pkg = context.getPackageName();
 
-        // Disable all themed components first so we never have two launchers/AA
-        // services enabled at once during a switch.
+        // Enable target first so a launcher stays available throughout the switch.
+        setEnabled(pm, new ComponentName(pkg, pkg + ".Launcher" + capitalize(theme)), true);
+        setEnabled(pm, new ComponentName(context, mediaBrowserServiceClass(theme)), true);
+
         for (String t : THEMES) {
+            if (t.equals(theme)) continue;
             setEnabled(pm, new ComponentName(pkg, pkg + ".Launcher" + capitalize(t)), false);
             setEnabled(pm, new ComponentName(context, mediaBrowserServiceClass(t)), false);
         }
-        setEnabled(pm, new ComponentName(pkg, pkg + ".Launcher" + capitalize(theme)), true);
-        setEnabled(pm, new ComponentName(context, mediaBrowserServiceClass(theme)), true);
 
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_THEME, theme)
             .apply();
         Log.i(TAG, "App / Android Auto icon theme -> " + theme);
+    }
+
+    private static boolean isTargetEnabled(Context context, String theme) {
+        PackageManager pm = context.getPackageManager();
+        String pkg = context.getPackageName();
+        try {
+            int launcher = pm.getComponentEnabledSetting(
+                new ComponentName(pkg, pkg + ".Launcher" + capitalize(theme))
+            );
+            int service = pm.getComponentEnabledSetting(
+                new ComponentName(context, mediaBrowserServiceClass(theme))
+            );
+            boolean launcherOn = launcher == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                || (launcher == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT && theme.equals(DEFAULT_THEME));
+            boolean serviceOn = service == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                || (service == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT && theme.equals(DEFAULT_THEME));
+            return launcherOn && serviceOn;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static void setEnabled(PackageManager pm, ComponentName component, boolean enable) {

@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Audiobook Library</title>
+    <!-- Apply cached theme before CSS/JS so we never flash ocean then remount native icons. -->
+    <script>
+      try {
+        var t = localStorage.getItem("library-ui-theme");
+        if (t === "ocean" || t === "ember" || t === "forest" || t === "dusk") {
+          document.documentElement.setAttribute("data-theme", t);
+        }
+      } catch (e) {}
+    </script>
 
     <!-- PWA manifest -->
     <link rel="manifest" href="/manifest.json" />

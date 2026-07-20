@@ -40,6 +40,9 @@ interface LibraryItem {
   author: string;
   coverUrl: string;
   genre: string;
+  genres?: string[];
+  seriesName?: string;
+  sequence?: string;
   magnetLink: string;
   streamStatus: string;
   progressSeconds: number;
@@ -50,6 +53,14 @@ interface LibraryItem {
   }>;
   createdAt: string;
   updatedAt: string;
+}
+
+interface PersonalSeries {
+  id: string;
+  name: string;
+  books: Array<LibraryItem & { sequence?: string; itemId?: string }>;
+  bookCount: number;
+  coverUrl: string;
 }
 
 interface ABSItem {
@@ -154,15 +165,35 @@ export default function MyLibrary() {
     enabled: !!user && sessionReady,
   });
 
-  const { data: absSeries } = useQuery({
+  const { data: absSeries, isLoading: absSeriesLoading } = useQuery({
     queryKey: ["abs-series"],
     queryFn: async () => {
       const { data } = await api.get("/library/abs/series");
       return data as { series: ABSSeries[] };
     },
-    staleTime: 5 * 60 * 1000,
+    // Hardcover-backed (same as book-detail “More in this series”) — cache longer
+    staleTime: 30 * 60 * 1000,
     refetchOnWindowFocus: false,
-    enabled: absView === "series",
+    enabled: !!user && sessionReady && tab === "abs",
+  });
+
+  const { data: kavitaSeries, isLoading: kavitaSeriesLoading } = useQuery({
+    queryKey: ["kavita-series"],
+    queryFn: async () => {
+      const { data } = await api.get("/library/kavita/series");
+      return data as {
+        series: Array<{
+          id: string;
+          name: string;
+          books: KavitaItem[];
+          bookCount: number;
+          coverUrl: string;
+        }>;
+      };
+    },
+    staleTime: 30 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    enabled: !!user && sessionReady && tab === "ebooks",
   });
 
   const { data: rdLibrary, isLoading: rdLoading } = useQuery({
@@ -172,6 +203,17 @@ export default function MyLibrary() {
       return data as { items: LibraryItem[] };
     },
     enabled: !!user && sessionReady,
+  });
+
+  const { data: personalSeries, isLoading: personalSeriesLoading } = useQuery({
+    queryKey: ["personal-series"],
+    queryFn: async () => {
+      const { data } = await api.get("/library/series");
+      return data as { series: PersonalSeries[] };
+    },
+    staleTime: 30 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    enabled: !!user && sessionReady && tab === "streams",
   });
 
   const { data: kavitaCollection, isLoading: kavitaLoading, isError: kavitaError, refetch: refetchKavita } = useQuery({
@@ -221,6 +263,7 @@ export default function MyLibrary() {
     mutationFn: (id: number) => api.delete(`/library/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["streaming-library"] });
+      queryClient.invalidateQueries({ queryKey: ["personal-series"] });
       toast("Removed from library", "info");
     },
   });
@@ -236,7 +279,9 @@ export default function MyLibrary() {
         queryClient.invalidateQueries({ queryKey: ["abs-collection"] }),
         queryClient.invalidateQueries({ queryKey: ["abs-series"] }),
         queryClient.invalidateQueries({ queryKey: ["kavita-collection"] }),
+        queryClient.invalidateQueries({ queryKey: ["kavita-series"] }),
         queryClient.invalidateQueries({ queryKey: ["streaming-library"] }),
+        queryClient.invalidateQueries({ queryKey: ["personal-series"] }),
       ]);
       toast("Library refreshed — ABS + Kavita scanned", "success");
     } catch {
@@ -457,16 +502,6 @@ export default function MyLibrary() {
 
   const isSearching = debouncedQuery.length >= 2;
 
-  const inferSeriesFromTitle = (title: string): string => {
-    const paren = title.match(/[(\[]\s*([^)\]]+?)\s*(?:,\s*(?:Book|Vol\.?|#)?\s*\d+)?\s*[)\]]\s*$/i);
-    if (paren?.[1]) {
-      return paren[1].replace(/,?\s*(?:Book|Vol\.?)\s*\d+\s*$/i, "").trim();
-    }
-    const hash = title.match(/^(.+?)\s+#?\d+\s*[:\-–]\s+/i);
-    if (hash?.[1]) return hash[1].trim();
-    return "";
-  };
-
   const allAbsItems = useMemo(() => {
     if (!absCollection) return [] as ABSItem[];
     const items = [...Object.values(absCollection.genres).flat(), ...absCollection.ungrouped];
@@ -474,32 +509,43 @@ export default function MyLibrary() {
     return deduped.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
   }, [absCollection]);
 
+  const absSeriesMembership = useMemo(() => {
+    const byName = new Map<string, Set<string>>();
+    for (const s of absSeries?.series || []) {
+      byName.set(s.name, new Set(s.books.map((b) => b.itemId)));
+    }
+    return byName;
+  }, [absSeries]);
+
   const absFilterOptions = useMemo(() => {
     const genres = new Set<string>();
-    const series = new Set<string>();
     const authors = new Set<string>();
     for (const item of allAbsItems) {
       (item.genres || []).forEach((g) => g && genres.add(g));
-      (item.series || []).forEach((s) => s.name && series.add(s.name));
       if (item.author) authors.add(item.author);
     }
+    // Series names come from Hardcover groups only (not ABS junk labels)
+    const series = (absSeries?.series || []).map((s) => s.name).sort((a, b) => a.localeCompare(b));
     return {
       genres: Array.from(genres).sort(),
-      series: Array.from(series).sort(),
+      series,
       authors: Array.from(authors).sort(),
     };
-  }, [allAbsItems]);
+  }, [allAbsItems, absSeries]);
 
   const filteredAbsItems = useMemo(() => {
     return allAbsItems.filter((item) => {
       if (filterGenre && !(item.genres || []).some((g) => g === filterGenre || g.toLowerCase().includes(filterGenre.toLowerCase()))) {
         return false;
       }
-      if (filterSeries && !(item.series || []).some((s) => s.name === filterSeries)) return false;
+      if (filterSeries) {
+        const members = absSeriesMembership.get(filterSeries);
+        if (!members?.has(item.itemId)) return false;
+      }
       if (filterAuthor && item.author !== filterAuthor) return false;
       return true;
     });
-  }, [allAbsItems, filterGenre, filterSeries, filterAuthor]);
+  }, [allAbsItems, filterGenre, filterSeries, filterAuthor, absSeriesMembership]);
 
   const absByGenre = useMemo(() => {
     const groups: Record<string, ABSItem[]> = {};
@@ -526,49 +572,46 @@ export default function MyLibrary() {
     return items.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
   }, [kavitaCollection]);
 
+  const ebookSeriesMembership = useMemo(() => {
+    const byName = new Map<string, Set<number>>();
+    for (const s of kavitaSeries?.series || []) {
+      byName.set(s.name, new Set(s.books.map((b) => b.seriesId)));
+    }
+    return byName;
+  }, [kavitaSeries]);
+
   const ebookFilterOptions = useMemo(() => {
     const genres = new Set<string>();
-    const series = new Set<string>();
     const authors = new Set<string>();
     for (const item of allEbookItems) {
       (item.genres || []).forEach((g) => g && genres.add(g));
-      const sn = item.seriesName || inferSeriesFromTitle(item.title);
-      if (sn) series.add(sn);
       if (item.author) authors.add(item.author);
     }
+    const series = (kavitaSeries?.series || []).map((s) => s.name).sort((a, b) => a.localeCompare(b));
     return {
       genres: Array.from(genres).sort(),
-      series: Array.from(series).sort(),
+      series,
       authors: Array.from(authors).sort(),
     };
-  }, [allEbookItems]);
+  }, [allEbookItems, kavitaSeries]);
 
   const filteredEbookItems = useMemo(() => {
     return allEbookItems.filter((item) => {
       if (filterGenre && !(item.genres || []).includes(filterGenre)) return false;
       if (filterSeries) {
-        const sn = item.seriesName || inferSeriesFromTitle(item.title);
-        if (sn !== filterSeries) return false;
+        const members = ebookSeriesMembership.get(filterSeries);
+        if (!members?.has(item.seriesId)) return false;
       }
       if (filterAuthor && item.author !== filterAuthor) return false;
       return true;
     });
-  }, [allEbookItems, filterGenre, filterSeries, filterAuthor]);
+  }, [allEbookItems, filterGenre, filterSeries, filterAuthor, ebookSeriesMembership]);
 
   const ebookByGenre = useMemo(() => {
     const groups: Record<string, KavitaItem[]> = {};
     for (const item of filteredEbookItems) {
       const gs = item.genres?.length ? item.genres : ["Uncategorized"];
       for (const g of gs) (groups[g] ??= []).push(item);
-    }
-    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
-  }, [filteredEbookItems]);
-
-  const ebookBySeries = useMemo(() => {
-    const groups: Record<string, KavitaItem[]> = {};
-    for (const item of filteredEbookItems) {
-      const key = item.seriesName || inferSeriesFromTitle(item.title) || "Standalone";
-      (groups[key] ??= []).push(item);
     }
     return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
   }, [filteredEbookItems]);
@@ -591,46 +634,50 @@ export default function MyLibrary() {
     });
   }, [rdLibrary]);
 
+  const rdSeriesMembership = useMemo(() => {
+    const byName = new Map<string, Set<number>>();
+    for (const s of personalSeries?.series || []) {
+      byName.set(s.name, new Set(s.books.map((b) => b.id)));
+    }
+    return byName;
+  }, [personalSeries]);
+
   const rdFilterOptions = useMemo(() => {
     const genres = new Set<string>();
-    const series = new Set<string>();
     const authors = new Set<string>();
     for (const item of rdItemsSorted) {
       if (item.genre) genres.add(item.genre);
-      const sn = inferSeriesFromTitle(item.title);
-      if (sn) series.add(sn);
+      (item.genres || []).forEach((g) => g && genres.add(g));
       if (item.author) authors.add(item.author);
     }
+    const series = (personalSeries?.series || []).map((s) => s.name).sort((a, b) => a.localeCompare(b));
     return {
       genres: Array.from(genres).sort(),
-      series: Array.from(series).sort(),
+      series,
       authors: Array.from(authors).sort(),
     };
-  }, [rdItemsSorted]);
+  }, [rdItemsSorted, personalSeries]);
 
   const filteredRdItems = useMemo(() => {
     return rdItemsSorted.filter((item) => {
-      if (filterGenre && (item.genre || "Uncategorized") !== filterGenre) return false;
-      if (filterSeries && inferSeriesFromTitle(item.title) !== filterSeries) return false;
+      const itemGenres = item.genres?.length ? item.genres : (item.genre ? [item.genre] : []);
+      if (filterGenre && !itemGenres.includes(filterGenre) && (item.genre || "Uncategorized") !== filterGenre) {
+        return false;
+      }
+      if (filterSeries) {
+        const members = rdSeriesMembership.get(filterSeries);
+        if (!members?.has(item.id)) return false;
+      }
       if (filterAuthor && item.author !== filterAuthor) return false;
       return true;
     });
-  }, [rdItemsSorted, filterGenre, filterSeries, filterAuthor]);
+  }, [rdItemsSorted, filterGenre, filterSeries, filterAuthor, rdSeriesMembership]);
 
   const rdByGenre = useMemo(() => {
     const groups: Record<string, LibraryItem[]> = {};
     for (const item of filteredRdItems) {
-      const g = item.genre || "Uncategorized";
-      (groups[g] ??= []).push(item);
-    }
-    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
-  }, [filteredRdItems]);
-
-  const rdBySeries = useMemo(() => {
-    const groups: Record<string, LibraryItem[]> = {};
-    for (const item of filteredRdItems) {
-      const key = inferSeriesFromTitle(item.title) || "Standalone";
-      (groups[key] ??= []).push(item);
+      const gs = item.genres?.length ? item.genres : [item.genre || "Uncategorized"];
+      for (const g of gs) (groups[g] ??= []).push(item);
     }
     return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
   }, [filteredRdItems]);
@@ -1012,13 +1059,17 @@ export default function MyLibrary() {
               )}
 
               {absView === "series" && (
-                absSeries?.series ? (
-                  <SeriesDrilldown series={absSeries.series} onPlay={handlePlayABS} />
-                ) : (
+                absSeriesLoading ? (
                   <div className="flex items-center justify-center py-12 text-gray-400 gap-2">
                     <Loader2 size={16} className="animate-spin" />
-                    Loading series...
+                    Matching series (Hardcover)…
                   </div>
+                ) : absSeries?.series && absSeries.series.length > 0 ? (
+                  <SeriesDrilldown series={absSeries.series} onPlay={handlePlayABS} />
+                ) : (
+                  <p className="text-sm text-gray-500 text-center py-12">
+                    No multi-book series found in your audiobook library yet.
+                  </p>
                 )
               )}
             </div>
@@ -1065,11 +1116,28 @@ export default function MyLibrary() {
                     </div>
                   )}
                   {ebookView === "series" && (
-                    <div className="space-y-6">
-                      {Object.entries(ebookBySeries).map(([series, items]) => (
-                        <EbookGenreRow key={series} genre={series} items={items} onNavigateToBook={handleNavigateToBook} formatMatches={formatMatches} />
-                      ))}
-                    </div>
+                    kavitaSeriesLoading ? (
+                      <div className="flex items-center justify-center py-12 text-gray-400 gap-2">
+                        <Loader2 size={16} className="animate-spin" />
+                        Matching series (Hardcover)…
+                      </div>
+                    ) : kavitaSeries?.series && kavitaSeries.series.length > 0 ? (
+                      <div className="space-y-6">
+                        {kavitaSeries.series.map((s) => (
+                          <EbookGenreRow
+                            key={s.id || s.name}
+                            genre={s.name}
+                            items={s.books}
+                            onNavigateToBook={handleNavigateToBook}
+                            formatMatches={formatMatches}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-gray-500 text-center py-12">
+                        No multi-book series found in your ebook library yet.
+                      </p>
+                    )
                   )}
                   {ebookView === "author" && (
                     <div className="space-y-6">
@@ -1146,24 +1214,40 @@ export default function MyLibrary() {
                   </div>
                 </div>
               ))}
-              {rdView === "series" && Object.entries(rdBySeries).map(([series, items]) => (
-                <div key={series} className="mb-6">
-                  <h3 className="text-sm font-semibold text-gray-300 mb-3">{series}</h3>
-                  <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2">
-                    {items.map((item) => (
-                      <RDCard
-                        key={item.id}
-                        item={item}
-                        isResolving={resolvingId === item.id}
-                        onPlay={() => handlePlayRD(item)}
-                        onResolve={() => handleResolveRD(item)}
-                        onRemove={() => removeMutation.mutate(item.id)}
-                        onNavigate={() => handlePersonalCollectionNavigate(item)}
-                      />
-                    ))}
+              {rdView === "series" && (
+                personalSeriesLoading ? (
+                  <div className="flex items-center justify-center py-12 text-gray-400 gap-2">
+                    <Loader2 size={16} className="animate-spin" />
+                    Matching series (Hardcover)…
                   </div>
-                </div>
-              ))}
+                ) : personalSeries?.series && personalSeries.series.length > 0 ? (
+                  personalSeries.series.map((s) => (
+                    <div key={s.id || s.name} className="mb-6">
+                      <h3 className="text-sm font-semibold text-gray-300 mb-3">
+                        {s.name}
+                        <span className="text-gray-500 font-normal ml-2">{s.bookCount}</span>
+                      </h3>
+                      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2">
+                        {s.books.map((item) => (
+                          <RDCard
+                            key={item.id}
+                            item={item}
+                            isResolving={resolvingId === item.id}
+                            onPlay={() => handlePlayRD(item)}
+                            onResolve={() => handleResolveRD(item)}
+                            onRemove={() => removeMutation.mutate(item.id)}
+                            onNavigate={() => handlePersonalCollectionNavigate(item)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-gray-500 text-center py-12">
+                    No multi-book series found in your personal collection yet.
+                  </p>
+                )
+              )}
               {rdView === "author" && Object.entries(rdByAuthor).map(([author, items]) => (
                 <div key={author} className="mb-6">
                   <h3 className="text-sm font-semibold text-gray-300 mb-3">{author}</h3>

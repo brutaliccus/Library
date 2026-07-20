@@ -17,10 +17,10 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from app.database import get_db, async_session
 from app.models import User, StreamingLibraryItem, DownloadRequest
 from app.utils.auth import get_current_user
-from app.services import debrid, debrid_tokens, audiobookshelf, kavita, google_books
+from app.services import debrid, debrid_tokens, audiobookshelf, kavita, google_books, hardcover
 from app.services import kavita_ebook_match
 from app.services.google_books import GENRE_TAXONOMY
-from app.utils.book_series import is_junk_library_label, library_series_from_title
+from app.utils.book_series import is_junk_library_label, is_junk_series_hint, library_series_from_title
 from app.routers.stream import tracks_with_stable_urls
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,168 @@ def _normalize_item_genres(raw_genres: list) -> list[str]:
             seen.add(top)
             out.append(top)
     return out
+
+
+def _series_hint_from_item(item: dict) -> str:
+    """Only pass clean series names to Hardcover — never ASINs / Book 01 titles."""
+    sn = (item.get("seriesName") or "").strip()
+    if sn and not is_junk_series_hint(sn):
+        return sn
+    for s in item.get("series") or []:
+        name = (s.get("name") if isinstance(s, dict) else str(s) or "").strip()
+        if name and not is_junk_series_hint(name):
+            return name
+    # Parenthetical in title is a safe soft hint (Elemental Masters, Book 3)
+    inferred = library_series_from_title(item.get("title") or "")
+    if inferred and not is_junk_series_hint(inferred[0]):
+        return inferred[0]
+    return ""
+
+
+async def _enrich_items_via_hardcover(
+    items: list[dict],
+    *,
+    title_key: str = "title",
+    author_key: str = "author",
+    concurrency: int = 8,
+) -> list[dict]:
+    """Enrich library items with Hardcover author / genres / series (taxonomy-mapped)."""
+    if not items:
+        return []
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _one(item: dict) -> dict:
+        title = (item.get(title_key) or "").strip()
+        if not title:
+            return item
+        author = (item.get(author_key) or "").strip()
+        hint = _series_hint_from_item(item)
+        async with sem:
+            try:
+                hc = await hardcover.match_library_book(
+                    title=title, author=author, series_hint=hint,
+                )
+            except Exception:
+                logger.debug("Hardcover match failed for %s", title, exc_info=True)
+                return item
+        out = {**item}
+        if hc.get("author"):
+            out[author_key] = hc["author"]
+        hc_genres = _normalize_item_genres(hc.get("genres") or [])
+        if hc_genres:
+            out["genres"] = hc_genres
+            # Personal Collection uses singular genre for filters/UI.
+            if "genre" in item:
+                out["genre"] = hc_genres[0]
+        sname = (hc.get("seriesName") or "").strip()
+        if sname and not is_junk_series_hint(sname):
+            out["seriesName"] = sname
+            seq = str(hc.get("sequence") or "").strip()
+            out["sequence"] = seq
+            out["series"] = [{"name": sname, "sequence": seq}]
+        return out
+
+    return list(await asyncio.gather(*[_one(it) for it in items]))
+
+
+async def _group_items_by_hardcover_series(
+    items: list[dict],
+    *,
+    id_key: str = "itemId",
+    title_key: str = "title",
+    author_key: str = "author",
+) -> list[dict]:
+    """Group local library items by Hardcover series — same path as /books/series/{id}.
+
+    Only series with 2+ matched *library* books are returned.
+    Prefers already-enriched seriesName/sequence to avoid a second HC round-trip.
+    """
+    if not items:
+        return []
+
+    sem = asyncio.Semaphore(6)
+
+    async def _resolve(item: dict) -> tuple[str, str, dict] | None:
+        title = (item.get(title_key) or "").strip()
+        author = (item.get(author_key) or "").strip()
+        if not title:
+            return None
+        # Prefer enrichment already applied by _enrich_items_via_hardcover.
+        pre_name = (item.get("seriesName") or "").strip()
+        if pre_name and not is_junk_series_hint(pre_name):
+            return pre_name, str(item.get("sequence") or ""), item
+        hint = _series_hint_from_item(item)
+        async with sem:
+            try:
+                hc = await hardcover.get_series_for_book(
+                    title=title, author=author, series_hint=hint,
+                )
+            except Exception:
+                logger.debug("Hardcover series lookup failed for %s", title, exc_info=True)
+                return None
+        sname = (hc.get("seriesName") or "").strip()
+        hc_books = hc.get("books") or []
+        if not sname or is_junk_series_hint(sname) or len(hc_books) < 2:
+            return None
+        seq = ""
+        for b in hc_books:
+            bt = b.get("title") or ""
+            if hardcover._titles_compatible(title, bt) or hardcover._norm_title(title) == hardcover._norm_title(bt):
+                seq = str(b.get("sequence") or b.get("seriesBookNumber") or "")
+                break
+        return sname, seq, item
+
+    resolved = await asyncio.gather(*[_resolve(it) for it in items])
+    groups: dict[str, dict] = {}
+    for row in resolved:
+        if not row:
+            continue
+        sname, seq, item = row
+        key = sname.lower()
+        bucket = groups.setdefault(
+            key,
+            {
+                "id": f"hc:{key}",
+                "name": sname,
+                "books": [],
+                "bookCount": 0,
+                "totalDuration": 0,
+                "coverUrl": "",
+                "_seen": set(),
+            },
+        )
+        iid = item.get(id_key)
+        if iid is None or iid in bucket["_seen"]:
+            continue
+        bucket["_seen"].add(iid)
+        book = {**item, "sequence": seq or item.get("sequence") or ""}
+        # SeriesDrilldown expects itemId for ABS play
+        if "itemId" not in book and id_key != "itemId" and item.get(id_key) is not None:
+            book["itemId"] = str(item.get(id_key))
+        bucket["books"].append(book)
+        if not bucket["coverUrl"] and book.get("coverUrl"):
+            bucket["coverUrl"] = book["coverUrl"]
+
+    series_list: list[dict] = []
+    for bucket in groups.values():
+        books = bucket.pop("books")
+        bucket.pop("_seen", None)
+        try:
+            books.sort(key=lambda b: float(b.get("sequence") or "999"))
+        except (ValueError, TypeError):
+            books.sort(key=lambda b: str(b.get("sequence") or ""))
+        if len(books) < 2:
+            continue
+        bucket["books"] = books
+        bucket["bookCount"] = len(books)
+        bucket["totalDuration"] = round(
+            sum(float(b.get("duration") or 0) for b in books)
+        )
+        series_list.append(bucket)
+
+    series_list.sort(key=lambda s: s["name"].lower())
+    return series_list
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 
@@ -202,12 +364,11 @@ async def add_to_library_from_stream(
             return None
 
 
-@router.get("")
-async def get_library(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Personal Collection — explicit adds only (synthetic rd: stream autos are hidden)."""
+async def _personal_collection_dicts(
+    user: User,
+    db: AsyncSession,
+) -> list[dict]:
+    """Load Personal Collection rows (drop rd: junk), serialize, enrich via Hardcover."""
     stmt = (
         select(StreamingLibraryItem)
         .where(StreamingLibraryItem.user_id == user.id)
@@ -250,7 +411,30 @@ async def get_library(
 
     if dirty:
         await db.commit()
-    return {"items": [_serialize(item) for item in keep]}
+    serialized = [_serialize(item) for item in keep]
+    return await _enrich_items_via_hardcover(serialized)
+
+
+@router.get("")
+async def get_library(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Personal Collection — explicit adds only (synthetic rd: stream autos are hidden)."""
+    return {"items": await _personal_collection_dicts(user, db)}
+
+
+@router.get("/series")
+async def personal_series(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Group Personal Collection by Hardcover series (same resolver as ABS/Kavita)."""
+    items = await _personal_collection_dicts(user, db)
+    series_list = await _group_items_by_hardcover_series(
+        items, id_key="id", title_key="title", author_key="author",
+    )
+    return {"series": series_list}
 
 
 @router.post("")
@@ -482,27 +666,27 @@ async def abs_collection(
 ):
     """Return all ABS library items grouped by store top-level genres."""
     hidden_titles = await _get_private_titles_for_others(user.id, db)
-    items = await audiobookshelf.get_all_items()
+    raw_items = [
+        it for it in await audiobookshelf.get_all_items()
+        if not _is_hidden(it.get("title", ""), hidden_titles)
+    ]
+    # Drop ABS junk series labels before Hardcover enrichment/hints.
+    cleaned: list[dict] = []
+    for item in raw_items:
+        series_bits = []
+        for s in item.get("series") or []:
+            name = (s.get("name") or "").strip()
+            if name and not is_junk_series_hint(name):
+                series_bits.append(s)
+        mapped = _normalize_item_genres(item.get("genres") or [])
+        cleaned.append({**item, "genres": mapped, "series": series_bits})
+    items = await _enrich_items_via_hardcover(cleaned)
+
     genres: dict[str, list] = {}
     ungrouped: list = []
     seen_in_genre: dict[str, set] = {}
     for item in items:
-        if _is_hidden(item.get("title", ""), hidden_titles):
-            continue
-        # Attach store-aligned genres + series for client filters
-        mapped = _normalize_item_genres(item.get("genres") or [])
-        item = {**item, "genres": mapped}
-        series_bits = []
-        for s in item.get("series") or []:
-            name = (s.get("name") or "").strip()
-            if name and not is_junk_library_label(name):
-                series_bits.append(s)
-        if not series_bits:
-            inferred = library_series_from_title(item.get("title") or "")
-            if inferred:
-                series_bits = [{"id": "", "name": inferred[0], "sequence": inferred[1]}]
-        item["series"] = series_bits
-
+        mapped = item.get("genres") or []
         if not mapped:
             ungrouped.append(item)
             continue
@@ -528,74 +712,31 @@ async def abs_series(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Series shelves using ABS metadata when valid, else store-style title inference.
-
-    Filters media-type junk names like \"Audiobook\" that ABS sometimes stores as series.
-    """
+    """Group audiobooks by series using the same Hardcover resolution as book detail
+    (“More in this series”). Never trusts ABS/Amazon series junk labels."""
     hidden_titles = await _get_private_titles_for_others(user.id, db)
-    items = await audiobookshelf.get_all_items()
-    groups: dict[str, dict] = {}
+    items = [
+        it for it in await audiobookshelf.get_all_items()
+        if not _is_hidden(it.get("title", ""), hidden_titles)
+    ]
+    # Intentionally skip collection enrichment here so grouping still goes through
+    # get_series_for_book (requires a real multi-book HC series graph).
+    series_list = await _group_items_by_hardcover_series(items, id_key="itemId")
+    return {"series": series_list}
 
-    def _add(series_name: str, item: dict, sequence: str) -> None:
-        key = series_name.strip()
-        if not key or is_junk_library_label(key):
-            return
-        bucket = groups.setdefault(
-            key.lower(),
-            {
-                "id": f"lib:{key.lower()}",
-                "name": key,
-                "books": [],
-                "bookCount": 0,
-                "totalDuration": 0,
-                "coverUrl": "",
-                "_seen": set(),
-            },
-        )
-        iid = item.get("itemId") or ""
-        if iid in bucket["_seen"]:
-            return
-        bucket["_seen"].add(iid)
-        book = {**item, "sequence": sequence or ""}
-        bucket["books"].append(book)
-        bucket["bookCount"] = len(bucket["books"])
-        bucket["totalDuration"] = round(
-            sum(float(b.get("duration") or 0) for b in bucket["books"])
-        )
-        if not bucket["coverUrl"] and book.get("coverUrl"):
-            bucket["coverUrl"] = book["coverUrl"]
 
-    for item in items:
-        title = item.get("title") or ""
-        if _is_hidden(title, hidden_titles):
-            continue
-        placed = False
-        for s in item.get("series") or []:
-            name = (s.get("name") or "").strip()
-            if name and not is_junk_library_label(name):
-                _add(name, item, str(s.get("sequence") or ""))
-                placed = True
-        if not placed:
-            inferred = library_series_from_title(title)
-            if inferred:
-                _add(inferred[0], item, inferred[1])
-
-    series_list = []
-    for bucket in groups.values():
-        books = bucket.pop("books")
-        bucket.pop("_seen", None)
-        try:
-            books.sort(key=lambda b: float(b.get("sequence") or "999"))
-        except (ValueError, TypeError):
-            books.sort(key=lambda b: str(b.get("sequence") or ""))
-        # Only show real series (2+ books). Singles clutter the shelf.
-        if len(books) < 2:
-            continue
-        bucket["books"] = books
-        bucket["bookCount"] = len(books)
-        series_list.append(bucket)
-
-    series_list.sort(key=lambda s: s["name"].lower())
+@router.get("/kavita/series")
+async def kavita_series_groups(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Group ebooks by Hardcover series (same resolver as “More in this series”)."""
+    # Reuse collection builder so chapter/cover fields stay consistent
+    coll = await kavita_collection(user=user, db=db)
+    items = coll.get("items") or []
+    series_list = await _group_items_by_hardcover_series(
+        items, id_key="seriesId", title_key="title", author_key="author",
+    )
     return {"series": series_list}
 
 
@@ -613,20 +754,50 @@ async def abs_item_detail(
     series_list = meta.get("series", [])
     if isinstance(series_list, dict):
         series_list = [series_list]
+    title = meta.get("title") or ""
+    author = meta.get("authorName") or ""
+    abs_genres = _normalize_item_genres(meta.get("genres") or [])
+    abs_series = [
+        {"id": s.get("id", ""), "name": s.get("name", ""), "sequence": s.get("sequence", "")}
+        for s in series_list
+        if (s.get("name") or "").strip() and not is_junk_series_hint(s.get("name") or "")
+    ]
+    series_hint = ""
+    if abs_series:
+        series_hint = abs_series[0]["name"]
+    else:
+        inferred = library_series_from_title(title)
+        if inferred and not is_junk_series_hint(inferred[0]):
+            series_hint = inferred[0]
+
+    try:
+        hc = await hardcover.match_library_book(
+            title=title, author=author, series_hint=series_hint,
+        )
+    except Exception:
+        logger.debug("Hardcover match failed for ABS item %s", item_id, exc_info=True)
+        hc = {}
+
+    hc_author = (hc.get("author") or "").strip()
+    hc_genres = _normalize_item_genres(hc.get("genres") or [])
+    hc_series_name = (hc.get("seriesName") or "").strip()
+    hc_seq = str(hc.get("sequence") or "").strip()
+    if hc_series_name and not is_junk_series_hint(hc_series_name):
+        out_series = [{"id": "", "name": hc_series_name, "sequence": hc_seq}]
+    else:
+        out_series = abs_series
+
     return {
         "itemId": item.get("id", ""),
-        "title": meta.get("title") or "",
+        "title": title,
         "subtitle": meta.get("subtitle") or "",
-        "author": meta.get("authorName") or "",
+        "author": hc_author or author,
         "narrator": meta.get("narratorName") or "",
         "description": meta.get("description") or "",
         "publisher": meta.get("publisher") or "",
         "publishedYear": meta.get("publishedYear") or "",
-        "genres": meta.get("genres", []),
-        "series": [
-            {"id": s.get("id", ""), "name": s.get("name", ""), "sequence": s.get("sequence", "")}
-            for s in series_list
-        ],
+        "genres": hc_genres or abs_genres,
+        "series": out_series,
         "duration": media.get("duration", 0) or 0,
         "numTracks": media.get("numTracks", 0) or media.get("numAudioFiles", 0) or 0,
         "coverUrl": f"/api/stream/abs/proxy/cover/{item_id}",
@@ -683,8 +854,8 @@ async def kavita_collection(
         if writers:
             author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
         genres = _normalize_item_genres(meta.get("genres") or [])
-        # Kavita series name is often the book title; prefer store-style title cues.
-        series_name = _infer_series_name(name) or ""
+        # Title-inferred series is a soft HC hint only — never authoritative for shelves.
+        hint = _infer_series_name(name) or ""
 
         added_at = s.get("created") or s.get("lastChapterAdded") or meta.get("releaseYear") or 0
         try:
@@ -706,10 +877,12 @@ async def kavita_collection(
             "coverUrl": cover_url,
             "chapterId": chapter_id,
             "genres": genres,
-            "seriesName": series_name,
+            "seriesName": "",
+            "series": [{"name": hint, "sequence": ""}] if hint and not is_junk_series_hint(hint) else [],
             "addedAt": added_ms,
             "source": "kavita",
         })
+    items = await _enrich_items_via_hardcover(items)
     # Newest first by default for the All shelf
     items.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
     return {"items": items, "totalItems": len(items)}
@@ -1039,6 +1212,32 @@ async def reader_book_chapters(chapter_id: int):
     return chapters
 
 
+def _prepare_reader_html(html: str) -> str:
+    """Strip EPUB author CSS so our reader typography (first-line indent) can win.
+
+    Kavita page HTML often embeds the book's <style> blocks / stylesheet links.
+    Those rules are injected into the SPA DOM after our stylesheet and commonly
+    reset `text-indent`, which made `.reader-content p { text-indent }` a no-op.
+    """
+    if not html:
+        return html
+    out = re.sub(r"<style\b[^>]*>.*?</style>", "", html, flags=re.I | re.S)
+    out = re.sub(
+        r"<link\b[^>]*rel\s*=\s*[\"']?stylesheet[\"']?[^>]*>",
+        "",
+        out,
+        flags=re.I,
+    )
+    # Drop inline text-indent so author "no indent" styles can't override us.
+    out = re.sub(
+        r"""(style\s*=\s*["'][^"']*?)text-indent\s*:\s*[^;"']+;?\s*""",
+        r"\1",
+        out,
+        flags=re.I,
+    )
+    return out
+
+
 @router.get("/reader/{chapter_id}/book-page")
 async def reader_book_page(
     chapter_id: int,
@@ -1049,6 +1248,7 @@ async def reader_book_page(
     html = await kavita.get_book_page(chapter_id, page)
     if not html:
         raise HTTPException(status_code=404, detail="Page not found")
+    html = _prepare_reader_html(html)
     # Rewrite Kavita resource URLs to use our proxy (avoids CORS, mixed content, hides API key)
     cfg = get_settings()
     app_base = (cfg.app_url or "").rstrip("/")

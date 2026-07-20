@@ -7,6 +7,7 @@ import {
   applyThemeToDocument,
   DEFAULT_THEME,
   normalizeThemeId,
+  readCachedTheme,
   type ThemeId,
 } from "./themes";
 
@@ -18,21 +19,27 @@ interface UserSettingsTheme {
 
 /**
  * Applies the effective UI theme (user preference, else library default).
+ *
+ * Important: while settings are still loading, do NOT apply DEFAULT_THEME.
+ * That speculative ocean→real-theme bounce was re-toggling Android activity
+ * aliases and killing the WebView process ("crashes twice then stabilizes").
  */
 export function useThemeSync() {
   const { user, sessionReady } = useAuth();
-  const libraryQuery = useLibraryGroup(
-    !!user && sessionReady && !user.mustChangePassword && !user.mustSetEmail
-  );
+  const needsSettings =
+    !!user && sessionReady && !user.mustChangePassword && !user.mustSetEmail;
+  const libraryQuery = useLibraryGroup(needsSettings);
   const settingsQuery = useQuery({
     queryKey: ["user-settings"],
     queryFn: async () => {
       const { data } = await api.get("/auth/settings");
       return data as UserSettingsTheme;
     },
-    enabled: !!user && sessionReady && !user.mustChangePassword && !user.mustSetEmail,
+    enabled: needsSettings,
     staleTime: 60_000,
   });
+
+  const settingsReady = !needsSettings || settingsQuery.isFetched;
 
   const effective: ThemeId = (() => {
     if (settingsQuery.data?.effective_theme) {
@@ -42,12 +49,13 @@ export function useThemeSync() {
     if (personal) return normalizeThemeId(personal);
     const libDefault = libraryQuery.data?.library?.defaultTheme;
     if (libDefault) return normalizeThemeId(libDefault);
-    return DEFAULT_THEME;
+    return readCachedTheme() ?? DEFAULT_THEME;
   })();
 
   useEffect(() => {
+    if (!settingsReady) return;
     applyThemeToDocument(effective);
-  }, [effective]);
+  }, [effective, settingsReady]);
 
   return {
     effectiveTheme: effective,

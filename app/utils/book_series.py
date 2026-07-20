@@ -33,6 +33,31 @@ def is_junk_library_label(name: str | None) -> bool:
     return not n or n in JUNK_LIBRARY_LABELS
 
 
+# ABS / Amazon often stuff ASINs, "Kindle Edition", product noise into series fields.
+_ASIN_RE = re.compile(r"\bB0[A-Z0-9]{8,}\b", re.IGNORECASE)
+_AMAZON_SERIES_JUNK = re.compile(
+    r"(?:amazon\.com|kindle\s*edition|audible\.com|asin\b|"
+    r"^book\s*#?\s*\d+$|^\d{6,}$)",
+    re.IGNORECASE,
+)
+
+
+def is_junk_series_hint(name: str | None) -> bool:
+    """True for labels that must never be passed to Hardcover as a series hint."""
+    n = (name or "").strip()
+    if not n or is_junk_library_label(n):
+        return True
+    if _ASIN_RE.search(n) or _AMAZON_SERIES_JUNK.search(n):
+        return True
+    # Folder-style book titles mistakenly stored as series ("Book 01 - …")
+    if _BOOK_NN_PREFIX.match(n):
+        return True
+    # Pure punctuation / digits
+    if re.fullmatch(r"[\d\W_]+", n):
+        return True
+    return False
+
+
 def library_series_from_title(title: str) -> tuple[str, str] | None:
     """Infer (series_name, sequence) for local library shelves.
 

@@ -592,6 +592,100 @@ def _series_name_compatible(series_name: str, candidate: str, book_title: str = 
     return False
 
 
+async def match_library_book(
+    *,
+    title: str,
+    author: str = "",
+    series_hint: str = "",
+) -> dict:
+    """Best Hardcover match for local-library enrichment.
+
+    Returns {author, genres, seriesName, sequence, matchedTitle}
+    (empty strings/lists when no match). Cached including empty results.
+    """
+    empty = {
+        "author": "",
+        "genres": [],
+        "seriesName": "",
+        "sequence": "",
+        "matchedTitle": "",
+    }
+    title = (title or "").strip()
+    author = (author or "").strip()
+    if not title or not await get_api_key():
+        return empty
+
+    cache_key = f"hc_lib_meta:v1:{_norm_title(title)}:{_norm_title(author)}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    hits = await search_books(f"{title} {author}".strip(), limit=8)
+    best = None
+    for h in hits:
+        if not _titles_compatible(title, h.get("title") or ""):
+            continue
+        h_authors = h.get("authors") or []
+        if author and h_authors and not _authors_overlap(author, h_authors):
+            continue
+        best = h
+        if h.get("seriesName"):
+            break
+
+    if not best:
+        _cache_set(cache_key, empty)
+        return empty
+
+    authors = best.get("authors") or []
+    canon_author = (authors[0] if authors else "") or ""
+    raw_genres = best.get("categories") or best.get("genres") or best.get("tags") or []
+    genres: list[str] = []
+    for g in raw_genres:
+        if isinstance(g, str):
+            label = g.strip()
+        elif isinstance(g, dict):
+            label = (g.get("name") or g.get("tag") or g.get("title") or "").strip()
+        else:
+            label = str(g).strip() if g else ""
+        if label and label not in genres:
+            genres.append(label)
+
+    series_name = (best.get("seriesName") or "").strip()
+    sequence = str(best.get("seriesBookNumber") or "").strip()
+    try:
+        if sequence and float(sequence) == int(float(sequence)):
+            sequence = str(int(float(sequence)))
+    except (TypeError, ValueError):
+        pass
+
+    if not series_name:
+        try:
+            hc = await get_series_for_book(
+                title=title,
+                author=author or canon_author,
+                series_hint=(series_hint or "").strip(),
+            )
+            series_name = (hc.get("seriesName") or "").strip()
+            if series_name:
+                for b in hc.get("books") or []:
+                    bt = b.get("title") or ""
+                    if _titles_compatible(title, bt) or _norm_title(title) == _norm_title(bt):
+                        sequence = str(b.get("sequence") or b.get("seriesBookNumber") or sequence or "")
+                        break
+        except Exception:
+            logger.debug("match_library_book series fallback failed for %s", title, exc_info=True)
+
+    out = {
+        "author": canon_author,
+        "genres": genres,
+        "seriesName": series_name or "",
+        "sequence": sequence or "",
+        "matchedTitle": (best.get("title") or "").strip(),
+    }
+    _cache_set(cache_key, out)
+    return out
+
+
 async def get_series_for_book(
     *,
     title: str,

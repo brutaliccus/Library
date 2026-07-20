@@ -55,8 +55,18 @@ function formatBookDetailsLine(book: BookDetailType): string | null {
 }
 
 export default function BookDetailPage() {
-  const { volumeId: rawVolumeId } = useParams<{ volumeId: string }>();
-  const volumeId = rawVolumeId ? decodeURIComponent(rawVolumeId) : undefined;
+  // Splat route /book/* — OL ids contain slashes (OL:/works/OL…W); :volumeId truncates them.
+  const params = useParams();
+  const rawVolumeId = params["*"] ?? params.volumeId;
+  const volumeId = rawVolumeId
+    ? (() => {
+        try {
+          return decodeURIComponent(rawVolumeId);
+        } catch {
+          return rawVolumeId;
+        }
+      })()
+    : undefined;
   const location = useLocation();
   const navigate = useNavigate();
   const { playABS, playRD } = usePlayer();
@@ -121,7 +131,7 @@ export default function BookDetailPage() {
   const { data: libraryCheck } = useQuery({
     queryKey: ["library-check", volumeId],
     queryFn: async () => {
-      const { data } = await api.get(`/library/check/${volumeId}`);
+      const { data } = await api.get(`/library/check/${encodeURIComponent(volumeId!)}`);
       return data as { inLibrary: boolean; item: any };
     },
     enabled: !!volumeId,
@@ -506,10 +516,14 @@ export default function BookDetailPage() {
 
   const noticesBlock = (
     <>
-      {globalLibCheck?.inLibrary && !libraryCheck?.inLibrary && (
+      {(globalLibCheck?.inLibrary || !!absMatch || !!ebookMatch?.chapterId) &&
+        !libraryCheck?.inLibrary && (
         <div className="flex items-center gap-2 mt-4 px-3 py-2 bg-emerald-900/20 border border-emerald-800/30 rounded-lg">
           <Check size={14} className="text-emerald-400 shrink-0" />
-          <p className="text-xs text-emerald-300">This book is already in the library.</p>
+          <p className="text-xs text-emerald-300">
+            This book is already in the library
+            {absMatch ? " (audiobook)" : ebookMatch?.chapterId ? " (ebook)" : ""}.
+          </p>
         </div>
       )}
       {smartStreamLoading && smartStreamDetail && (
@@ -518,7 +532,7 @@ export default function BookDetailPage() {
           {smartStreamDetail}
         </p>
       )}
-      {!absMatch && absData && !smartStreamLoading && (
+      {!absMatch && absData && !smartStreamLoading && !globalLibCheck?.inLibrary && (
         <p className="mt-2 text-xs text-gray-500 flex items-center gap-1.5">
           <Headphones size={13} />
           Not in your Audiobookshelf library
@@ -573,6 +587,7 @@ export default function BookDetailPage() {
               coverUrl={coverUrl}
               seriesName={catalogSeriesName}
               seriesIndex={seriesIndex}
+              googleVolumeId={volumeId}
             />
           </div>
 

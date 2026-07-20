@@ -13,8 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import User, SearchHistory
+from app.models import User, SearchHistory, DownloadRequest
 from app.utils.auth import get_current_user
+from app.database import async_session
 from app.services import google_books
 from app.services import goodreads
 from app.services import hardcover
@@ -23,6 +24,7 @@ from app.services import nyt_books
 from app.services import ol_catalog
 from app.services import availability_alerts
 from app.services import shelf_snapshots
+from app.services import audiobookshelf, kavita
 from app.utils.book_series import detect_series_from_title as _detect_series_from_title
 from app.utils.book_series import series_name_match as _series_name_match
 
@@ -110,18 +112,71 @@ def _norm_title_key(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
 
-async def _annotate_availability(books: list) -> list:
-    """Batch-attach indexer cache badges for store tiles.
+def _title_in_holdings(title: str, holdings: set[str]) -> bool:
+    key = _norm_title_key(title)
+    if not key or not holdings:
+        return False
+    if key in holdings:
+        return True
+    if len(key) < 10:
+        return False
+    for h in holdings:
+        if len(h) >= 10 and (key in h or h in key):
+            return True
+    return False
 
-    Intentionally does NOT scan Audiobookshelf/Kavita here — that full-library
-    pull on every search/shelf request melted the Pi (load 40+, swap thrash).
-    In-library checks stay on book detail via dedicated endpoints.
+
+async def _library_holding_title_keys() -> set[str]:
+    """Normalized titles currently in ABS / Kavita / non-failed download requests.
+
+    ABS/Kavita lists are process-cached (~5 min) so this stays cheap on shelves.
+    Private downloads still count — badges prevent duplicate requests without
+    revealing who requested the book.
+    """
+    keys: set[str] = set()
+    try:
+        for item in await audiobookshelf.get_all_items():
+            k = _norm_title_key(item.get("title") or "")
+            if k:
+                keys.add(k)
+    except Exception:
+        logger.debug("holdings: ABS unavailable", exc_info=True)
+    try:
+        for s in await kavita.get_all_series(formats=kavita.EBOOK_FORMATS):
+            name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
+            k = _norm_title_key(name)
+            if k:
+                keys.add(k)
+    except Exception:
+        logger.debug("holdings: Kavita unavailable", exc_info=True)
+    try:
+        async with async_session() as db:
+            rows = (
+                await db.execute(
+                    select(DownloadRequest.title).where(DownloadRequest.status != "failed")
+                )
+            ).scalars().all()
+            for t in rows:
+                k = _norm_title_key(t or "")
+                if k:
+                    keys.add(k)
+    except Exception:
+        logger.debug("holdings: download_requests unavailable", exc_info=True)
+    return keys
+
+
+async def _annotate_availability(books: list) -> list:
+    """Batch-attach indexer cache badges + in-library flags for store tiles.
+
+    In-library uses cached ABS/Kavita holdings (not a fresh full pull each time).
     """
     if not books:
         return books
 
     volume_ids = [b.get("volumeId") or b.get("id") for b in books if b.get("volumeId") or b.get("id")]
-    avail = await indexer_cache.volume_ids_with_matches(volume_ids)
+    avail_task = asyncio.create_task(indexer_cache.volume_ids_with_matches(volume_ids))
+    holdings_task = asyncio.create_task(_library_holding_title_keys())
+    avail, holdings = await asyncio.gather(avail_task, holdings_task)
 
     annotated = []
     for b in books:
@@ -129,14 +184,15 @@ async def _annotate_availability(books: list) -> list:
         row = dict(b)
         base = dict(avail.get(vid, _UNAVAILABLE) if vid else _UNAVAILABLE)
         available = bool(base.get("available"))
+        in_library = _title_in_holdings(b.get("title") or "", holdings)
         row["availability"] = {
-            "available": available,
+            "available": available or in_library,
             "matchCount": int(base.get("matchCount") or 0),
             "instantRd": bool(base.get("instantRd")),
             "instantTorbox": bool(base.get("instantTorbox")),
-            "inLibrary": False,
-            # Yellow "?" — catalog hit with no cached torrent match.
-            "catalogOnly": not available,
+            "inLibrary": in_library,
+            # Yellow "?" — catalog hit with no cached torrent match and not on disk.
+            "catalogOnly": not available and not in_library,
         }
         annotated.append(row)
     return annotated
@@ -1167,11 +1223,29 @@ async def _series_from_title_detect(book: dict, volume_id: str) -> dict:
     }
 
 
+def _normalize_volume_id(volume_id: str) -> str:
+    """Normalize catalog ids so OL work keys always resolve as /works/OL…W."""
+    if not volume_id.startswith("OL:"):
+        return volume_id
+    key = volume_id[3:].strip()
+    if not key:
+        return volume_id
+    if key.startswith("/"):
+        return f"OL:{key}"
+    if key.startswith("works/") or key.startswith("books/") or key.startswith("authors/"):
+        return f"OL:/{key}"
+    # Bare work id from a truncated URL (e.g. OL123W)
+    if re.fullmatch(r"OL\d+W", key, flags=re.IGNORECASE):
+        return f"OL:/works/{key}"
+    return f"OL:/{key}" if "/" not in key else f"OL:{key}"
+
+
 @router.get("/{volume_id:path}")
 async def get_book_detail(
     volume_id: str,
     _user: User = Depends(get_current_user),
 ):
+    volume_id = _normalize_volume_id(volume_id)
     if volume_id.startswith("cache:"):
         book = await indexer_cache.get_cache_release_detail(volume_id[6:])
         if not book:
@@ -1182,13 +1256,8 @@ async def get_book_detail(
         if not book:
             raise HTTPException(status_code=404, detail="Book not found")
         return book
-    if volume_id.startswith("OL:"):
-        ol_key = volume_id[3:]
-        book = await google_books.get_open_library_work(ol_key)
-    elif volume_id.startswith("ISBN:"):
-        book = await google_books.get_catalog_volume(volume_id)
-    else:
-        book = await google_books.get_volume(volume_id)
+    # Open Library / ISBNdb / legacy Google — one path with cover enrichment.
+    book = await google_books.get_catalog_volume(volume_id)
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
     return book

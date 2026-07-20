@@ -6,6 +6,7 @@ import {
   setInstanceUrl,
 } from "../api/instanceUrl";
 import { applyApiBaseUrl } from "../api/client";
+import { parseInviteInput, stashPendingInvite } from "../api/inviteLink";
 
 interface ServerUrlFieldProps {
   value?: string;
@@ -51,10 +52,26 @@ export default function ServerUrlField({
     setError("");
   };
 
+  /** If the user pasted an invite link, extract origin + stash the code. */
+  const absorbInviteIfPresent = (raw: string): string => {
+    const parsed = parseInviteInput(raw);
+    if (parsed?.origin) {
+      stashPendingInvite(parsed.code);
+      return parsed.origin;
+    }
+    if (parsed?.code) {
+      stashPendingInvite(parsed.code);
+    }
+    return raw;
+  };
+
   const persist = (raw: string): string | null => {
-    const normalized = normalizeInstanceUrl(raw);
+    const cleaned = absorbInviteIfPresent(raw);
+    const normalized = normalizeInstanceUrl(cleaned);
     if (!normalized) {
-      setError("Enter a valid HTTPS URL, e.g. https://library.example.com");
+      setError(
+        "Enter a valid HTTPS URL or paste an invite link (https://…/join/CODE)"
+      );
       return null;
     }
     try {
@@ -85,14 +102,28 @@ export default function ServerUrlField({
         value={value}
         autoFocus={autoFocus}
         required={required}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => {
+          const next = absorbInviteIfPresent(e.target.value);
+          setValue(next);
+        }}
         onBlur={() => {
           if (value.trim()) persist(value);
+        }}
+        onPaste={(e) => {
+          const text = e.clipboardData?.getData("text") || "";
+          const parsed = parseInviteInput(text);
+          if (parsed?.origin) {
+            e.preventDefault();
+            stashPendingInvite(parsed.code);
+            setValue(parsed.origin);
+            persist(parsed.origin);
+          }
         }}
         className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500"
       />
       <p className="text-[11px] text-gray-500 mt-1">
-        Your self-hosted Library address (must be reachable from this device, usually HTTPS).
+        Your Library address, or paste an invite link — the server URL is filled in
+        automatically.
       </p>
       {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
     </div>

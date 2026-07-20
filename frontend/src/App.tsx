@@ -1,14 +1,13 @@
-import { Routes, Route, Navigate, useLocation } from "react-router-dom";
-import { useState, useCallback } from "react";
+import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { useState, useCallback, useEffect } from "react";
 import { useAuth } from "./hooks/useAuth";
 import { usePlayer } from "./contexts/PlayerContext";
 import { useNativeNotifications } from "./hooks/useNativeNotifications";
+import { DEEPLINK_NAV_EVENT } from "./deepLinks";
 import Navbar from "./components/Navbar";
 import MiniPlayer from "./components/MiniPlayer";
 import PlayerPage from "./pages/Player";
 import Login from "./pages/Login";
-import RequestAccount from "./pages/RequestAccount";
-import AccountStatus from "./pages/AccountStatus";
 import ChangePassword from "./pages/ChangePassword";
 import Home from "./pages/Home";
 import SearchResults from "./pages/SearchResults";
@@ -24,6 +23,7 @@ import LibraryBookDetail from "./pages/LibraryBookDetail";
 import Ereader from "./pages/Ereader";
 import Settings from "./pages/Settings";
 import Onboarding from "./pages/Onboarding";
+import JoinInvite from "./pages/JoinInvite";
 import { useLibraryGroup } from "./hooks/useLibraryGroup";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -54,6 +54,19 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+function DeepLinkNavigator() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    const onNav = (ev: Event) => {
+      const path = (ev as CustomEvent<{ path?: string }>).detail?.path;
+      if (path) navigate(path, { replace: true });
+    };
+    window.addEventListener(DEEPLINK_NAV_EVENT, onNav);
+    return () => window.removeEventListener(DEEPLINK_NAV_EVENT, onNav);
+  }, [navigate]);
+  return null;
+}
+
 export default function App() {
   const { user, sessionReady } = useAuth();
   const { nowPlaying, expanded } = usePlayer();
@@ -82,11 +95,15 @@ export default function App() {
         />
       )}
       {expanded && <PlayerPage />}
+      <DeepLinkNavigator />
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/request-account" element={<RequestAccount />} />
-        <Route path="/account-status" element={<AccountStatus />} />
+        {/* Legacy approval-flow URLs → invite-only join */}
+        <Route path="/request-account" element={<Navigate to="/join" replace />} />
+        <Route path="/account-status" element={<Navigate to="/join" replace />} />
         <Route path="/change-password" element={<ChangePassword />} />
+        <Route path="/join/:code" element={<JoinInvite />} />
+        <Route path="/join" element={<JoinInvite />} />
         <Route
           path="/onboarding"
           element={
@@ -120,7 +137,7 @@ export default function App() {
           }
         />
         <Route
-          path="/book/:volumeId"
+          path="/book/*"
           element={
             <ProtectedRoute>
               <BookDetailPage />
@@ -128,7 +145,7 @@ export default function App() {
           }
         />
         <Route
-          path="/series/:volumeId"
+          path="/series/*"
           element={
             <ProtectedRoute>
               <SeriesPage />

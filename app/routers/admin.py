@@ -1,18 +1,17 @@
 import asyncio
 import logging
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import User, AccountRequest, DownloadRequest
+from app.models import User, DownloadRequest
 from app.utils.auth import require_admin, hash_password
-from app.services import push, real_debrid, audiobookshelf, kavita, downloader, goodreads
+from app.services import real_debrid, audiobookshelf, kavita, downloader, goodreads
 from app.services.pipeline import (
     audiobook_destination_dir,
     organize_audiobook_files,
@@ -21,14 +20,6 @@ from app.services.pipeline import (
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger(__name__)
-
-
-class ApproveRequest(BaseModel):
-    password: str | None = None
-
-
-class DenyRequest(BaseModel):
-    reason: str | None = None
 
 
 class UserResponse(BaseModel):
@@ -41,17 +32,6 @@ class UserResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class AccountRequestResponse(BaseModel):
-    id: int
-    username: str
-    email: str | None
-    reason: str | None
-    status: str
-    created_at: str
-
-    model_config = {"from_attributes": True}
-
-
 class AdminDownloadResponse(BaseModel):
     id: int
     title: str
@@ -59,108 +39,13 @@ class AdminDownloadResponse(BaseModel):
     status: str
     status_detail: str | None
     username: str
+    is_private: bool = False
     created_at: str
     completed_at: str | None
     progress_percent: float | None = None
     progress_bytes: int | None = None
     progress_total_bytes: int | None = None
     progress_speed_bps: float | None = None
-
-
-# --- Account Approvals ---
-
-@router.get("/account-requests", response_model=list[AccountRequestResponse])
-async def list_account_requests(
-    status_filter: str | None = None,
-    _admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    query = select(AccountRequest).order_by(AccountRequest.created_at.desc())
-    if status_filter:
-        query = query.where(AccountRequest.status == status_filter)
-    result = await db.execute(query)
-    reqs = result.scalars().all()
-    return [
-        AccountRequestResponse(
-            id=r.id,
-            username=r.username,
-            email=r.email,
-            reason=r.reason,
-            status=r.status,
-            created_at=r.created_at.isoformat() if r.created_at else "",
-        )
-        for r in reqs
-    ]
-
-
-@router.post("/account-requests/{request_id}/approve")
-async def approve_account(
-    request_id: int,
-    body: ApproveRequest,
-    background_tasks: BackgroundTasks,
-    _admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(AccountRequest).where(AccountRequest.id == request_id))
-    req = result.scalar_one_or_none()
-    if not req or req.status != "pending":
-        raise HTTPException(status_code=404, detail="Pending request not found")
-
-    existing = await db.execute(select(User).where(User.username == req.username))
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Username already taken")
-
-    default_password = "changeme"
-
-    user = User(
-        username=req.username,
-        hashed_password=hash_password(default_password),
-        role="user",
-        must_change_password=True,
-    )
-    db.add(user)
-
-    req.status = "approved"
-    req.resolved_at = datetime.now(timezone.utc)
-    await db.commit()
-
-    background_tasks.add_task(
-        push.notify_admins_background,
-        {"type": "account_approved", "title": "Account Approved", "body": f"{req.username} can now log in", "url": "/admin?tab=users"},
-    )
-
-    return {"message": f"Account created for {req.username}"}
-
-
-@router.post("/account-requests/{request_id}/deny")
-async def deny_account(
-    request_id: int,
-    body: DenyRequest,
-    background_tasks: BackgroundTasks,
-    _admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(AccountRequest).where(AccountRequest.id == request_id))
-    req = result.scalar_one_or_none()
-    if not req or req.status != "pending":
-        raise HTTPException(status_code=404, detail="Pending request not found")
-
-    req.status = "denied"
-    req.deny_reason = body.reason
-    req.resolved_at = datetime.now(timezone.utc)
-    await db.commit()
-
-    background_tasks.add_task(
-        push.notify_admins_background,
-        {
-            "type": "account_denied",
-            "title": "Account Denied",
-            "body": f"{req.username}" + (f": {body.reason}" if body.reason else ""),
-            "url": "/admin?tab=approvals",
-        },
-    )
-
-    return {"message": f"Account request for {req.username} denied"}
 
 
 # --- User Management ---
@@ -242,6 +127,7 @@ async def list_all_downloads(
             status=req.status,
             status_detail=req.status_detail,
             username=username,
+            is_private=bool(req.is_private),
             created_at=req.created_at.isoformat() if req.created_at else "",
             completed_at=req.completed_at.isoformat() if req.completed_at else None,
             progress_percent=req.progress_percent,

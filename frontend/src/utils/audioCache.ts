@@ -16,6 +16,7 @@
  *   window or while the audio element is buffering.
  */
 
+import { toAbsoluteUrl } from "../api/instanceUrl";
 import {
   cacheStorageKey,
   hasStorageRoom,
@@ -243,6 +244,7 @@ async function fetchChunkWithBody(
   url: string,
   offset: number
 ): Promise<ChunkResult | "eof" | null> {
+  const absoluteUrl = toAbsoluteUrl(url);
   const headers = { Range: `bytes=${offset}-${offset + CHUNK_SIZE - 1}` };
   for (let attempt = 0; attempt < CHUNK_RETRIES; attempt++) {
     if (attempt > 0) await sleep(Math.min(12_000, 1_500 * 2 ** attempt));
@@ -252,7 +254,8 @@ async function fetchChunkWithBody(
       return null;
     }
     try {
-      const resp = await fetch(url, { headers, credentials: "same-origin" });
+      // Native APK: absolute URL is cross-origin from https://localhost.
+      const resp = await fetch(absoluteUrl, { headers, credentials: "include" });
       if (resp.status === 416) return "eof";
       if (resp.status !== 206 && resp.status !== 200) {
         setLastError(`Server returned ${resp.status} while downloading`);

@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import api from "../api/client";
+import { toAbsoluteUrl } from "../api/instanceUrl";
 import { clearMediaSessionPlayback } from "../media/playerMediaSession";
 import { indexOfChapterAtTime } from "../utils/playerNav";
 import {
@@ -43,6 +44,22 @@ import {
 } from "../types/player";
 
 export type { Track, AbsChapter, NowPlaying, RDResumeInfo };
+
+/** Capacitor WebView is https://localhost — relative /api/stream URLs must hit the library host. */
+function withAbsoluteMediaUrls(np: NowPlaying): NowPlaying {
+  return {
+    ...np,
+    coverUrl: np.coverUrl ? toAbsoluteUrl(np.coverUrl) : np.coverUrl,
+    tracks: np.tracks.map((t) => ({
+      ...t,
+      contentUrl: toAbsoluteUrl(t.contentUrl),
+    })),
+  };
+}
+
+function absolutizeTracks(tracks: Track[]): Track[] {
+  return tracks.map((t) => ({ ...t, contentUrl: toAbsoluteUrl(t.contentUrl) }));
+}
 
 interface PlayerState {
   nowPlaying: NowPlaying | null;
@@ -286,11 +303,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         audio.addEventListener("canplay", tryPlay, { once: true });
       };
 
+      const streamUrl = toAbsoluteUrl(track.contentUrl);
+
       // Cached books: play from blob (offline). Uncached: stream immediately.
       void (async () => {
         try {
-          if (await isTrackFullyCached(track.contentUrl)) {
-            const objectUrl = await getCachedTrackObjectUrl(track.contentUrl);
+          if (await isTrackFullyCached(streamUrl)) {
+            const objectUrl = await getCachedTrackObjectUrl(streamUrl);
             if (objectUrl && seq === loadSeqRef.current) {
               beginPlayback(objectUrl, objectUrl);
               return;
@@ -300,7 +319,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           /* fall through to stream */
         }
         if (seq === loadSeqRef.current) {
-          beginPlayback(track.contentUrl, null);
+          beginPlayback(streamUrl, null);
         }
       })();
 
@@ -379,7 +398,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           controller.signal.addEventListener("abort", cleanup, { once: true });
           probe.addEventListener("loadedmetadata", onMeta, { once: true });
           probe.addEventListener("error", onError, { once: true });
-          probe.src = t.contentUrl;
+          probe.src = toAbsoluteUrl(t.contentUrl);
         });
 
       let cursor = 0;
@@ -577,7 +596,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (!(await isBookCached(manifest.tracks))) return false;
 
         const local = getOfflineProgress(progressKeyForAbs(itemId));
-        const np: NowPlaying = {
+        const np = withAbsoluteMediaUrls({
           source: "abs",
           // No live ABS session offline — progress stays local until next online play.
           itemId,
@@ -587,7 +606,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           tracks: manifest.tracks,
           totalDuration: manifest.totalDuration,
           absChapters: manifest.absChapters,
-        };
+        });
 
         const startOffset = local?.time ?? 0;
         let trackIdx = local?.trackIndex ?? 0;
@@ -630,7 +649,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       try {
         const { data } = await api.post(`/stream/abs/${itemId}/play`);
 
-        const np: NowPlaying = {
+        const np = withAbsoluteMediaUrls({
           source: "abs",
           sessionId: data.sessionId,
           itemId,
@@ -639,7 +658,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           coverUrl: data.coverUrl,
           tracks: data.tracks,
           totalDuration: data.duration,
-        };
+        });
 
         // Prefer local offline progress when it's newer than ABS (listened offline).
         const local = getOfflineProgress(progressKeyForAbs(itemId));
@@ -738,9 +757,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       probeAbortRef.current?.abort();
       retryCountRef.current = 0;
       playIntentRef.current = true;
-      const tracksCopy = tracks.map((t) => ({ ...t }));
+      const tracksCopy = absolutizeTracks(tracks.map((t) => ({ ...t })));
       const totalDuration = recalcOffsets(tracksCopy);
-      const np: NowPlaying = {
+      const np = withAbsoluteMediaUrls({
         source: "rd",
         streamHistoryId,
         libraryItemId,
@@ -749,7 +768,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         coverUrl: coverUrl || "",
         tracks: tracksCopy,
         totalDuration,
-      };
+      });
 
       const info: RDResumeInfo =
         typeof resume === "number" ? { startAt: resume } : resume;

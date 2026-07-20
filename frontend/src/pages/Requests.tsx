@@ -7,7 +7,7 @@ import { useWebSocket } from "../hooks/useWebSocket";
 import { usePushNotifications } from "../hooks/usePushNotifications";
 import { applyRequestWsUpdate, type DownloadRequestProgress } from "../utils/requestProgress";
 import type { WSMessage } from "../hooks/wsClient";
-import { List, Bell } from "lucide-react";
+import { List, Bell, EyeOff } from "lucide-react";
 
 function formatSize(bytes: number | null): string {
   if (!bytes) return "-";
@@ -125,9 +125,20 @@ export default function RequestsPage() {
             >
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1 min-w-0">
-                  <h3 className="font-semibold text-gray-100 truncate">
-                    {req.title}
-                  </h3>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <h3 className="font-semibold text-gray-100 truncate">
+                      {req.title}
+                    </h3>
+                    {req.is_private && (
+                      <span
+                        className="inline-flex items-center gap-1 shrink-0 text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-300 border border-purple-700/40"
+                        title="Hidden from other members' library browse"
+                      >
+                        <EyeOff size={11} />
+                        Private
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-500">
                     <span>{formatDate(req.created_at)}</span>
                     <span>{formatSize(req.size_bytes)}</span>

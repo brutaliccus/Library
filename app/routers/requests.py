@@ -29,6 +29,9 @@ class CreateDownloadRequest(BaseModel):
     source: str | None = None
     aa_md5: str | None = None
     aa_file_extension: str | None = None
+    # Catalog volume the user was viewing (Personal Collection + in-library badges)
+    google_volume_id: str | None = None
+    catalog_title: str | None = None
 
 
 class DownloadRequestResponse(BaseModel):
@@ -40,6 +43,7 @@ class DownloadRequestResponse(BaseModel):
     status_detail: str | None
     size_bytes: int | None
     indexer: str | None
+    is_private: bool = False
     created_at: str
     completed_at: str | None
     progress_percent: float | None = None
@@ -62,9 +66,11 @@ async def create_request(
     if not is_aa and not link:
         raise HTTPException(status_code=400, detail="Either magnet_link or download_url is required")
 
+    # Prefer catalog title for matching/hide so ABS clean titles line up with requests.
+    stored_title = (body.catalog_title or body.title or "").strip() or body.title
     dl_request = DownloadRequest(
         user_id=user.id,
-        title=body.title,
+        title=stored_title,
         author=body.author,
         magnet_link=link or f"aa:{body.aa_md5}",
         indexer=body.indexer or ("Anna's Archive" if is_aa else None),
@@ -78,18 +84,19 @@ async def create_request(
     await db.flush()
     await db.refresh(dl_request)
 
-    # Auto-add to Personal Collection when requesting audiobook (with magnet for streaming)
-    if body.media_type == "audiobook" and link and not link.startswith("aa:"):
-        try:
-            await add_to_library_from_stream(
-                user.id,
-                body.title,
-                body.author or "",
-                magnet_link=link if (link or "").startswith("magnet:") else None,
-                db=db,
-            )
-        except Exception:
-            pass  # Non-fatal; request still succeeds
+    # Always add to Personal Collection for the requester (private or not) so they
+    # can find the book again from the catalog volume page.
+    try:
+        await add_to_library_from_stream(
+            user.id,
+            body.catalog_title or body.title,
+            body.author or "",
+            magnet_link=link if (link or "").startswith("magnet:") else None,
+            google_volume_id=body.google_volume_id,
+            db=db,
+        )
+    except Exception:
+        pass  # Non-fatal; request still succeeds
 
     if is_aa:
         asyncio.create_task(process_aa_download(dl_request.id))
@@ -163,6 +170,7 @@ def _to_response(req: DownloadRequest) -> DownloadRequestResponse:
         status_detail=req.status_detail,
         size_bytes=req.size_bytes,
         indexer=req.indexer,
+        is_private=bool(req.is_private),
         created_at=req.created_at.isoformat() if req.created_at else "",
         completed_at=req.completed_at.isoformat() if req.completed_at else None,
         progress_percent=req.progress_percent,

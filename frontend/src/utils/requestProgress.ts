@@ -8,6 +8,7 @@ export interface DownloadRequestProgress {
   status_detail: string | null;
   size_bytes: number | null;
   indexer: string | null;
+  is_private?: boolean;
   created_at: string;
   completed_at: string | null;
   progress_percent?: number | null;

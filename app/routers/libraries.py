@@ -68,9 +68,40 @@ def _token_sources(group: LibraryGroup) -> dict[str, str]:
     return {"rd": rd, "torbox": tb}
 
 
+async def _public_app_base() -> str:
+    """Canonical public origin for invite links (APP_URL / Admin → Config → App URL)."""
+    base = ""
+    try:
+        from app.services import instance_settings
+
+        base = (await instance_settings.get_effective("config.app_url")).strip()
+    except Exception:
+        base = ""
+    if not base:
+        from app.config import get_settings
+
+        base = (get_settings().app_url or "").strip()
+    return base.rstrip("/")
+
+
+def _invite_link_for(code: str, base: str) -> str | None:
+    code = (code or "").strip().upper()
+    if not code or not base:
+        return None
+    if "library.example.com" in base.lower():
+        # Placeholder APP_URL — still return a link shape so clients don't fall
+        # back to a bare code; ops should set APP_URL to the real public host.
+        pass
+    return f"{base}/join/{code}"
+
+
 async def _serialize_group(group: LibraryGroup, user: User, db: AsyncSession) -> dict:
     can_invite = user.library_role in ("owner", "admin")
     sources = _token_sources(group)
+    invite_code = group.invite_code if can_invite else None
+    invite_link = None
+    if invite_code:
+        invite_link = _invite_link_for(invite_code, await _public_app_base())
     out: dict = {
         "id": group.id,
         "name": group.name,
@@ -82,7 +113,8 @@ async def _serialize_group(group: LibraryGroup, user: User, db: AsyncSession) ->
         "rdKeySource": sources["rd"],
         "torboxKeySource": sources["torbox"],
         "usesServerKeys": sources["rd"] == "server" or sources["torbox"] == "server",
-        "inviteCode": group.invite_code if can_invite else None,
+        "inviteCode": invite_code,
+        "inviteLink": invite_link,
     }
     if can_invite:
         members = (
@@ -268,7 +300,11 @@ async def regenerate_invite(
         raise HTTPException(status_code=404, detail="You're not in a library")
     group.invite_code = _invite_code()
     await db.commit()
-    return {"inviteCode": group.invite_code}
+    base = await _public_app_base()
+    return {
+        "inviteCode": group.invite_code,
+        "inviteLink": _invite_link_for(group.invite_code, base),
+    }
 
 
 @router.post("/members/{member_id}/role")

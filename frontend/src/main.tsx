@@ -76,20 +76,40 @@ queryClient.getQueryCache().subscribe(() => {
   }, 1500);
 });
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <QueryClientProvider client={queryClient}>
-        <AuthProvider>
-          <ToastProvider>
-            <PlayerProvider>
-              <App />
-              <UpdateBanner />
-              <ToastContainer />
-            </PlayerProvider>
-          </ToastProvider>
-        </AuthProvider>
-      </QueryClientProvider>
-    </BrowserRouter>
-  </React.StrictMode>
-);
+async function start() {
+  // Native: apply cold-start invite deep link before AuthProvider checks the API.
+  try {
+    const { consumeLaunchDeepLink, registerDeepLinkListener } = await import("./deepLinks");
+    const launchPath = await consumeLaunchDeepLink();
+    void registerDeepLinkListener();
+    if (launchPath && typeof window !== "undefined") {
+      // Ensure first paint routes to /join/CODE (SPA may have opened at /).
+      const here = window.location.pathname + window.location.search;
+      if (!here.startsWith("/join")) {
+        window.history.replaceState(null, "", launchPath);
+      }
+    }
+  } catch {
+    // web / plugin unavailable
+  }
+
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <BrowserRouter>
+        <QueryClientProvider client={queryClient}>
+          <AuthProvider>
+            <ToastProvider>
+              <PlayerProvider>
+                <App />
+                <UpdateBanner />
+                <ToastContainer />
+              </PlayerProvider>
+            </ToastProvider>
+          </AuthProvider>
+        </QueryClientProvider>
+      </BrowserRouter>
+    </React.StrictMode>
+  );
+}
+
+void start();

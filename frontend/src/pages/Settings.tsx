@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import ServerUrlField, { commitServerUrl } from "../components/ServerUrlField";
 import { getStoredInstanceUrl, isNativeApp } from "../api/instanceUrl";
+import { resolveInviteShareUrl } from "../api/inviteLink";
 
 interface UserSettings {
   private_mode: boolean;
@@ -238,12 +239,46 @@ function LibraryGroupSection() {
   const isOwner = lib.role === "owner";
   const canInvite = lib.role === "owner" || lib.role === "admin";
 
-  const copyInvite = () => {
-    if (!lib.inviteCode) return;
-    navigator.clipboard?.writeText(lib.inviteCode).then(
-      () => toast("Invite code copied", "success"),
+  const inviteLink = resolveInviteShareUrl(lib.inviteLink, lib.inviteCode);
+  const inviteLooksBroken =
+    !!lib.inviteCode &&
+    (!inviteLink ||
+      inviteLink === lib.inviteCode ||
+      /library\.example\.com/i.test(inviteLink) ||
+      /localhost|127\.0\.0\.1/i.test(inviteLink));
+
+  const copyInviteLink = () => {
+    if (!inviteLink || inviteLink === lib.inviteCode) {
+      toast(
+        "Set App URL in Admin → Config (or APP_URL in .env) to your public https:// address, then copy again",
+        "error"
+      );
+      return;
+    }
+    navigator.clipboard?.writeText(inviteLink).then(
+      () => toast("Invite link copied", "success"),
       () => toast("Couldn't copy — long-press to copy manually", "error"),
     );
+  };
+
+  const shareInviteLink = async () => {
+    if (!inviteLink || inviteLink === lib.inviteCode) {
+      copyInviteLink();
+      return;
+    }
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: `Join ${lib.name}`,
+          text: `Join my Library — create your account with this invite:`,
+          url: inviteLink,
+        });
+        return;
+      }
+    } catch {
+      // user cancelled or share failed — fall through to copy
+    }
+    copyInviteLink();
   };
 
   return (
@@ -261,32 +296,48 @@ function LibraryGroupSection() {
           </div>
 
           {canInvite && lib.inviteCode && (
-            <div>
-              <p className="text-xs font-medium text-gray-400 mb-1.5">
-                Invite code — share it to let others stream with this library's account
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-gray-400">
+                Invite link — share this full URL so friends can join (opens the Android app when
+                installed)
               </p>
-              <div className="flex items-center gap-2">
-                <code className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-brand-300 font-mono tracking-widest">
-                  {lib.inviteCode}
+              {inviteLooksBroken && (
+                <p className="text-xs text-amber-400/90 leading-relaxed">
+                  Set <span className="font-medium">App URL</span> in Admin → Config (or{" "}
+                  <code className="text-amber-300">APP_URL</code> in{" "}
+                  <code className="text-amber-300">.env</code>) to your public address, e.g.{" "}
+                  <code className="text-amber-300">https://library.yourdomain.com</code>, then
+                  reload. Invite links are built from that URL.
+                </p>
+              )}
+              <div className="flex items-start gap-2">
+                <code className="flex-1 min-w-0 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-[11px] text-brand-300 font-mono break-all select-all">
+                  {inviteLink || lib.inviteCode}
                 </code>
                 <button
-                  onClick={copyInvite}
-                  className="p-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 transition-colors"
-                  title="Copy invite code"
+                  type="button"
+                  onClick={shareInviteLink}
+                  className="p-2 bg-brand-600 text-white rounded-lg hover:bg-brand-500 transition-colors shrink-0"
+                  title="Share or copy invite link"
                 >
                   <Copy size={15} />
                 </button>
                 {isOwner && (
                   <button
+                    type="button"
                     onClick={() => regenInvite.mutate()}
                     disabled={regenInvite.isPending}
-                    className="p-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors"
+                    className="p-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors shrink-0"
                     title="Generate a new code (old one stops working)"
                   >
                     <RefreshCw size={15} className={regenInvite.isPending ? "animate-spin" : ""} />
                   </button>
                 )}
               </div>
+              <p className="text-[11px] text-gray-500">
+                Code inside the link:{" "}
+                <span className="font-mono text-gray-400">{lib.inviteCode}</span>
+              </p>
             </div>
           )}
 
@@ -518,9 +569,9 @@ export default function Settings() {
                 <div>
                   <h3 className="text-sm font-semibold text-gray-100">Private Mode</h3>
                   <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-                    When enabled, any books you request will be hidden from other users' library views.
-                    Private books will only appear in your Personal Collection. Other users will still
-                    see a "book is already in the library" notice to prevent duplicate requests.
+                    When enabled, books you request stay visible to you (Audiobookshelf / Kavita /
+                    Personal Collection) but are hidden from everyone else's library browse.
+                    Others still see an “already in the library” notice so they don't re-download it.
                   </p>
                 </div>
                 <button
@@ -543,7 +594,8 @@ export default function Settings() {
                 <div className="mt-3 flex items-center gap-2 px-3 py-2 bg-purple-900/20 border border-purple-800/30 rounded-lg">
                   <Shield size={14} className="text-purple-400 shrink-0" />
                   <p className="text-xs text-purple-300">
-                    Private mode is active. New download requests will be hidden from other users.
+                    Private mode is active. Your new downloads stay in your library and stay hidden
+                    from other members' browse views.
                   </p>
                 </div>
               )}

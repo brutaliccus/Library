@@ -434,11 +434,12 @@ async def abs_collection(
                 placed = True
             if not placed:
                 ungrouped.append(item)
+    visible = sum(len(v) for v in genres.values()) + len(ungrouped)
     sorted_genres = dict(sorted(genres.items(), key=lambda x: x[0]))
     return {
         "genres": sorted_genres,
         "ungrouped": ungrouped,
-        "totalItems": len(items) - len(hidden_titles),
+        "totalItems": visible,
     }
 
 
@@ -1043,7 +1044,7 @@ async def format_matches_batch(
     return result
 
 
-@router.get("/check/{google_volume_id}")
+@router.get("/check/{google_volume_id:path}")
 async def check_in_library(
     google_volume_id: str,
     user: User = Depends(get_current_user),
@@ -1063,23 +1064,71 @@ async def check_in_library(
     return {"inLibrary": False, "item": None}
 
 
+def _norm_title_key(s: str) -> str:
+    """Normalize titles for private-hide / in-library matching."""
+    s = (s or "").lower().replace("\u2019", "'").replace("\u2018", "'")
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+def _titles_overlap(a: str, b: str) -> bool:
+    """True when normalized titles are equal or one substantial title contains the other."""
+    ka, kb = _norm_title_key(a), _norm_title_key(b)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    shorter, longer = (ka, kb) if len(ka) <= len(kb) else (kb, ka)
+    # Avoid tiny false positives ("it", "a", "war")
+    return len(shorter) >= 10 and shorter in longer
+
+
 async def _get_private_titles_for_others(current_user_id: int, db: AsyncSession) -> set[str]:
-    """Get lowercase titles of private download requests made by OTHER users.
-    These should be hidden from the current user's shared library views."""
-    result = await db.execute(
-        select(DownloadRequest.title).where(
-            DownloadRequest.is_private == True,
-            DownloadRequest.user_id != current_user_id,
+    """Normalized title keys of OTHER users' private downloads to hide.
+
+    Never includes titles the current user also requested (so you always see
+    your own private books even if someone else privately requested the same title).
+    """
+    others = (
+        await db.execute(
+            select(DownloadRequest.title).where(
+                DownloadRequest.is_private == True,  # noqa: E712
+                DownloadRequest.user_id != current_user_id,
+                DownloadRequest.status != "failed",
+            )
         )
-    )
-    return {row[0].lower().strip() for row in result.all() if row[0]}
+    ).scalars().all()
+    mine = (
+        await db.execute(
+            select(DownloadRequest.title).where(
+                DownloadRequest.user_id == current_user_id,
+                DownloadRequest.status != "failed",
+            )
+        )
+    ).scalars().all()
+
+    other_keys = {_norm_title_key(t) for t in others if t}
+    my_keys = {_norm_title_key(t) for t in mine if t}
+    # Drop keys that overlap the viewer's own requests
+    hidden: set[str] = set()
+    for ok in other_keys:
+        if not ok:
+            continue
+        if any(_titles_overlap(ok, mk) for mk in my_keys if mk):
+            continue
+        hidden.add(ok)
+    return hidden
 
 
 def _is_hidden(title: str, hidden_titles: set[str]) -> bool:
+    """hidden_titles is a set of normalized keys (see _get_private_titles_for_others)."""
     if not hidden_titles or not title:
         return False
-    t = title.lower().strip()
-    return t in hidden_titles
+    key = _norm_title_key(title)
+    if not key:
+        return False
+    if key in hidden_titles:
+        return True
+    return any(_titles_overlap(key, h) for h in hidden_titles)
 
 
 @router.get("/in-library-global")
@@ -1090,22 +1139,29 @@ async def check_in_library_global(
     db: AsyncSession = Depends(get_db),
 ):
     """Check if ANY user has this book in the library (for 'already in library' indicator).
-    Does not reveal who owns it."""
-    q_lower = title.lower().strip()
+
+    Includes private downloads (title only — never who requested them) so
+    duplicate requests are discouraged even in private mode.
+    """
+    _ = user  # auth required
+    _ = author  # reserved for future author-aware matching
+    q_key = _norm_title_key(title)
+    if not q_key:
+        return {"inLibrary": False}
 
     result = await db.execute(
-        select(DownloadRequest.id).where(
-            DownloadRequest.title.ilike(f"%{q_lower}%"),
-            DownloadRequest.status != "failed",
-        ).limit(1)
+        select(DownloadRequest.title).where(DownloadRequest.status != "failed")
     )
-    if result.scalar_one_or_none() is not None:
-        return {"inLibrary": True}
+    for req_title in result.scalars().all():
+        if req_title and _titles_overlap(title, req_title):
+            return {"inLibrary": True}
 
     try:
         abs_items = await audiobookshelf.get_all_items()
         for item in abs_items:
-            if _title_matches(title, item.get("title", "")):
+            if _titles_overlap(title, item.get("title", "")) or _title_matches(
+                title, item.get("title", "")
+            ):
                 return {"inLibrary": True}
     except Exception:
         pass
@@ -1114,7 +1170,7 @@ async def check_in_library_global(
         kavita_series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS)
         for s in kavita_series:
             name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
-            if _title_matches(title, name):
+            if _titles_overlap(title, name) or _title_matches(title, name):
                 return {"inLibrary": True}
     except Exception:
         pass

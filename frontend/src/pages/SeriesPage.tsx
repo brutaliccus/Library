@@ -17,9 +17,15 @@ interface SeriesBook {
 }
 
 export default function SeriesPage() {
-  const { volumeId = "" } = useParams<{ volumeId: string }>();
+  const params = useParams();
+  const rawVolumeId = params["*"] ?? params.volumeId ?? "";
   const navigate = useNavigate();
-  const decoded = decodeURIComponent(volumeId);
+  let decoded = rawVolumeId;
+  try {
+    decoded = decodeURIComponent(rawVolumeId);
+  } catch {
+    /* keep raw */
+  }
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["book-series", decoded],

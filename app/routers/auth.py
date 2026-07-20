@@ -6,7 +6,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import User, AccountRequest
+from app.models import User, LibraryGroup
 from app.utils.auth import (
     hash_password,
     verify_password,
@@ -33,22 +33,21 @@ class TokenResponse(BaseModel):
     must_change_password: bool = False
 
 
-class AccountRequestCreate(BaseModel):
-    username: str
-    email: str | None = None
-    reason: str | None = None
-
-
-class AccountRequestStatus(BaseModel):
-    status: str
-    username: str
-    deny_reason: str | None = None
-    temp_password: str | None = None
-
-
 class SetupRequest(BaseModel):
     username: str
     password: str
+
+
+class InviteSignupRequest(BaseModel):
+    invite_code: str
+    username: str
+    password: str
+
+
+class InvitePreviewResponse(BaseModel):
+    valid: bool = True
+    code: str
+    library_name: str
 
 
 class RefreshRequest(BaseModel):
@@ -64,6 +63,32 @@ class MeResponse(BaseModel):
     username: str
     role: str
     must_change_password: bool = False
+
+
+def _normalize_invite_code(raw: str) -> str:
+    return (raw or "").strip().upper()
+
+
+def _token_response(user: User) -> TokenResponse:
+    return TokenResponse(
+        access_token=create_access_token(user.id, user.role),
+        refresh_token=create_refresh_token(user.id),
+        role=user.role,
+        username=user.username,
+        must_change_password=user.must_change_password,
+    )
+
+
+async def _library_for_invite(code: str, db: AsyncSession) -> LibraryGroup:
+    normalized = _normalize_invite_code(code)
+    if not normalized or len(normalized) < 6:
+        raise HTTPException(status_code=400, detail="Invalid invite code")
+    group = (
+        await db.execute(select(LibraryGroup).where(LibraryGroup.invite_code == normalized))
+    ).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Invalid invite code")
+    return group
 
 
 @router.get("/me", response_model=MeResponse)
@@ -84,13 +109,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
 
-    return TokenResponse(
-        access_token=create_access_token(user.id, user.role),
-        refresh_token=create_refresh_token(user.id),
-        role=user.role,
-        username=user.username,
-        must_change_password=user.must_change_password,
-    )
+    return _token_response(user)
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -134,75 +153,79 @@ async def initial_setup(body: SetupRequest, db: AsyncSession = Depends(get_db)):
     if result.scalar() > 0:
         raise HTTPException(status_code=400, detail="Setup already completed")
 
+    username = (body.username or "").strip()
+    password = body.password or ""
+    if len(username) < 2 or len(username) > 64:
+        raise HTTPException(status_code=400, detail="Username must be 2–64 characters")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
     user = User(
-        username=body.username,
-        hashed_password=hash_password(body.password),
+        username=username,
+        hashed_password=hash_password(password),
         role="admin",
     )
     db.add(user)
     await db.commit()
+    await db.refresh(user)
 
-    return TokenResponse(
-        access_token=create_access_token(user.id, user.role),
-        refresh_token=create_refresh_token(user.id),
-        role=user.role,
-        username=user.username,
+    return _token_response(user)
+
+
+@router.get("/invite/{code}", response_model=InvitePreviewResponse)
+async def preview_invite(code: str, db: AsyncSession = Depends(get_db)):
+    """Public: validate an invite code and return the library name for the join screen."""
+    group = await _library_for_invite(code, db)
+    return InvitePreviewResponse(
+        valid=True,
+        code=group.invite_code,
+        library_name=group.name,
     )
 
 
-@router.post("/request-account")
-async def request_account(
-    body: AccountRequestCreate,
+@router.post("/signup-with-invite", response_model=TokenResponse)
+async def signup_with_invite(
+    body: InviteSignupRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    existing = await db.execute(
-        select(AccountRequest).where(
-            AccountRequest.username == body.username,
-            AccountRequest.status == "pending",
-        )
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="A pending request for this username already exists")
+    """Create an account + join a library in one step (shared invite link flow)."""
+    group = await _library_for_invite(body.invite_code, db)
 
-    user_exists = await db.execute(select(User).where(User.username == body.username))
-    if user_exists.scalar_one_or_none():
+    username = (body.username or "").strip()
+    password = body.password or ""
+    if len(username) < 2 or len(username) > 64:
+        raise HTTPException(status_code=400, detail="Username must be 2–64 characters")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    existing = await db.execute(select(User).where(User.username == username))
+    if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="This username is already taken")
 
-    req = AccountRequest(
-        username=body.username,
-        email=body.email,
-        reason=body.reason,
+    user = User(
+        username=username,
+        hashed_password=hash_password(password),
+        role="user",
+        must_change_password=False,
+        library_group_id=group.id,
+        library_role="member",
     )
-    db.add(req)
+    db.add(user)
     await db.commit()
+    await db.refresh(user)
 
     background_tasks.add_task(
         push.notify_admins_background,
         {
-            "type": "account_request",
-            "title": "New Account Request",
-            "body": f"{body.username} wants to join" + (f": {body.reason}" if body.reason else ""),
-            "url": "/admin?tab=approvals",
+            "type": "invite_signup",
+            "title": "New member joined",
+            "body": f"{username} joined {group.name} via invite",
+            "url": "/admin?tab=users",
         },
     )
 
-    return {"token": req.token, "message": "Account request submitted. You'll be notified when it's reviewed."}
-
-
-@router.get("/account-status/{token}", response_model=AccountRequestStatus)
-async def check_account_status(token: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(AccountRequest).where(AccountRequest.token == token))
-    req = result.scalar_one_or_none()
-    if not req:
-        raise HTTPException(status_code=404, detail="Request not found")
-
-    return AccountRequestStatus(
-        status=req.status,
-        username=req.username,
-        deny_reason=req.deny_reason,
-        temp_password=req.temp_password if req.status == "approved" else None,
-    )
+    return _token_response(user)
 
 
 class UserSettingsResponse(BaseModel):
@@ -258,18 +281,5 @@ async def change_password(
 
     user.hashed_password = hash_password(body.new_password)
     user.must_change_password = False
-
-    # The temp password has served its purpose — stop storing it in plaintext.
-    reqs = (
-        await db.execute(
-            select(AccountRequest).where(
-                AccountRequest.username == user.username,
-                AccountRequest.temp_password.is_not(None),
-            )
-        )
-    ).scalars().all()
-    for r in reqs:
-        r.temp_password = None
-
     await db.commit()
     return {"message": "Password updated"}

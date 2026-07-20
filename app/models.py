@@ -1,4 +1,3 @@
-import uuid
 from datetime import datetime, timezone
 from sqlalchemy import String, Integer, Float, DateTime, Text, ForeignKey, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -8,10 +7,6 @@ from app.database import Base
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _uuid() -> str:
-    return uuid.uuid4().hex
 
 
 def _invite_code() -> str:
@@ -59,21 +54,6 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     download_requests: Mapped[list["DownloadRequest"]] = relationship(back_populates="user")
-
-
-class AccountRequest(Base):
-    __tablename__ = "account_requests"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(64), nullable=False)
-    email: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending | approved | denied
-    token: Mapped[str] = mapped_column(String(64), unique=True, default=_uuid, index=True)
-    deny_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    temp_password: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DownloadRequest(Base):

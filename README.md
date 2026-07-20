@@ -45,16 +45,17 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 - Continue listening / continue reading on the home screen
 
 ### Accounts & library groups
-- JWT auth; first account becomes admin
-- Account request -> admin approve/deny -> temporary password -> forced password change
-- Library groups with invite codes (owner / admin / member roles)
+- JWT auth; first account becomes admin (fresh install only)
+- **Invite-only signup** — friends open `/join/CODE`, pick username/password, and join immediately (no admin approval)
+- Library groups with invite links (code + server URL for Android deep link)
+- Admins can still disable users and reset passwords
 - Per-user preferred debrid provider and private mode
 
 ### Admin
 - First-run setup wizard at `/admin/setup` (libraries, Prowlarr, debrid, catalog APIs, scraper mode)
 - **Config** tab: edit runtime settings and API keys (DB override with env fallback)
 - **Cache** tab: scraper enable/run, RSS vs deep-crawl tuning, debrid refresh, catalog relink
-- User approvals, download monitoring, and integration health probes
+- User management (disable / reset password), download monitoring, and integration health probes
 - RSS-only scraper defaults (Pi-friendly); optional high-usage FlareSolverr crawls
 
 ### Notifications
@@ -111,6 +112,8 @@ flowchart TB
 
 | Flow | What happens |
 |------|----------------|
+| **First admin** | Empty DB → create admin on `/login` → `/onboarding` create library (invite code) → optional `/admin/setup` |
+| **Invite signup** | Open `/join/CODE` → username/password → account + library membership (no approval) |
 | **Catalog browse** | SPA -> `/api/books/*` -> Google Books / Open Library DB / Hardcover / NYT / ISBNdb |
 | **Release search** | SPA -> `/api/search` -> local indexer cache first; optional live Prowlarr / Jackett ABB / AA |
 | **Download** | SPA -> `/api/requests` -> Real-Debrid or TorBox -> files under `/audiobooks` or `/ebooks` -> ABS/Kavita scan -> WebSocket + push |
@@ -185,10 +188,11 @@ App listens on **`http://127.0.0.1:8085`**.
 
 ### First-run wizard
 
-1. Open the site -> create the **admin** account  
-2. Go to **`/admin/setup`** - libraries (ABS/Kavita), Prowlarr, debrid defaults, catalog API keys, scraper mode  
-3. Create or join a **library group** at `/onboarding` (group debrid keys)  
-4. Anytime later: **Admin -> Config** and **Admin -> Cache**
+1. Open the site → create the **admin** account (only when the server has zero users)  
+2. **Onboarding** → create your library (name + debrid keys). That generates the invite link.  
+3. **`/admin/setup`** — libraries (ABS/Kavita), Prowlarr, catalog API keys, scraper mode  
+4. Share the **invite link** from Settings (`/join/CODE`). Friends open it (Android app if installed, otherwise the site), set username/password, and join — no approval step.  
+5. Anytime later: **Admin → Config**, **Admin → Cache**, and **Admin → Users** (disable / reset password)
 
 ### Media mounts
 

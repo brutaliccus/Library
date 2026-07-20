@@ -94,7 +94,7 @@ export function useNativeNotifications(enabled: boolean) {
       void showNativeNotification(title, body, { url: "/my-library" });
     }
 
-    if (msg.type === "account_request" || msg.type === "admin_alert") {
+    if (msg.type === "invite_signup" || msg.type === "admin_alert") {
       const key = `admin-${msg.type}-${msg.request_id ?? Date.now()}`;
       if (seen.current.has(key)) return;
       seen.current.add(key);

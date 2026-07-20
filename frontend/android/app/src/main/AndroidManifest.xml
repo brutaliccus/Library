@@ -26,6 +26,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Invite deep links: library://join/CODE?origin=https://… -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="library" />
+            </intent-filter>
+
         </activity>
 
         <!-- Android Auto shows this service's icon in its app launcher. Use the

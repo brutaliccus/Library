@@ -15,6 +15,14 @@ interface AuthUser {
   mustChangePassword: boolean;
 }
 
+interface SessionTokens {
+  access_token: string;
+  refresh_token: string;
+  role: string;
+  username: string;
+  must_change_password?: boolean;
+}
+
 interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
@@ -23,6 +31,8 @@ interface AuthContextType {
   setupRequired: boolean;
   login: (username: string, password: string) => Promise<void>;
   setup: (username: string, password: string) => Promise<void>;
+  /** Apply tokens from invite signup (or similar) without a separate login call. */
+  acceptSession: (data: SessionTokens) => void;
   logout: () => void;
   clearMustChangePassword: () => void;
   /** Re-fetch whether the instance still needs first-admin setup. */
@@ -146,6 +156,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSetupRequired(false);
   }, []);
 
+  const acceptSession = useCallback((data: SessionTokens) => {
+    const mustChange = !!data.must_change_password;
+    localStorage.setItem("access_token", data.access_token);
+    localStorage.setItem("refresh_token", data.refresh_token);
+    localStorage.setItem("user_role", data.role);
+    localStorage.setItem("username", data.username);
+    localStorage.setItem("must_change_password", String(mustChange));
+    setUser({
+      username: data.username,
+      role: data.role,
+      mustChangePassword: mustChange,
+    });
+    setSetupRequired(false);
+  }, []);
+
   const logout = useCallback(() => {
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
@@ -169,6 +194,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setupRequired,
         login,
         setup,
+        acceptSession,
         logout,
         clearMustChangePassword,
         refreshSetupRequired,

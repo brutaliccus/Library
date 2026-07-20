@@ -16,6 +16,8 @@ interface Props {
   subtitle?: string;
   seriesName?: string;
   seriesIndex?: string;
+  /** Google Books / catalog volume id for Personal Collection + in-library badges */
+  googleVolumeId?: string;
 }
 
 type MediaFilter = "all" | "audiobook" | "ebook";
@@ -47,7 +49,7 @@ function SearchProgressBar({ phase, progress }: { phase: string; progress: numbe
 }
 
 export default function DownloadPanel({
-  title, author, coverUrl, subtitle, seriesName, seriesIndex,
+  title, author, coverUrl, subtitle, seriesName, seriesIndex, googleVolumeId,
 }: Props) {
   const { toast } = useToast();
   const { playRD } = usePlayer();
@@ -426,6 +428,8 @@ export default function DownloadPanel({
         source: result.source || "prowlarr",
         aa_md5: result.aaMd5 || undefined,
         aa_file_extension: isAA ? result.fileExtension || undefined : undefined,
+        google_volume_id: googleVolumeId || undefined,
+        catalog_title: title || undefined,
       });
       const dest = mediaType === "ebook" ? "Kavita" : "Audiobookshelf";
       const via = isAA ? " (direct download)" : "";

@@ -48,7 +48,7 @@ REGISTRY: list[SettingDef] = [
         group="core",
         label="App URL",
         env_attr="app_url",
-        help="Public site URL (CORS, push links, OAuth redirects).",
+        help="Public HTTPS URL of this Library (invite links, CORS, push). Must be the URL friends open — not localhost.",
         restart_required=True,
         placeholder="https://library.example.com",
     ),

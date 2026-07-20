@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from sqlalchemy import select
 
@@ -139,7 +140,8 @@ async def notify_fulfilled_alerts() -> int:
                 continue
             live.notified_at = now
             title = live.title or "A book you watchlisted"
-            book_url = f"/book/{live.google_volume_id}"
+            # Encode so OL:/works/… ids survive URL parsing in the client.
+            book_url = f"/book/{quote(live.google_volume_id, safe='')}"
             try:
                 await push.send_push_to_user(
                     db,

@@ -1,9 +1,18 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import api from "../api/client";
+import api, { applyApiBaseUrl } from "../api/client";
 import { useToast } from "../contexts/ToastContext";
+import { useAuth } from "../hooks/useAuth";
 import { Library, KeyRound, Users, Loader2, ArrowRight } from "lucide-react";
+import {
+  applyInvitePaste,
+  normalizeInviteCode,
+  peekPendingInvite,
+  resolveInviteShareUrl,
+  takePendingInvite,
+} from "../api/inviteLink";
+import { isNativeApp } from "../api/instanceUrl";
 
 type Mode = "choose" | "create" | "join";
 
@@ -11,8 +20,14 @@ export default function Onboarding() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { user } = useAuth();
   const [searchParams] = useSearchParams();
-  const initialMode = searchParams.get("mode") === "create" ? "create" : "choose";
+  const initialMode =
+    searchParams.get("mode") === "create"
+      ? "create"
+      : searchParams.get("mode") === "join"
+        ? "join"
+        : "choose";
 
   const [mode, setMode] = useState<Mode>(initialMode);
   const [busy, setBusy] = useState(false);
@@ -22,6 +37,24 @@ export default function Onboarding() {
   const [torboxToken, setTorboxToken] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const pending = peekPendingInvite();
+    if (pending) {
+      setInviteCode(pending);
+      if (searchParams.get("mode") !== "create") {
+        setMode("join");
+      }
+      return;
+    }
+    // First admin (or explicit ?mode=create): go straight to creating the library / invite.
+    if (
+      searchParams.get("mode") === "create" ||
+      (user?.role === "admin" && !searchParams.get("mode"))
+    ) {
+      setMode("create");
+    }
+  }, [searchParams, user?.role]);
 
   const finish = async () => {
     await queryClient.invalidateQueries({ queryKey: ["library-group"] });
@@ -41,12 +74,28 @@ export default function Onboarding() {
     }
     setBusy(true);
     try {
-      await api.post("/libraries/create", {
+      const { data } = await api.post("/libraries/create", {
         name: name.trim(),
         real_debrid_api_token: rdToken.trim(),
         torbox_api_token: torboxToken.trim(),
       });
-      toast("Library created!", "success");
+      const link = resolveInviteShareUrl(
+        data.library?.inviteLink,
+        data.library?.inviteCode
+      );
+      if (link && link !== data.library?.inviteCode) {
+        try {
+          await navigator.clipboard?.writeText(link);
+          toast("Library created — invite link copied. Share it from Settings anytime.", "success");
+        } catch {
+          toast("Library created! Copy your invite link from Settings.", "success");
+        }
+      } else {
+        toast(
+          "Library created! Set App URL in Admin → Config, then copy the invite link from Settings.",
+          "success"
+        );
+      }
       await finish();
     } catch (e: any) {
       setError(e.response?.data?.detail || "Failed to create library");
@@ -57,15 +106,21 @@ export default function Onboarding() {
 
   const handleJoin = async () => {
     setError(null);
-    if (!inviteCode.trim()) {
-      setError("Enter your invite code");
+    const parsed = applyInvitePaste(inviteCode);
+    const code = parsed?.code || normalizeInviteCode(inviteCode);
+    if (!code) {
+      setError("Enter your invite code or paste an invite link");
       return;
+    }
+    if (parsed?.origin) {
+      applyApiBaseUrl();
     }
     setBusy(true);
     try {
       const { data } = await api.post("/libraries/join", {
-        invite_code: inviteCode.trim(),
+        invite_code: code,
       });
+      takePendingInvite();
       toast(`Joined "${data.library?.name || "library"}"!`, "success");
       await finish();
     } catch (e: any) {
@@ -84,8 +139,9 @@ export default function Onboarding() {
           </div>
           <h1 className="text-2xl font-bold text-gray-100">Set up your library</h1>
           <p className="text-sm text-gray-400 mt-2">
-            All downloaded books are shared with everyone. This choice only decides whose
-            debrid account powers <span className="text-gray-300">your</span> streaming.
+            {mode === "create" || initialMode === "create"
+              ? "Name your library and add debrid keys. You'll get an invite link to share — that's how friends create accounts."
+              : "All downloaded books are shared. This choice only decides whose debrid account powers your streaming."}
           </p>
         </div>
 
@@ -102,7 +158,7 @@ export default function Onboarding() {
                 <h3 className="font-semibold text-gray-100">Create my own library</h3>
                 <p className="text-xs text-gray-400 mt-1">
                   Use your own Real-Debrid and/or Torbox API keys. You'll get an invite
-                  code to share with friends.
+                  link to share with friends.
                 </p>
               </div>
               <ArrowRight size={18} className="text-gray-500 shrink-0" />
@@ -116,10 +172,10 @@ export default function Onboarding() {
                 <Users size={22} className="text-sky-400" />
               </div>
               <div className="flex-1">
-                <h3 className="font-semibold text-gray-100">Join with an invite code</h3>
+                <h3 className="font-semibold text-gray-100">Join with an invite</h3>
                 <p className="text-xs text-gray-400 mt-1">
-                  Someone shared a code with you? You'll stream using their debrid
-                  account — no API keys needed.
+                  Paste an invite link or code. Links include the server URL for the
+                  Android app — no API keys needed.
                 </p>
               </div>
               <ArrowRight size={18} className="text-gray-500 shrink-0" />
@@ -199,13 +255,39 @@ export default function Onboarding() {
         {mode === "join" && (
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
             <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1.5">Invite code</label>
+              <label className="block text-xs font-medium text-gray-400 mb-1.5">
+                Invite link or code
+              </label>
               <input
                 value={inviteCode}
-                onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
-                placeholder="e.g. 7Q2MKX4RB3ZD"
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-500 font-mono tracking-widest text-center"
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  const parsed = applyInvitePaste(raw);
+                  if (parsed) {
+                    setInviteCode(parsed.code);
+                    if (parsed.origin) applyApiBaseUrl();
+                    return;
+                  }
+                  setInviteCode(raw.toUpperCase());
+                }}
+                onPaste={(e) => {
+                  const text = e.clipboardData?.getData("text") || "";
+                  const parsed = applyInvitePaste(text);
+                  if (parsed) {
+                    e.preventDefault();
+                    setInviteCode(parsed.code);
+                    if (parsed.origin) applyApiBaseUrl();
+                    if (isNativeApp() && parsed.origin) {
+                      toast("Server URL set from invite link", "success");
+                    }
+                  }
+                }}
+                placeholder="Paste invite link or code"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-500 font-mono break-all"
               />
+              <p className="text-[11px] text-gray-500 mt-1.5">
+                Example: https://library.example.com/join/7Q2MKX4RB3ZD
+              </p>
             </div>
             {error && <p className="text-xs text-red-400">{error}</p>}
             <div className="flex gap-2 pt-1">

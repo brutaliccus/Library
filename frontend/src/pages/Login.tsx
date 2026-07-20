@@ -12,6 +12,7 @@ export default function Login() {
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [serverUrl, setServerUrl] = useState(() => getStoredInstanceUrl() || "");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -29,10 +30,8 @@ export default function Login() {
           return;
         }
         applyApiBaseUrl();
-        // Re-check setup vs login now that we can reach the server.
         await refreshSetupRequired();
       }
-      // After URL save, setupRequired may have just updated — re-read via API.
       let doSetup = setupRequired;
       if (isNativeApp()) {
         try {
@@ -43,10 +42,22 @@ export default function Login() {
         }
       }
       if (doSetup) {
+        if (password.length < 6) {
+          setError("Password must be at least 6 characters");
+          setLoading(false);
+          return;
+        }
+        if (password !== confirmPassword) {
+          setError("Passwords do not match");
+          setLoading(false);
+          return;
+        }
         await setup(username, password);
-      } else {
-        await login(username, password);
+        // First admin still needs to create the library (generates invite code).
+        navigate("/onboarding?mode=create", { replace: true });
+        return;
       }
+      await login(username, password);
       navigate("/");
     } catch (err: any) {
       const detail = err.response?.data?.detail;
@@ -71,10 +82,10 @@ export default function Login() {
           <h1 className="text-2xl font-bold text-gray-100">Audiobook Library</h1>
           <p className="text-sm text-gray-400 mt-1">
             {needsInstanceUrl()
-              ? "Enter your Library URL, then create or sign in to your account"
+              ? "Paste an invite link (or your Library URL), then sign in or join"
               : setupRequired
-                ? "Create your admin account to get started"
-                : "Sign in to request audiobooks"}
+                ? "Create the admin account for this Library server"
+                : "Sign in to your library"}
           </p>
         </div>
 
@@ -86,6 +97,14 @@ export default function Login() {
             <div className="p-3 bg-red-900/30 text-red-400 text-sm rounded-lg">
               {error}
             </div>
+          )}
+
+          {setupRequired && (
+            <p className="text-xs text-gray-400 leading-relaxed">
+              First-time setup: create your admin username and password. Next you'll name
+              the library and add debrid keys — that generates the invite link friends use
+              to join.
+            </p>
           )}
 
           {isNativeApp() && (
@@ -107,6 +126,7 @@ export default function Login() {
               className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               required
               autoFocus={!isNativeApp() || !!serverUrl}
+              autoComplete="username"
             />
           </div>
 
@@ -120,8 +140,27 @@ export default function Login() {
               onChange={(e) => setPassword(e.target.value)}
               className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               required
+              minLength={setupRequired ? 6 : undefined}
+              autoComplete={setupRequired ? "new-password" : "current-password"}
             />
           </div>
+
+          {setupRequired && (
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                Confirm password
+              </label>
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                required
+                minLength={6}
+                autoComplete="new-password"
+              />
+            </div>
+          )}
 
           <button
             type="submit"
@@ -132,19 +171,19 @@ export default function Login() {
             {loading
               ? "Please wait..."
               : setupRequired
-              ? "Create Admin Account"
+              ? "Create admin & continue"
               : "Sign In"}
           </button>
         </form>
 
         {!setupRequired && (
           <p className="text-center text-sm text-gray-500 mt-4">
-            Don't have an account?{" "}
+            New here?{" "}
             <Link
-              to="/request-account"
+              to="/join"
               className="text-brand-400 hover:text-brand-300 font-medium"
             >
-              Request one
+              Join with an invite link
             </Link>
           </p>
         )}

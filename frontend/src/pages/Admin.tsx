@@ -6,14 +6,13 @@ import {
   Users,
   Download,
   Activity,
-  Check,
-  X,
   Trash2,
   RefreshCw,
   Bell,
   Wrench,
   Radar,
   Settings2,
+  EyeOff,
 } from "lucide-react";
 import ScraperTab from "../components/admin/ScraperTab";
 import ConfigTab from "../components/admin/ConfigTab";
@@ -66,7 +65,7 @@ export default function AdminPage() {
             <Bell size={20} className="text-amber-400 shrink-0" />
             <div>
               <p className="text-sm font-medium text-gray-100">Admin push notifications</p>
-              <p className="text-xs text-gray-500">Get notified for new account requests, download status, and errors</p>
+              <p className="text-xs text-gray-500">Get notified when members join via invite, plus download status and errors</p>
               {pushError && <p className="text-xs text-red-400 mt-1">{pushError}</p>}
             </div>
           </div>
@@ -134,16 +133,6 @@ function UsersTab() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [disableUserModal, setDisableUserModal] = useState<number | null>(null);
-  const [denyModal, setDenyModal] = useState<{ requestId: number } | null>(null);
-  const [denyReason, setDenyReason] = useState("");
-
-  const { data: pendingRequests, isLoading: pendingLoading } = useQuery({
-    queryKey: ["admin-account-requests"],
-    queryFn: async () => {
-      const { data } = await api.get("/admin/account-requests?status_filter=pending");
-      return data as any[];
-    },
-  });
 
   const { data: users, isLoading: usersLoading } = useQuery({
     queryKey: ["admin-users"],
@@ -164,35 +153,6 @@ function UsersTab() {
     },
   });
 
-  const approve = useMutation({
-    mutationFn: async (id: number) => {
-      await api.post(`/admin/account-requests/${id}/approve`, {});
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["admin-account-requests"] });
-      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
-      toast("Account approved. They can log in with password \"changeme\" and will be prompted to change it.", "success");
-    },
-  });
-
-  const deny = useMutation({
-    mutationFn: async ({ id, reason }: { id: number; reason: string | null }) => {
-      await api.post(`/admin/account-requests/${id}/deny`, { reason: reason || undefined });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["admin-account-requests"] });
-      setDenyModal(null);
-      setDenyReason("");
-      toast("Account request denied.", "info");
-    },
-  });
-
-  const submitDeny = () => {
-    if (denyModal) {
-      deny.mutate({ id: denyModal.requestId, reason: denyReason.trim() || null });
-    }
-  };
-
   const resetPw = useMutation({
     mutationFn: async (id: number) => {
       await api.post(`/admin/users/${id}/reset-password`);
@@ -205,135 +165,65 @@ function UsersTab() {
     },
   });
 
-  if (pendingLoading || usersLoading) return <div className="text-gray-500">Loading...</div>;
+  if (usersLoading) return <div className="text-gray-500">Loading...</div>;
 
   return (
     <div className="space-y-6 min-w-0">
-      {pendingRequests && pendingRequests.length > 0 && (
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
-            Pending approvals ({pendingRequests.length})
-          </h2>
-          {pendingRequests.map((req: any) => (
-            <div
-              key={req.id}
-              className="bg-gray-800 border border-amber-800/40 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
-            >
-              <div className="min-w-0">
-                <p className="font-semibold text-gray-100">{req.username}</p>
-                {req.email && (
-                  <p className="text-sm text-gray-400 break-all">{req.email}</p>
-                )}
-                {req.reason && (
-                  <p className="text-sm text-gray-400 mt-1 italic break-words">"{req.reason}"</p>
-                )}
-                <p className="text-xs text-gray-500 mt-1">
-                  {new Date(req.created_at).toLocaleString()}
-                </p>
-              </div>
-              <div className="flex gap-2 shrink-0">
-                <button
-                  onClick={() => approve.mutate(req.id)}
-                  disabled={approve.isPending}
-                  className="flex items-center gap-1 px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-500 disabled:opacity-50"
-                >
-                  <Check size={14} /> Approve
-                </button>
-                <button
-                  onClick={() => setDenyModal({ requestId: req.id })}
-                  disabled={deny.isPending}
-                  className="flex items-center gap-1 px-3 py-1.5 bg-red-600 text-white text-sm rounded-lg hover:bg-red-500 disabled:opacity-50"
-                >
-                  <X size={14} /> Deny
-                </button>
-              </div>
-            </div>
-          ))}
-        </section>
-      )}
+      <p className="text-sm text-gray-400">
+        New members join with an invite link from Settings — no approval step. You can still
+        reset passwords or disable accounts here.
+      </p>
 
       <section className="space-y-3">
         <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
-          Active users ({users?.length ?? 0})
+          Users ({users?.length ?? 0})
         </h2>
         {!users?.length ? (
           <p className="text-center py-8 text-gray-500">No users yet</p>
         ) : (
           users.map((user: any) => (
-        <div
-          key={user.id}
-          className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
-        >
-          <div>
-            <p className="font-semibold text-gray-100">
-              {user.username}
-              {user.role === "admin" && (
-                <span className="ml-2 text-xs bg-brand-900/30 text-brand-400 px-2 py-0.5 rounded-full">
-                  admin
-                </span>
-              )}
-              {!user.is_active && (
-                <span className="ml-2 text-xs bg-red-900/30 text-red-400 px-2 py-0.5 rounded-full">
-                  disabled
-                </span>
-              )}
-            </p>
-            <p className="text-xs text-gray-500">
-              Joined {new Date(user.created_at).toLocaleDateString()}
-            </p>
-          </div>
-          <div className="flex gap-2 shrink-0">
-            <button
-              onClick={() => resetPw.mutate(user.id)}
-              className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600"
+            <div
+              key={user.id}
+              className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
             >
-              <RefreshCw size={14} /> Reset PW
-            </button>
-            {user.role !== "admin" && (
-              <button
-                onClick={() => setDisableUserModal(user.id)}
-                className="flex items-center gap-1 px-3 py-1.5 bg-red-900/30 text-red-400 text-sm rounded-lg hover:bg-red-900/50"
-              >
-                <Trash2 size={14} /> Disable
-              </button>
-            )}
-          </div>
-        </div>
+              <div>
+                <p className="font-semibold text-gray-100">
+                  {user.username}
+                  {user.role === "admin" && (
+                    <span className="ml-2 text-xs bg-brand-900/30 text-brand-400 px-2 py-0.5 rounded-full">
+                      admin
+                    </span>
+                  )}
+                  {!user.is_active && (
+                    <span className="ml-2 text-xs bg-red-900/30 text-red-400 px-2 py-0.5 rounded-full">
+                      disabled
+                    </span>
+                  )}
+                </p>
+                <p className="text-xs text-gray-500">
+                  Joined {new Date(user.created_at).toLocaleDateString()}
+                </p>
+              </div>
+              <div className="flex gap-2 shrink-0">
+                <button
+                  onClick={() => resetPw.mutate(user.id)}
+                  className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600"
+                >
+                  <RefreshCw size={14} /> Reset PW
+                </button>
+                {user.role !== "admin" && (
+                  <button
+                    onClick={() => setDisableUserModal(user.id)}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-red-900/30 text-red-400 text-sm rounded-lg hover:bg-red-900/50"
+                  >
+                    <Trash2 size={14} /> Disable
+                  </button>
+                )}
+              </div>
+            </div>
           ))
         )}
       </section>
-
-      <Modal
-        title="Deny account request"
-        show={denyModal !== null}
-        onClose={() => { setDenyModal(null); setDenyReason(""); }}
-      >
-        <p className="text-sm text-gray-400 mb-3">Optionally provide a reason to show the user.</p>
-        <textarea
-          value={denyReason}
-          onChange={(e) => setDenyReason(e.target.value)}
-          placeholder="Reason (optional)"
-          rows={3}
-          className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 placeholder:text-gray-500 mb-4"
-        />
-        <div className="flex gap-2 justify-end">
-          <button
-            type="button"
-            onClick={() => { setDenyModal(null); setDenyReason(""); }}
-            className="px-3 py-1.5 text-gray-300 hover:bg-gray-700 rounded-lg"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={submitDeny}
-            disabled={deny.isPending}
-            className="px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-500 disabled:opacity-50"
-          >
-            {deny.isPending ? "Denying..." : "Deny request"}
-          </button>
-        </div>
-      </Modal>
 
       <Modal
         title="Disable user"
@@ -390,9 +280,20 @@ function AllRequestsTab() {
         >
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
             <div className="flex-1 min-w-0">
-              <h3 className="font-semibold text-gray-100 truncate">
-                {req.title}
-              </h3>
+              <div className="flex items-center gap-2 min-w-0">
+                <h3 className="font-semibold text-gray-100 truncate">
+                  {req.title}
+                </h3>
+                {req.is_private && (
+                  <span
+                    className="inline-flex items-center gap-1 shrink-0 text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-300 border border-purple-700/40"
+                    title="Requested in private mode — hidden from other members' library browse"
+                  >
+                    <EyeOff size={11} />
+                    Private
+                  </span>
+                )}
+              </div>
               <div className="flex items-center gap-3 mt-1 text-xs text-gray-500">
                 <span>by {req.username}</span>
                 <span>{new Date(req.created_at).toLocaleString()}</span>

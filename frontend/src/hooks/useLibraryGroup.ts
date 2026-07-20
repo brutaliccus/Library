@@ -22,6 +22,8 @@ export interface LibraryGroupInfo {
   torboxKeySource: KeySource;
   usesServerKeys: boolean;
   inviteCode: string | null;
+  /** Full share URL from server APP_URL, e.g. https://host/join/CODE */
+  inviteLink: string | null;
   members?: LibraryMember[];
 }
 

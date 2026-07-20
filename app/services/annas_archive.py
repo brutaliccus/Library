@@ -446,29 +446,94 @@ def _extract_download_urls(html: str, base: str) -> list[str]:
             logger.info(f"AA: found partner link {href[:80]}...")
 
     def _partner_rank(url: str) -> int:
-        # libgen.li/ads.php is the reliable path (relative get.php → CDN redirect).
-        # Prefer it over Flare-heavy AA slow_download and flaky CF mirrors.
+        # Prefer archive.org + libgen get.php / ads.php. Deprioritize Z-Lib and
+        # IPFS gateways — recent failures show they often resolve to HTML interstitials.
         lower = url.lower()
-        if "libgen.li" in lower and "ads.php" in lower:
-            return 0
-        if "libgen.li" in lower:
-            return 1
         if "archive.org" in lower:
+            return 0
+        if "libgen.li" in lower and ("get.php" in lower or "ads.php" in lower):
+            return 1
+        if "libgen.li" in lower:
             return 2
-        if "libgen" in lower:
+        if "libgen" in lower and "get.php" in lower:
             return 3
-        if "library.lol" in lower:
+        if "libgen" in lower:
             return 4
-        if "z-lib" in lower or "zlib" in lower:
+        if "library.lol" in lower:
             return 5
+        if "cloudflare-ipfs" in lower or "ipfs.io" in lower or "dweb.link" in lower:
+            return 8
+        if "z-lib" in lower or "zlib" in lower:
+            return 9
         return 6
 
+    # Drop known-bad partner shapes before ranking (HTML-only landing pages).
+    partners = [
+        u for u in partners
+        if not _is_skip_partner_url(u)
+    ]
     partners.sort(key=_partner_rank)
     # External partners first (no Flare), then AA fast (account), then one slow fallback.
+    # slow_download via FlareSolverr is flaky — keep it last and only once.
     urls = partners + fast[:3]
     if slow:
         urls.append(slow[0])
     return urls
+
+
+def _is_skip_partner_url(url: str) -> bool:
+    """Partner URLs that consistently fail to yield a real file in our pipeline."""
+    lower = (url or "").lower()
+    if not lower:
+        return True
+    # Fiction landing pages without /get rarely become direct files.
+    if "library.lol" in lower and "/fiction/" in lower and "/get" not in lower:
+        return True
+    # Bare IP libgen CDNs are unreachable from many residential/VPN networks.
+    if is_unreachable_libgen_cdn(url):
+        return True
+    return False
+
+
+async def verify_direct_file_url(url: str, timeout: float = 12.0) -> bool:
+    """Return False when a 'resolved' URL is actually HTML/interstitial (common AA failure)."""
+    if not url or not url.startswith("http"):
+        return False
+    if is_unreachable_libgen_cdn(url):
+        return False
+    # get.php / archive.org download paths are trustworthy enough to skip the probe.
+    lower = url.lower()
+    if "get.php" in lower or "archive.org/download/" in lower:
+        return True
+    try:
+        async with _build_session(for_annas_archive=_is_annas_archive_url(url)) as client:
+            # Prefer a ranged GET so we can sniff bytes even when HEAD is blocked.
+            resp = await client.get(
+                url,
+                headers={"Range": "bytes=0-1023"},
+                follow_redirects=True,
+                timeout=timeout,
+            )
+            if resp.status_code >= 400 and resp.status_code != 416:
+                # Some CDNs reject Range; try a tiny full GET.
+                resp = await client.get(url, follow_redirects=True, timeout=timeout)
+            ct = (resp.headers.get("content-type") or "").lower()
+            if "text/html" in ct or "text/xml" in ct:
+                return False
+            chunk = resp.content[:512] if resp.content else b""
+            if chunk.lstrip().lower().startswith((b"<!doctype", b"<html", b"<head", b"<script")):
+                return False
+            # Successful binary-ish response
+            if resp.status_code in (200, 206) and chunk:
+                return True
+            # Empty body with non-HTML content-type still OK (some hosts need full GET)
+            if resp.status_code in (200, 206) and "octet-stream" in ct:
+                return True
+            return bool(chunk) and "text/html" not in ct
+    except Exception as e:
+        logger.info("AA verify_direct_file_url failed for %s: %s", url[:90], e)
+        # Don't hard-fail the candidate — download_file will still try.
+        return True
 
 
 async def get_download_urls(md5: str) -> list[str]:

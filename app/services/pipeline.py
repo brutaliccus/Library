@@ -101,6 +101,15 @@ async def _report_progress(
         await db.commit()
 
 
+async def _is_cancelled(request_id: int) -> bool:
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest.status).where(DownloadRequest.id == request_id)
+        )
+        status = result.scalar_one_or_none()
+        return status == "cancelled"
+
+
 async def _update_status(
     db: AsyncSession,
     request_id: int,
@@ -119,12 +128,15 @@ async def _update_status(
     if req is None:
         logger.warning("DownloadRequest %s missing during status update → %s", request_id, status)
         return
+    # Never clobber an explicit user cancel with pipeline progress/failure.
+    if req.status == "cancelled" and status != "cancelled":
+        return
     req.status = status
     if detail is not None:
         req.status_detail = detail or status
     if rd_torrent_id is not None:
         req.rd_torrent_id = rd_torrent_id
-    if status in ("completed", "failed"):
+    if status in ("completed", "failed", "cancelled"):
         req.progress_percent = None
         req.progress_bytes = None
         req.progress_total_bytes = None
@@ -547,6 +559,9 @@ async def process_download(request_id: int) -> None:
                     stripped = re.sub(r"\s*-\s*" + re.escape(author) + r"\s*$", "", title, flags=re.IGNORECASE).strip()
                     book_title = downloader.sanitize_filename(stripped) if stripped else downloader.sanitize_filename(title)
 
+            if await _is_cancelled(request_id):
+                return
+
             if not rd_id:
                 await _update_status(db, request_id, "sent_to_rd", "Sending to Real-Debrid")
                 # ABB detail pages are HTML — scrape the info hash into a magnet first.
@@ -716,6 +731,7 @@ async def process_download(request_id: int) -> None:
             try:
                 if media_type == "ebook":
                     await kavita.scan_library()
+                    kavita.invalidate_cache()
                 else:
                     await audiobookshelf.scan_library()
                     await asyncio.sleep(5)
@@ -803,6 +819,9 @@ async def process_aa_download(request_id: int) -> None:
                     stripped = re.sub(r"\s*-\s*" + re.escape(author) + r"\s*$", "", title, flags=re.IGNORECASE).strip()
                     book_title = downloader.sanitize_filename(stripped) if stripped else downloader.sanitize_filename(title)
 
+            if await _is_cancelled(request_id):
+                return
+
             await _update_status(db, request_id, "transferring", "Resolving Anna's Archive download...")
 
             download_urls = await annas_archive.get_download_urls(aa_md5)
@@ -829,6 +848,8 @@ async def process_aa_download(request_id: int) -> None:
                     dest_dir = author_dir / downloader.sanitize_filename(book_title)
 
             async def _on_aa_progress(bytes_done: int, total_bytes: int | None, speed_bps: float) -> None:
+                if await _is_cancelled(request_id):
+                    raise RuntimeError("cancelled")
                 pct = None
                 if total_bytes and total_bytes > 0:
                     pct = min(100.0, bytes_done / total_bytes * 100)
@@ -854,6 +875,8 @@ async def process_aa_download(request_id: int) -> None:
             downloaded = False
 
             for page_url in download_urls:
+                if await _is_cancelled(request_id):
+                    return
                 last_page_url = page_url
                 source_label = "Anna's Archive"
                 if "archive.org" in page_url:
@@ -862,6 +885,8 @@ async def process_aa_download(request_id: int) -> None:
                     source_label = "Library Genesis"
                 elif "slow_download" in page_url:
                     source_label = "Anna's Archive (slow)"
+                elif "z-lib" in page_url.lower() or "zlib" in page_url.lower():
+                    source_label = "Z-Library"
                 logger.info(f"AA download: trying page URL {page_url[:80]}...")
                 await _update_status(
                     db, request_id, "transferring", f"Resolving via {source_label}..."
@@ -869,9 +894,26 @@ async def process_aa_download(request_id: int) -> None:
                 direct_url = await annas_archive.resolve_download(page_url, media_type)
                 if not direct_url:
                     continue
+                # Common failure: interstitial HTML advertised as a "file" URL.
+                if not await annas_archive.verify_direct_file_url(direct_url):
+                    logger.warning(
+                        "AA download: skipping non-file URL from %s: %s",
+                        source_label,
+                        direct_url[:120],
+                    )
+                    last_error = RuntimeError(
+                        f"{source_label} resolved to HTML/interstitial instead of a file"
+                    )
+                    await _update_status(
+                        db,
+                        request_id,
+                        "transferring",
+                        f"Source skipped ({source_label}: not a direct file), trying another…",
+                    )
+                    continue
                 logger.info(f"AA download: resolved to {direct_url[:120]}...")
                 await _update_status(
-                    db, request_id, "transferring", "Downloading file...", progress_percent=0
+                    db, request_id, "transferring", f"Downloading via {source_label}...", progress_percent=0
                 )
                 try:
                     await downloader.download_file(
@@ -882,6 +924,22 @@ async def process_aa_download(request_id: int) -> None:
                     )
                     downloaded = True
                     break
+                except RuntimeError as e:
+                    if "cancelled" in str(e).lower():
+                        return
+                    last_error = e
+                    logger.warning(
+                        "AA download failed (%s), trying next source: %s",
+                        source_label,
+                        e,
+                    )
+                    await _update_status(
+                        db,
+                        request_id,
+                        "transferring",
+                        f"Source failed ({source_label}), trying another…",
+                    )
+                    continue
                 except (
                     httpx.ConnectError,
                     httpx.ConnectTimeout,
@@ -889,7 +947,6 @@ async def process_aa_download(request_id: int) -> None:
                     httpx.RemoteProtocolError,
                     httpx.ReadError,
                     httpx.HTTPError,
-                    RuntimeError,
                 ) as e:
                     last_error = e
                     logger.warning(
@@ -904,6 +961,9 @@ async def process_aa_download(request_id: int) -> None:
                         f"Source failed ({source_label}), trying another…",
                     )
                     continue
+
+            if await _is_cancelled(request_id):
+                return
 
             if not downloaded:
                 if last_error:
@@ -936,6 +996,7 @@ async def process_aa_download(request_id: int) -> None:
             try:
                 if media_type == "ebook":
                     await kavita.scan_library()
+                    kavita.invalidate_cache()
                 else:
                     await audiobookshelf.scan_library()
                     await asyncio.sleep(5)
@@ -967,6 +1028,8 @@ async def process_aa_download(request_id: int) -> None:
                 logger.warning(f"Push notification failed (non-fatal): {e}")
 
         except Exception as e:
+            if await _is_cancelled(request_id):
+                return
             logger.exception(f"AA download pipeline failed for request {request_id}")
             err_msg = (str(e) or e.__class__.__name__)[:500]
             async with async_session() as err_db:

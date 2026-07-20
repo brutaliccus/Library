@@ -4,11 +4,14 @@ export interface DownloadRequestProgress {
   id: number;
   title: string;
   author: string | null;
+  media_type?: string;
   status: string;
   status_detail: string | null;
   size_bytes: number | null;
   indexer: string | null;
   is_private?: boolean;
+  google_volume_id?: string | null;
+  cover_url?: string | null;
   created_at: string;
   completed_at: string | null;
   progress_percent?: number | null;

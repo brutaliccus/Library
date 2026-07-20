@@ -1,10 +1,11 @@
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from app.config import get_settings
 from app.database import get_db
@@ -12,10 +13,18 @@ from app.models import User, DownloadRequest
 from app.utils.auth import get_current_user
 from app.utils.websocket import ws_manager
 from app.services.pipeline import process_download, process_aa_download
-from app.routers.library import add_to_library_from_stream
 
 router = APIRouter(prefix="/api/requests", tags=["requests"])
 settings = get_settings()
+
+_ACTIVE_STATUSES = frozenset({
+    "pending",
+    "sent_to_rd",
+    "downloading_rd",
+    "transferring",
+    "organizing",
+})
+_RETRYABLE_STATUSES = frozenset({"failed", "cancelled"})
 
 
 class CreateDownloadRequest(BaseModel):
@@ -29,9 +38,9 @@ class CreateDownloadRequest(BaseModel):
     source: str | None = None
     aa_md5: str | None = None
     aa_file_extension: str | None = None
-    # Catalog volume the user was viewing (Personal Collection + in-library badges)
     google_volume_id: str | None = None
     catalog_title: str | None = None
+    cover_url: str | None = None
 
 
 class DownloadRequestResponse(BaseModel):
@@ -44,6 +53,8 @@ class DownloadRequestResponse(BaseModel):
     size_bytes: int | None
     indexer: str | None
     is_private: bool = False
+    google_volume_id: str | None = None
+    cover_url: str | None = None
     created_at: str
     completed_at: str | None
     progress_percent: float | None = None
@@ -66,7 +77,6 @@ async def create_request(
     if not is_aa and not link:
         raise HTTPException(status_code=400, detail="Either magnet_link or download_url is required")
 
-    # Prefer catalog title for matching/hide so ABS clean titles line up with requests.
     stored_title = (body.catalog_title or body.title or "").strip() or body.title
     dl_request = DownloadRequest(
         user_id=user.id,
@@ -79,24 +89,12 @@ async def create_request(
         rd_torrent_id=body.aa_md5 if is_aa else None,
         aa_file_extension=body.aa_file_extension if is_aa else None,
         is_private=user.private_mode,
+        google_volume_id=(body.google_volume_id or "").strip() or None,
+        cover_url=(body.cover_url or "").strip() or None,
     )
     db.add(dl_request)
     await db.flush()
     await db.refresh(dl_request)
-
-    # Always add to Personal Collection for the requester (private or not) so they
-    # can find the book again from the catalog volume page.
-    try:
-        await add_to_library_from_stream(
-            user.id,
-            body.catalog_title or body.title,
-            body.author or "",
-            magnet_link=link if (link or "").startswith("magnet:") else None,
-            google_volume_id=body.google_volume_id,
-            db=db,
-        )
-    except Exception:
-        pass  # Non-fatal; request still succeeds
 
     if is_aa:
         asyncio.create_task(process_aa_download(dl_request.id))
@@ -125,15 +123,76 @@ async def get_request(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(DownloadRequest).where(
-            DownloadRequest.id == request_id,
-            DownloadRequest.user_id == user.id,
-        )
+    req = await _get_user_request(request_id, user.id, db)
+    return _to_response(req)
+
+
+@router.post("/{request_id}/cancel", response_model=DownloadRequestResponse)
+async def cancel_request(
+    request_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    req = await _get_user_request(request_id, user.id, db)
+    if req.status not in _ACTIVE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Cannot cancel request in status '{req.status}'")
+    req.status = "cancelled"
+    req.status_detail = "Cancelled by user"
+    req.progress_percent = None
+    req.progress_bytes = None
+    req.progress_total_bytes = None
+    req.progress_speed_bps = None
+    await db.commit()
+    await db.refresh(req)
+    await ws_manager.send_to_user(
+        user.id,
+        {
+            "type": "status_update",
+            "request_id": req.id,
+            "status": req.status,
+            "detail": req.status_detail,
+        },
     )
-    req = result.scalar_one_or_none()
-    if not req:
-        raise HTTPException(status_code=404, detail="Request not found")
+    return _to_response(req)
+
+
+@router.post("/{request_id}/retry", response_model=DownloadRequestResponse)
+async def retry_request(
+    request_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    req = await _get_user_request(request_id, user.id, db)
+    if req.status not in _RETRYABLE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Cannot retry request in status '{req.status}'")
+
+    is_aa = (req.magnet_link or "").startswith("aa:") or (
+        (req.indexer or "").lower().find("anna") >= 0 and bool(req.rd_torrent_id)
+    )
+    req.status = "pending"
+    req.status_detail = "Retrying…"
+    req.completed_at = None
+    req.progress_percent = None
+    req.progress_bytes = None
+    req.progress_total_bytes = None
+    req.progress_speed_bps = None
+    await db.commit()
+    await db.refresh(req)
+
+    if is_aa:
+        asyncio.create_task(process_aa_download(req.id))
+    else:
+        asyncio.create_task(process_download(req.id))
+
+    await ws_manager.send_to_user(
+        user.id,
+        {
+            "type": "status_update",
+            "request_id": req.id,
+            "status": req.status,
+            "detail": req.status_detail,
+        },
+    )
     return _to_response(req)
 
 
@@ -160,6 +219,19 @@ async def websocket_endpoint(websocket: WebSocket):
         ws_manager.disconnect(websocket, user_id)
 
 
+async def _get_user_request(request_id: int, user_id: int, db: AsyncSession) -> DownloadRequest:
+    result = await db.execute(
+        select(DownloadRequest).where(
+            DownloadRequest.id == request_id,
+            DownloadRequest.user_id == user_id,
+        )
+    )
+    req = result.scalar_one_or_none()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return req
+
+
 def _to_response(req: DownloadRequest) -> DownloadRequestResponse:
     return DownloadRequestResponse(
         id=req.id,
@@ -171,6 +243,8 @@ def _to_response(req: DownloadRequest) -> DownloadRequestResponse:
         size_bytes=req.size_bytes,
         indexer=req.indexer,
         is_private=bool(req.is_private),
+        google_volume_id=getattr(req, "google_volume_id", None),
+        cover_url=getattr(req, "cover_url", None),
         created_at=req.created_at.isoformat() if req.created_at else "",
         completed_at=req.completed_at.isoformat() if req.completed_at else None,
         progress_percent=req.progress_percent,

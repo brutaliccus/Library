@@ -430,6 +430,7 @@ export default function DownloadPanel({
         aa_file_extension: isAA ? result.fileExtension || undefined : undefined,
         google_volume_id: googleVolumeId || undefined,
         catalog_title: title || undefined,
+        cover_url: coverUrl || undefined,
       });
       const dest = mediaType === "ebook" ? "Kavita" : "Audiobookshelf";
       const via = isAA ? " (direct download)" : "";

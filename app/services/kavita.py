@@ -186,6 +186,33 @@ async def get_series_volumes(series_id: int) -> list[dict]:
         return []
 
 
+async def get_series_metadata(series_id: int) -> dict:
+    """Series metadata (genres, tags, writers). Cached briefly with the series list."""
+    url, key, _ = await _conn()
+    if not key:
+        return {}
+    cache_key = f"kavita_meta:{series_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{url}/api/Series/metadata",
+                params={"seriesId": series_id},
+                headers=_headers(key),
+                timeout=15,
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            data = raw if isinstance(raw, dict) else {}
+        _cache_set(cache_key, data)
+        return data
+    except Exception as e:
+        logger.debug("Failed to fetch Kavita metadata for series %s: %s", series_id, e)
+        return {}
+
+
 async def get_chapter_file_path(chapter_id: int) -> Path | None:
     """Resolve a Kavita chapter id to a local ebook file path."""
     info = await get_book_info(chapter_id)

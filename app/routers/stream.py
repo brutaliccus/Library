@@ -1285,14 +1285,6 @@ async def _resolve_rd_background(
                 )
                 if task.get("stream_history_id"):
                     serialized_tracks = tracks_with_stable_urls("h", task["stream_history_id"], tracks)
-                from app.routers.library import add_to_library_from_stream
-                await add_to_library_from_stream(
-                    user_id, title, author, cover_url,
-                    magnet_link=magnet,
-                    rd_torrent_id=torrent_id,
-                    tracks=tracks,
-                    provider=chosen,
-                )
             except Exception as e:
                 logger.warning("Failed to save stream history: %s", e)
         if serialized_tracks is tracks:
@@ -1556,14 +1548,6 @@ async def _smart_stream_background(
                         )
                         if task.get("stream_history_id"):
                             serialized_tracks = tracks_with_stable_urls("h", task["stream_history_id"], tracks)
-                        from app.routers.library import add_to_library_from_stream
-                        await add_to_library_from_stream(
-                            user_id, title, author, cover_url,
-                            magnet_link=magnet,
-                            rd_torrent_id=resolved_torrent_id,
-                            tracks=tracks,
-                            provider=provider,
-                        )
                     except Exception as e:
                         logger.warning("Failed to save smart stream history: %s", e)
                     if serialized_tracks is tracks:

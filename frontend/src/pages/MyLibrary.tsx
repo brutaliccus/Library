@@ -64,6 +64,7 @@ interface ABSItem {
   isFinished: boolean;
   narrator: string;
   numTracks: number;
+  addedAt?: number;
 }
 
 interface ABSSeries {
@@ -95,12 +96,15 @@ interface KavitaItem {
   author: string;
   coverUrl: string;
   chapterId: number | null;
+  genres?: string[];
+  seriesName?: string;
+  addedAt?: number;
   source: "kavita";
 }
 
 type Tab = "abs" | "streams" | "ebooks";
 type MediaFilter = "all" | "audiobooks" | "ebooks";
-type TabView = "all" | "genre" | "series";
+type TabView = "all" | "genre" | "series" | "author";
 
 export type NavigateToBook = (
   title: string,
@@ -120,6 +124,9 @@ export default function MyLibrary() {
   const [ebookView, setEbookView] = useState<TabView>("all");
   const [rdView, setRdView] = useState<TabView>("all");
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>("all");
+  const [filterGenre, setFilterGenre] = useState("");
+  const [filterSeries, setFilterSeries] = useState("");
+  const [filterAuthor, setFilterAuthor] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [resolvingId, setResolvingId] = useState<number | null>(null);
@@ -221,16 +228,30 @@ export default function MyLibrary() {
   const handleRefreshLibrary = useCallback(async () => {
     setScanning(true);
     try {
-      await api.post("/library/abs/scan");
-      queryClient.invalidateQueries({ queryKey: ["abs-collection"] });
-      queryClient.invalidateQueries({ queryKey: ["abs-series"] });
-      toast("Library refreshed — stale entries removed", "success");
+      await Promise.allSettled([
+        api.post("/library/abs/scan"),
+        api.post("/library/kavita/scan"),
+      ]);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["abs-collection"] }),
+        queryClient.invalidateQueries({ queryKey: ["abs-series"] }),
+        queryClient.invalidateQueries({ queryKey: ["kavita-collection"] }),
+        queryClient.invalidateQueries({ queryKey: ["streaming-library"] }),
+      ]);
+      toast("Library refreshed — ABS + Kavita scanned", "success");
     } catch {
       toast("Library scan failed", "error");
     } finally {
       setScanning(false);
     }
   }, [queryClient, toast]);
+
+  // Reset shelf filters when switching media tabs
+  useEffect(() => {
+    setFilterGenre("");
+    setFilterSeries("");
+    setFilterAuthor("");
+  }, [tab]);
 
   const handlePlayABS = useCallback(
     async (itemId: string) => {
@@ -436,49 +457,290 @@ export default function MyLibrary() {
 
   const isSearching = debouncedQuery.length >= 2;
 
-  const rdByGenre = (() => {
-    if (!rdLibrary?.items) return {};
+  const inferSeriesFromTitle = (title: string): string => {
+    const paren = title.match(/[(\[]\s*([^)\]]+?)\s*(?:,\s*(?:Book|Vol\.?|#)?\s*\d+)?\s*[)\]]\s*$/i);
+    if (paren?.[1]) {
+      return paren[1].replace(/,?\s*(?:Book|Vol\.?)\s*\d+\s*$/i, "").trim();
+    }
+    const hash = title.match(/^(.+?)\s+#?\d+\s*[:\-–]\s+/i);
+    if (hash?.[1]) return hash[1].trim();
+    return "";
+  };
+
+  const allAbsItems = useMemo(() => {
+    if (!absCollection) return [] as ABSItem[];
+    const items = [...Object.values(absCollection.genres).flat(), ...absCollection.ungrouped];
+    const deduped = items.filter((item, idx, arr) => arr.findIndex((i) => i.itemId === item.itemId) === idx);
+    return deduped.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  }, [absCollection]);
+
+  const absFilterOptions = useMemo(() => {
+    const genres = new Set<string>();
+    const series = new Set<string>();
+    const authors = new Set<string>();
+    for (const item of allAbsItems) {
+      (item.genres || []).forEach((g) => g && genres.add(g));
+      (item.series || []).forEach((s) => s.name && series.add(s.name));
+      if (item.author) authors.add(item.author);
+    }
+    return {
+      genres: Array.from(genres).sort(),
+      series: Array.from(series).sort(),
+      authors: Array.from(authors).sort(),
+    };
+  }, [allAbsItems]);
+
+  const filteredAbsItems = useMemo(() => {
+    return allAbsItems.filter((item) => {
+      if (filterGenre && !(item.genres || []).some((g) => g === filterGenre || g.toLowerCase().includes(filterGenre.toLowerCase()))) {
+        return false;
+      }
+      if (filterSeries && !(item.series || []).some((s) => s.name === filterSeries)) return false;
+      if (filterAuthor && item.author !== filterAuthor) return false;
+      return true;
+    });
+  }, [allAbsItems, filterGenre, filterSeries, filterAuthor]);
+
+  const absByGenre = useMemo(() => {
+    const groups: Record<string, ABSItem[]> = {};
+    for (const item of filteredAbsItems) {
+      const gs = item.genres?.length ? item.genres : ["Uncategorized"];
+      for (const g of gs) {
+        (groups[g] ??= []).push(item);
+      }
+    }
+    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
+  }, [filteredAbsItems]);
+
+  const absByAuthor = useMemo(() => {
+    const groups: Record<string, ABSItem[]> = {};
+    for (const item of filteredAbsItems) {
+      const a = item.author || "Unknown Author";
+      (groups[a] ??= []).push(item);
+    }
+    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
+  }, [filteredAbsItems]);
+
+  const allEbookItems = useMemo(() => {
+    const items = [...(kavitaCollection?.items || [])];
+    return items.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  }, [kavitaCollection]);
+
+  const ebookFilterOptions = useMemo(() => {
+    const genres = new Set<string>();
+    const series = new Set<string>();
+    const authors = new Set<string>();
+    for (const item of allEbookItems) {
+      (item.genres || []).forEach((g) => g && genres.add(g));
+      const sn = item.seriesName || inferSeriesFromTitle(item.title);
+      if (sn) series.add(sn);
+      if (item.author) authors.add(item.author);
+    }
+    return {
+      genres: Array.from(genres).sort(),
+      series: Array.from(series).sort(),
+      authors: Array.from(authors).sort(),
+    };
+  }, [allEbookItems]);
+
+  const filteredEbookItems = useMemo(() => {
+    return allEbookItems.filter((item) => {
+      if (filterGenre && !(item.genres || []).includes(filterGenre)) return false;
+      if (filterSeries) {
+        const sn = item.seriesName || inferSeriesFromTitle(item.title);
+        if (sn !== filterSeries) return false;
+      }
+      if (filterAuthor && item.author !== filterAuthor) return false;
+      return true;
+    });
+  }, [allEbookItems, filterGenre, filterSeries, filterAuthor]);
+
+  const ebookByGenre = useMemo(() => {
+    const groups: Record<string, KavitaItem[]> = {};
+    for (const item of filteredEbookItems) {
+      const gs = item.genres?.length ? item.genres : ["Uncategorized"];
+      for (const g of gs) (groups[g] ??= []).push(item);
+    }
+    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
+  }, [filteredEbookItems]);
+
+  const ebookBySeries = useMemo(() => {
+    const groups: Record<string, KavitaItem[]> = {};
+    for (const item of filteredEbookItems) {
+      const key = item.seriesName || inferSeriesFromTitle(item.title) || "Standalone";
+      (groups[key] ??= []).push(item);
+    }
+    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
+  }, [filteredEbookItems]);
+
+  const ebookByAuthor = useMemo(() => {
+    const groups: Record<string, KavitaItem[]> = {};
+    for (const item of filteredEbookItems) {
+      const a = item.author || "Unknown Author";
+      (groups[a] ??= []).push(item);
+    }
+    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
+  }, [filteredEbookItems]);
+
+  const rdItemsSorted = useMemo(() => {
+    const items = [...(rdLibrary?.items || [])];
+    return items.sort((a, b) => {
+      const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return tb - ta;
+    });
+  }, [rdLibrary]);
+
+  const rdFilterOptions = useMemo(() => {
+    const genres = new Set<string>();
+    const series = new Set<string>();
+    const authors = new Set<string>();
+    for (const item of rdItemsSorted) {
+      if (item.genre) genres.add(item.genre);
+      const sn = inferSeriesFromTitle(item.title);
+      if (sn) series.add(sn);
+      if (item.author) authors.add(item.author);
+    }
+    return {
+      genres: Array.from(genres).sort(),
+      series: Array.from(series).sort(),
+      authors: Array.from(authors).sort(),
+    };
+  }, [rdItemsSorted]);
+
+  const filteredRdItems = useMemo(() => {
+    return rdItemsSorted.filter((item) => {
+      if (filterGenre && (item.genre || "Uncategorized") !== filterGenre) return false;
+      if (filterSeries && inferSeriesFromTitle(item.title) !== filterSeries) return false;
+      if (filterAuthor && item.author !== filterAuthor) return false;
+      return true;
+    });
+  }, [rdItemsSorted, filterGenre, filterSeries, filterAuthor]);
+
+  const rdByGenre = useMemo(() => {
     const groups: Record<string, LibraryItem[]> = {};
-    for (const item of rdLibrary.items) {
+    for (const item of filteredRdItems) {
       const g = item.genre || "Uncategorized";
       (groups[g] ??= []).push(item);
     }
-    return groups;
-  })();
+    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
+  }, [filteredRdItems]);
 
-  const rdBySeries = (() => {
-    if (!rdLibrary?.items) return {};
-    const seriesRe = /^(.+?)\s+0?\d{1,2}\s*[-–]\s*.+/;
+  const rdBySeries = useMemo(() => {
     const groups: Record<string, LibraryItem[]> = {};
-    for (const item of rdLibrary.items) {
-      const m = item.title.match(seriesRe);
-      const key = m ? m[1].trim() : "Standalone";
+    for (const item of filteredRdItems) {
+      const key = inferSeriesFromTitle(item.title) || "Standalone";
       (groups[key] ??= []).push(item);
     }
-    return groups;
-  })();
+    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
+  }, [filteredRdItems]);
 
-  const ebookByGenre = (() => {
-    if (!kavitaCollection?.items) return {};
-    const groups: Record<string, KavitaItem[]> = {};
-    for (const item of kavitaCollection.items) {
-      const g = item.author || "Unknown Author";
-      (groups[g] ??= []).push(item);
+  const rdByAuthor = useMemo(() => {
+    const groups: Record<string, LibraryItem[]> = {};
+    for (const item of filteredRdItems) {
+      const a = item.author || "Unknown Author";
+      (groups[a] ??= []).push(item);
     }
-    return groups;
-  })();
+    return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
+  }, [filteredRdItems]);
 
-  const ebookBySeries = (() => {
-    if (!kavitaCollection?.items) return {};
-    const seriesRe = /^(.+?)\s+0?\d{1,2}\s*[-–]\s*.+/;
-    const groups: Record<string, KavitaItem[]> = {};
-    for (const item of kavitaCollection.items) {
-      const m = item.title.match(seriesRe);
-      const key = m ? m[1].trim() : item.title;
-      (groups[key] ??= []).push(item);
-    }
-    return groups;
-  })();
+  const handlePersonalCollectionNavigate = useCallback(
+    async (item: LibraryItem) => {
+      const vid = item.googleVolumeId || "";
+      if (vid && !vid.startsWith("rd:")) {
+        navigate(`/book/${encodeURIComponent(vid)}`);
+        return;
+      }
+      try {
+        const { data } = await api.get(
+          `/library/search?q=${encodeURIComponent(item.title)}&media=all`
+        );
+        const results = (data as { results?: SearchResult[] })?.results || [];
+        const abs = results.find((r) => r.source === "abs" && r.itemId);
+        if (abs?.itemId) {
+          navigate(`/library/abs/${encodeURIComponent(abs.itemId)}`);
+          return;
+        }
+        const kav = results.find((r) => r.source === "kavita" && r.chapterId != null);
+        if (kav?.chapterId != null) {
+          navigate(`/read/${kav.chapterId}`);
+          return;
+        }
+      } catch {
+        /* fall through */
+      }
+      navigate(`/search?q=${encodeURIComponent(item.title)}`);
+    },
+    [navigate]
+  );
+
+  const FilterBar = ({
+    options,
+  }: {
+    options: { genres: string[]; series: string[]; authors: string[] };
+  }) => (
+    <div className="flex flex-wrap gap-2 mb-4">
+      <select
+        value={filterGenre}
+        onChange={(e) => setFilterGenre(e.target.value)}
+        className="px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200"
+      >
+        <option value="">All genres</option>
+        {options.genres.map((g) => (
+          <option key={g} value={g}>{g}</option>
+        ))}
+      </select>
+      <select
+        value={filterSeries}
+        onChange={(e) => setFilterSeries(e.target.value)}
+        className="px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200"
+      >
+        <option value="">All series</option>
+        {options.series.map((s) => (
+          <option key={s} value={s}>{s}</option>
+        ))}
+      </select>
+      <select
+        value={filterAuthor}
+        onChange={(e) => setFilterAuthor(e.target.value)}
+        className="px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200 max-w-[200px]"
+      >
+        <option value="">All authors</option>
+        {options.authors.map((a) => (
+          <option key={a} value={a}>{a}</option>
+        ))}
+      </select>
+      {(filterGenre || filterSeries || filterAuthor) && (
+        <button
+          type="button"
+          onClick={() => {
+            setFilterGenre("");
+            setFilterSeries("");
+            setFilterAuthor("");
+          }}
+          className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-gray-200"
+        >
+          Clear filters
+        </button>
+      )}
+    </div>
+  );
+
+  const viewToggle = (view: TabView, setView: (v: TabView) => void) => (
+    <div className="flex gap-1 mb-4 bg-gray-800/30 p-0.5 rounded-md w-fit flex-wrap">
+      {(["all", "genre", "series", "author"] as const).map((v) => (
+        <button
+          key={v}
+          onClick={() => setView(v)}
+          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            view === v ? "bg-gray-700 text-gray-100" : "text-gray-500 hover:text-gray-300"
+          }`}
+        >
+          {v === "all" ? "All" : v === "genre" ? "By Genre" : v === "series" ? "By Series" : "By Author"}
+        </button>
+      ))}
+    </div>
+  );
 
   return (
     <div className="max-w-7xl mx-auto px-4 lg:px-6 py-8">
@@ -702,53 +964,27 @@ export default function MyLibrary() {
           {/* ABS Tab */}
           {tab === "abs" && (
             <div>
-              <div className="flex gap-1 mb-4 bg-gray-800/30 p-0.5 rounded-md w-fit">
-                <button
-                  onClick={() => setAbsView("all")}
-                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                    absView === "all" ? "bg-gray-700 text-gray-100" : "text-gray-500 hover:text-gray-300"
-                  }`}
-                >
-                  All
-                </button>
-                <button
-                  onClick={() => setAbsView("genre")}
-                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                    absView === "genre" ? "bg-gray-700 text-gray-100" : "text-gray-500 hover:text-gray-300"
-                  }`}
-                >
-                  By Genre
-                </button>
-                <button
-                  onClick={() => setAbsView("series")}
-                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                    absView === "series" ? "bg-gray-700 text-gray-100" : "text-gray-500 hover:text-gray-300"
-                  }`}
-                >
-                  By Series
-                </button>
-              </div>
+              {viewToggle(absView, setAbsView)}
+              <FilterBar options={absFilterOptions} />
 
-              {absView === "all" && absCollection && (
+              {absView === "all" && (
                 <div>
-                  {absCollection.totalItems > 0 ? (
+                  {filteredAbsItems.length > 0 ? (
                     <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
-                      {[...Object.values(absCollection.genres).flat(), ...absCollection.ungrouped]
-                        .filter((item, idx, arr) => arr.findIndex(i => i.itemId === item.itemId) === idx)
-                        .map((item) => (
-                          <ABSBookCard
-                            key={item.itemId}
-                            itemId={item.itemId}
-                            title={item.title}
-                            author={item.author}
-                            coverUrl={item.coverUrl}
-                            duration={item.duration}
-                            progress={item.progress}
-                            onPlay={handlePlayABS}
-                            onNavigate={handleNavigateToBook}
-                            hasEbook={formatMatches?.[item.title]?.hasEbook}
-                          />
-                        ))}
+                      {filteredAbsItems.map((item) => (
+                        <ABSBookCard
+                          key={item.itemId}
+                          itemId={item.itemId}
+                          title={item.title}
+                          author={item.author}
+                          coverUrl={item.coverUrl}
+                          duration={item.duration}
+                          progress={item.progress}
+                          onPlay={handlePlayABS}
+                          onNavigate={handleNavigateToBook}
+                          hasEbook={formatMatches?.[item.title]?.hasEbook}
+                        />
+                      ))}
                     </div>
                   ) : (
                     <EmptyABS onBrowse={() => navigate("/")} />
@@ -756,17 +992,22 @@ export default function MyLibrary() {
                 </div>
               )}
 
-              {absView === "genre" && absCollection && (
+              {absView === "genre" && (
                 <div className="space-y-6">
-                  {Object.entries(absCollection.genres).map(([genre, items]) => (
+                  {Object.entries(absByGenre).map(([genre, items]) => (
                     <ABSGenreRow key={genre} genre={genre} items={items} onPlay={handlePlayABS} onNavigate={handleNavigateToBook} formatMatches={formatMatches} />
                   ))}
-                  {absCollection.ungrouped.length > 0 && (
-                    <ABSGenreRow genre="Uncategorized" items={absCollection.ungrouped} onPlay={handlePlayABS} onNavigate={handleNavigateToBook} formatMatches={formatMatches} />
-                  )}
-                  {Object.keys(absCollection.genres).length === 0 && absCollection.ungrouped.length === 0 && (
+                  {Object.keys(absByGenre).length === 0 && (
                     <EmptyABS onBrowse={() => navigate("/")} />
                   )}
+                </div>
+              )}
+
+              {absView === "author" && (
+                <div className="space-y-6">
+                  {Object.entries(absByAuthor).map(([author, items]) => (
+                    <ABSGenreRow key={author} genre={author} items={items} onPlay={handlePlayABS} onNavigate={handleNavigateToBook} formatMatches={formatMatches} />
+                  ))}
                 </div>
               )}
 
@@ -786,19 +1027,8 @@ export default function MyLibrary() {
           {/* Ebooks Tab */}
           {tab === "ebooks" && (
             <div>
-              <div className="flex gap-1 mb-4 bg-gray-800/30 p-0.5 rounded-md w-fit">
-                {(["all", "genre", "series"] as const).map((v) => (
-                  <button
-                    key={v}
-                    onClick={() => setEbookView(v)}
-                    className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                      ebookView === v ? "bg-gray-700 text-gray-100" : "text-gray-500 hover:text-gray-300"
-                    }`}
-                  >
-                    {v === "all" ? "All" : v === "genre" ? "By Genre" : "By Series"}
-                  </button>
-                ))}
-              </div>
+              {viewToggle(ebookView, setEbookView)}
+              <FilterBar options={ebookFilterOptions} />
               {kavitaLoading && (
                 <div className="flex justify-center py-12 text-gray-400 gap-2">
                   <Loader2 size={16} className="animate-spin" />
@@ -813,11 +1043,11 @@ export default function MyLibrary() {
                   </button>
                 </div>
               )}
-              {!kavitaLoading && !kavitaError && kavitaCollection?.items && kavitaCollection.items.length > 0 && (
+              {!kavitaLoading && !kavitaError && allEbookItems.length > 0 && (
                 <>
                   {ebookView === "all" && (
                     <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
-                      {kavitaCollection.items.map((item) => (
+                      {filteredEbookItems.map((item) => (
                         <EbookCard
                           key={item.seriesId}
                           item={item}
@@ -841,13 +1071,20 @@ export default function MyLibrary() {
                       ))}
                     </div>
                   )}
+                  {ebookView === "author" && (
+                    <div className="space-y-6">
+                      {Object.entries(ebookByAuthor).map(([author, items]) => (
+                        <EbookGenreRow key={author} genre={author} items={items} onNavigateToBook={handleNavigateToBook} formatMatches={formatMatches} />
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
-              {!kavitaLoading && !kavitaError && (!kavitaCollection?.items || kavitaCollection.items.length === 0) && (
+              {!kavitaLoading && !kavitaError && allEbookItems.length === 0 && (
                 <div className="text-center py-16">
                   <BookOpen className="mx-auto mb-4 text-gray-600" size={40} />
                   <h3 className="text-base font-semibold text-gray-300 mb-2">No ebooks on your server</h3>
-                  <p className="text-sm text-gray-500 mb-4">Add EPUB or PDF files to your Kavita library</p>
+                  <p className="text-sm text-gray-500 mb-4">Add EPUB or PDF files to your Kavita library, then hit Refresh</p>
                 </div>
               )}
             </div>
@@ -856,38 +1093,29 @@ export default function MyLibrary() {
           {/* Personal Collection Tab */}
           {tab === "streams" && (
             <div>
-              <div className="flex gap-1 mb-4 bg-gray-800/30 p-0.5 rounded-md w-fit">
-                {(["all", "genre", "series"] as const).map((v) => (
-                  <button
-                    key={v}
-                    onClick={() => setRdView(v)}
-                    className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                      rdView === v ? "bg-gray-700 text-gray-100" : "text-gray-500 hover:text-gray-300"
-                    }`}
-                  >
-                    {v === "all" ? "All" : v === "genre" ? "By Genre" : "By Series"}
-                  </button>
-                ))}
-              </div>
+              {viewToggle(rdView, setRdView)}
+              <FilterBar options={rdFilterOptions} />
               {rdLoading && (
                 <div className="flex items-center justify-center py-12 text-gray-400 gap-2">
                   <Loader2 size={16} className="animate-spin" />
                   Loading...
                 </div>
               )}
-              {rdLibrary && rdLibrary.items.length === 0 && (
+              {!rdLoading && rdItemsSorted.length === 0 && (
                 <div className="text-center py-16">
                   <BookOpen className="mx-auto mb-4 text-gray-600" size={40} />
                   <h3 className="text-base font-semibold text-gray-300 mb-2">No items yet</h3>
-                  <p className="text-sm text-gray-500 mb-4">Add books, stream, or request — they'll appear here</p>
+                  <p className="text-sm text-gray-500 mb-4">
+                    Books you explicitly add to Personal Collection appear here — streams are not auto-added
+                  </p>
                   <button onClick={() => navigate("/")} className="px-5 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-500 transition-colors">
                     Browse Books
                   </button>
                 </div>
               )}
-              {rdView === "all" && rdLibrary?.items && rdLibrary.items.length > 0 && (
+              {rdView === "all" && filteredRdItems.length > 0 && (
                 <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2">
-                  {rdLibrary.items.map((item) => (
+                  {filteredRdItems.map((item) => (
                     <RDCard
                       key={item.id}
                       item={item}
@@ -895,7 +1123,7 @@ export default function MyLibrary() {
                       onPlay={() => handlePlayRD(item)}
                       onResolve={() => handleResolveRD(item)}
                       onRemove={() => removeMutation.mutate(item.id)}
-                      onNavigate={() => navigate(`/book/${encodeURIComponent(item.googleVolumeId)}`)}
+                      onNavigate={() => handlePersonalCollectionNavigate(item)}
                     />
                   ))}
                 </div>
@@ -912,7 +1140,7 @@ export default function MyLibrary() {
                         onPlay={() => handlePlayRD(item)}
                         onResolve={() => handleResolveRD(item)}
                         onRemove={() => removeMutation.mutate(item.id)}
-                        onNavigate={() => navigate(`/book/${encodeURIComponent(item.googleVolumeId)}`)}
+                        onNavigate={() => handlePersonalCollectionNavigate(item)}
                       />
                     ))}
                   </div>
@@ -930,7 +1158,25 @@ export default function MyLibrary() {
                         onPlay={() => handlePlayRD(item)}
                         onResolve={() => handleResolveRD(item)}
                         onRemove={() => removeMutation.mutate(item.id)}
-                        onNavigate={() => navigate(`/book/${encodeURIComponent(item.googleVolumeId)}`)}
+                        onNavigate={() => handlePersonalCollectionNavigate(item)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {rdView === "author" && Object.entries(rdByAuthor).map(([author, items]) => (
+                <div key={author} className="mb-6">
+                  <h3 className="text-sm font-semibold text-gray-300 mb-3">{author}</h3>
+                  <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2">
+                    {items.map((item) => (
+                      <RDCard
+                        key={item.id}
+                        item={item}
+                        isResolving={resolvingId === item.id}
+                        onPlay={() => handlePlayRD(item)}
+                        onResolve={() => handleResolveRD(item)}
+                        onRemove={() => removeMutation.mutate(item.id)}
+                        onNavigate={() => handlePersonalCollectionNavigate(item)}
                       />
                     ))}
                   </div>

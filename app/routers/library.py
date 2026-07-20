@@ -53,6 +53,36 @@ def _map_to_toplevel(genre: str) -> str:
             return val
     return genre
 
+
+_SERIES_IN_PARENS = re.compile(
+    r"[\(\[]\s*(?P<series>[^\)\]]+?)\s*(?:,\s*(?:Book|Vol\.?|#)?\s*\d+)?\s*[\)\]]\s*$",
+    re.IGNORECASE,
+)
+_SERIES_HASH = re.compile(
+    r"^(?P<series>.+?)\s+#?\d+\s*[:\-–]\s+",
+    re.IGNORECASE,
+)
+
+
+def _infer_series_name(title: str) -> str:
+    """Best-effort series label from a book title (store-like grouping for ebooks)."""
+    t = (title or "").strip()
+    if not t:
+        return ""
+    m = _SERIES_IN_PARENS.search(t)
+    if m:
+        series = m.group("series").strip()
+        # Drop trailing ", Book 3" variants already handled; also strip "Book N" alone
+        series = re.sub(r",?\s*(?:Book|Vol\.?)\s*\d+\s*$", "", series, flags=re.IGNORECASE).strip()
+        if series and len(series) > 1:
+            return series
+    m = _SERIES_HASH.match(t)
+    if m:
+        series = m.group("series").strip()
+        if series and len(series) > 1:
+            return series
+    return ""
+
 router = APIRouter(prefix="/api/library", tags=["library"])
 
 AUDIO_EXT = re.compile(r"\.(mp3|m4a|m4b|ogg|opus|flac|wav|wma|aac|mp4)$", re.IGNORECASE)
@@ -178,7 +208,7 @@ async def get_library(
     stmt = (
         select(StreamingLibraryItem)
         .where(StreamingLibraryItem.user_id == user.id)
-        .order_by(StreamingLibraryItem.updated_at.desc())
+        .order_by(StreamingLibraryItem.created_at.desc())
     )
     rows = (await db.execute(stmt)).scalars().all()
     return {"items": [_serialize(item) for item in rows]}
@@ -436,6 +466,10 @@ async def abs_collection(
                 ungrouped.append(item)
     visible = sum(len(v) for v in genres.values()) + len(ungrouped)
     sorted_genres = dict(sorted(genres.items(), key=lambda x: x[0]))
+    # Newest first within each bucket (ABS addedAt is epoch ms)
+    for bucket in sorted_genres.values():
+        bucket.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
+    ungrouped.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
     return {
         "genres": sorted_genres,
         "ungrouped": ungrouped,
@@ -494,18 +528,21 @@ async def kavita_collection(
     """Return all Kavita ebook series (EPUB/PDF) for the library view."""
     hidden_titles = await _get_private_titles_for_others(user.id, db)
     series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS)
-    # Fetch volumes in parallel (limit 10 concurrent) to avoid 504 timeout
+    # Fetch volumes + metadata in parallel (limit 10 concurrent) to avoid 504 timeout
     sem = asyncio.Semaphore(10)
 
-    async def volumes_for(s: dict) -> tuple[dict, list]:
+    async def volumes_and_meta(s: dict) -> tuple[dict, list, dict]:
         sid = s.get("id", 0)
         async with sem:
-            volumes = await kavita.get_series_volumes(sid)
-        return s, volumes
+            volumes, meta = await asyncio.gather(
+                kavita.get_series_volumes(sid),
+                kavita.get_series_metadata(sid),
+            )
+        return s, volumes, meta or {}
 
-    results = await asyncio.gather(*[volumes_for(s) for s in series])
+    results = await asyncio.gather(*[volumes_and_meta(s) for s in series])
     items: list[dict] = []
-    for s, volumes in results:
+    for s, volumes, meta in results:
         name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
         if not name or _is_hidden(name, hidden_titles):
             continue
@@ -527,14 +564,55 @@ async def kavita_collection(
             cover_url += f"&volumeId={volume_id}"
         if cover_url and chapter_id:
             cover_url += f"&chapterId={chapter_id}"
+
+        writers = meta.get("writers") or s.get("authors") or []
+        author = ""
+        if writers:
+            author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
+        genres_raw = meta.get("genres") or []
+        genres: list[str] = []
+        seen_g: set[str] = set()
+        for g in genres_raw:
+            if isinstance(g, dict):
+                label = g.get("title") or g.get("name") or ""
+            else:
+                label = str(g)
+            if not label:
+                continue
+            top = _map_to_toplevel(label)
+            if top not in seen_g:
+                seen_g.add(top)
+                genres.append(top)
+
+        # Kavita series name is often the book title; prefer parenthetical / "Book N" series cues.
+        series_name = _infer_series_name(name) or ""
+
+        added_at = s.get("created") or s.get("lastChapterAdded") or meta.get("releaseYear") or 0
+        try:
+            # Kavita may return ISO strings or epoch ms
+            if isinstance(added_at, str) and added_at:
+                from datetime import datetime
+                added_ms = int(datetime.fromisoformat(added_at.replace("Z", "+00:00")).timestamp() * 1000)
+            else:
+                added_ms = int(added_at or 0)
+                if added_ms < 10_000_000_000:  # seconds → ms
+                    added_ms = added_ms * 1000 if added_ms else 0
+        except Exception:
+            added_ms = 0
+
         items.append({
             "seriesId": s.get("id"),
             "title": name,
-            "author": (s.get("authors") or [{}])[0].get("name", "") if s.get("authors") else "",
+            "author": author,
             "coverUrl": cover_url,
             "chapterId": chapter_id,
+            "genres": genres,
+            "seriesName": series_name,
+            "addedAt": added_ms,
             "source": "kavita",
         })
+    # Newest first by default for the All shelf
+    items.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
     return {"items": items, "totalItems": len(items)}
 
 
@@ -678,7 +756,19 @@ async def trigger_abs_scan(user: User = Depends(get_current_user)):
         await audiobookshelf.scan_library()
         await asyncio.sleep(5)
         await audiobookshelf.remove_items_with_issues()
+        audiobookshelf.invalidate_cache()
         return {"ok": True, "message": "Library scanned and cleaned up"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/kavita/scan")
+async def trigger_kavita_scan(user: User = Depends(get_current_user)):
+    """Trigger a Kavita library scan and clear the in-process series cache."""
+    try:
+        await kavita.scan_library()
+        kavita.invalidate_cache()
+        return {"ok": True, "message": "Kavita scanned"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

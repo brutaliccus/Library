@@ -147,9 +147,11 @@ export async function syncAndroidAutoPlayback(
       await LibraryAuto.syncPlayback({
         active: true,
         playing: isPlaying,
-        title: scope.label || np.title,
-        artist: np.author || "Audiobook",
-        album: trackLabel || np.title,
+        // Android Auto MediaSession: TITLE (large) + ARTIST (small).
+        // Put chapter in artist so the car shows Book / Chapter, not Author / Chapter.
+        title: np.title || "Audiobook",
+        artist: scope.label || trackLabel || np.author || "",
+        album: np.author || "",
         duration: isFinite(d) && d > 0 ? d : 0,
         position: safePos,
         playbackRate: Math.max(playbackRate, 0.25),

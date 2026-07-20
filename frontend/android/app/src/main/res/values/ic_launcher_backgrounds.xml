@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background_ocean">#030712</color>
+    <color name="ic_launcher_background_ember">#100b09</color>
+    <color name="ic_launcher_background_forest">#060c08</color>
+    <color name="ic_launcher_background_dusk">#020617</color>
+</resources>

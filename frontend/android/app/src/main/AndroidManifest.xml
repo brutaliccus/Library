@@ -3,9 +3,9 @@
 
     <application
         android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@mipmap/ic_launcher_ocean"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
+        android:roundIcon="@mipmap/ic_launcher_ocean_round"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
@@ -21,11 +21,6 @@
             android:launchMode="singleTask"
             android:exported="true">
 
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-
             <!-- Invite deep links: library://join/CODE?origin=https://… -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -36,14 +31,106 @@
 
         </activity>
 
-        <!-- Android Auto shows this service's icon in its app launcher. Use the
-             full-color launcher icon — a monochrome/transparent drawable renders
-             as a blank tile. -->
+        <!-- Themed home-screen icons (only one alias enabled at a time). -->
+        <activity-alias
+            android:name=".LauncherOcean"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_ocean"
+            android:roundIcon="@mipmap/ic_launcher_ocean_round"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".LauncherEmber"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_ember"
+            android:roundIcon="@mipmap/ic_launcher_ember_round"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".LauncherForest"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_forest"
+            android:roundIcon="@mipmap/ic_launcher_forest_round"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".LauncherDusk"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_dusk"
+            android:roundIcon="@mipmap/ic_launcher_dusk_round"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Android Auto: themed service icons (only one enabled at a time). -->
         <service
-            android:name=".LibraryMediaBrowserService"
+            android:name=".LibraryMediaBrowserServiceOcean"
+            android:enabled="true"
             android:exported="true"
             android:foregroundServiceType="mediaPlayback"
-            android:icon="@mipmap/ic_launcher"
+            android:icon="@mipmap/ic_launcher_ocean"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".LibraryMediaBrowserServiceEmber"
+            android:enabled="false"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback"
+            android:icon="@mipmap/ic_launcher_ember"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".LibraryMediaBrowserServiceForest"
+            android:enabled="false"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback"
+            android:icon="@mipmap/ic_launcher_forest"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".LibraryMediaBrowserServiceDusk"
+            android:enabled="false"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback"
+            android:icon="@mipmap/ic_launcher_dusk"
             android:label="@string/app_name">
             <intent-filter>
                 <action android:name="android.media.browse.MediaBrowserService" />

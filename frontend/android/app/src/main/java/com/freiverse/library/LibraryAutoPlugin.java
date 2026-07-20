@@ -156,10 +156,10 @@ public class LibraryAutoPlugin extends Plugin
         if (ctx == null) {
             return;
         }
-        android.content.Intent serviceIntent = new android.content.Intent(
-            ctx,
-            LibraryMediaBrowserService.class
+        Class<?> serviceClass = ThemeIconHelper.mediaBrowserServiceClass(
+            ThemeIconHelper.getSavedTheme(ctx)
         );
+        android.content.Intent serviceIntent = new android.content.Intent(ctx, serviceClass);
         try {
             ContextCompat.startForegroundService(ctx, serviceIntent);
         } catch (Exception e) {

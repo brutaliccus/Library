@@ -52,4 +52,10 @@ export function applyThemeToDocument(theme: ThemeId): void {
   } catch {
     /* ignore */
   }
+  // Browser tab favicon + Android launcher / Android Auto icons.
+  void import("./themeIcon")
+    .then((m) => m.applyAppIconTheme(theme))
+    .catch(() => {
+      /* ignore */
+    });
 }

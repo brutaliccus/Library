@@ -54,7 +54,13 @@ Signed-in Android users get:
 - **Settings → Android app update** to check / download manually
 
 The server calls GitHub `releases/latest` for the configured repo (default
-`brutaliccus/Library`) and looks for a `.apk` asset. Put `versionCode: N` in the
+`brutaliccus/Library`) and looks for a `.apk` asset.
+
+Themed app icons (ocean / ember / forest / dusk) are generated with
+`npm run icons:themed` in `frontend/` (PWA favicons + Android mipmaps). The app
+switches launcher and Android Auto icons when the UI theme changes.
+
+Put `versionCode: N` in the
 release body (the GitHub Action does this automatically).
 
 ### Publish a release

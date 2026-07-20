@@ -9,6 +9,9 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(LibraryAutoPlugin.class);
         registerPlugin(AppUpdatePlugin.class);
+        registerPlugin(ThemeIconPlugin.class);
+        // Re-apply saved themed launcher / Android Auto icons on cold start.
+        ThemeIconHelper.apply(this, ThemeIconHelper.getSavedTheme(this));
         super.onCreate(savedInstanceState);
     }
 }

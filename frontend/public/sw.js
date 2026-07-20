@@ -1,5 +1,5 @@
 /** Bump when fetch/caching behavior changes so old caches are dropped. */
-const CACHE_VERSION = 10;
+const CACHE_VERSION = 11;
 const CACHE_NAME = `audiobook-library-v${CACHE_VERSION}`;
 /** Downloaded audiobook tracks (populated by the app, served here). Survives
  * SW updates — cleared per-book when a book is finished or progress cleared. */

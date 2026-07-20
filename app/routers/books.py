@@ -570,6 +570,10 @@ async def refresh_daily_shelves(*, force: bool = False) -> dict[str, bool]:
                 snap = await shelf_snapshots.get_snapshot(name)
                 if shelf_snapshots.same_utc_day(snap):
                     continue
+            elif name in _shelf_cache:
+                # Drop same-day memory snapshot so visitors don't keep seeing
+                # blank OL stub covers while the forced rebuild runs.
+                _shelf_cache.pop(name, None)
             payload = await builder()
             if payload.get("books"):
                 await _store_daily_shelf(name, payload)

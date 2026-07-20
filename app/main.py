@@ -24,12 +24,16 @@ _shelf_refresh_task: asyncio.Task | None = None
 async def _daily_shelf_refresh_loop() -> None:
     """Ensure trending / new-releases rebuild at least once per UTC day."""
     # First pass shortly after boot so cold starts don't wait for a visitor.
+    # Force once so cover-enrichment fixes replace same-day snapshots that still
+    # hold blank Open Library stub URLs.
     await asyncio.sleep(15)
+    first = True
     while True:
         try:
             from app.routers.books import refresh_daily_shelves
 
-            await refresh_daily_shelves(force=False)
+            await refresh_daily_shelves(force=first)
+            first = False
         except Exception as e:
             logger.warning("Daily shelf refresh loop error: %s", e)
         # Check hourly; rebuild only when the UTC day rolled over.

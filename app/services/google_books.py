@@ -453,15 +453,13 @@ async def search_volumes(
         result = await _google_books_search(query, max_results, start_index, order_by)
 
     if result.get("books"):
-        # Local OL dump often omits cover_id — fill gaps so store cards aren't blank.
+        # Local OL dump often omits cover_id or only has a blank stub image —
+        # enrich (and strip stubs) so store cards aren't silent empty tiles.
         books = result["books"]
-        enriched: list[dict] = []
-        for b in books:
-            if b.get("coverUrl"):
-                enriched.append(b)
-            else:
-                enriched.append(await enrich_cover_if_missing(b))
-        result = {**result, "books": enriched}
+        enriched = await asyncio.gather(
+            *(enrich_cover_if_missing(b) for b in books)
+        )
+        result = {**result, "books": list(enriched)}
         _cache_set(cache_key, result)
     return result
 
@@ -736,6 +734,18 @@ async def enrich_cover_if_missing(book: dict) -> dict:
         vid = book.get("volumeId") or book.get("id") or ""
         if vid.startswith("OL:"):
             _cache_set(f"ol_work:{vid[3:]}", book)
+    else:
+        # Drop OL stub URLs (~43B blank JPEG) so cards show a placeholder, not a
+        # silent empty tile (stubs return HTTP 200 and never fire img.onError).
+        existing = (book.get("coverUrl") or "").strip()
+        if existing and "covers.openlibrary.org" in existing:
+            if not await _cover_url_looks_real(existing):
+                book = dict(book)
+                book["coverUrl"] = ""
+                book["coverUrlLarge"] = ""
+                vid = book.get("volumeId") or book.get("id") or ""
+                if vid.startswith("OL:"):
+                    _cache_set(f"ol_work:{vid[3:]}", book)
     return book
 
 
@@ -752,15 +762,33 @@ def _titles_roughly_match(a: str, b: str) -> bool:
 
 
 async def _cover_url_looks_real(url: str) -> bool:
-    """OL returns a tiny placeholder for missing covers — reject those."""
+    """OL returns a tiny placeholder for missing covers — reject those.
+
+    HEAD often omits Content-Length on covers.openlibrary.org, so we must GET a
+    small prefix and measure the body. Real covers are >>2KB; stubs are ~40 bytes.
+    """
+    if not (url or "").strip():
+        return False
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=4.0) as client:
-            resp = await client.head(url)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=6.0) as client:
+            resp = await client.get(
+                url,
+                headers={"Range": "bytes=0-4095"},
+            )
             if resp.status_code >= 400:
                 return False
-            length = int(resp.headers.get("content-length") or "0")
-            # Real covers are typically >2KB; OL's blank placeholder is ~40 bytes.
-            return length == 0 or length > 2000
+            body_len = len(resp.content or b"")
+            # Range responses may be 206 with a short slice of a large file —
+            # treat a full 4KB chunk as real. Tiny bodies are OL stubs.
+            if body_len > 2000:
+                return True
+            cl = resp.headers.get("content-length") or resp.headers.get("Content-Length")
+            if cl is not None:
+                try:
+                    return int(cl) > 2000
+                except ValueError:
+                    pass
+            return False
     except Exception:
         return False
 

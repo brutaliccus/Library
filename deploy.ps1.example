@@ -1,0 +1,223 @@
+# Deploy Library Site to Pi via SSH
+# Run from project root: .\deploy.ps1
+# Optional: .\deploy.ps1 -NoCache   (full image rebuild, slower)
+# Optional: .\deploy.ps1 -SkipChecks
+# Optional: .\deploy.ps1 -SkipApk     (never trigger an Android APK GitHub Release)
+# Optional: .\deploy.ps1 -ForceApk    (always bump + tag an APK release after deploy)
+#
+# After a successful Pi deploy, automatically tags android-v{name}+{code} when
+# APK-relevant files changed since the last android-v* tag (Capacitor SPA + native).
+# That tag push starts .github/workflows/android-apk-release.yml.
+#
+# Connection: deploy.local.ps1 (see deploy.local.ps1.example) or env LIBRARY_SITE_PI_HOST.
+
+param(
+    [switch]$NoCache,
+    [switch]$SkipChecks,
+    [switch]$SkipApk,
+    [switch]$ForceApk
+)
+
+# Native tools (npm/vite, ssh, docker, scp) write progress to stderr. Under
+# $ErrorActionPreference='Stop' that becomes a terminating NativeCommandError.
+# Gate failures on exit codes only.
+$ErrorActionPreference = "Continue"
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
+$PI_USER = if ($env:LIBRARY_SITE_PI_USER) { $env:LIBRARY_SITE_PI_USER } else { "pihole" }
+$PI_HOST = if ($env:LIBRARY_SITE_PI_HOST) { $env:LIBRARY_SITE_PI_HOST } else { "pihole" }
+$REMOTE_PATH = if ($env:LIBRARY_SITE_PI_PATH) { $env:LIBRARY_SITE_PI_PATH } else { "/opt/stacks/Library Site" }
+
+$localConfig = Join-Path $PSScriptRoot "deploy.local.ps1"
+if (Test-Path $localConfig) {
+    . $localConfig
+}
+
+$sshTarget = "${PI_USER}@${PI_HOST}"
+
+function Write-Step([string]$Message) {
+    Write-Host $Message -ForegroundColor Cyan
+}
+
+function Invoke-Native {
+    <#
+    .SYNOPSIS
+      Run an external program, print stdout+stderr as plain text, throw on nonzero exit.
+      Avoids PowerShell wrapping native stderr as terminating ErrorRecords.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [string]$FailMessage = "Command failed"
+    )
+
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    $output = & $FilePath @Arguments 2>&1
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+
+    foreach ($line in @($output)) {
+        if ($null -eq $line) { continue }
+        if ($line -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $line.ToString()
+        }
+        else {
+            Write-Host $line
+        }
+    }
+
+    if ($code -ne 0) {
+        throw "$FailMessage (exit $code)"
+    }
+}
+
+function Invoke-Ssh([string]$RemoteCommand, [string]$FailMessage) {
+    Invoke-Native -FilePath "ssh" -FailMessage $FailMessage -Arguments @(
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=20",
+        $sshTarget,
+        $RemoteCommand
+    )
+}
+
+function Invoke-Scp([string]$LocalPath, [string]$RemotePath, [string]$FailMessage) {
+    Invoke-Native -FilePath "scp" -FailMessage $FailMessage -Arguments @(
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=20",
+        $LocalPath,
+        "${sshTarget}:${RemotePath}"
+    )
+}
+
+function Test-PiConnection {
+    Write-Step "Checking SSH to $sshTarget..."
+    try {
+        Invoke-Ssh "echo ok" "SSH preflight failed"
+    }
+    catch {
+        Write-Host ""
+        Write-Host "Cannot reach Pi at $sshTarget." -ForegroundColor Red
+        Write-Host "  Copy deploy.local.ps1.example to deploy.local.ps1 and set PI_HOST (e.g. 192.168.68.76)"
+        Write-Host ""
+        throw
+    }
+    Write-Host "SSH OK ($sshTarget)." -ForegroundColor Green
+}
+
+# ---------------------------------------------------------------------------
+# Deploy steps
+# ---------------------------------------------------------------------------
+
+if (-not $SkipChecks) {
+    Write-Step "[1/9] Pre-deploy checks (pytest + tsc)..."
+    & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "scripts\check.ps1") -SkipAndroid
+    if ($LASTEXITCODE -ne 0) { throw "Pre-deploy checks failed" }
+}
+else {
+    Write-Host "[1/9] Skipping pre-deploy checks (-SkipChecks)." -ForegroundColor Yellow
+}
+
+Write-Step "[2/9] Building frontend locally..."
+Push-Location (Join-Path $PSScriptRoot "frontend")
+try {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    npm run build 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host $_.ToString() }
+        else { Write-Host $_ }
+    }
+    $buildExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($buildExit -ne 0) { throw "Frontend build failed (exit $buildExit)" }
+}
+finally {
+    Pop-Location
+}
+
+Write-Step "[3/9] Creating deploy archive..."
+python (Join-Path $PSScriptRoot "scripts\make_deploy_archive.py")
+if ($LASTEXITCODE -ne 0) { throw "Deploy archive creation failed" }
+
+$archive = Join-Path $PSScriptRoot "library-site-deploy.tar.gz"
+if (-not (Test-Path $archive)) { throw "Archive missing: $archive" }
+
+Test-PiConnection
+
+Write-Step "[4/9] Uploading to Pi..."
+Invoke-Scp $archive "/tmp/library-site-deploy.tar.gz" "scp upload failed"
+
+Write-Step "[5/9] Extracting on Pi (stop app, replace root-owned static, extract)..."
+$extractCmd = "cd '$REMOTE_PATH' && docker compose stop app && sudo rm -rf backend/static && tar -xzf /tmp/library-site-deploy.tar.gz && test -f backend/static/index.html && ls -la backend/static/index.html backend/static/assets/index-*.js 2>/dev/null | tail -3"
+Invoke-Ssh $extractCmd "extract on Pi failed"
+
+Write-Step "[6/9] Ensuring nightly DB backup cron..."
+Invoke-Ssh "cd '$REMOTE_PATH' && bash scripts/install_backup_cron.sh" "backup cron install failed"
+
+Write-Step "[6b/9] Ensuring monthly Open Library catalog refresh cron..."
+Invoke-Ssh "cd '$REMOTE_PATH' && bash scripts/install_ol_catalog_cron.sh" "OL catalog cron install failed"
+
+if ($NoCache) {
+    Write-Step "[7/9] Rebuilding Docker image (--no-cache)..."
+    Invoke-Ssh "cd '$REMOTE_PATH' && docker compose build --no-cache app" "docker build failed"
+}
+else {
+    Write-Step "[7/9] Rebuilding Docker image (cached layers)..."
+    Invoke-Ssh "cd '$REMOTE_PATH' && docker compose build app" "docker build failed"
+}
+
+Write-Step "[8/9] Restarting app..."
+Invoke-Ssh "cd '$REMOTE_PATH' && docker compose up -d app" "docker compose up failed"
+
+Write-Step "[9/9] Updating NPM proxy timeouts..."
+$npmCmd = "sudo mkdir -p /opt/stacks/nginxproxymanager/data/nginx/custom && sudo cp '$REMOTE_PATH/nginx/npm-server_proxy.conf' /opt/stacks/nginxproxymanager/data/nginx/custom/server_proxy.conf && sudo docker exec nginx-proxy-manager nginx -t && sudo docker exec nginx-proxy-manager nginx -s reload"
+Invoke-Ssh $npmCmd "NPM proxy update failed"
+
+Write-Step "[9c/9] FlareSolverr + Jackett timeouts..."
+try {
+    Invoke-Ssh "cd '$REMOTE_PATH' && docker compose up -d flaresolverr jackett" "flaresolverr/jackett up failed"
+}
+catch {
+    Write-Host "Warning: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+try {
+    Invoke-Ssh "cd '$REMOTE_PATH' && bash scripts/patch_jackett_flare_timeout.sh && bash scripts/patch_jackett_abb_site.sh && bash scripts/wait_for_jackett.sh && bash scripts/sync_jackett_env.sh && bash scripts/wait_for_jackett.sh && bash scripts/sync_prowlarr_abb_indexer.sh" "Jackett/Prowlarr sync failed"
+}
+catch {
+    Write-Host "Warning (non-fatal): $($_.Exception.Message)" -ForegroundColor Yellow
+}
+try {
+    Invoke-Ssh "docker exec -e PYTHONPATH=/app audiobook-request python /app/scripts/refresh_debrid_post_deploy.py || echo 'debrid refresh skipped (database busy)'" "debrid refresh failed"
+}
+catch {
+    Write-Host "Warning (non-fatal): $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+Write-Host ""
+Write-Host "Deploy complete." -ForegroundColor Green
+
+# ---------------------------------------------------------------------------
+# Android APK release (smart — only when Capacitor/native/frontend changed)
+# ---------------------------------------------------------------------------
+Write-Step "APK: Android release check..."
+$apkScript = Join-Path $PSScriptRoot "scripts\release_android_apk.ps1"
+try {
+    if ($SkipApk) {
+        & powershell -ExecutionPolicy Bypass -File $apkScript -Skip
+    }
+    elseif ($ForceApk) {
+        & powershell -ExecutionPolicy Bypass -File $apkScript -Force
+    }
+    else {
+        & powershell -ExecutionPolicy Bypass -File $apkScript
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Warning: Android APK release step failed (exit $LASTEXITCODE). Pi deploy is still OK." -ForegroundColor Yellow
+    }
+}
+catch {
+    Write-Host "Warning: Android APK release step failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "  Pi deploy succeeded; re-run: .\scripts\release_android_apk.ps1" -ForegroundColor DarkGray
+}

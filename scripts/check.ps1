@@ -29,7 +29,7 @@ function Run-Check {
 
 Run-Check "Backend tests (pytest)" $root {
     if (-not (Test-Path (Join-Path $root "tests"))) {
-        Write-Host "No tests/ directory — skipping pytest." -ForegroundColor Yellow
+        Write-Host "No tests/ directory - skipping pytest." -ForegroundColor Yellow
         $global:LASTEXITCODE = 0
         return
     }

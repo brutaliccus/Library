@@ -26,6 +26,8 @@ export interface LibraryGroupInfo {
   inviteCode: string | null;
   /** Full share URL from server APP_URL, e.g. https://host/join/CODE */
   inviteLink: string | null;
+  /** Library-wide default UI theme (ocean | ember | forest | dusk) */
+  defaultTheme?: string;
   members?: LibraryMember[];
 }
 

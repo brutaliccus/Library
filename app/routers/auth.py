@@ -15,6 +15,7 @@ from app.utils.auth import (
     get_current_user,
 )
 from app.utils.email_norm import is_valid_email, normalize_email, username_from_email
+from app.utils.themes import DEFAULT_THEME, THEME_IDS, normalize_theme
 from app.services import push
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -285,27 +286,51 @@ class UserSettingsResponse(BaseModel):
     private_mode: bool = False
     preferred_debrid: str = "rd"
     available_debrid_providers: list[str] = []
+    # Personal override; null = follow library default
+    theme: str | None = None
+    library_default_theme: str = DEFAULT_THEME
+    effective_theme: str = DEFAULT_THEME
+    available_themes: list[str] = list(THEME_IDS)
 
 
 class UpdateSettingsRequest(BaseModel):
     private_mode: bool | None = None
     preferred_debrid: str | None = None
+    # Pass null / "default" to clear personal override
+    theme: str | None = None
+    clear_theme: bool = False
 
-
-async def _settings_response(user: User) -> UserSettingsResponse:
+async def _settings_response(user: User, db: AsyncSession | None = None) -> UserSettingsResponse:
     from app.services import debrid, debrid_tokens
-    # Providers reflect the user's library-group keys (env fallback for default group)
+    from app.models import LibraryGroup
+
     await debrid_tokens.apply_tokens_for_user_id(user.id)
+    lib_theme = DEFAULT_THEME
+    if user.library_group_id and db is not None:
+        group = (
+            await db.execute(select(LibraryGroup).where(LibraryGroup.id == user.library_group_id))
+        ).scalar_one_or_none()
+        if group:
+            lib_theme = normalize_theme(getattr(group, "default_theme", None)) or DEFAULT_THEME
+    user_theme = normalize_theme(getattr(user, "theme", None), allow_null=True)
+    effective = user_theme or lib_theme
     return UserSettingsResponse(
         private_mode=user.private_mode,
         preferred_debrid=getattr(user, "preferred_debrid", "rd") or "rd",
         available_debrid_providers=debrid.available_providers(),
+        theme=user_theme,
+        library_default_theme=lib_theme,
+        effective_theme=effective,
+        available_themes=list(THEME_IDS),
     )
 
 
 @router.get("/settings", response_model=UserSettingsResponse)
-async def get_settings_endpoint(user: User = Depends(get_current_user)):
-    return await _settings_response(user)
+async def get_settings_endpoint(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _settings_response(user, db)
 
 
 @router.put("/settings", response_model=UserSettingsResponse)
@@ -319,8 +344,20 @@ async def update_settings(
     if body.preferred_debrid is not None:
         from app.services import debrid
         user.preferred_debrid = debrid.normalize_provider(body.preferred_debrid)
+    if body.clear_theme:
+        user.theme = None
+    elif body.theme is not None:
+        # Empty string or "default" clears override
+        if not str(body.theme).strip() or str(body.theme).strip().lower() in ("default", "library", "auto"):
+            user.theme = None
+        else:
+            tid = normalize_theme(body.theme, allow_null=True)
+            if tid is None:
+                raise HTTPException(status_code=400, detail="Unknown theme")
+            user.theme = tid
     await db.commit()
-    return await _settings_response(user)
+    await db.refresh(user)
+    return await _settings_response(user, db)
 
 
 @router.post("/change-password")

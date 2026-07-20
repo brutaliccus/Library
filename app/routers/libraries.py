@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import LibraryGroup, User, _invite_code
 from app.utils.auth import get_current_user
+from app.utils.themes import DEFAULT_THEME, normalize_theme
 from app.services import debrid_tokens, real_debrid, torbox
 
 logger = logging.getLogger(__name__)
@@ -42,10 +43,12 @@ class CreateGroupRequest(BaseModel):
     name: str
     real_debrid_api_token: str = ""
     torbox_api_token: str = ""
+    default_theme: str = DEFAULT_THEME
 
 
 class UpdateBrandingRequest(BaseModel):
     name: str | None = None
+    default_theme: str | None = None
 
 
 class JoinGroupRequest(BaseModel):
@@ -122,6 +125,7 @@ async def _serialize_group(group: LibraryGroup, user: User, db: AsyncSession) ->
         "id": group.id,
         "name": group.name,
         "coverUrl": f"/api/libraries/{group.id}/cover" if group.cover_path else None,
+        "defaultTheme": normalize_theme(getattr(group, "default_theme", None)) or DEFAULT_THEME,
         "role": user.library_role,
         "isOwner": group.owner_user_id == user.id,
         "canManageKeys": user.library_role == "owner",
@@ -223,11 +227,13 @@ async def create_group(
     await _validate_tokens(body.real_debrid_api_token.strip(), body.torbox_api_token.strip())
 
     old_group_id = user.library_group_id
+    theme = normalize_theme(body.default_theme) or DEFAULT_THEME
     group = LibraryGroup(
         name=name,
         owner_user_id=user.id,
         real_debrid_api_token=body.real_debrid_api_token.strip(),
         torbox_api_token=body.torbox_api_token.strip(),
+        default_theme=theme,
     )
     db.add(group)
     await db.flush()
@@ -328,7 +334,7 @@ async def update_branding(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Rename the library (owner only). Cover art uses POST /branding/cover."""
+    """Rename the library / set default theme (owner only). Cover art uses POST /branding/cover."""
     _require_owner(user)
     group = await _get_group(user, db)
     if not group:
@@ -340,6 +346,8 @@ async def update_branding(
         if len(name) > 128:
             raise HTTPException(status_code=400, detail="Library name is too long")
         group.name = name
+    if body.default_theme is not None:
+        group.default_theme = normalize_theme(body.default_theme) or DEFAULT_THEME
     await db.commit()
     return {"library": await _serialize_group(group, user, db)}
 

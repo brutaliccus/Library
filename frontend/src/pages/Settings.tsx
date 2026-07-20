@@ -13,15 +13,17 @@ import {
   clearAllAudioCache,
 } from "../utils/audioCache";
 import { ebookCacheUsageBytes, ebookCacheEntryCount, clearAllEbookCache } from "../utils/ebookCache";
+import CoverImage from "../components/CoverImage";
+import ThemePicker from "../components/ThemePicker";
+import { upsertRememberedLibrary, currentOrigin } from "../api/libraryRegistry";
+import { applyThemeToDocument, normalizeThemeId, type ThemeId } from "../theme/themes";
+import { isNativeApp } from "../api/instanceUrl";
+import { resolveInviteShareUrl } from "../api/inviteLink";
 import {
   Settings as SettingsIcon, EyeOff, Shield, Zap, HardDrive, Trash2,
   Library, Copy, RefreshCw, KeyRound, ChevronUp, ChevronDown,
-  Smartphone, Download, ExternalLink, ImagePlus,
+  Smartphone, Download, ExternalLink, ImagePlus, Palette,
 } from "lucide-react";
-import CoverImage from "../components/CoverImage";
-import { upsertRememberedLibrary, currentOrigin } from "../api/libraryRegistry";
-import { isNativeApp } from "../api/instanceUrl";
-import { resolveInviteShareUrl } from "../api/inviteLink";
 import {
   fetchAndroidAppUpdateInfo,
   getInstalledAndroidVersion,
@@ -37,6 +39,11 @@ interface UserSettings {
   private_mode: boolean;
   preferred_debrid: string;
   available_debrid_providers: string[];
+  theme: string | null;
+  library_default_theme: string;
+  effective_theme: string;
+  available_themes: string[];
+  clear_theme?: boolean;
 }
 
 const DEBRID_LABELS: Record<string, string> = {
@@ -232,6 +239,7 @@ function LibraryGroupSection() {
   const [brandName, setBrandName] = useState("");
   const [savingBrand, setSavingBrand] = useState(false);
   const [uploadingCover, setUploadingCover] = useState(false);
+  const [savingTheme, setSavingTheme] = useState(false);
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["library-group"] });
 
@@ -305,6 +313,21 @@ function LibraryGroupSection() {
       toast(e.response?.data?.detail || "Failed to upload cover", "error");
     } finally {
       setUploadingCover(false);
+    }
+  };
+
+  const saveDefaultTheme = async (themeId: ThemeId) => {
+    setSavingTheme(true);
+    try {
+      await api.put("/libraries/branding", { default_theme: themeId });
+      applyThemeToDocument(themeId);
+      await refresh();
+      await queryClient.invalidateQueries({ queryKey: ["user-settings"] });
+      toast("Library default theme updated", "success");
+    } catch (e: any) {
+      toast(e.response?.data?.detail || "Failed to update theme", "error");
+    } finally {
+      setSavingTheme(false);
     }
   };
 
@@ -414,6 +437,17 @@ function LibraryGroupSection() {
                   </label>
                   <span className="text-[11px] text-gray-500">JPEG, PNG, WebP, or GIF · under 8 MB</span>
                 </div>
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1.5">Default theme for members</label>
+                <ThemePicker
+                  value={normalizeThemeId(lib.defaultTheme)}
+                  onChange={(v) => {
+                    if (v === "default") return;
+                    void saveDefaultTheme(v);
+                  }}
+                  disabled={savingTheme}
+                />
               </div>
             </div>
           )}
@@ -805,6 +839,38 @@ export default function Settings() {
         <AndroidApkSettings />
         <DebridKeysSection />
         <LibraryGroupSection />
+
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <div className="flex items-start gap-4">
+            <div className="p-2 bg-gray-800 rounded-lg shrink-0">
+              <Palette size={20} className="text-brand-400" />
+            </div>
+            <div className="flex-1 min-w-0 space-y-3">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-100">Appearance</h3>
+                <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+                  Choose your look. “Library default” follows what the owner set for this library.
+                </p>
+              </div>
+              <ThemePicker
+                allowDefault
+                libraryDefaultLabel="Library default"
+                value={settings?.theme ? normalizeThemeId(settings.theme) : "default"}
+                disabled={updateSettings.isPending}
+                onChange={(v) => {
+                  if (v === "default") {
+                    updateSettings.mutate({ clear_theme: true, theme: null });
+                    const libTheme = normalizeThemeId(settings?.library_default_theme);
+                    applyThemeToDocument(libTheme);
+                    return;
+                  }
+                  applyThemeToDocument(v);
+                  updateSettings.mutate({ theme: v });
+                }}
+              />
+            </div>
+          </div>
+        </div>
 
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
           <div className="flex items-start gap-4">

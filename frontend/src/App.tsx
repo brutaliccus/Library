@@ -28,7 +28,12 @@ import Onboarding from "./pages/Onboarding";
 import JoinInvite from "./pages/JoinInvite";
 import LibrariesPage from "./pages/Libraries";
 import { useLibraryGroup } from "./hooks/useLibraryGroup";
+import { useThemeSync } from "./theme/useThemeSync";
 
+function ThemeSync() {
+  useThemeSync();
+  return null;
+}
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, isLoading, sessionReady } = useAuth();
   const hasLibraryToken = !!localStorage.getItem("access_token");
@@ -114,6 +119,7 @@ export default function App() {
         />
       )}
       {expanded && <PlayerPage />}
+      <ThemeSync />
       <DeepLinkNavigator />
       <Routes>
         <Route path="/login" element={<Login />} />

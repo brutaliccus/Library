@@ -27,6 +27,8 @@ class LibraryGroup(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     # Relative path under data/ (e.g. library_covers/3.jpg) for the library card art.
     cover_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Default UI theme for members who haven't set a personal preference.
+    default_theme: Mapped[str] = mapped_column(String(32), default="ocean")
     owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     invite_code: Mapped[str] = mapped_column(String(24), unique=True, index=True, default=_invite_code)
     # Empty string = fall back to the server-wide env tokens (default library)
@@ -49,6 +51,8 @@ class User(Base):
     private_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     # Preferred debrid provider when a torrent is cached on neither/both: "rd" | "torbox"
     preferred_debrid: Mapped[str] = mapped_column(String(16), default="rd")
+    # Personal UI theme override; NULL = use library default_theme.
+    theme: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Library group whose debrid API keys this user streams/downloads with.
     # NULL = not onboarded yet (new accounts pick create-or-join on first login).
     library_group_id: Mapped[int | None] = mapped_column(ForeignKey("library_groups.id"), nullable=True)

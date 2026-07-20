@@ -14,6 +14,8 @@ import {
 } from "../api/inviteLink";
 import { isNativeApp } from "../api/instanceUrl";
 import { upsertRememberedLibrary, currentOrigin } from "../api/libraryRegistry";
+import ThemePicker from "../components/ThemePicker";
+import { applyThemeToDocument, DEFAULT_THEME, type ThemeId } from "../theme/themes";
 
 type Mode = "choose" | "create" | "join";
 
@@ -34,6 +36,7 @@ export default function Onboarding() {
   const [busy, setBusy] = useState(false);
 
   const [name, setName] = useState("");
+  const [theme, setTheme] = useState<ThemeId>(DEFAULT_THEME);
   const [coverFile, setCoverFile] = useState<File | null>(null);
   const [coverPreview, setCoverPreview] = useState<string | null>(null);
   const [rdToken, setRdToken] = useState("");
@@ -102,6 +105,7 @@ export default function Onboarding() {
         name: name.trim(),
         real_debrid_api_token: rdToken.trim(),
         torbox_api_token: torboxToken.trim(),
+        default_theme: theme,
       });
       let library = data.library;
       if (coverFile) {
@@ -229,6 +233,23 @@ export default function Onboarding() {
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. Jared's Library"
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1.5">
+                Default theme
+              </label>
+              <p className="text-[11px] text-gray-500 mb-2">
+                Members see this look unless they pick their own in Settings.
+              </p>
+              <ThemePicker
+                value={theme}
+                onChange={(v) => {
+                  if (v === "default") return;
+                  setTheme(v);
+                  applyThemeToDocument(v);
+                }}
+                disabled={busy}
               />
             </div>
             <div>

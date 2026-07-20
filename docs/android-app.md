@@ -61,9 +61,18 @@ release body (the GitHub Action does this automatically).
 
 1. Add Actions secrets: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
    `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`
-2. Run **Actions → Android APK release → Run workflow** with `versionName` + `versionCode`
-   (versionCode must increase each time), **or** push a tag like `android-v1.5+6`
-3. Users on older builds will see the update banner after their next check
+2. Prefer **`.\deploy.ps1`** — after the Pi deploy it detects APK-relevant changes
+   since the last `android-v*` tag, bumps `versionName` / `versionCode`, commits,
+   and pushes `android-v{name}+{code}` which starts the Actions build.
+   - Skip: `.\deploy.ps1 -SkipApk`
+   - Force: `.\deploy.ps1 -ForceApk`
+   - Standalone: `.\scripts\release_android_apk.ps1` (optional `-Force` / `-DryRun`)
+3. Or manually: **Actions → Android APK release → Run workflow**, or push a tag
+   like `android-v1.5+6`
+4. Users on older builds will see the update banner after their next check
+
+Working tree must be **clean** for the auto-release step (so the tag matches what
+you deployed). Commit first, then deploy.
 
 Admin → Config → **Android APK GitHub repo** can point at a fork. Optional GitHub
 token raises API rate limits.

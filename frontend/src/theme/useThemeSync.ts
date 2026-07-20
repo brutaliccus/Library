@@ -21,14 +21,16 @@ interface UserSettingsTheme {
  */
 export function useThemeSync() {
   const { user, sessionReady } = useAuth();
-  const libraryQuery = useLibraryGroup(!!user && sessionReady && !user.mustChangePassword);
+  const libraryQuery = useLibraryGroup(
+    !!user && sessionReady && !user.mustChangePassword && !user.mustSetEmail
+  );
   const settingsQuery = useQuery({
     queryKey: ["user-settings"],
     queryFn: async () => {
       const { data } = await api.get("/auth/settings");
       return data as UserSettingsTheme;
     },
-    enabled: !!user && sessionReady && !user.mustChangePassword,
+    enabled: !!user && sessionReady && !user.mustChangePassword && !user.mustSetEmail,
     staleTime: 60_000,
   });
 

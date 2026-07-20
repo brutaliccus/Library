@@ -5,7 +5,7 @@ import { KeyRound, Lock } from "lucide-react";
 import api from "../api/client";
 
 export default function ChangePassword() {
-  const { clearMustChangePassword } = useAuth();
+  const { clearMustChangePassword, user } = useAuth();
   const navigate = useNavigate();
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -36,7 +36,7 @@ export default function ChangePassword() {
         new_password: newPassword,
       });
       clearMustChangePassword();
-      navigate("/libraries");
+      navigate(user?.mustSetEmail ? "/set-email" : "/libraries", { replace: true });
     } catch (err: any) {
       setError(err.response?.data?.detail || "Failed to change password");
     } finally {

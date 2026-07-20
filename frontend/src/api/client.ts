@@ -44,6 +44,8 @@ async function postRefresh(refreshToken: string): Promise<string> {
   localStorage.setItem("user_role", data.role);
   localStorage.setItem("username", data.username);
   localStorage.setItem("must_change_password", String(data.must_change_password));
+  localStorage.setItem("must_set_email", String(!!data.must_set_email));
+  if (data.email) localStorage.setItem("user_email", data.email);
   window.dispatchEvent(
     new CustomEvent(AUTH_TOKEN_REFRESHED_EVENT, { detail: data.access_token })
   );
@@ -97,6 +99,7 @@ api.interceptors.response.use(
           localStorage.removeItem("user_role");
           localStorage.removeItem("username");
           localStorage.removeItem("must_change_password");
+          localStorage.removeItem("must_set_email");
           window.location.href = "/login";
         }
       } else {
@@ -104,6 +107,7 @@ api.interceptors.response.use(
         localStorage.removeItem("user_role");
         localStorage.removeItem("username");
         localStorage.removeItem("must_change_password");
+        localStorage.removeItem("must_set_email");
         if (!window.location.pathname.startsWith("/login")) {
           window.location.href = "/login";
         }

@@ -34,8 +34,20 @@ export default function Login() {
     return <Navigate to="/libraries" replace />;
   }
 
-  if (!isLoading && user && !user.mustChangePassword && getStoredInstanceUrl()) {
+  if (
+    !isLoading &&
+    user &&
+    !user.mustChangePassword &&
+    !user.mustSetEmail &&
+    getStoredInstanceUrl()
+  ) {
     return <Navigate to="/" replace />;
+  }
+  if (!isLoading && user?.mustChangePassword) {
+    return <Navigate to="/change-password" replace />;
+  }
+  if (!isLoading && user?.mustSetEmail) {
+    return <Navigate to="/set-email" replace />;
   }
 
   const handleSubmit = async (e: React.FormEvent) => {

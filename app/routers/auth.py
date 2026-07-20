@@ -36,6 +36,7 @@ class TokenResponse(BaseModel):
     username: str
     email: str | None = None
     must_change_password: bool = False
+    must_set_email: bool = False
 
 
 class SetupRequest(BaseModel):
@@ -68,15 +69,25 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class SetEmailRequest(BaseModel):
+    email: str
+    password: str
+
+
 class MeResponse(BaseModel):
     username: str
     email: str | None = None
     role: str
     must_change_password: bool = False
+    must_set_email: bool = False
 
 
 def _normalize_invite_code(raw: str) -> str:
     return (raw or "").strip().upper()
+
+
+def _must_set_email(user: User) -> bool:
+    return not is_valid_email(normalize_email(user.email))
 
 
 def _token_response(user: User) -> TokenResponse:
@@ -87,6 +98,7 @@ def _token_response(user: User) -> TokenResponse:
         username=user.username,
         email=user.email,
         must_change_password=user.must_change_password,
+        must_set_email=_must_set_email(user),
     )
 
 
@@ -153,6 +165,7 @@ async def me(user: User = Depends(get_current_user)):
         email=user.email,
         role=user.role,
         must_change_password=user.must_change_password,
+        must_set_email=_must_set_email(user),
     )
 
 
@@ -387,3 +400,30 @@ async def change_password(
     user.must_change_password = False
     await db.commit()
     return {"message": "Password updated"}
+
+
+@router.post("/set-email", response_model=TokenResponse)
+async def set_email(
+    body: SetEmailRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Attach an email to a legacy username-only account (required for future logins)."""
+    if not verify_password(body.password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Password is incorrect")
+    if user.email and is_valid_email(normalize_email(user.email)):
+        raise HTTPException(status_code=400, detail="This account already has an email")
+
+    email = normalize_email(body.email)
+    if not is_valid_email(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    taken = (
+        await db.execute(select(User.id).where(User.email == email, User.id != user.id))
+    ).scalar_one_or_none()
+    if taken is not None:
+        raise HTTPException(status_code=400, detail="An account with this email already exists")
+
+    user.email = email
+    await db.commit()
+    await db.refresh(user)
+    return _token_response(user)

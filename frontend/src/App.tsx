@@ -11,6 +11,7 @@ import AppUpdateBanner from "./components/AppUpdateBanner";
 import PlayerPage from "./pages/Player";
 import Login from "./pages/Login";
 import ChangePassword from "./pages/ChangePassword";
+import SetEmail from "./pages/SetEmail";
 import Home from "./pages/Home";
 import SearchResults from "./pages/SearchResults";
 import BookDetailPage from "./pages/BookDetail";
@@ -34,15 +35,26 @@ function ThemeSync() {
   useThemeSync();
   return null;
 }
+function authGatePath(user: { mustChangePassword: boolean; mustSetEmail: boolean }): string | null {
+  if (user.mustChangePassword) return "/change-password";
+  if (user.mustSetEmail) return "/set-email";
+  return null;
+}
+
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, isLoading, sessionReady } = useAuth();
   const hasLibraryToken = !!localStorage.getItem("access_token");
   const libraryQuery = useLibraryGroup(
-    !!user && sessionReady && !user.mustChangePassword && hasLibraryToken
+    !!user &&
+      sessionReady &&
+      !user.mustChangePassword &&
+      !user.mustSetEmail &&
+      hasLibraryToken
   );
   if (isLoading || !sessionReady) return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
   if (!hasLibraryToken || !user) return <Navigate to="/libraries" />;
-  if (user.mustChangePassword) return <Navigate to="/change-password" />;
+  const gate = authGatePath(user);
+  if (gate) return <Navigate to={gate} />;
   if (libraryQuery.data && libraryQuery.data.library === null) return <Navigate to="/onboarding" />;
   return <>{children}</>;
 }
@@ -51,7 +63,8 @@ function OnboardingRoute({ children }: { children: React.ReactNode }) {
   const { user, isLoading } = useAuth();
   if (isLoading) return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
   if (!user) return <Navigate to="/libraries" />;
-  if (user.mustChangePassword) return <Navigate to="/change-password" />;
+  const gate = authGatePath(user);
+  if (gate) return <Navigate to={gate} />;
   return <>{children}</>;
 }
 
@@ -59,7 +72,8 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   const { user, isLoading } = useAuth();
   if (isLoading) return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
   if (!user) return <Navigate to="/login" />;
-  if (user.mustChangePassword) return <Navigate to="/change-password" />;
+  const gate = authGatePath(user);
+  if (gate) return <Navigate to={gate} />;
   if (user.role !== "admin") return <Navigate to="/" />;
   return <>{children}</>;
 }
@@ -82,13 +96,15 @@ export default function App() {
   const { nowPlaying, expanded } = usePlayer();
   const location = useLocation();
 
-  useNativeNotifications(!!user && sessionReady && !user.mustChangePassword);
+  const authReady =
+    !!user && sessionReady && !user.mustChangePassword && !user.mustSetEmail;
+  useNativeNotifications(authReady);
   const {
     pendingUpdate,
     downloading: appUpdateDownloading,
     downloadUpdate,
     dismissPending,
-  } = useAppUpdateNotification(!!user && sessionReady && !user.mustChangePassword);
+  } = useAppUpdateNotification(authReady);
 
   const [genreMobileOpen, setGenreMobileOpen] = useState(false);
   const [genreActiveCount, setGenreActiveCount] = useState(0);
@@ -112,7 +128,10 @@ export default function App() {
           onDownload={() => void downloadUpdate()}
         />
       )}
-      {user && !user.mustChangePassword && location.pathname !== "/libraries" && (
+      {user &&
+        !user.mustChangePassword &&
+        !user.mustSetEmail &&
+        location.pathname !== "/libraries" && (
         <Navbar
           onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
           genreActiveCount={showGenreButton ? genreActiveCount : 0}
@@ -127,6 +146,7 @@ export default function App() {
         <Route path="/request-account" element={<Navigate to="/join" replace />} />
         <Route path="/account-status" element={<Navigate to="/join" replace />} />
         <Route path="/change-password" element={<ChangePassword />} />
+        <Route path="/set-email" element={<SetEmail />} />
         <Route path="/join/:code" element={<JoinInvite />} />
         <Route path="/join" element={<JoinInvite />} />
         <Route path="/libraries" element={<LibrariesPage />} />

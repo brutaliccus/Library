@@ -23,6 +23,7 @@ export interface LibrarySession {
   username: string;
   email: string | null;
   must_change_password: boolean;
+  must_set_email?: boolean;
 }
 
 export interface LibraryRegistry {
@@ -104,7 +105,9 @@ export function saveSessionForOrigin(origin: string, session: LibrarySession): v
   localStorage.setItem("user_role", session.role);
   localStorage.setItem("username", session.username);
   if (session.email) localStorage.setItem("user_email", session.email);
+  else localStorage.removeItem("user_email");
   localStorage.setItem("must_change_password", String(session.must_change_password));
+  localStorage.setItem("must_set_email", String(!!session.must_set_email));
   localStorage.setItem(ACTIVE_LIBRARY_ORIGIN_KEY, key);
 }
 
@@ -121,6 +124,7 @@ export function clearActiveSession(): void {
   localStorage.removeItem("username");
   localStorage.removeItem("user_email");
   localStorage.removeItem("must_change_password");
+  localStorage.removeItem("must_set_email");
 }
 
 export function switchToLibrary(origin: string): LibrarySession | null {
@@ -136,7 +140,9 @@ export function switchToLibrary(origin: string): LibrarySession | null {
     localStorage.setItem("user_role", session.role);
     localStorage.setItem("username", session.username);
     if (session.email) localStorage.setItem("user_email", session.email);
+    else localStorage.removeItem("user_email");
     localStorage.setItem("must_change_password", String(session.must_change_password));
+    localStorage.setItem("must_set_email", String(!!session.must_set_email));
   } else {
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
@@ -144,6 +150,7 @@ export function switchToLibrary(origin: string): LibrarySession | null {
     localStorage.removeItem("username");
     localStorage.removeItem("user_email");
     localStorage.removeItem("must_change_password");
+    localStorage.removeItem("must_set_email");
   }
   return session;
 }

@@ -28,6 +28,7 @@ interface AuthUser {
   email: string | null;
   role: string;
   mustChangePassword: boolean;
+  mustSetEmail: boolean;
 }
 
 interface SessionTokens {
@@ -37,6 +38,7 @@ interface SessionTokens {
   username: string;
   email?: string | null;
   must_change_password?: boolean;
+  must_set_email?: boolean;
 }
 
 interface AuthContextType {
@@ -49,6 +51,7 @@ interface AuthContextType {
   acceptSession: (data: SessionTokens) => void;
   logout: () => void;
   clearMustChangePassword: () => void;
+  applyEmailUpdate: (data: SessionTokens) => void;
   refreshSetupRequired: () => Promise<boolean>;
   rememberCurrentLibrary: () => Promise<void>;
   /** Switch to a saved library; restores session if present. */
@@ -56,6 +59,16 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
+
+function userFromTokens(data: SessionTokens, emailFallback?: string | null): AuthUser {
+  return {
+    username: data.username,
+    email: data.email ?? emailFallback ?? null,
+    role: data.role,
+    mustChangePassword: !!data.must_change_password,
+    mustSetEmail: !!data.must_set_email,
+  };
+}
 
 function persistSession(data: SessionTokens, origin?: string) {
   const o = (origin || currentOrigin() || getStoredInstanceUrl() || "").replace(/\/+$/, "");
@@ -66,6 +79,7 @@ function persistSession(data: SessionTokens, origin?: string) {
     username: data.username,
     email: data.email ?? null,
     must_change_password: !!data.must_change_password,
+    must_set_email: !!data.must_set_email,
   };
   if (o) {
     saveSessionForOrigin(o, session);
@@ -75,7 +89,9 @@ function persistSession(data: SessionTokens, origin?: string) {
     localStorage.setItem("user_role", session.role);
     localStorage.setItem("username", session.username);
     if (session.email) localStorage.setItem("user_email", session.email);
+    else localStorage.removeItem("user_email");
     localStorage.setItem("must_change_password", String(session.must_change_password));
+    localStorage.setItem("must_set_email", String(session.must_set_email));
   }
 }
 
@@ -123,7 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         email,
       });
     }
-  }, [user?.email]);
+  }, [user?.email, user?.username]);
 
   useEffect(() => {
     const init = async () => {
@@ -148,6 +164,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           email: cachedEmail,
           role: cachedRole,
           mustChangePassword: localStorage.getItem("must_change_password") === "true",
+          mustSetEmail: localStorage.getItem("must_set_email") === "true",
         });
         setIsLoading(false);
         setSessionReady(true);
@@ -159,18 +176,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           localStorage.setItem("user_role", data.role);
           localStorage.setItem("username", data.username);
           if (data.email) localStorage.setItem("user_email", data.email);
+          else localStorage.removeItem("user_email");
           localStorage.setItem(
             "must_change_password",
             String(data.must_change_password)
           );
+          localStorage.setItem("must_set_email", String(!!data.must_set_email));
           setUser({
             username: data.username,
             email: data.email ?? null,
             role: data.role,
-            mustChangePassword: data.must_change_password,
+            mustChangePassword: !!data.must_change_password,
+            mustSetEmail: !!data.must_set_email,
           });
           const origin = currentOrigin();
-          if (origin && data.email) {
+          if (origin) {
             const access = localStorage.getItem("access_token") || "";
             const refresh = localStorage.getItem("refresh_token") || "";
             if (access && refresh) {
@@ -179,20 +199,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 refresh_token: refresh,
                 role: data.role,
                 username: data.username,
-                email: data.email,
+                email: data.email ?? null,
                 must_change_password: !!data.must_change_password,
+                must_set_email: !!data.must_set_email,
               });
             }
-            try {
-              const lib = await api.get("/libraries/me");
-              upsertRememberedLibrary({
-                origin,
-                name: lib.data?.library?.name || "Library",
-                coverUrl: lib.data?.library?.coverUrl || null,
-                email: data.email,
-              });
-            } catch {
-              /* ignore */
+            if (data.email) {
+              try {
+                const lib = await api.get("/libraries/me");
+                upsertRememberedLibrary({
+                  origin,
+                  name: lib.data?.library?.name || "Library",
+                  coverUrl: lib.data?.library?.coverUrl || null,
+                  email: data.email,
+                });
+              } catch {
+                /* ignore */
+              }
             }
           }
         } catch {
@@ -226,12 +249,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     const { data } = await api.post("/auth/login", { email, password });
     persistSession(data, origin || currentOrigin());
-    setUser({
-      username: data.username,
-      email: data.email ?? email,
-      role: data.role,
-      mustChangePassword: data.must_change_password,
-    });
+    setUser(userFromTokens(data, email));
     const o = origin || currentOrigin();
     const identity = data.email || email || data.username;
     if (o && identity) {
@@ -260,26 +278,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       applyApiBaseUrl();
     }
     const { data } = await api.post("/auth/setup", { email, password });
-    persistSession({ ...data, must_change_password: false }, origin || currentOrigin());
+    persistSession(
+      { ...data, must_change_password: false, must_set_email: false },
+      origin || currentOrigin()
+    );
     setUser({
       username: data.username,
       email: data.email ?? email,
       role: data.role,
       mustChangePassword: false,
+      mustSetEmail: false,
     });
     setSetupRequired(false);
   }, []);
 
   const acceptSession = useCallback((data: SessionTokens) => {
-    const mustChange = !!data.must_change_password;
     const origin = currentOrigin();
-    persistSession({ ...data, must_change_password: mustChange }, origin);
-    setUser({
-      username: data.username,
-      email: data.email ?? null,
-      role: data.role,
-      mustChangePassword: mustChange,
-    });
+    persistSession(data, origin);
+    setUser(userFromTokens(data));
     setSetupRequired(false);
     const email = data.email;
     if (origin && email) {
@@ -317,7 +333,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         email: data.email ?? existing.email,
         role: data.role,
         mustChangePassword: !!data.must_change_password,
+        mustSetEmail: !!data.must_set_email,
       });
+      localStorage.setItem("must_set_email", String(!!data.must_set_email));
       if (data.email) {
         try {
           const lib = await api.get("/libraries/me");
@@ -346,7 +364,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const clearMustChangePassword = useCallback(() => {
     localStorage.setItem("must_change_password", "false");
+    const origin = currentOrigin();
+    if (origin) {
+      const existing = getSessionForOrigin(origin);
+      if (existing) {
+        saveSessionForOrigin(origin, { ...existing, must_change_password: false });
+      }
+    }
     setUser((prev) => (prev ? { ...prev, mustChangePassword: false } : null));
+  }, []);
+
+  const applyEmailUpdate = useCallback((data: SessionTokens) => {
+    persistSession({ ...data, must_set_email: false }, currentOrigin());
+    setUser(userFromTokens({ ...data, must_set_email: false }));
   }, []);
 
   return (
@@ -361,6 +391,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         acceptSession,
         logout,
         clearMustChangePassword,
+        applyEmailUpdate,
         refreshSetupRequired,
         rememberCurrentLibrary,
         enterLibrary,

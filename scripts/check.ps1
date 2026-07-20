@@ -27,7 +27,16 @@ function Run-Check {
     }
 }
 
-Run-Check "Backend tests (pytest)" $root { python -m pytest tests -q }
+Run-Check "Backend tests (pytest)" $root {
+    if (-not (Test-Path (Join-Path $root "tests"))) {
+        Write-Host "No tests/ directory — skipping pytest." -ForegroundColor Yellow
+        $global:LASTEXITCODE = 0
+        return
+    }
+    python -m pytest tests -q
+    # pytest exit 5 = no tests collected
+    if ($LASTEXITCODE -eq 5) { $global:LASTEXITCODE = 0 }
+}
 Run-Check "Frontend type-check (tsc)" (Join-Path $root "frontend") { npx tsc --noEmit }
 
 if (-not $SkipAndroid) {

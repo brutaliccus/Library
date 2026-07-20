@@ -23,7 +23,7 @@ const queryClient = new QueryClient({
 // so Home paints instantly and revalidates in the background (stale-while-
 // revalidate via each query's staleTime). Only cacheable, user-agnostic shelves
 // are stored — never auth or "continue listening".
-const PERSIST_KEY = "rq-shelf-cache-v2";
+const PERSIST_KEY = "rq-shelf-cache-v3";
 const PERSIST_PREFIXES = [
   "trending-books",
   "new-releases",
@@ -34,12 +34,29 @@ const PERSIST_PREFIXES = [
 ];
 const PERSIST_MAX_AGE = 24 * 60 * 60 * 1000; // 24h
 
+/** Drop persisted shelf rows that still have blank/stub covers (stale after enrich fixes). */
+function shelfLooksCoverBroken(data: unknown): boolean {
+  const books = (data as { books?: Array<{ coverUrl?: string }> } | undefined)?.books;
+  if (!Array.isArray(books) || books.length === 0) return false;
+  const blank = books.filter((b) => !(b?.coverUrl || "").trim()).length;
+  return blank / books.length >= 0.25;
+}
+
 try {
+  // Drop prior persist generations that froze blank OL stub covers for 24h.
+  localStorage.removeItem("rq-shelf-cache-v2");
   const raw = localStorage.getItem(PERSIST_KEY);
   if (raw) {
     const saved = JSON.parse(raw) as { t: number; entries: [unknown, unknown][] };
     if (saved && Date.now() - saved.t < PERSIST_MAX_AGE && Array.isArray(saved.entries)) {
       for (const [key, data] of saved.entries) {
+        const first = Array.isArray(key) ? String(key[0]) : "";
+        if (
+          (first === "trending-books" || first === "new-releases") &&
+          shelfLooksCoverBroken(data)
+        ) {
+          continue; // force network fetch for broken shelf snapshots
+        }
         // Restore with the ORIGINAL timestamp so staleTime still triggers a
         // background refresh when appropriate (instant paint, fresh data soon).
         queryClient.setQueryData(key as readonly unknown[], data, { updatedAt: saved.t });

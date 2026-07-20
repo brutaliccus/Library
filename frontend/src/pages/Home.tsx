@@ -221,9 +221,10 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
         return { books: [] as BookSummary[] };
       }
     },
-    // Server rebuilds daily; local persist paints instantly on reopen.
-    staleTime: 24 * 60 * 60 * 1000,
+    // Short TTL so cover-enrichment rebuilds show up; server still snapshots daily.
+    staleTime: 15 * 60 * 1000,
     gcTime: 48 * 60 * 60 * 1000,
+    refetchOnMount: "always",
     refetchOnWindowFocus: false,
     retry: 1,
   });
@@ -238,8 +239,9 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
         return { books: [] as BookSummary[] };
       }
     },
-    staleTime: 24 * 60 * 60 * 1000,
+    staleTime: 15 * 60 * 1000,
     gcTime: 48 * 60 * 60 * 1000,
+    refetchOnMount: "always",
     refetchOnWindowFocus: false,
     retry: 1,
   });

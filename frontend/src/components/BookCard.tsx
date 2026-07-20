@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BookOpen, Check, Download, HelpCircle } from "lucide-react";
 import type { BookSummary } from "../types/book";
 import CoverImage from "./CoverImage";
@@ -11,11 +11,16 @@ interface Props {
 export default function BookCard({ book }: Props) {
   const navigate = useNavigate();
   const [coverFailed, setCoverFailed] = useState(false);
-  const showCover = Boolean(book.coverUrl) && !coverFailed;
+  const coverUrl = book.coverUrl || "";
+  const showCover = Boolean(coverUrl) && !coverFailed;
   const avail = book.availability;
   const inLibrary = Boolean(avail?.inLibrary);
   const cached = Boolean(avail?.available);
   const catalogOnly = Boolean(avail?.catalogOnly) || (!cached && !inLibrary);
+
+  useEffect(() => {
+    setCoverFailed(false);
+  }, [coverUrl, book.id]);
 
   return (
     <button
@@ -25,10 +30,11 @@ export default function BookCard({ book }: Props) {
       <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
         {showCover ? (
           <CoverImage
-            src={book.coverUrl}
+            src={coverUrl}
             alt={book.title}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
             loading="lazy"
+            referrerPolicy="no-referrer"
             onError={() => setCoverFailed(true)}
           />
         ) : (

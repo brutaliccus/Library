@@ -99,7 +99,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const rememberCurrentLibrary = useCallback(async () => {
     const origin = currentOrigin();
-    const email = localStorage.getItem("user_email") || user?.email || "";
+    const email =
+      localStorage.getItem("user_email") ||
+      user?.email ||
+      user?.username ||
+      localStorage.getItem("username") ||
+      "";
     if (!origin || !email) return;
     try {
       const { data } = await api.get("/libraries/me");
@@ -228,21 +233,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       mustChangePassword: data.must_change_password,
     });
     const o = origin || currentOrigin();
-    if (o && (data.email || email)) {
+    const identity = data.email || email || data.username;
+    if (o && identity) {
       try {
         const lib = await api.get("/libraries/me");
         upsertRememberedLibrary({
           origin: o,
           name: lib.data?.library?.name || "Library",
           coverUrl: lib.data?.library?.coverUrl || null,
-          email: data.email || email,
+          email: identity,
         });
       } catch {
         upsertRememberedLibrary({
           origin: o,
           name: "Library",
           coverUrl: null,
-          email: data.email || email,
+          email: identity,
         });
       }
     }

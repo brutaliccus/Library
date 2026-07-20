@@ -140,17 +140,22 @@ export default function Login() {
           )}
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">Email</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1">
+              Email or username
+            </label>
             <input
-              type="email"
+              type="text"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               required
               autoFocus={!showServerField}
-              autoComplete="email"
+              autoComplete="username"
               inputMode="email"
             />
+            <p className="text-[11px] text-gray-500 mt-1">
+              Older accounts may still use a username. New accounts use email.
+            </p>
           </div>
 
           <div>

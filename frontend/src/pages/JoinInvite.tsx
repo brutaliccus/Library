@@ -124,7 +124,8 @@ export default function JoinInvite() {
         try {
           const lib = await api.get("/libraries/me");
           const origin = currentOrigin();
-          const em = user?.email || localStorage.getItem("user_email") || "";
+          const em =
+            user?.email || localStorage.getItem("user_email") || user?.username || "";
           if (origin && em) {
             upsertRememberedLibrary({
               origin,
@@ -138,8 +139,8 @@ export default function JoinInvite() {
         }
         takePendingInvite();
         if (!cancelled) {
-          toast("Joined library!", "success");
-          navigate("/libraries", { replace: true });
+          toast("You're in!", "success");
+          navigate("/", { replace: true });
         }
       } catch (e: any) {
         const detail = e.response?.data?.detail || "";
@@ -147,7 +148,8 @@ export default function JoinInvite() {
           try {
             const lib = await api.get("/libraries/me");
             const origin = currentOrigin();
-            const em = user?.email || localStorage.getItem("user_email") || "";
+            const em =
+              user?.email || localStorage.getItem("user_email") || user?.username || "";
             if (origin && em) {
               upsertRememberedLibrary({
                 origin,
@@ -160,7 +162,7 @@ export default function JoinInvite() {
             /* ignore */
           }
           takePendingInvite();
-          if (!cancelled) navigate("/libraries", { replace: true });
+          if (!cancelled) navigate("/", { replace: true });
           return;
         }
         joinedExisting.current = false;

@@ -259,8 +259,9 @@ async def join_group(
     ).scalar_one_or_none()
     if not group:
         raise HTTPException(status_code=404, detail="Invalid invite code")
+    # Already a member (incl. owner) — idempotent success so invite links work for admins too.
     if group.id == user.library_group_id:
-        raise HTTPException(status_code=400, detail="You're already in this library")
+        return {"library": await _serialize_group(group, user, db), "alreadyMember": True}
     await _ensure_can_leave(user, db)
 
     old_group_id = user.library_group_id
@@ -268,7 +269,7 @@ async def join_group(
     user.library_role = "member"
     await db.commit()
     await _cleanup_empty_group(old_group_id, db)
-    return {"library": await _serialize_group(group, user, db)}
+    return {"library": await _serialize_group(group, user, db), "alreadyMember": False}
 
 
 @router.post("/leave")

@@ -93,7 +93,12 @@ def _token_response(user: User) -> TokenResponse:
 async def _find_user_for_login(db: AsyncSession, email: str | None, username: str | None) -> User | None:
     em = normalize_email(email)
     un = (username or "").strip()
-    if em:
+    # Allow typing a legacy username into the email field.
+    if em and not is_valid_email(em) and not un:
+        un = em
+        em = ""
+
+    if em and is_valid_email(em):
         user = (
             await db.execute(select(User).where(User.email == em))
         ).scalar_one_or_none()
@@ -105,10 +110,18 @@ async def _find_user_for_login(db: AsyncSession, email: str | None, username: st
         ).scalar_one_or_none()
         if user:
             return user
+
     if un:
-        return (
-            await db.execute(select(User).where(User.username == un))
+        # Case-insensitive username match (SQLite / Postgres).
+        from sqlalchemy import func as sa_func
+
+        user = (
+            await db.execute(
+                select(User).where(sa_func.lower(User.username) == un.lower())
+            )
         ).scalar_one_or_none()
+        if user:
+            return user
     return None
 
 
@@ -145,13 +158,14 @@ async def me(user: User = Depends(get_current_user)):
 
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+    # Prefer email; also accept username in either field for legacy accounts.
     user = await _find_user_for_login(db, body.email, body.username)
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
-    # Soft-upgrade legacy username-as-email accounts.
-    em = normalize_email(body.email) or normalize_email(user.username)
+    # Soft-upgrade: attach email when the login identifier is a real email.
+    em = normalize_email(body.email)
     if not user.email and is_valid_email(em):
         taken = (
             await db.execute(select(User.id).where(User.email == em, User.id != user.id))

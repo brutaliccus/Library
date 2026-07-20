@@ -18,6 +18,7 @@ import {
 } from "../utils/readingProgress";
 import { clearBookCache, clearAbsBookCache } from "../utils/audioCache";
 import type { BookSummary } from "../types/book";
+import CoverImage from "../components/CoverImage";
 
 /** Cover tile that supports tap-to-open plus long-press / right-click for the context menu. */
 function ContinueTile({
@@ -43,16 +44,15 @@ function ContinueTile({
       className={`aspect-[2/3] rounded-lg overflow-hidden bg-gray-800/60 hover:ring-2 ${ringClass} transition-all group select-none`}
       style={{ WebkitTouchCallout: "none" }}
     >
-      {coverUrl ? (
-        <img
-          src={coverUrl}
-          alt={alt}
-          draggable={false}
-          className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-        />
-      ) : (
-        <div className="w-full h-full flex items-center justify-center">{fallbackIcon}</div>
-      )}
+      <CoverImage
+        src={coverUrl}
+        alt={alt}
+        draggable={false}
+        className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+        fallback={
+          <div className="w-full h-full flex items-center justify-center">{fallbackIcon}</div>
+        }
+      />
     </button>
   );
 }

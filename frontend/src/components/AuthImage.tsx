@@ -20,7 +20,7 @@ export default function AuthImage({ src, alt, className, fallback }: Props) {
     }
     let revoked = false;
     const token = localStorage.getItem("access_token");
-    const url = src.startsWith("/") ? toAbsoluteUrl(src) : src;
+    const url = toAbsoluteUrl(src);
     fetch(url, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       credentials: "include",

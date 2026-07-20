@@ -62,6 +62,23 @@ REGISTRY: list[SettingDef] = [
         restart_required=True,
         help="JWT signing secret — set in .env only, never exposed in full.",
     ),
+    SettingDef(
+        key="config.android_apk_github_repo",
+        group="mobile",
+        label="Android APK GitHub repo",
+        env_attr="android_apk_github_repo",
+        help="owner/repo whose GitHub Releases host the Library APK (latest release with a .apk asset).",
+        placeholder="brutaliccus/Library",
+    ),
+    SettingDef(
+        key="config.github_token",
+        group="mobile",
+        label="GitHub token (optional)",
+        env_attr="github_token",
+        secret=True,
+        help="Optional PAT for higher GitHub API rate limits when checking for APK updates.",
+        placeholder="ghp_…",
+    ),
     # --- Libraries ---
     SettingDef(
         key="config.abs_url",
@@ -312,6 +329,7 @@ REGISTRY: list[SettingDef] = [
 
 GROUPS: list[dict[str, str]] = [
     {"id": "core", "label": "Core"},
+    {"id": "mobile", "label": "Android / mobile"},
     {"id": "libraries", "label": "Libraries (ABS / Kavita)"},
     {"id": "indexers", "label": "Indexers"},
     {"id": "debrid", "label": "Debrid (server defaults)"},

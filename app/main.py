@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import init_db
-from app.routers import auth, search, requests, admin, books, stream, library, libraries, push
+from app.routers import auth, search, requests, admin, books, stream, library, libraries, push, mobile
 from app.services.pipeline import resume_interrupted_downloads
 from app.services.indexer_scraper import start_scraper, stop_scraper
 
@@ -89,6 +89,7 @@ app.include_router(stream.router)
 app.include_router(library.router)
 app.include_router(libraries.router)
 app.include_router(push.router)
+app.include_router(mobile.router)
 
 
 @app.get("/api/health")

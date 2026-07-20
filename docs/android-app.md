@@ -45,9 +45,34 @@ In Android Studio:
 Your server must allow CORS from the Capacitor WebView origin (`https://localhost`).
 Current backend builds already include this.
 
+## In-app APK updates (GitHub Releases)
+
+Signed-in Android users get:
+
+- An **Update available** banner when a newer APK is published
+- A system notification (when the app is in the background) with **Update now**
+- **Settings → Android app update** to check / download manually
+
+The server calls GitHub `releases/latest` for the configured repo (default
+`brutaliccus/Library`) and looks for a `.apk` asset. Put `versionCode: N` in the
+release body (the GitHub Action does this automatically).
+
+### Publish a release
+
+1. Add Actions secrets: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+   `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`
+2. Run **Actions → Android APK release → Run workflow** with `versionName` + `versionCode`
+   (versionCode must increase each time), **or** push a tag like `android-v1.5+6`
+3. Users on older builds will see the update banner after their next check
+
+Admin → Config → **Android APK GitHub repo** can point at a fork. Optional GitHub
+token raises API rate limits.
+
 ## Notes
 
 - Rebuild/sync the APK when you want UI changes in the store build (`npm run android:sync`).
 - Streaming, offline cache, media session, and Android Auto still work; API calls
   use the stored server URL instead of same-origin.
 - Prefer HTTPS for the library URL. Cleartext HTTP may be blocked by Android.
+- Keep using the **same signing keystore** for every release or Android will refuse
+  the in-place update.

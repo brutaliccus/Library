@@ -8,6 +8,7 @@ import GenreSidebar from "../components/GenreSidebar";
 import type { Genre } from "../components/GenreSidebar";
 import { Search, ChevronLeft, ChevronRight, Library, BookOpen, Headphones, HardDrive, Loader2 } from "lucide-react";
 import type { BookSummary } from "../types/book";
+import CoverImage from "../components/CoverImage";
 
 interface LibrarySearchHit {
   title: string;
@@ -354,17 +355,20 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
                       }}
                       className="w-full flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-800/80 transition-colors text-left"
                     >
-                      {r.coverUrl ? (
-                        <img src={r.coverUrl} alt="" className="w-9 h-12 rounded object-cover shrink-0" />
-                      ) : (
-                        <div className="w-9 h-12 rounded bg-gray-800 shrink-0 flex items-center justify-center">
-                          {r.source === "kavita" ? (
-                            <BookOpen size={14} className="text-amber-400" />
-                          ) : (
-                            <Headphones size={14} className="text-emerald-400" />
-                          )}
-                        </div>
-                      )}
+                      <CoverImage
+                        src={r.coverUrl}
+                        alt=""
+                        className="w-9 h-12 rounded object-cover shrink-0"
+                        fallback={
+                          <div className="w-9 h-12 rounded bg-gray-800 shrink-0 flex items-center justify-center">
+                            {r.source === "kavita" ? (
+                              <BookOpen size={14} className="text-amber-400" />
+                            ) : (
+                              <Headphones size={14} className="text-emerald-400" />
+                            )}
+                          </div>
+                        }
+                      />
                       <div className="flex-1 min-w-0">
                         <p className="text-sm text-gray-100 truncate">{r.title}</p>
                         {r.author && <p className="text-xs text-gray-500 truncate">{r.author}</p>}

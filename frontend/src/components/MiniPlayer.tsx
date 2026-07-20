@@ -2,6 +2,7 @@ import { usePlayer } from "../contexts/PlayerContext";
 import { X, Maximize2, Volume2 } from "lucide-react";
 import AudiobookTransport from "./AudiobookTransport";
 import PlaybackScrubber from "./PlaybackScrubber";
+import CoverImage from "./CoverImage";
 import { chapterNavAvailability, playbackScope, seekTimeFromScope } from "../utils/playerNav";
 
 const SLEEP_TIMER_MINUTES = [5, 10, 15, 20, 25, 30, 60] as const;
@@ -70,15 +71,12 @@ export default function MiniPlayer() {
       />
 
       <div className="max-w-6xl mx-auto px-4 flex items-center gap-4 h-16">
-        {nowPlaying.coverUrl ? (
-          <img
-            src={nowPlaying.coverUrl}
-            alt=""
-            className="w-10 h-10 rounded object-cover shrink-0"
-          />
-        ) : (
-          <div className="w-10 h-10 rounded bg-gray-800 shrink-0" />
-        )}
+        <CoverImage
+          src={nowPlaying.coverUrl}
+          alt=""
+          className="w-10 h-10 rounded object-cover shrink-0"
+          fallback={<div className="w-10 h-10 rounded bg-gray-800 shrink-0" />}
+        />
 
         <div className="flex-1 min-w-0">
           <p className="text-sm text-gray-100 font-medium truncate">

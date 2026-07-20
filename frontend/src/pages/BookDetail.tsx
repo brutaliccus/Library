@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import type { BookDetail as BookDetailType } from "../types/book";
 import { useState, useCallback, useRef, useMemo } from "react";
+import CoverImage from "../components/CoverImage";
 
 interface ABSMatch {
   title: string;
@@ -388,7 +389,7 @@ export default function BookDetailPage() {
 
   const renderCover = (className: string) =>
     coverUrl ? (
-      <img src={coverUrl} alt={book.title} className={className} />
+      <CoverImage src={coverUrl} alt={book.title} className={className} />
     ) : (
       <div className={`${className} aspect-[2/3] bg-gray-800 flex items-center justify-center text-gray-700`}>
         <BookOpen size={48} />
@@ -650,7 +651,7 @@ export default function BookDetailPage() {
               >
                 <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
                   {sb.coverUrl ? (
-                    <img src={sb.coverUrl} alt={sb.title} className="w-full h-full object-cover" loading="lazy" />
+                    <CoverImage src={sb.coverUrl} alt={sb.title} className="w-full h-full object-cover" loading="lazy" />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-gray-700">
                       <BookOpen size={16} />

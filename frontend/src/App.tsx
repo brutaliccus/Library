@@ -3,9 +3,11 @@ import { useState, useCallback, useEffect } from "react";
 import { useAuth } from "./hooks/useAuth";
 import { usePlayer } from "./contexts/PlayerContext";
 import { useNativeNotifications } from "./hooks/useNativeNotifications";
+import { useAppUpdateNotification } from "./hooks/useAppUpdateNotification";
 import { DEEPLINK_NAV_EVENT } from "./deepLinks";
 import Navbar from "./components/Navbar";
 import MiniPlayer from "./components/MiniPlayer";
+import AppUpdateBanner from "./components/AppUpdateBanner";
 import PlayerPage from "./pages/Player";
 import Login from "./pages/Login";
 import ChangePassword from "./pages/ChangePassword";
@@ -73,6 +75,12 @@ export default function App() {
   const location = useLocation();
 
   useNativeNotifications(!!user && sessionReady && !user.mustChangePassword);
+  const {
+    pendingUpdate,
+    downloading: appUpdateDownloading,
+    downloadUpdate,
+    dismissPending,
+  } = useAppUpdateNotification(!!user && sessionReady && !user.mustChangePassword);
 
   const [genreMobileOpen, setGenreMobileOpen] = useState(false);
   const [genreActiveCount, setGenreActiveCount] = useState(0);
@@ -88,6 +96,14 @@ export default function App() {
 
   return (
     <div className={`min-h-screen bg-gray-950 overflow-x-hidden w-full max-w-[100vw] ${nowPlaying && !expanded ? "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]" : ""}`}>
+      {pendingUpdate && (
+        <AppUpdateBanner
+          update={pendingUpdate}
+          downloading={appUpdateDownloading}
+          onDismiss={dismissPending}
+          onDownload={() => void downloadUpdate()}
+        />
+      )}
       {user && !user.mustChangePassword && (
         <Navbar
           onGenreToggle={showGenreButton ? handleGenreToggle : undefined}

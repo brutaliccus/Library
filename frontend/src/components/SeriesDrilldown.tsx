@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronUp, Play, Clock, Headphones } from "lucide-react";
 import { useState } from "react";
+import CoverImage from "./CoverImage";
 
 interface SeriesBook {
   itemId: string;
@@ -44,13 +45,16 @@ function SeriesCard({ series, isExpanded, onToggle, onPlay }: {
         onClick={onToggle}
         className="w-full flex items-center gap-3 p-3 hover:bg-gray-800/60 transition-colors text-left"
       >
-        {series.coverUrl ? (
-          <img src={series.coverUrl} alt="" className="w-10 h-14 rounded object-cover shrink-0" />
-        ) : (
-          <div className="w-10 h-14 rounded bg-gray-700 shrink-0 flex items-center justify-center">
-            <Headphones size={14} className="text-gray-500" />
-          </div>
-        )}
+        <CoverImage
+          src={series.coverUrl}
+          alt=""
+          className="w-10 h-14 rounded object-cover shrink-0"
+          fallback={
+            <div className="w-10 h-14 rounded bg-gray-700 shrink-0 flex items-center justify-center">
+              <Headphones size={14} className="text-gray-500" />
+            </div>
+          }
+        />
         <div className="flex-1 min-w-0">
           <h3 className="text-sm font-semibold text-gray-100 truncate">{series.name}</h3>
           <p className="text-xs text-gray-400">
@@ -72,11 +76,12 @@ function SeriesCard({ series, isExpanded, onToggle, onPlay }: {
               onClick={() => onPlay(book.itemId)}
               className="w-full flex items-center gap-3 px-3 py-2 hover:bg-gray-800/60 transition-colors text-left group"
             >
-              {book.coverUrl ? (
-                <img src={book.coverUrl} alt="" className="w-8 h-11 rounded object-cover shrink-0" />
-              ) : (
-                <div className="w-8 h-11 rounded bg-gray-700 shrink-0" />
-              )}
+              <CoverImage
+                src={book.coverUrl}
+                alt=""
+                className="w-8 h-11 rounded object-cover shrink-0"
+                fallback={<div className="w-8 h-11 rounded bg-gray-700 shrink-0" />}
+              />
               <span className="text-xs text-gray-500 w-6 shrink-0 text-center font-mono">
                 {book.sequence || "—"}
               </span>

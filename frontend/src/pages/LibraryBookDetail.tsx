@@ -7,6 +7,7 @@ import { useToast } from "../contexts/ToastContext";
 import {
   ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store,
 } from "lucide-react";
+import CoverImage from "../components/CoverImage";
 
 interface ABSItemDetail {
   itemId: string;
@@ -146,7 +147,7 @@ export default function LibraryBookDetail() {
     .join(" · ");
 
   const cover = item.coverUrl ? (
-    <img src={item.coverUrl} alt={item.title} className="w-full rounded-xl shadow-2xl shadow-black/40" />
+    <CoverImage src={item.coverUrl} alt={item.title} className="w-full rounded-xl shadow-2xl shadow-black/40" />
   ) : (
     <div className="w-full aspect-[2/3] bg-gray-800 rounded-xl flex items-center justify-center text-gray-700">
       <Headphones size={48} />

@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { BookOpen, Download, HardDrive } from "lucide-react";
+import CoverImage from "./CoverImage";
 
 export interface CacheReleaseCardData {
   id: string;
@@ -26,19 +27,18 @@ export default function CacheReleaseCard({ release }: Props) {
       className="group text-left flex flex-col bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-amber-700/60 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-black/20 hover:-translate-y-0.5 h-full"
     >
       <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
-        {release.coverUrl ? (
-          <img
-            src={release.coverUrl}
-            alt={release.title}
-            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-            loading="lazy"
-          />
-        ) : (
-          <div className="w-full h-full flex flex-col items-center justify-center text-gray-600 gap-1 px-2">
-            <BookOpen size={20} />
-            <span className="text-[8px] uppercase tracking-wide text-gray-500">No cover</span>
-          </div>
-        )}
+        <CoverImage
+          src={release.coverUrl}
+          alt={release.title}
+          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+          loading="lazy"
+          fallback={
+            <div className="w-full h-full flex flex-col items-center justify-center text-gray-600 gap-1 px-2">
+              <BookOpen size={20} />
+              <span className="text-[8px] uppercase tracking-wide text-gray-500">No cover</span>
+            </div>
+          }
+        />
         <span
           className="absolute top-1 left-1 flex items-center gap-0.5 px-1 py-0.5 rounded bg-amber-950/90 text-amber-300 text-[8px] font-medium"
           title="Cached indexer release"

@@ -71,6 +71,8 @@ export function getApiBaseUrl(): string {
 export function toAbsoluteUrl(path: string): string {
   if (!path) return path;
   if (/^(https?:|blob:|data:)/i.test(path)) return path;
+  // Protocol-relative //cdn.example/… — leave alone (rare for covers).
+  if (path.startsWith("//")) return `https:${path}`;
   const origin = getApiOrigin();
   if (!origin) return path;
   return `${origin}${path.startsWith("/") ? path : `/${path}`}`;

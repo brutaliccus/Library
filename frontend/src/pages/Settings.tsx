@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../hooks/useAuth";
@@ -16,10 +16,21 @@ import { ebookCacheUsageBytes, ebookCacheEntryCount, clearAllEbookCache } from "
 import {
   Settings as SettingsIcon, EyeOff, Shield, Zap, HardDrive, Trash2,
   Library, Copy, RefreshCw, KeyRound, ChevronUp, ChevronDown, Globe,
+  Smartphone, Download, ExternalLink,
 } from "lucide-react";
 import ServerUrlField, { commitServerUrl } from "../components/ServerUrlField";
 import { getStoredInstanceUrl, isNativeApp } from "../api/instanceUrl";
 import { resolveInviteShareUrl } from "../api/inviteLink";
+import {
+  fetchAndroidAppUpdateInfo,
+  getInstalledAndroidVersion,
+  getLastInstalledReleaseKey,
+  installAndroidAppUpdate,
+  isUpdateAvailable,
+  type AndroidAppUpdateInfo,
+} from "../utils/appUpdate";
+import { ANDROID_APK_GITHUB_RELEASES_URL } from "../utils/appUpdateConfig";
+import { Capacitor } from "@capacitor/core";
 
 interface UserSettings {
   private_mode: boolean;
@@ -393,6 +404,177 @@ function LibraryGroupSection() {
   );
 }
 
+function formatApkBytes(bytes: number | null): string {
+  if (bytes == null || !Number.isFinite(bytes)) return "—";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Native Android: check GitHub Releases for a newer APK and download/install. */
+function AndroidApkSettings() {
+  const { toast } = useToast();
+  const nativeAndroid = isNativeApp() && Capacitor.getPlatform() === "android";
+  const [installed, setInstalled] = useState<{ versionCode: number; versionName: string } | null>(
+    null
+  );
+  const [remote, setRemote] = useState<AndroidAppUpdateInfo | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!nativeAndroid) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const [server, local] = await Promise.all([
+        fetchAndroidAppUpdateInfo(true),
+        getInstalledAndroidVersion().catch(() => null),
+      ]);
+      setRemote(server);
+      setInstalled(local);
+    } catch (e: unknown) {
+      const detail =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        (e instanceof Error ? e.message : "Update check failed");
+      setError(String(detail));
+      setRemote(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [nativeAndroid]);
+
+  useEffect(() => {
+    if (nativeAndroid) void refresh();
+  }, [nativeAndroid, refresh]);
+
+  if (!nativeAndroid) return null;
+
+  const lastKey = getLastInstalledReleaseKey();
+  const updateReady =
+    !!remote &&
+    !!installed &&
+    isUpdateAvailable(installed.versionCode, remote, lastKey);
+
+  const handleDownload = async () => {
+    if (!remote) return;
+    setDownloading(true);
+    setProgress(0);
+    setError(null);
+    try {
+      await installAndroidAppUpdate(remote, (pct) => setProgress(pct));
+      toast("Opening installer…", "success");
+      void getInstalledAndroidVersion()
+        .then(setInstalled)
+        .catch(() => {});
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Download failed";
+      setError(msg);
+      toast(msg, "error");
+    } finally {
+      setDownloading(false);
+      setProgress(null);
+    }
+  };
+
+  const releaseLink = remote?.releaseUrl || ANDROID_APK_GITHUB_RELEASES_URL;
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+      <div className="flex items-start gap-4">
+        <div className="p-2 bg-gray-800 rounded-lg shrink-0">
+          <Smartphone size={20} className="text-emerald-400" />
+        </div>
+        <div className="flex-1 min-w-0 space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-100">Android app update</h3>
+            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+              Checks GitHub Releases for a newer Library APK and installs it on this device.
+            </p>
+          </div>
+
+          <dl className="text-xs space-y-1.5">
+            <div className="flex justify-between gap-3">
+              <dt className="text-gray-500">Installed</dt>
+              <dd className="text-gray-200 text-right">
+                {installed ? (
+                  <>
+                    v{installed.versionName}
+                    <span className="text-gray-500"> (build {installed.versionCode})</span>
+                  </>
+                ) : (
+                  "—"
+                )}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-gray-500">On GitHub</dt>
+              <dd className="text-gray-200 text-right">
+                {remote ? (
+                  <>
+                    v{remote.versionName || remote.tagName}
+                    {remote.versionCode != null && (
+                      <span className="text-gray-500"> (build {remote.versionCode})</span>
+                    )}
+                    <span className="text-gray-500"> · {formatApkBytes(remote.sizeBytes)}</span>
+                  </>
+                ) : (
+                  "—"
+                )}
+              </dd>
+            </div>
+          </dl>
+
+          {updateReady ? (
+            <p className="text-xs text-emerald-300">A newer APK is available</p>
+          ) : remote && !error ? (
+            <p className="text-xs text-gray-500">This device has the latest release</p>
+          ) : null}
+          {error && <p className="text-xs text-amber-300/90">{error}</p>}
+          {progress != null && (
+            <p className="text-xs text-gray-400">Downloading… {progress}%</p>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              disabled={loading || downloading}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gray-800 text-gray-200 text-sm font-medium hover:bg-gray-700 disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+              Check for updates
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDownload()}
+              disabled={!remote || downloading || loading}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-700/80 text-white text-sm font-medium hover:bg-emerald-600 disabled:opacity-50"
+            >
+              <Download size={14} />
+              {downloading
+                ? "Downloading…"
+                : updateReady
+                  ? "Download & install"
+                  : "Download APK"}
+            </button>
+            <a
+              href={releaseLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-700 text-gray-300 text-sm hover:bg-gray-800"
+            >
+              <ExternalLink size={14} />
+              Open on GitHub
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ServerUrlSettings() {
   const { toast } = useToast();
   const { logout } = useAuth();
@@ -556,6 +738,7 @@ export default function Settings() {
 
       <div className="space-y-4">
         <ServerUrlSettings />
+        <AndroidApkSettings />
         <DebridKeysSection />
         <LibraryGroupSection />
 

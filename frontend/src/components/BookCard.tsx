@@ -2,6 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { useState } from "react";
 import { BookOpen, Check, Download, HelpCircle } from "lucide-react";
 import type { BookSummary } from "../types/book";
+import CoverImage from "./CoverImage";
 
 interface Props {
   book: BookSummary;
@@ -23,7 +24,7 @@ export default function BookCard({ book }: Props) {
     >
       <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
         {showCover ? (
-          <img
+          <CoverImage
             src={book.coverUrl}
             alt={book.title}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"

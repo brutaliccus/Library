@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Headphones, Play, BookOpen, Info, RefreshCw } from "lucide-react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import api from "../api/client";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
+import CoverImage from "./CoverImage";
 
 interface Props {
   itemId: string;
@@ -60,18 +61,17 @@ export default function ABSBookCard({ itemId, title, author, coverUrl, duration,
       className="group text-left flex flex-col bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-emerald-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-emerald-900/10 hover:-translate-y-0.5 h-full relative"
     >
       <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
-        {coverUrl ? (
-          <img
-            src={coverUrl}
-            alt={title}
-            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-            loading="lazy"
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center text-gray-700">
-            <Headphones size={20} />
-          </div>
-        )}
+        <CoverImage
+          src={coverUrl}
+          alt={title}
+          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+          loading="lazy"
+          fallback={
+            <div className="w-full h-full flex items-center justify-center text-gray-700">
+              <Headphones size={20} />
+            </div>
+          }
+        />
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center">
           <Play size={24} className="text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg" />
         </div>

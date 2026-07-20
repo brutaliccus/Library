@@ -136,6 +136,10 @@ class Settings(BaseSettings):
     vapid_private_key: str = ""
     vapid_public_key: str = ""
 
+    # Android APK updates — latest GitHub Release asset (Admin → Config can override).
+    android_apk_github_repo: str = "brutaliccus/Library"
+    github_token: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @model_validator(mode="after")

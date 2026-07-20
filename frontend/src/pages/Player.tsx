@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import AudiobookTransport from "../components/AudiobookTransport";
 import PlaybackScrubber from "../components/PlaybackScrubber";
+import CoverImage from "../components/CoverImage";
 import {
   chapterNavAvailability,
   currentChapterLabel,
@@ -150,17 +151,16 @@ export default function PlayerPage() {
 
         <div className="flex-1 flex flex-col items-center justify-center gap-6">
           <div className="w-64 h-64 rounded-2xl overflow-hidden shadow-2xl shadow-black/50">
-            {nowPlaying.coverUrl ? (
-              <img
-                src={nowPlaying.coverUrl}
-                alt=""
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <div className="w-full h-full bg-gray-800 flex items-center justify-center">
-                <BookOpen size={64} className="text-gray-700" />
-              </div>
-            )}
+            <CoverImage
+              src={nowPlaying.coverUrl}
+              alt=""
+              className="w-full h-full object-cover"
+              fallback={
+                <div className="w-full h-full bg-gray-800 flex items-center justify-center">
+                  <BookOpen size={64} className="text-gray-700" />
+                </div>
+              }
+            />
           </div>
 
           <div className="text-center w-full">

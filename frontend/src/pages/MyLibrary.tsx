@@ -8,6 +8,7 @@ import { usePlayer } from "../contexts/PlayerContext";
 import ABSBookCard from "../components/ABSBookCard";
 import SeriesDrilldown from "../components/SeriesDrilldown";
 import AuthImage from "../components/AuthImage";
+import CoverImage from "../components/CoverImage";
 import Modal from "../components/Modal";
 import {
   Library,
@@ -490,7 +491,7 @@ export default function MyLibrary() {
           <div className="space-y-4">
             <div className="flex gap-3">
               {continueModal.item.coverUrl ? (
-                <img
+                <CoverImage
                   src={continueModal.item.coverUrl}
                   alt=""
                   className="w-16 h-24 rounded object-cover shrink-0"
@@ -631,7 +632,7 @@ export default function MyLibrary() {
                         }
                       />
                     ) : (
-                      <img src={r.coverUrl} alt="" className="w-10 h-14 rounded object-cover shrink-0" />
+                      <CoverImage src={r.coverUrl} alt="" className="w-10 h-14 rounded object-cover shrink-0" />
                     )
                   ) : (
                     <div className="w-10 h-14 rounded bg-gray-700 shrink-0 flex items-center justify-center">
@@ -1049,7 +1050,7 @@ function EbookCard({ item, onNavigateToBook, hasAudio }: { item: KavitaItem; onN
     <div ref={cardRef} className="group bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-amber-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-amber-900/10 hover:-translate-y-0.5 h-full relative">
       <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden cursor-pointer" onClick={handleClick}>
         {showCover ? (
-          <img
+          <CoverImage
             src={item.coverUrl}
             alt={item.title}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
@@ -1087,11 +1088,15 @@ function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate }: 
   return (
     <div className="group bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-gray-700 transition-colors relative">
       <div className="relative aspect-[2/3] bg-gray-900 cursor-pointer" onClick={onNavigate}>
-        {item.coverUrl ? (
-          <img src={item.coverUrl} alt={item.title} className="w-full h-full object-cover" loading="lazy" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center text-gray-700"><BookOpen size={16} /></div>
-        )}
+        <CoverImage
+          src={item.coverUrl}
+          alt={item.title}
+          className="w-full h-full object-cover"
+          loading="lazy"
+          fallback={
+            <div className="w-full h-full flex items-center justify-center text-gray-700"><BookOpen size={16} /></div>
+          }
+        />
         {item.totalSeconds > 0 && item.progressSeconds > 0 && (
           <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-gray-700">
             <div className="h-full bg-purple-500" style={{ width: `${Math.round((item.progressSeconds / item.totalSeconds) * 100)}%` }} />

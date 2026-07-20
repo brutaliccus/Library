@@ -150,6 +150,22 @@ export default function BookDetailPage() {
     return String(seriesData.currentBookIndex + 1);
   }, [book?.seriesBookNumber, seriesData]);
 
+  // Series strip often has Hardcover art when the detail payload has none.
+  const seriesCoverUrl = useMemo(() => {
+    const books = seriesData?.books;
+    if (!books?.length) return "";
+    const idx = seriesData?.currentBookIndex ?? -1;
+    if (idx >= 0 && books[idx]?.coverUrl) return books[idx].coverUrl;
+    const byId = books.find((b) => b.id === volumeId && b.coverUrl);
+    if (byId) return byId.coverUrl;
+    const titleKey = (book?.title || "").trim().toLowerCase();
+    if (!titleKey) return "";
+    const byTitle = books.find(
+      (b) => b.coverUrl && b.title.trim().toLowerCase() === titleKey
+    );
+    return byTitle?.coverUrl || "";
+  }, [seriesData, volumeId, book?.title]);
+
   const { data: ebookMatch } = useQuery({
     queryKey: [
       "ebook-match",
@@ -383,17 +399,32 @@ export default function BookDetailPage() {
     );
   }
 
-  const coverUrl = book.coverUrlLarge || book.coverUrl;
+  const coverCandidates = [
+    book.coverUrlLarge,
+    book.coverUrl,
+    seriesCoverUrl,
+  ].filter((u, i, arr): u is string => !!u && arr.indexOf(u) === i);
+  const coverUrl = coverCandidates[0] || "";
   const authorStr = book.authors.join(", ");
   const detailsLine = formatBookDetailsLine(book);
 
+  const coverPlaceholder = (className: string) => (
+    <div className={`${className} aspect-[2/3] bg-gray-800 flex items-center justify-center text-gray-700`}>
+      <BookOpen size={48} />
+    </div>
+  );
+
   const renderCover = (className: string) =>
     coverUrl ? (
-      <CoverImage src={coverUrl} alt={book.title} className={className} />
+      <CoverImage
+        src={coverCandidates[0]}
+        fallbackSrc={coverCandidates.slice(1)}
+        alt={book.title}
+        className={`${className} aspect-[2/3] object-cover`}
+        fallback={coverPlaceholder(className)}
+      />
     ) : (
-      <div className={`${className} aspect-[2/3] bg-gray-800 flex items-center justify-center text-gray-700`}>
-        <BookOpen size={48} />
-      </div>
+      coverPlaceholder(className)
     );
 
   const renderActions = (compact: boolean) => {

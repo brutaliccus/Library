@@ -975,9 +975,18 @@ async def resolve_store_volume(hc_book: dict, *, quick: bool = False) -> dict:
         out["seriesBookNumber"] = hc_book.get("seriesBookNumber") or hc_book.get("sequence") or ""
     elif hc_book.get("sequence") and not out.get("seriesBookNumber"):
         out["seriesBookNumber"] = hc_book["sequence"]
-    if not out.get("coverUrl") and hc_book.get("coverUrl"):
-        out["coverUrl"] = hc_book["coverUrl"]
-        out["coverUrlLarge"] = hc_book.get("coverUrlLarge") or hc_book["coverUrl"]
+    # Prefer Hardcover art when local OL has none, or only a tiny OL stub image.
+    hc_cover = (hc_book.get("coverUrl") or "").strip()
+    local_cover = (out.get("coverUrl") or "").strip()
+    if hc_cover and (
+        not local_cover
+        or (
+            "covers.openlibrary.org" in local_cover
+            and not await google_books._cover_url_looks_real(local_cover)
+        )
+    ):
+        out["coverUrl"] = hc_cover
+        out["coverUrlLarge"] = hc_book.get("coverUrlLarge") or hc_cover
     if not out.get("averageRating") and hc_book.get("averageRating"):
         out["averageRating"] = hc_book["averageRating"]
         out["ratingsCount"] = hc_book.get("ratingsCount") or 0

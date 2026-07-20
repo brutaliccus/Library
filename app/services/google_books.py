@@ -623,13 +623,22 @@ async def get_catalog_volume(volume_id: str) -> dict | None:
 
 
 async def enrich_cover_if_missing(book: dict) -> dict:
-    """Fill empty coverUrl from ISBNdb / Google Books / OL ISBN cover endpoint.
+    """Fill empty/broken coverUrl from ISBNdb / Google / Hardcover / OL ISBN.
 
-    Many works in the local Open Library dump have no cover_id; the store would
-    otherwise show blank placeholders even when a cover exists elsewhere.
+    Many works in the local Open Library dump have no cover_id (or a tiny OL
+    placeholder). Series carousels often still show art via Hardcover — detail
+    pages need the same enrichment path.
     """
-    if not book or book.get("coverUrl"):
+    if not book:
         return book
+
+    existing = (book.get("coverUrl") or "").strip()
+    if existing:
+        # Keep non-OL covers; re-check OL URLs that commonly 200 with a ~40B stub.
+        if "covers.openlibrary.org" not in existing:
+            return book
+        if await _cover_url_looks_real(existing):
+            return book
 
     title = (book.get("title") or "").strip()
     # Skip OL "Duplicate of …" junk titles for enrichment lookups.
@@ -641,6 +650,7 @@ async def enrich_cover_if_missing(book: dict) -> dict:
     isbn10 = (book.get("isbn10") or "").strip()
 
     cover = ""
+    cover_large = ""
 
     # 1) Direct Open Library cover-by-ISBN (fast, no auth).
     for isbn in (isbn13, isbn10):
@@ -649,6 +659,7 @@ async def enrich_cover_if_missing(book: dict) -> dict:
         candidate = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg"
         if await _cover_url_looks_real(candidate):
             cover = candidate
+            cover_large = f"https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg"
             break
 
     # 2) ISBNdb (often has commercial covers OL dump lacks).
@@ -660,12 +671,14 @@ async def enrich_cover_if_missing(book: dict) -> dict:
                 hit = await isbndb.lookup_isbn(isbn13 or isbn10)
                 if hit and hit.get("coverUrl"):
                     cover = hit["coverUrl"]
+                    cover_large = hit.get("coverUrlLarge") or cover
             if not cover and title:
                 q = f"{title} {author}".strip()
                 result = await isbndb.search_books(q, limit=3)
                 for b in result.get("books") or []:
                     if b.get("coverUrl") and _titles_roughly_match(title, b.get("title") or ""):
                         cover = b["coverUrl"]
+                        cover_large = b.get("coverUrlLarge") or cover
                         break
         except Exception as e:
             logger.debug("cover enrich ISBNdb failed: %s", e)
@@ -687,19 +700,38 @@ async def enrich_cover_if_missing(book: dict) -> dict:
                         continue
                     if _titles_roughly_match(title, b.get("title") or ""):
                         cover = b["coverUrl"]
+                        cover_large = b.get("coverUrlLarge") or cover
                         break
                 if cover:
                     break
                 if len(books) == 1 and books[0].get("coverUrl"):
                     cover = books[0]["coverUrl"]
+                    cover_large = books[0].get("coverUrlLarge") or cover
                     break
         except Exception as e:
             logger.debug("cover enrich Google Books failed: %s", e)
 
+    # 4) Hardcover — same source that powers "More in this series" covers.
+    if not cover and title:
+        try:
+            from app.services import hardcover
+
+            q = f"{title} {author}".strip()
+            hits = await hardcover.search_books(q, limit=5)
+            for b in hits or []:
+                if not b.get("coverUrl"):
+                    continue
+                if _titles_roughly_match(title, b.get("title") or ""):
+                    cover = b["coverUrl"]
+                    cover_large = b.get("coverUrlLarge") or cover
+                    break
+        except Exception as e:
+            logger.debug("cover enrich Hardcover failed: %s", e)
+
     if cover:
         book = dict(book)
         book["coverUrl"] = cover
-        book.setdefault("coverUrlLarge", cover)
+        book["coverUrlLarge"] = cover_large or cover
         # Refresh cache entry for OL works so the next hit is cheap.
         vid = book.get("volumeId") or book.get("id") or ""
         if vid.startswith("OL:"):

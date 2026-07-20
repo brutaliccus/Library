@@ -3,7 +3,7 @@
 #
 # Trigger:
 #   - workflow_dispatch (set versionName + versionCode)
-#   - push tag matching android-v* (e.g. android-v1.5) — uses tag name + versionCode input default
+#   - push tag matching android-v* (e.g. android-v1.5+6)
 #
 # Required repo secrets (Settings → Secrets and variables → Actions):
 #   ANDROID_KEYSTORE_BASE64  — base64 of your .jks / .keystore
@@ -49,7 +49,6 @@ jobs:
             REF="${GITHUB_REF_NAME}"
             NAME="${REF#android-v}"
             NAME="${NAME#v}"
-            # Prefer +N suffix on tag (android-v1.5+6); else fail the job for tag pushes without it.
             if [[ "$REF" =~ \+([0-9]+)$ ]]; then
               CODE="${BASH_REMATCH[1]}"
               NAME="${NAME%+*}"
@@ -67,6 +66,18 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "platform-tools"
+          yes | sdkmanager --licenses >/dev/null || true
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -96,26 +107,42 @@ jobs:
         working-directory: frontend/android
         shell: bash
         run: |
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "ANDROID_KEYSTORE_BASE64 secret is empty" >&2
+            exit 1
+          fi
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+          test -s release.keystore
           {
             echo "storeFile=release.keystore"
             echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
             echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}"
             echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}"
           } > keystore.properties
+          ls -la release.keystore keystore.properties
 
       - name: Build release APK
         working-directory: frontend/android
-        run: ./gradlew assembleRelease --no-daemon
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Prepare artifact
         id: apk
         shell: bash
         run: |
           SRC="frontend/android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$SRC" ]; then
+            echo "APK not found at $SRC" >&2
+            find frontend/android/app/build/outputs -type f -name '*.apk' || true
+            exit 1
+          fi
           NAME="Library-${{ steps.ver.outputs.versionName }}.apk"
           cp "$SRC" "$NAME"
           echo "path=$NAME" >> "$GITHUB_OUTPUT"
+          ls -la "$NAME"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

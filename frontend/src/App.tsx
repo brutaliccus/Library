@@ -26,15 +26,18 @@ import Ereader from "./pages/Ereader";
 import Settings from "./pages/Settings";
 import Onboarding from "./pages/Onboarding";
 import JoinInvite from "./pages/JoinInvite";
+import LibrariesPage from "./pages/Libraries";
 import { useLibraryGroup } from "./hooks/useLibraryGroup";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, isLoading, sessionReady } = useAuth();
-  const libraryQuery = useLibraryGroup(!!user && sessionReady && !user.mustChangePassword);
+  const hasLibraryToken = !!localStorage.getItem("access_token");
+  const libraryQuery = useLibraryGroup(
+    !!user && sessionReady && !user.mustChangePassword && hasLibraryToken
+  );
   if (isLoading || !sessionReady) return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
-  if (!user) return <Navigate to="/login" />;
+  if (!hasLibraryToken || !user) return <Navigate to="/libraries" />;
   if (user.mustChangePassword) return <Navigate to="/change-password" />;
-  // New accounts pick "create or join a library" before using the app
   if (libraryQuery.data && libraryQuery.data.library === null) return <Navigate to="/onboarding" />;
   return <>{children}</>;
 }
@@ -42,7 +45,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 function OnboardingRoute({ children }: { children: React.ReactNode }) {
   const { user, isLoading } = useAuth();
   if (isLoading) return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
-  if (!user) return <Navigate to="/login" />;
+  if (!user) return <Navigate to="/libraries" />;
   if (user.mustChangePassword) return <Navigate to="/change-password" />;
   return <>{children}</>;
 }
@@ -104,7 +107,7 @@ export default function App() {
           onDownload={() => void downloadUpdate()}
         />
       )}
-      {user && !user.mustChangePassword && (
+      {user && !user.mustChangePassword && location.pathname !== "/libraries" && (
         <Navbar
           onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
           genreActiveCount={showGenreButton ? genreActiveCount : 0}
@@ -120,6 +123,7 @@ export default function App() {
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="/join/:code" element={<JoinInvite />} />
         <Route path="/join" element={<JoinInvite />} />
+        <Route path="/libraries" element={<LibrariesPage />} />
         <Route
           path="/onboarding"
           element={
@@ -246,7 +250,7 @@ export default function App() {
             </AdminRoute>
           }
         />
-        <Route path="*" element={<Navigate to="/" />} />
+        <Route path="*" element={<Navigate to="/libraries" />} />
       </Routes>
       {!expanded && <MiniPlayer />}
     </div>

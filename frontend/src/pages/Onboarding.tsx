@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import api, { applyApiBaseUrl } from "../api/client";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
-import { Library, KeyRound, Users, Loader2, ArrowRight } from "lucide-react";
+import { Library, KeyRound, Users, Loader2, ArrowRight, ImagePlus } from "lucide-react";
 import {
   applyInvitePaste,
   normalizeInviteCode,
@@ -13,6 +13,7 @@ import {
   takePendingInvite,
 } from "../api/inviteLink";
 import { isNativeApp } from "../api/instanceUrl";
+import { upsertRememberedLibrary, currentOrigin } from "../api/libraryRegistry";
 
 type Mode = "choose" | "create" | "join";
 
@@ -33,6 +34,8 @@ export default function Onboarding() {
   const [busy, setBusy] = useState(false);
 
   const [name, setName] = useState("");
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [coverPreview, setCoverPreview] = useState<string | null>(null);
   const [rdToken, setRdToken] = useState("");
   const [torboxToken, setTorboxToken] = useState("");
   const [inviteCode, setInviteCode] = useState("");
@@ -56,10 +59,31 @@ export default function Onboarding() {
     }
   }, [searchParams, user?.role]);
 
-  const finish = async () => {
+  const rememberLibrary = (
+    lib: { name?: string; coverUrl?: string | null } | null | undefined
+  ) => {
+    const origin = currentOrigin();
+    const email = user?.email || localStorage.getItem("user_email") || "";
+    if (!origin || !email) return;
+    upsertRememberedLibrary({
+      origin,
+      name: lib?.name || name.trim() || "Library",
+      coverUrl: lib?.coverUrl || null,
+      email,
+    });
+  };
+
+  const finish = async (lib?: { name?: string; coverUrl?: string | null } | null) => {
+    rememberLibrary(lib);
     await queryClient.invalidateQueries({ queryKey: ["library-group"] });
     await queryClient.invalidateQueries({ queryKey: ["user-settings"] });
-    navigate("/", { replace: true });
+    navigate("/libraries", { replace: true });
+  };
+
+  const onCoverPicked = (file: File | null) => {
+    if (coverPreview) URL.revokeObjectURL(coverPreview);
+    setCoverFile(file);
+    setCoverPreview(file ? URL.createObjectURL(file) : null);
   };
 
   const handleCreate = async () => {
@@ -79,11 +103,24 @@ export default function Onboarding() {
         real_debrid_api_token: rdToken.trim(),
         torbox_api_token: torboxToken.trim(),
       });
+      let library = data.library;
+      if (coverFile) {
+        try {
+          const form = new FormData();
+          form.append("cover", coverFile);
+          const uploaded = await api.post("/libraries/branding/cover", form, {
+            headers: { "Content-Type": "multipart/form-data" },
+          });
+          library = uploaded.data.library || library;
+        } catch {
+          toast("Library created, but cover upload failed — you can add it later in Settings.", "error");
+        }
+      }
       const link = resolveInviteShareUrl(
-        data.library?.inviteLink,
-        data.library?.inviteCode
+        library?.inviteLink,
+        library?.inviteCode
       );
-      if (link && link !== data.library?.inviteCode) {
+      if (link && link !== library?.inviteCode) {
         try {
           await navigator.clipboard?.writeText(link);
           toast("Library created — invite link copied. Share it from Settings anytime.", "success");
@@ -96,7 +133,7 @@ export default function Onboarding() {
           "success"
         );
       }
-      await finish();
+      await finish(library);
     } catch (e: any) {
       setError(e.response?.data?.detail || "Failed to create library");
     } finally {
@@ -122,7 +159,7 @@ export default function Onboarding() {
       });
       takePendingInvite();
       toast(`Joined "${data.library?.name || "library"}"!`, "success");
-      await finish();
+      await finish(data.library);
     } catch (e: any) {
       setError(e.response?.data?.detail || "Failed to join library");
     } finally {
@@ -140,7 +177,7 @@ export default function Onboarding() {
           <h1 className="text-2xl font-bold text-gray-100">Set up your library</h1>
           <p className="text-sm text-gray-400 mt-2">
             {mode === "create" || initialMode === "create"
-              ? "Name your library and add debrid keys. You'll get an invite link to share — that's how friends create accounts."
+              ? "Name your library, optionally add cover art, and add debrid keys. You'll get an invite link to share — that's how friends create accounts."
               : "All downloaded books are shared. This choice only decides whose debrid account powers your streaming."}
           </p>
         </div>
@@ -193,6 +230,37 @@ export default function Onboarding() {
                 placeholder="e.g. Jared's Library"
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-500"
               />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1.5">
+                Cover art <span className="text-gray-500 font-normal">(optional — add later in Settings)</span>
+              </label>
+              <div className="flex items-center gap-3">
+                <div className="w-16 aspect-[2/3] rounded-lg overflow-hidden bg-gray-800 border border-gray-700 shrink-0 flex items-center justify-center">
+                  {coverPreview ? (
+                    <img src={coverPreview} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <ImagePlus size={18} className="text-gray-600" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,image/gif"
+                    onChange={(e) => onCoverPicked(e.target.files?.[0] || null)}
+                    className="block w-full text-xs text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-gray-800 file:text-gray-200 hover:file:bg-gray-700"
+                  />
+                  {coverFile && (
+                    <button
+                      type="button"
+                      onClick={() => onCoverPicked(null)}
+                      className="mt-1.5 text-[11px] text-gray-500 hover:text-gray-300"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-400 mb-1.5">

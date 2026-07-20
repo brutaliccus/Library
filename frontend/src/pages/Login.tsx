@@ -1,45 +1,68 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { BookOpen, LogIn } from "lucide-react";
-import ServerUrlField, { commitServerUrl } from "../components/ServerUrlField";
-import { isNativeApp, needsInstanceUrl, getStoredInstanceUrl } from "../api/instanceUrl";
+import {
+  getStoredInstanceUrl,
+  isNativeApp,
+  needsInstanceUrl,
+  setInstanceUrl,
+  normalizeInstanceUrl,
+} from "../api/instanceUrl";
 import { applyApiBaseUrl } from "../api/client";
 import api from "../api/client";
+import { listRememberedLibraries } from "../api/libraryRegistry";
 
 export default function Login() {
-  const { login, setup, setupRequired, refreshSetupRequired } = useAuth();
+  const { login, setup, setupRequired, refreshSetupRequired, user, isLoading } = useAuth();
   const navigate = useNavigate();
-  const [username, setUsername] = useState("");
+  const [searchParams] = useSearchParams();
+  const originParam = searchParams.get("origin");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [serverUrl, setServerUrl] = useState(() => getStoredInstanceUrl() || "");
+  const [serverUrl, setServerUrl] = useState(
+    () => originParam || getStoredInstanceUrl() || ""
+  );
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const hasLibraries = listRememberedLibraries().length > 0;
+
+  // Native with no server and no remembered libraries → libraries picker (add via invite).
+  if (!isLoading && needsInstanceUrl() && !originParam && !hasLibraries) {
+    return <Navigate to="/libraries" replace />;
+  }
+
+  if (!isLoading && user && !user.mustChangePassword && getStoredInstanceUrl()) {
+    return <Navigate to="/" replace />;
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
     try {
-      if (isNativeApp()) {
-        const saved = commitServerUrl(serverUrl);
-        if (!saved) {
-          setError("Enter your Library server URL, e.g. https://library.example.com");
+      let origin = getStoredInstanceUrl();
+      if (isNativeApp() || originParam) {
+        const raw = serverUrl.trim() || originParam || "";
+        const normalized = normalizeInstanceUrl(raw);
+        if (!normalized) {
+          setError("Enter your Library server URL, or join with an invite link instead");
           setLoading(false);
           return;
         }
+        setInstanceUrl(normalized);
         applyApiBaseUrl();
-        await refreshSetupRequired();
+        origin = normalized;
       }
       let doSetup = setupRequired;
-      if (isNativeApp()) {
-        try {
-          const { data } = await api.get("/auth/setup-required");
-          doSetup = !!data.setup_required;
-        } catch {
-          // fall back to context flag
-        }
+      try {
+        const { data } = await api.get("/auth/setup-required");
+        doSetup = !!data.setup_required;
+        await refreshSetupRequired();
+      } catch {
+        /* use context */
       }
       if (doSetup) {
         if (password.length < 6) {
@@ -52,88 +75,86 @@ export default function Login() {
           setLoading(false);
           return;
         }
-        await setup(username, password);
-        // First admin still needs to create the library (generates invite code).
+        await setup(email.trim(), password, origin || undefined);
         navigate("/onboarding?mode=create", { replace: true });
         return;
       }
-      await login(username, password);
-      navigate("/");
+      await login(email.trim(), password, origin || undefined);
+      navigate("/", { replace: true });
     } catch (err: any) {
-      const detail = err.response?.data?.detail;
-      const msg =
-        detail ||
-        (err.code === "ERR_NETWORK"
-          ? "Could not reach that server. Check the URL and your network."
-          : "Login failed");
-      setError(String(msg));
+      setError(
+        err.response?.data?.detail ||
+          (err.code === "ERR_NETWORK"
+            ? "Could not reach the library server"
+            : "Sign in failed")
+      );
     } finally {
       setLoading(false);
     }
   };
 
+  const showServerField = isNativeApp() || !!originParam;
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-950 p-4 pt-[calc(1rem+env(safe-area-inset-top,0px))] pb-[calc(1rem+env(safe-area-inset-bottom,0px))]">
+    <div className="min-h-screen flex items-center justify-center bg-gray-950 p-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 bg-brand-600 text-white rounded-2xl mb-4">
-            <BookOpen size={28} />
+          <div className="inline-flex p-3 bg-brand-900/40 rounded-2xl mb-4">
+            <BookOpen size={32} className="text-brand-400" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-100">Audiobook Library</h1>
-          <p className="text-sm text-gray-400 mt-1">
-            {needsInstanceUrl()
-              ? "Paste an invite link (or your Library URL), then sign in or join"
-              : setupRequired
-                ? "Create the admin account for this Library server"
-                : "Sign in to your library"}
+          <h1 className="text-2xl font-bold text-gray-100">
+            {setupRequired ? "Create admin account" : "Sign in"}
+          </h1>
+          <p className="text-sm text-gray-400 mt-2">
+            {setupRequired
+              ? "First-time setup for this library server."
+              : "Sign in to this library with your email."}
           </p>
         </div>
 
-        <form
-          onSubmit={handleSubmit}
-          className="bg-gray-800 rounded-2xl shadow-lg border border-gray-700 p-6 space-y-4"
-        >
+        <form onSubmit={handleSubmit} className="space-y-4">
           {error && (
-            <div className="p-3 bg-red-900/30 text-red-400 text-sm rounded-lg">
-              {error}
+            <div className="p-3 bg-red-900/30 text-red-400 text-sm rounded-lg">{error}</div>
+          )}
+
+          {showServerField && (
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                Library URL
+              </label>
+              <input
+                type="url"
+                value={serverUrl}
+                onChange={(e) => setServerUrl(e.target.value)}
+                placeholder="https://library.example.com"
+                className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500"
+                autoComplete="url"
+              />
+              <p className="text-[11px] text-gray-500 mt-1">
+                Prefer an invite link?{" "}
+                <Link to="/libraries" className="text-brand-400 hover:text-brand-300">
+                  Add from Libraries
+                </Link>
+              </p>
             </div>
           )}
 
-          {setupRequired && (
-            <p className="text-xs text-gray-400 leading-relaxed">
-              First-time setup: create your admin username and password. Next you'll name
-              the library and add debrid keys — that generates the invite link friends use
-              to join.
-            </p>
-          )}
-
-          {isNativeApp() && (
-            <ServerUrlField
-              value={serverUrl}
-              onChange={setServerUrl}
-              autoFocus={!serverUrl}
-            />
-          )}
-
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
-              Username
-            </label>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Email</label>
             <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
               className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               required
-              autoFocus={!isNativeApp() || !!serverUrl}
-              autoComplete="username"
+              autoFocus={!showServerField}
+              autoComplete="email"
+              inputMode="email"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
-              Password
-            </label>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Password</label>
             <input
               type="password"
               value={password}
@@ -171,22 +192,26 @@ export default function Login() {
             {loading
               ? "Please wait..."
               : setupRequired
-              ? "Create admin & continue"
-              : "Sign In"}
+                ? "Create admin & continue"
+                : "Sign In"}
           </button>
         </form>
 
-        {!setupRequired && (
-          <p className="text-center text-sm text-gray-500 mt-4">
-            New here?{" "}
-            <Link
-              to="/join"
-              className="text-brand-400 hover:text-brand-300 font-medium"
-            >
-              Join with an invite link
+        <p className="text-center text-sm text-gray-500 mt-4 space-y-1">
+          <span className="block">
+            <Link to="/libraries" className="text-brand-400 hover:text-brand-300 font-medium">
+              Your libraries
             </Link>
-          </p>
-        )}
+          </span>
+          {!setupRequired && (
+            <span className="block">
+              New here?{" "}
+              <Link to="/join" className="text-brand-400 hover:text-brand-300 font-medium">
+                Join with an invite link
+              </Link>
+            </span>
+          )}
+        </p>
       </div>
     </div>
   );

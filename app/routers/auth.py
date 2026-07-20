@@ -14,13 +14,16 @@ from app.utils.auth import (
     create_refresh_token,
     get_current_user,
 )
+from app.utils.email_norm import is_valid_email, normalize_email, username_from_email
 from app.services import push
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 class LoginRequest(BaseModel):
-    username: str
+    """Prefer email; username kept for backward-compatible clients."""
+    email: str | None = None
+    username: str | None = None
     password: str
 
 
@@ -30,24 +33,29 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     role: str
     username: str
+    email: str | None = None
     must_change_password: bool = False
 
 
 class SetupRequest(BaseModel):
-    username: str
+    email: str
     password: str
+    # Optional display name; defaults from email local-part.
+    username: str | None = None
 
 
 class InviteSignupRequest(BaseModel):
     invite_code: str
-    username: str
+    email: str
     password: str
+    username: str | None = None
 
 
 class InvitePreviewResponse(BaseModel):
     valid: bool = True
     code: str
     library_name: str
+    cover_url: str | None = None
 
 
 class RefreshRequest(BaseModel):
@@ -61,6 +69,7 @@ class ChangePasswordRequest(BaseModel):
 
 class MeResponse(BaseModel):
     username: str
+    email: str | None = None
     role: str
     must_change_password: bool = False
 
@@ -75,8 +84,40 @@ def _token_response(user: User) -> TokenResponse:
         refresh_token=create_refresh_token(user.id),
         role=user.role,
         username=user.username,
+        email=user.email,
         must_change_password=user.must_change_password,
     )
+
+
+async def _find_user_for_login(db: AsyncSession, email: str | None, username: str | None) -> User | None:
+    em = normalize_email(email)
+    un = (username or "").strip()
+    if em:
+        user = (
+            await db.execute(select(User).where(User.email == em))
+        ).scalar_one_or_none()
+        if user:
+            return user
+        # Legacy: some installs used email as username before the email column.
+        user = (
+            await db.execute(select(User).where(User.username == em))
+        ).scalar_one_or_none()
+        if user:
+            return user
+    if un:
+        return (
+            await db.execute(select(User).where(User.username == un))
+        ).scalar_one_or_none()
+    return None
+
+
+def _require_email_password(email_raw: str | None, password: str) -> str:
+    email = normalize_email(email_raw)
+    if not is_valid_email(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    if len(password or "") < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    return email
 
 
 async def _library_for_invite(code: str, db: AsyncSession) -> LibraryGroup:
@@ -95,6 +136,7 @@ async def _library_for_invite(code: str, db: AsyncSession) -> LibraryGroup:
 async def me(user: User = Depends(get_current_user)):
     return MeResponse(
         username=user.username,
+        email=user.email,
         role=user.role,
         must_change_password=user.must_change_password,
     )
@@ -102,12 +144,21 @@ async def me(user: User = Depends(get_current_user)):
 
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.username == body.username))
-    user = result.scalar_one_or_none()
+    user = await _find_user_for_login(db, body.email, body.username)
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
+    # Soft-upgrade legacy username-as-email accounts.
+    em = normalize_email(body.email) or normalize_email(user.username)
+    if not user.email and is_valid_email(em):
+        taken = (
+            await db.execute(select(User.id).where(User.email == em, User.id != user.id))
+        ).scalar_one_or_none()
+        if taken is None:
+            user.email = em
+            await db.commit()
+            await db.refresh(user)
 
     return _token_response(user)
 
@@ -131,13 +182,7 @@ async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found or disabled")
 
-    return TokenResponse(
-        access_token=create_access_token(user.id, user.role),
-        refresh_token=create_refresh_token(user.id),
-        role=user.role,
-        username=user.username,
-        must_change_password=user.must_change_password,
-    )
+    return _token_response(user)
 
 
 @router.get("/setup-required")
@@ -153,16 +198,15 @@ async def initial_setup(body: SetupRequest, db: AsyncSession = Depends(get_db)):
     if result.scalar() > 0:
         raise HTTPException(status_code=400, detail="Setup already completed")
 
-    username = (body.username or "").strip()
-    password = body.password or ""
+    email = _require_email_password(body.email, body.password or "")
+    username = (body.username or "").strip() or username_from_email(email)
     if len(username) < 2 or len(username) > 64:
-        raise HTTPException(status_code=400, detail="Username must be 2–64 characters")
-    if len(password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        raise HTTPException(status_code=400, detail="Display name must be 2–64 characters")
 
     user = User(
         username=username,
-        hashed_password=hash_password(password),
+        email=email,
+        hashed_password=hash_password(body.password),
         role="admin",
     )
     db.add(user)
@@ -176,10 +220,12 @@ async def initial_setup(body: SetupRequest, db: AsyncSession = Depends(get_db)):
 async def preview_invite(code: str, db: AsyncSession = Depends(get_db)):
     """Public: validate an invite code and return the library name for the join screen."""
     group = await _library_for_invite(code, db)
+    cover = f"/api/libraries/{group.id}/cover" if group.cover_path else None
     return InvitePreviewResponse(
         valid=True,
         code=group.invite_code,
         library_name=group.name,
+        cover_url=cover,
     )
 
 
@@ -192,20 +238,27 @@ async def signup_with_invite(
     """Create an account + join a library in one step (shared invite link flow)."""
     group = await _library_for_invite(body.invite_code, db)
 
-    username = (body.username or "").strip()
-    password = body.password or ""
+    email = _require_email_password(body.email, body.password or "")
+    username = (body.username or "").strip() or username_from_email(email)
     if len(username) < 2 or len(username) > 64:
-        raise HTTPException(status_code=400, detail="Username must be 2–64 characters")
-    if len(password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        raise HTTPException(status_code=400, detail="Display name must be 2–64 characters")
+
+    existing_email = await db.execute(select(User).where(User.email == email))
+    if existing_email.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="An account with this email already exists")
 
     existing = await db.execute(select(User).where(User.username == username))
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="This username is already taken")
+        # Collision on display name — fall back to email as username.
+        username = email[:64]
+        existing2 = await db.execute(select(User).where(User.username == username))
+        if existing2.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="An account with this email already exists")
 
     user = User(
         username=username,
-        hashed_password=hash_password(password),
+        email=email,
+        hashed_password=hash_password(body.password),
         role="user",
         must_change_password=False,
         library_group_id=group.id,
@@ -220,7 +273,7 @@ async def signup_with_invite(
         {
             "type": "invite_signup",
             "title": "New member joined",
-            "body": f"{username} joined {group.name} via invite",
+            "body": f"{email} joined {group.name} via invite",
             "url": "/admin?tab=users",
         },
     )

@@ -10,8 +10,11 @@ invite code) > member.
 """
 
 import logging
+import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,11 +28,24 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/libraries", tags=["libraries"])
 
+_COVER_DIR = Path(__file__).resolve().parents[2] / "data" / "library_covers"
+_COVER_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
 
 class CreateGroupRequest(BaseModel):
     name: str
     real_debrid_api_token: str = ""
     torbox_api_token: str = ""
+
+
+class UpdateBrandingRequest(BaseModel):
+    name: str | None = None
 
 
 class JoinGroupRequest(BaseModel):
@@ -105,6 +121,7 @@ async def _serialize_group(group: LibraryGroup, user: User, db: AsyncSession) ->
     out: dict = {
         "id": group.id,
         "name": group.name,
+        "coverUrl": f"/api/libraries/{group.id}/cover" if group.cover_path else None,
         "role": user.library_role,
         "isOwner": group.owner_user_id == user.id,
         "canManageKeys": user.library_role == "owner",
@@ -248,6 +265,23 @@ async def join_group(
     return {"library": await _serialize_group(group, user, db)}
 
 
+@router.post("/leave")
+async def leave_group(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Leave the current library group on this host (does not delete the hub roster entry)."""
+    if not user.library_group_id:
+        return {"status": "ok", "library": None}
+    await _ensure_can_leave(user, db)
+    old_group_id = user.library_group_id
+    user.library_group_id = None
+    user.library_role = "member"
+    await db.commit()
+    await _cleanup_empty_group(old_group_id, db)
+    return {"status": "ok", "library": None}
+
+
 async def _cleanup_empty_group(group_id: int | None, db: AsyncSession) -> None:
     """Delete a group that no longer has any members (owner moved away)."""
     if not group_id:
@@ -284,6 +318,69 @@ async def update_tokens(
         group.real_debrid_api_token = rd
     if tb is not None:
         group.torbox_api_token = tb
+    await db.commit()
+    return {"library": await _serialize_group(group, user, db)}
+
+
+@router.put("/branding")
+async def update_branding(
+    body: UpdateBrandingRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rename the library (owner only). Cover art uses POST /branding/cover."""
+    _require_owner(user)
+    group = await _get_group(user, db)
+    if not group:
+        raise HTTPException(status_code=404, detail="You're not in a library")
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Library name is required")
+        if len(name) > 128:
+            raise HTTPException(status_code=400, detail="Library name is too long")
+        group.name = name
+    await db.commit()
+    return {"library": await _serialize_group(group, user, db)}
+
+
+@router.post("/branding/cover")
+async def upload_branding_cover(
+    cover: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload library card cover art (owner only)."""
+    _require_owner(user)
+    group = await _get_group(user, db)
+    if not group:
+        raise HTTPException(status_code=404, detail="You're not in a library")
+
+    content_type = (cover.content_type or "").split(";")[0].strip().lower()
+    ext = _COVER_TYPES.get(content_type)
+    if not ext:
+        raise HTTPException(status_code=400, detail="Cover must be a JPEG, PNG, WebP, or GIF image")
+
+    data = await cover.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty cover file")
+    if len(data) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Cover must be under 8 MB")
+
+    _COVER_DIR.mkdir(parents=True, exist_ok=True)
+    # Remove previous cover file if present.
+    if group.cover_path:
+        old = Path(__file__).resolve().parents[2] / "data" / group.cover_path
+        try:
+            if old.is_file():
+                old.unlink()
+        except OSError:
+            pass
+
+    rel = f"library_covers/{group.id}_{uuid.uuid4().hex[:8]}{ext}"
+    dest = Path(__file__).resolve().parents[2] / "data" / rel
+    dest.write_bytes(data)
+    group.cover_path = rel
     await db.commit()
     return {"library": await _serialize_group(group, user, db)}
 
@@ -333,3 +430,25 @@ async def set_member_role(
     member.library_role = body.library_role
     await db.commit()
     return {"status": "ok", "memberId": member.id, "libraryRole": member.library_role}
+
+
+@router.get("/{group_id}/cover")
+async def get_library_cover(group_id: int, db: AsyncSession = Depends(get_db)):
+    """Public cover image for library cards / invite previews."""
+    group = (
+        await db.execute(select(LibraryGroup).where(LibraryGroup.id == group_id))
+    ).scalar_one_or_none()
+    if not group or not group.cover_path:
+        raise HTTPException(status_code=404, detail="Cover not found")
+    path = Path(__file__).resolve().parents[2] / "data" / group.cover_path
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Cover not found")
+    media = "image/jpeg"
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        media = "image/png"
+    elif suffix == ".webp":
+        media = "image/webp"
+    elif suffix == ".gif":
+        media = "image/gif"
+    return FileResponse(path, media_type=media, headers={"Cache-Control": "public, max-age=86400"})

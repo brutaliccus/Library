@@ -36,7 +36,7 @@ export default function ChangePassword() {
         new_password: newPassword,
       });
       clearMustChangePassword();
-      navigate("/");
+      navigate("/libraries");
     } catch (err: any) {
       setError(err.response?.data?.detail || "Failed to change password");
     } finally {

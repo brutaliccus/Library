@@ -25,6 +25,8 @@ class LibraryGroup(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Relative path under data/ (e.g. library_covers/3.jpg) for the library card art.
+    cover_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     invite_code: Mapped[str] = mapped_column(String(24), unique=True, index=True, default=_invite_code)
     # Empty string = fall back to the server-wide env tokens (default library)
@@ -38,6 +40,8 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    # Login identity for new accounts; legacy users may still log in with username only.
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(128), nullable=False)
     role: Mapped[str] = mapped_column(String(16), default="user")  # "admin" | "user"
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

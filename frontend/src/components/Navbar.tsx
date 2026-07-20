@@ -2,7 +2,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useState, FormEvent, useEffect } from "react";
-import { BookOpen, Home, List, Shield, LogOut, Search, Headphones, Library, SlidersHorizontal, Lock, Unlock, Settings } from "lucide-react";
+import { BookOpen, Home, List, Shield, LogOut, Search, Headphones, Library, LayoutGrid, SlidersHorizontal, Lock, Unlock, Settings } from "lucide-react";
 
 interface Props {
   onGenreToggle?: () => void;
@@ -46,6 +46,7 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
   if (!user) return null;
 
   const links = [
+    { to: "/libraries", label: "Libraries", icon: LayoutGrid },
     { to: "/", label: "Home", icon: Home },
     { to: "/my-library", label: "My Library", icon: Library },
     { to: "/requests", label: "My Requests", icon: List },

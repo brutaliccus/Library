@@ -13,6 +13,8 @@ export type KeySource = "group" | "server" | "none";
 export interface LibraryGroupInfo {
   id: number;
   name: string;
+  /** Root-relative cover path, e.g. /api/libraries/3/cover */
+  coverUrl?: string | null;
   role: "owner" | "admin" | "member";
   isOwner: boolean;
   canManageKeys: boolean;

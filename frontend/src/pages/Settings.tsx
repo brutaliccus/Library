@@ -5,7 +5,7 @@ import { useAuth } from "../hooks/useAuth";
 import { useToast } from "../contexts/ToastContext";
 import { useLibraryGroup } from "../hooks/useLibraryGroup";
 import type { KeySource } from "../hooks/useLibraryGroup";
-import api, { applyApiBaseUrl } from "../api/client";
+import api from "../api/client";
 import {
   audioCacheUsageBytes,
   audioCacheEntryCount,
@@ -15,11 +15,12 @@ import {
 import { ebookCacheUsageBytes, ebookCacheEntryCount, clearAllEbookCache } from "../utils/ebookCache";
 import {
   Settings as SettingsIcon, EyeOff, Shield, Zap, HardDrive, Trash2,
-  Library, Copy, RefreshCw, KeyRound, ChevronUp, ChevronDown, Globe,
-  Smartphone, Download, ExternalLink,
+  Library, Copy, RefreshCw, KeyRound, ChevronUp, ChevronDown,
+  Smartphone, Download, ExternalLink, ImagePlus,
 } from "lucide-react";
-import ServerUrlField, { commitServerUrl } from "../components/ServerUrlField";
-import { getStoredInstanceUrl, isNativeApp } from "../api/instanceUrl";
+import CoverImage from "../components/CoverImage";
+import { upsertRememberedLibrary, currentOrigin } from "../api/libraryRegistry";
+import { isNativeApp } from "../api/instanceUrl";
 import { resolveInviteShareUrl } from "../api/inviteLink";
 import {
   fetchAndroidAppUpdateInfo,
@@ -225,10 +226,30 @@ function DebridKeysSection() {
 function LibraryGroupSection() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const { data } = useLibraryGroup();
   const lib = data?.library;
+  const [brandName, setBrandName] = useState("");
+  const [savingBrand, setSavingBrand] = useState(false);
+  const [uploadingCover, setUploadingCover] = useState(false);
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["library-group"] });
+
+  useEffect(() => {
+    if (lib?.name) setBrandName(lib.name);
+  }, [lib?.name]);
+
+  const syncRegistry = (next: { name?: string; coverUrl?: string | null }) => {
+    const origin = currentOrigin();
+    const email = user?.email || localStorage.getItem("user_email") || "";
+    if (!origin || !email) return;
+    upsertRememberedLibrary({
+      origin,
+      name: next.name || lib?.name || "Library",
+      coverUrl: next.coverUrl !== undefined ? next.coverUrl : lib?.coverUrl || null,
+      email,
+    });
+  };
 
   const regenInvite = useMutation({
     mutationFn: async () => (await api.post("/libraries/regenerate-invite")).data,
@@ -245,6 +266,47 @@ function LibraryGroupSection() {
     onSuccess: () => refresh(),
     onError: (e: any) => toast(e.response?.data?.detail || "Failed to update member", "error"),
   });
+
+  const saveBranding = async () => {
+    const name = brandName.trim();
+    if (!name) {
+      toast("Library name is required", "error");
+      return;
+    }
+    setSavingBrand(true);
+    try {
+      const { data: res } = await api.put("/libraries/branding", { name });
+      syncRegistry({ name: res.library?.name || name, coverUrl: res.library?.coverUrl });
+      await refresh();
+      toast("Library name saved", "success");
+    } catch (e: any) {
+      toast(e.response?.data?.detail || "Failed to save library name", "error");
+    } finally {
+      setSavingBrand(false);
+    }
+  };
+
+  const uploadCover = async (file: File | null) => {
+    if (!file) return;
+    setUploadingCover(true);
+    try {
+      const form = new FormData();
+      form.append("cover", file);
+      const { data: res } = await api.post("/libraries/branding/cover", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      syncRegistry({
+        name: res.library?.name || lib?.name,
+        coverUrl: res.library?.coverUrl,
+      });
+      await refresh();
+      toast("Cover art updated", "success");
+    } catch (e: any) {
+      toast(e.response?.data?.detail || "Failed to upload cover", "error");
+    } finally {
+      setUploadingCover(false);
+    }
+  };
 
   if (!lib) return null;
   const isOwner = lib.role === "owner";
@@ -295,8 +357,13 @@ function LibraryGroupSection() {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
       <div className="flex items-start gap-4">
-        <div className="p-2 bg-gray-800 rounded-lg shrink-0">
-          <Library size={20} className="text-brand-400" />
+        <div className="w-14 aspect-[2/3] rounded-lg overflow-hidden bg-gray-800 shrink-0 flex items-center justify-center">
+          <CoverImage
+            src={lib.coverUrl}
+            alt={lib.name}
+            className="w-full h-full object-cover"
+            fallback={<Library size={20} className="text-brand-400" />}
+          />
         </div>
         <div className="flex-1 min-w-0 space-y-4">
           <div>
@@ -305,6 +372,51 @@ function LibraryGroupSection() {
               Your role: <span className="text-gray-200 capitalize">{lib.role}</span>
             </p>
           </div>
+
+          {isOwner && (
+            <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950/50 p-3">
+              <p className="text-xs font-medium text-gray-400">Library card (name & cover)</p>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">Display name</label>
+                <div className="flex gap-2">
+                  <input
+                    value={brandName}
+                    onChange={(e) => setBrandName(e.target.value)}
+                    className="flex-1 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:border-brand-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void saveBranding()}
+                    disabled={savingBrand || brandName.trim() === lib.name}
+                    className="px-3 py-1.5 bg-brand-600 text-white text-xs font-medium rounded-lg hover:bg-brand-500 disabled:opacity-40"
+                  >
+                    {savingBrand ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">Cover art</label>
+                <div className="flex items-center gap-2">
+                  <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-gray-200 text-xs rounded-lg hover:bg-gray-700 cursor-pointer">
+                    <ImagePlus size={14} />
+                    {uploadingCover ? "Uploading…" : lib.coverUrl ? "Replace cover" : "Upload cover"}
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/gif"
+                      className="hidden"
+                      disabled={uploadingCover}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0] || null;
+                        e.target.value = "";
+                        void uploadCover(f);
+                      }}
+                    />
+                  </label>
+                  <span className="text-[11px] text-gray-500">JPEG, PNG, WebP, or GIF · under 8 MB</span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {canInvite && lib.inviteCode && (
             <div className="space-y-2">
@@ -575,53 +687,6 @@ function AndroidApkSettings() {
   );
 }
 
-function ServerUrlSettings() {
-  const { toast } = useToast();
-  const { logout } = useAuth();
-  const [serverUrl, setServerUrl] = useState(() => getStoredInstanceUrl() || "");
-
-  if (!isNativeApp()) return null;
-
-  const save = () => {
-    const saved = commitServerUrl(serverUrl);
-    if (!saved) {
-      toast("Enter a valid Library URL (https://…)", "error");
-      return;
-    }
-    applyApiBaseUrl();
-    toast("Library server URL updated. Sign in again if requests fail.", "success");
-    // Changing servers invalidates the old session — send user to login.
-    logout();
-  };
-
-  return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-      <div className="flex items-start gap-4">
-        <div className="p-2 bg-gray-800 rounded-lg shrink-0">
-          <Globe size={20} className="text-sky-400" />
-        </div>
-        <div className="flex-1 min-w-0 space-y-3">
-          <div>
-            <h3 className="text-sm font-semibold text-gray-100">Library server</h3>
-            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-              Address of your self-hosted Library. Changing it signs you out so you can
-              reconnect to the new server.
-            </p>
-          </div>
-          <ServerUrlField value={serverUrl} onChange={setServerUrl} forceShow />
-          <button
-            type="button"
-            onClick={save}
-            className="px-3 py-2 rounded-lg bg-sky-700/80 text-white text-sm font-medium hover:bg-sky-600"
-          >
-            Save server URL
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function Settings() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -737,7 +802,6 @@ export default function Settings() {
       </div>
 
       <div className="space-y-4">
-        <ServerUrlSettings />
         <AndroidApkSettings />
         <DebridKeysSection />
         <LibraryGroupSection />

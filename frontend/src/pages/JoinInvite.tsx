@@ -12,11 +12,12 @@ import {
   takePendingInvite,
 } from "../api/inviteLink";
 import { isNativeApp } from "../api/instanceUrl";
+import { currentOrigin, upsertRememberedLibrary } from "../api/libraryRegistry";
 
 /**
  * /join/:code — shared invite link (invite-only signup).
  * Web (Android): tries to open the installed app, else shows signup.
- * App / desktop web: username + password only; creates account and joins library.
+ * App / desktop web: email + password; creates account and joins library.
  * /join — paste an invite link or code first.
  */
 export default function JoinInvite() {
@@ -38,7 +39,7 @@ export default function JoinInvite() {
   const [invitePaste, setInvitePaste] = useState("");
   const [libraryName, setLibraryName] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
@@ -120,16 +121,46 @@ export default function JoinInvite() {
       setJoiningExisting(true);
       try {
         await api.post("/libraries/join", { invite_code: code });
+        try {
+          const lib = await api.get("/libraries/me");
+          const origin = currentOrigin();
+          const em = user?.email || localStorage.getItem("user_email") || "";
+          if (origin && em) {
+            upsertRememberedLibrary({
+              origin,
+              name: lib.data?.library?.name || libraryName || "Library",
+              coverUrl: lib.data?.library?.coverUrl || null,
+              email: em,
+            });
+          }
+        } catch {
+          /* local save best-effort */
+        }
         takePendingInvite();
         if (!cancelled) {
           toast("Joined library!", "success");
-          navigate("/", { replace: true });
+          navigate("/libraries", { replace: true });
         }
       } catch (e: any) {
         const detail = e.response?.data?.detail || "";
         if (String(detail).toLowerCase().includes("already")) {
+          try {
+            const lib = await api.get("/libraries/me");
+            const origin = currentOrigin();
+            const em = user?.email || localStorage.getItem("user_email") || "";
+            if (origin && em) {
+              upsertRememberedLibrary({
+                origin,
+                name: lib.data?.library?.name || libraryName || "Library",
+                coverUrl: lib.data?.library?.coverUrl || null,
+                email: em,
+              });
+            }
+          } catch {
+            /* ignore */
+          }
           takePendingInvite();
-          if (!cancelled) navigate("/", { replace: true });
+          if (!cancelled) navigate("/libraries", { replace: true });
           return;
         }
         joinedExisting.current = false;
@@ -176,13 +207,13 @@ export default function JoinInvite() {
       applyApiBaseUrl();
       const { data } = await api.post("/auth/signup-with-invite", {
         invite_code: code,
-        username: username.trim(),
+        email: email.trim(),
         password,
       });
       acceptSession(data);
       takePendingInvite();
       toast(`Welcome — you're in ${libraryName || "the library"}!`, "success");
-      navigate("/", { replace: true });
+      navigate("/libraries", { replace: true });
     } catch (err: any) {
       setError(
         err.response?.data?.detail ||
@@ -286,7 +317,7 @@ export default function JoinInvite() {
               ? "Opening the Library app…"
               : libraryName
                 ? `Create your account to join ${libraryName}`
-                : "Create your username and password to join"}
+                : "Create your email and password to join"}
           </p>
         </div>
 
@@ -321,17 +352,17 @@ export default function JoinInvite() {
 
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1">
-                Username
+                Email
               </label>
               <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="email"
+                inputMode="email"
                 autoFocus
                 required
-                minLength={2}
-                maxLength={64}
+                maxLength={254}
                 className="w-full px-3 py-2.5 bg-gray-900 border border-gray-600 rounded-lg text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               />
             </div>

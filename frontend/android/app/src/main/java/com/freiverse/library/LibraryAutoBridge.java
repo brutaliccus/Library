@@ -13,6 +13,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.MediaDescriptionCompat;
 import android.support.v4.media.MediaMetadataCompat;
@@ -482,7 +483,9 @@ public final class LibraryAutoBridge {
 
         PlaybackStateCompat playbackState = new PlaybackStateCompat.Builder()
             .setActions(actions)
-            .setState(state, positionMs, playbackSpeed)
+            // Explicit updateTime so AA keeps extrapolating position across
+            // chapter metadata swaps (without it, some head units freeze the timer).
+            .setState(state, positionMs, playbackSpeed, SystemClock.elapsedRealtime())
             .build();
         session.setPlaybackState(playbackState);
 
@@ -496,14 +499,17 @@ public final class LibraryAutoBridge {
         }
 
         if (metadataMayHaveChanged) {
-            MediaMetadataCompat metadata = new MediaMetadataCompat.Builder()
+            MediaMetadataCompat.Builder metaBuilder = new MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
                 .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
-                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
-                .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork)
-                .build();
-            session.setMetadata(metadata);
+                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+            // Never put a null bitmap — that clears cover art on many AA units.
+            if (artwork != null) {
+                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork);
+                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, artwork);
+            }
+            session.setMetadata(metaBuilder.build());
         }
         session.setActive(true);
 

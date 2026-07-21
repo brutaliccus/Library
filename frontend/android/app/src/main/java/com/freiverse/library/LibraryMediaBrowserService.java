@@ -55,8 +55,11 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
             @Override
             public void onPause() {
-                LibraryAutoBridge.getInstance().setPlayingOptimistic(false);
-                LibraryAutoBridge.getInstance().dispatch("pause", null);
+                LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
+                bridge.setPlayingOptimistic(false);
+                // Keep audio focus so a subsequent play from AA/lock screen
+                // doesn't race a fresh focus request while the WebView wakes.
+                bridge.dispatch("pause", null);
             }
 
             @Override
@@ -94,10 +97,15 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
             @Override
             public void onPlayFromMediaId(String mediaId, Bundle extras) {
-                LibraryAutoBridge.getInstance().requestAudioFocusForPlay();
+                LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
+                bridge.requestAudioFocusForPlay();
+                // Optimistic play so AA shows playing while the book loads.
+                if (bridge.isActive()) {
+                    bridge.setPlayingOptimistic(true);
+                }
                 Bundle payload = new Bundle();
                 payload.putString("mediaId", mediaId);
-                LibraryAutoBridge.getInstance().dispatch("playmedia", payload);
+                bridge.dispatch("playmedia", payload);
             }
         });
 

@@ -79,9 +79,9 @@ export function applyThemeCss(theme: ThemeId): void {
 
 export function applyThemeToDocument(theme: ThemeId): void {
   applyThemeCss(theme);
-  // Browser/PWA favicons only — native launcher icon swap is disabled (crashes).
+  // Favicons always; on Android also switch the single AA MediaBrowserService.
   void import("./themeIcon")
-    .then((m) => m.applyThemedFavicons(theme))
+    .then((m) => m.applyAppIconTheme(theme))
     .catch(() => {
       /* ignore */
     });
@@ -90,5 +90,11 @@ export function applyThemeToDocument(theme: ThemeId): void {
 /** Call once before React mounts so first paint matches last theme. */
 export function bootstrapThemeFromCache(): void {
   const cached = readCachedTheme();
-  if (cached) applyThemeCss(cached);
+  if (cached) {
+    applyThemeCss(cached);
+    // Sync AA MediaBrowserService early (prefs may already match).
+    void import("./themeIcon")
+      .then((m) => m.applyNativeAppIconTheme(cached))
+      .catch(() => {});
+  }
 }

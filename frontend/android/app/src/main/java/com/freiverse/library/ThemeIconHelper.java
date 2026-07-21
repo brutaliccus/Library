@@ -7,18 +7,19 @@ import android.content.pm.PackageManager;
 import android.util.Log;
 
 /**
- * Persists the preferred theme for Android Auto service selection.
+ * Persists UI theme and keeps exactly one Android Auto MediaBrowserService enabled.
  *
- * Launcher activity-alias switching via PackageManager was killing the Capacitor
- * WebView process on theme change (DONT_KILL_APP is not reliable when disabling
- * the active launcher). Theme changes now only update in-app CSS + web favicons;
- * the home-screen icon stays on the default aliases.
+ * Launcher activity-alias switching via PackageManager can kill the Capacitor
+ * WebView (DONT_KILL_APP is unreliable when disabling the active launcher).
+ * Home-screen icon stays on whatever the manifest/PackageManager already has;
+ * only AA MediaBrowser services are toggled here.
  */
 public final class ThemeIconHelper {
     private static final String TAG = "ThemeIconHelper";
     private static final String PREFS = "library_theme_icon";
     private static final String KEY_THEME = "theme";
-    private static final String KEY_HEALED = "aliases_healed_v1";
+    /** v1 heal re-enabled ALL services (4 AA icons). v2 corrects that. */
+    private static final String KEY_HEALED = "aliases_healed_v2";
     public static final String DEFAULT_THEME = "ocean";
     private static final String[] THEMES = { "ocean", "ember", "forest", "dusk" };
 
@@ -53,33 +54,39 @@ public final class ThemeIconHelper {
     }
 
     /**
-     * Persist theme preference only — do not toggle launcher aliases.
-     * Also one-time heal: re-enable all aliases disabled by older builds.
+     * Persist theme and enable only the matching Android Auto MediaBrowserService.
+     * Does not toggle launcher aliases (crash-prone).
      */
     public static void apply(Context context, String themeRaw) {
         String theme = normalize(themeRaw);
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         prefs.edit().putString(KEY_THEME, theme).apply();
-        healAliasesOnce(context, prefs);
-        Log.i(TAG, "Theme preference saved (launcher icon switch disabled): " + theme);
+        applyMediaBrowserOnly(context, theme);
+        prefs.edit().putBoolean(KEY_HEALED, true).apply();
+        Log.i(TAG, "Android Auto icon theme -> " + theme);
     }
 
-    /** Cold start: heal aliases if needed; never disable components. */
+    /** Cold start: heal from older builds that enabled every themed AA service. */
     public static void ensureSafeAliases(Context context) {
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        healAliasesOnce(context, prefs);
+        applyMediaBrowserOnly(context, getSavedTheme(context));
+        if (!prefs.getBoolean(KEY_HEALED, false)) {
+            prefs.edit().putBoolean(KEY_HEALED, true).apply();
+            Log.i(TAG, "Healed AA services to a single theme entry");
+        }
     }
 
-    private static void healAliasesOnce(Context context, SharedPreferences prefs) {
-        if (prefs.getBoolean(KEY_HEALED, false)) return;
+    /** Enable the theme's MediaBrowserService; disable the other three. */
+    private static void applyMediaBrowserOnly(Context context, String theme) {
         PackageManager pm = context.getPackageManager();
-        String pkg = context.getPackageName();
+        Class<?> target = mediaBrowserServiceClass(theme);
+        // Enable target first so AA always has a browsable service.
+        setEnabled(pm, new ComponentName(context, target), true);
         for (String t : THEMES) {
-            setEnabled(pm, new ComponentName(pkg, pkg + ".Launcher" + capitalize(t)), true);
-            setEnabled(pm, new ComponentName(context, mediaBrowserServiceClass(t)), true);
+            Class<?> cls = mediaBrowserServiceClass(t);
+            if (cls.equals(target)) continue;
+            setEnabled(pm, new ComponentName(context, cls), false);
         }
-        prefs.edit().putBoolean(KEY_HEALED, true).apply();
-        Log.i(TAG, "Re-enabled all theme launcher / AA aliases (one-time heal)");
     }
 
     private static void setEnabled(PackageManager pm, ComponentName component, boolean enable) {
@@ -91,10 +98,5 @@ public final class ThemeIconHelper {
         } catch (Exception e) {
             Log.w(TAG, "Failed to toggle " + component.flattenToShortString(), e);
         }
-    }
-
-    private static String capitalize(String theme) {
-        if (theme == null || theme.isEmpty()) return "Ocean";
-        return Character.toUpperCase(theme.charAt(0)) + theme.substring(1);
     }
 }

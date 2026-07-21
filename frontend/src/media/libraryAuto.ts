@@ -18,6 +18,7 @@ let playHandlers: AutoPlayHandlers | null = null;
 
 let lastMetaKey = "";
 let lastPosSyncAt = 0;
+let lastPlayingSynced: boolean | null = null;
 const POS_SYNC_INTERVAL_MS = 1_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -77,7 +78,12 @@ export async function registerAndroidAutoHandlers(
         action: "playmedia",
         fn: (d) => {
           const id = d?.mediaId;
-          if (id && playHandlers) void handlePlayMediaId(id, playHandlers);
+          const ph = playHandlers;
+          if (id && ph) {
+            void withWebViewReady(() => {
+              void handlePlayMediaId(id, ph);
+            });
+          }
         },
       },
     ];
@@ -103,6 +109,7 @@ export async function syncAndroidAutoPlayback(
   try {
     if (!np) {
       lastMetaKey = "";
+      lastPlayingSynced = null;
       await LibraryAuto.syncPlayback({ active: false, playing: false });
       return;
     }
@@ -115,15 +122,18 @@ export async function syncAndroidAutoPlayback(
 
     const d = scope.duration;
     const pos = scope.position;
-    const metaKey = `${scope.label}|${np.title}|${np.author}|${np.coverUrl}|${trackIndex}|${trackLabel}`;
+    const metaKey = `${scope.label}|${np.title}|${np.author}|${np.coverUrl}|${trackIndex}|${trackLabel}|${d}`;
     const metaChanged = metaKey !== lastMetaKey;
+    const playingChanged = lastPlayingSynced !== isPlaying;
     const now = Date.now();
     const posDue = now - lastPosSyncAt >= POS_SYNC_INTERVAL_MS;
 
-    if (!metaChanged && !posDue) return;
+    // Never throttle play/pause — AA button state must track the phone immediately.
+    if (!metaChanged && !posDue && !playingChanged) return;
 
     if (metaChanged) lastMetaKey = metaKey;
-    if (posDue) lastPosSyncAt = now;
+    if (posDue || playingChanged) lastPosSyncAt = now;
+    lastPlayingSynced = isPlaying;
 
     const safePos = isFinite(pos) ? Math.max(0, pos) : 0;
     if ("source" in np && (np.source === "abs" || np.source === "rd")) {

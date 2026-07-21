@@ -61,15 +61,23 @@ export function applyThemedFavicons(themeRaw: string): void {
 }
 
 /**
- * Native launcher-icon switching is intentionally disabled.
- * PackageManager activity-alias toggles were killing the Capacitor process.
- * In-app CSS theme + web favicons still update; home-screen icon stays put.
+ * Persist theme + enable the matching Android Auto MediaBrowserService.
+ * Launcher activity-aliases are NOT switched (that killed the WebView process).
  */
-export async function applyNativeAppIconTheme(_themeRaw: string): Promise<void> {
-  /* no-op — see ThemeIconHelper.java */
+export async function applyNativeAppIconTheme(themeRaw: string): Promise<void> {
+  try {
+    const { Capacitor, registerPlugin } = await import("@capacitor/core");
+    if (Capacitor.getPlatform() !== "android") return;
+    const ThemeIcon = registerPlugin<{
+      setTheme(options: { theme: string }): Promise<{ theme: string }>;
+    }>("ThemeIcon");
+    await ThemeIcon.setTheme({ theme: normalizeThemeId(themeRaw) });
+  } catch {
+    /* plugin unavailable (web / older APK) */
+  }
 }
 
 export async function applyAppIconTheme(themeRaw: string): Promise<void> {
   applyThemedFavicons(themeRaw);
-  // Native launcher aliases are not toggled (crash-prone on Android).
+  await applyNativeAppIconTheme(themeRaw);
 }

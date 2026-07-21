@@ -129,6 +129,10 @@ export async function syncNativeMediaSession(
   playbackRate: number,
   buffering = false
 ): Promise<void> {
+  // Android Auto: report true play intent, not buffering dips. Mapping
+  // buffering→paused froze the chapter progress timer and desynced the AA
+  // play/pause button during chapter loads and brief rebuffers.
+  const aaPlaying = isPlaying;
   const effectivelyPlaying = isPlaying && !buffering;
 
   if (Capacitor.getPlatform() === "android") {
@@ -138,7 +142,7 @@ export async function syncNativeMediaSession(
     const { syncAndroidAutoPlayback } = await import("./libraryAuto");
     await syncAndroidAutoPlayback(
       np,
-      effectivelyPlaying,
+      aaPlaying,
       globalTime,
       trackIndex,
       playbackRate

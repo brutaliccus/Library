@@ -43,7 +43,7 @@ scp scripts/install_libraforge.sh pihole@192.168.68.76:/tmp/
 ssh pihole@192.168.68.76 "bash /tmp/install_libraforge.sh"
 ```
 
-UI (localhost only): `http://127.0.0.1:5056`
+UI (localhost + Docker bridge): `http://127.0.0.1:5056` (also bound on `172.17.0.1:5056` so the Library container can health-probe it). The install script writes `docker-compose.override.yml` for that second bind.
 
 The install script creates `/mnt/Audiobooks/_unorganized` for messy imports.
 

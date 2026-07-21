@@ -64,6 +64,24 @@ if ! stack_looks_valid; then
   exit 1
 fi
 
+# Library container probes via Docker bridge gateway. Upstream binds
+# 127.0.0.1:5056 only, which containers cannot reach — add bridge bind.
+OVERRIDE="${STACK_DIR}/docker-compose.override.yml"
+if [[ ! -f "${OVERRIDE}" ]]; then
+  echo "==> Writing ${OVERRIDE} (127.0.0.1 + 172.17.0.1 :5056)"
+  cat >"${OVERRIDE}" <<'EOF'
+# Managed by Library Site scripts/install_libraforge.sh
+# Keep localhost bind for NPM/local; add Docker bridge for Library health probe.
+services:
+  libraforge:
+    ports:
+      - "127.0.0.1:5056:5056"
+      - "172.17.0.1:5056:5056"
+EOF
+else
+  echo "==> Keeping existing ${OVERRIDE}"
+fi
+
 if [[ ! -f "${STACK_DIR}/.env" ]]; then
   echo "==> Creating ${STACK_DIR}/.env"
   cat >"${STACK_DIR}/.env" <<EOF

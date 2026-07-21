@@ -49,42 +49,64 @@ The install script creates `/mnt/Audiobooks/_unorganized` for messy imports.
 
 ## Expose safely (Nginx Proxy Manager)
 
-Your Pi uses **Nginx Proxy Manager** on ports 80/443. Add a proxy host (manual in NPM UI if not already present):
+NPM runs on the Pi as Docker container `nginx-proxy-manager` (`/opt/stacks/nginxproxymanager`), UI on **http://192.168.68.76:81** (ports 80/443 for public traffic). Library deploy only reloads custom nginx snippets — it does **not** create proxy hosts, and this repo has **no** NPM API password/token.
 
-| Field | Value |
-|-------|-------|
-| Domain | `forge.library.freiverse.com` |
-| Forward hostname | `127.0.0.1` |
-| Forward port | `5056` |
-| Websockets | On |
-| Access | **Restrict** — VPN, home IP, or NPM access list |
+LibraForge listens on `127.0.0.1:5056` and `172.17.0.1:5056` only (not the LAN IP). From the NPM container, **`172.17.0.1:5056` works**; `127.0.0.1` and `192.168.68.76:5056` do not.
 
-Request SSL in NPM as usual. Do **not** expose LibraForge to the public internet without restrictions — it can rewrite tags and move files. Library deploy does **not** create this proxy host.
+### Configured on Pi (proxy host + access list)
+
+These already exist in NPM (other proxy hosts on this box are typically public because those apps have their own login; LibraForge does **not**, so it is restricted):
+
+| Item | Value |
+|------|-------|
+| Proxy host | `forge.library.freiverse.com` → `http://172.17.0.1:5056` (websockets on, block exploits on) |
+| Access list | `home-or-vpn` (Satisfy Any): allow `192.168.68.0/22`, `192.168.0.0/16`, `100.64.0.0/10` (Tailscale), `10.0.0.0/8`, `172.16.0.0/12`, `127.0.0.1/32`; NPM adds `deny all` |
+| SSL | **Pending** — add DNS first, then request Let's Encrypt + Force SSL in the NPM UI (or API) |
+
+Local check (from Pi / NPM): `curl -sS http://172.17.0.1:5056/health` and `curl -sS -H 'Host: forge.library.freiverse.com' http://127.0.0.1/health`.
+
+### Remaining: Cloudflare DNS + SSL
+
+1. In Cloudflare (zone `freiverse.com`), add an **A** (or CNAME) for `forge.library.freiverse.com` pointing at the **same public IP** as `library.freiverse.com` (currently `74.135.86.77`). No Cloudflare API token was found on the Pi or this repo.
+2. After DNS propagates (not NXDOMAIN), in NPM UI → edit the forge proxy host → SSL → Request new Let's Encrypt certificate → **Force SSL**.
+3. Test: `https://forge.library.freiverse.com` from an allowed LAN/VPN IP; confirm **403** from the public Internet.
+
+Do **not** leave the forge host on Public / without an access list. It can rewrite tags and move files.
 
 ## Audible authentication
 
-Metadata Forge needs Audible API credentials. Use a **dedicated** Audible account (not your main one).
+Metadata Forge needs an **unencrypted** Audible auth JSON at `/auth/audible-metadata.json` (host: `/opt/stacks/libraforge/audible-auth/`). Use a **dedicated** Audible account (not your main one).
 
-1. On any machine with Python, install the Audible CLI and authenticate:
+### Does this LibraForge have a browser login GUI?
 
-   ```bash
-   pip install audible
+**No** — the installed stack is [brutaliccus/LibraForge](https://github.com/brutaliccus/LibraForge). The UI only has an “Audible auth file” path field; it does **not** run Amazon OAuth in the browser. Upstream [coconautilus17/LibraForge](https://github.com/coconautilus17/LibraForge) has **Settings → Accounts** with guided browser OAuth; that is **not** what is running on the Pi today.
+
+### Practical path (Windows → Pi)
+
+1. On Windows (Python), install the CLI and run quickstart — choose **external browser** login when asked:
+
+   ```powershell
+   pip install audible-cli
    audible quickstart
    ```
 
-2. Copy the generated auth file to the Pi:
+   Or with the library alone: use `Authenticator.from_login_external` (prints a URL; paste the final Amazon redirect URL back). See [Audible authorization docs](https://audible.readthedocs.io/en/latest/auth/authorization.html).
 
-   ```bash
-   scp ~/.audible/audible-metadata.json pihole@192.168.68.76:/opt/stacks/libraforge/audible-auth/
+2. Copy the generated auth file to the Pi (rename to the expected name if needed):
+
+   ```powershell
+   scp $env:USERPROFILE\.audible\*.json pihole@192.168.68.76:/opt/stacks/libraforge/audible-auth/audible-metadata.json
    ```
+
+   Exact filename from quickstart may vary; LibraForge expects **`audible-metadata.json`** in that folder.
 
 3. Restart LibraForge:
 
-   ```bash
+   ```powershell
    ssh pihole@192.168.68.76 "cd /opt/stacks/libraforge && docker compose restart"
    ```
 
-The auth directory is mounted read-only inside the container at `/auth`.
+The auth directory is mounted into the container at `/auth`. Encrypted auth files are **not** supported by this UI.
 
 ## Recommended workflow with Library
 

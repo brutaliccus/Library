@@ -78,11 +78,19 @@ def _normalize_item_genres(raw_genres: list) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for g in raw_genres or []:
-        label = g if isinstance(g, str) else (g.get("name") or g.get("title") or "")
-        top = _map_to_toplevel(str(label))
-        if top and top not in seen:
-            seen.add(top)
-            out.append(top)
+        try:
+            if isinstance(g, str):
+                label = g
+            elif isinstance(g, dict):
+                label = g.get("name") or g.get("title") or g.get("tag") or ""
+            else:
+                label = str(g) if g is not None else ""
+            top = _map_to_toplevel(str(label))
+            if top and top not in seen:
+                seen.add(top)
+                out.append(top)
+        except Exception:
+            continue
     return out
 
 
@@ -102,51 +110,94 @@ def _series_hint_from_item(item: dict) -> str:
     return ""
 
 
+# Soft budget so collection shelves stay fast when Hardcover is slow/down.
+_ENRICH_BUDGET_SECONDS = 8.0
+
+
 async def _enrich_items_via_hardcover(
     items: list[dict],
     *,
     title_key: str = "title",
     author_key: str = "author",
     concurrency: int = 8,
+    budget_seconds: float = _ENRICH_BUDGET_SECONDS,
 ) -> list[dict]:
-    """Enrich library items with Hardcover author / genres / series (taxonomy-mapped)."""
+    """Enrich library items with Hardcover author / genres / series (taxonomy-mapped).
+
+    Fail-open: any HC error/timeout returns the original items unchanged (or
+    whatever finished before the budget). Never raises into collection handlers.
+    """
     if not items:
         return []
 
     sem = asyncio.Semaphore(max(1, concurrency))
 
     async def _one(item: dict) -> dict:
-        title = (item.get(title_key) or "").strip()
-        if not title:
-            return item
-        author = (item.get(author_key) or "").strip()
-        hint = _series_hint_from_item(item)
-        async with sem:
-            try:
+        try:
+            title = (item.get(title_key) or "").strip()
+            if not title:
+                return item
+            author = (item.get(author_key) or "").strip()
+            hint = _series_hint_from_item(item)
+            async with sem:
                 hc = await hardcover.match_library_book(
                     title=title, author=author, series_hint=hint,
                 )
-            except Exception:
-                logger.debug("Hardcover match failed for %s", title, exc_info=True)
+            if not isinstance(hc, dict):
                 return item
-        out = {**item}
-        if hc.get("author"):
-            out[author_key] = hc["author"]
-        hc_genres = _normalize_item_genres(hc.get("genres") or [])
-        if hc_genres:
-            out["genres"] = hc_genres
-            # Personal Collection uses singular genre for filters/UI.
-            if "genre" in item:
-                out["genre"] = hc_genres[0]
-        sname = (hc.get("seriesName") or "").strip()
-        if sname and not is_junk_series_hint(sname):
-            out["seriesName"] = sname
-            seq = str(hc.get("sequence") or "").strip()
-            out["sequence"] = seq
-            out["series"] = [{"name": sname, "sequence": seq}]
+            out = {**item}
+            if hc.get("author"):
+                out[author_key] = hc["author"]
+            hc_genres = _normalize_item_genres(hc.get("genres") or [])
+            if hc_genres:
+                out["genres"] = hc_genres
+                # Personal Collection uses singular genre for filters/UI.
+                if "genre" in item:
+                    out["genre"] = hc_genres[0]
+            sname = (hc.get("seriesName") or "").strip()
+            if sname and not is_junk_series_hint(sname):
+                out["seriesName"] = sname
+                seq = str(hc.get("sequence") or "").strip()
+                out["sequence"] = seq
+                out["series"] = [{"name": sname, "sequence": seq}]
+            return out
+        except Exception:
+            logger.debug(
+                "Hardcover enrich failed for %s",
+                (item.get(title_key) if isinstance(item, dict) else None) or "?",
+                exc_info=True,
+            )
+            return item
+
+    async def _run() -> list[dict]:
+        results = await asyncio.gather(*[_one(it) for it in items], return_exceptions=True)
+        out: list[dict] = []
+        for original, result in zip(items, results):
+            if isinstance(result, dict):
+                out.append(result)
+            else:
+                if isinstance(result, BaseException):
+                    logger.debug("Hardcover enrich gather item failed", exc_info=result)
+                out.append(original)
         return out
 
-    return list(await asyncio.gather(*[_one(it) for it in items]))
+    try:
+        if budget_seconds and budget_seconds > 0:
+            return await asyncio.wait_for(_run(), timeout=budget_seconds)
+        return await _run()
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Hardcover enrichment timed out after %.1fs (%d items); returning unenriched",
+            budget_seconds,
+            len(items),
+        )
+        return items
+    except Exception:
+        logger.exception(
+            "Hardcover enrichment failed entirely (%d items); returning unenriched",
+            len(items),
+        )
+        return items
 
 
 async def _group_items_by_hardcover_series(

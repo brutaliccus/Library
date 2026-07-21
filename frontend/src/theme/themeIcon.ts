@@ -1,15 +1,5 @@
-import { Capacitor, registerPlugin } from "@capacitor/core";
 import { normalizeThemeId, type ThemeId } from "./themes";
 
-interface ThemeIconPlugin {
-  setTheme(options: { theme: string }): Promise<{ theme: string }>;
-  getTheme(): Promise<{ theme: string }>;
-}
-
-const ThemeIcon = registerPlugin<ThemeIconPlugin>("ThemeIcon");
-
-/** Avoid redundant native alias toggles (each can restart the activity). */
-let lastNativeTheme: ThemeId | null = null;
 let lastFaviconTheme: ThemeId | null = null;
 
 /** Hex accents used for meta theme-color (matches icon backgrounds). */
@@ -70,21 +60,16 @@ export function applyThemedFavicons(themeRaw: string): void {
   setMetaContent("msapplication-TileColor", THEME_META[theme].themeColor);
 }
 
-/** Native Android launcher + Android Auto service icon switch. */
-export async function applyNativeAppIconTheme(themeRaw: string): Promise<void> {
-  if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android") return;
-  const theme = normalizeThemeId(themeRaw);
-  if (lastNativeTheme === theme) return;
-  lastNativeTheme = theme;
-  try {
-    await ThemeIcon.setTheme({ theme });
-  } catch {
-    /* plugin missing on older APKs — allow retry next time */
-    lastNativeTheme = null;
-  }
+/**
+ * Native launcher-icon switching is intentionally disabled.
+ * PackageManager activity-alias toggles were killing the Capacitor process.
+ * In-app CSS theme + web favicons still update; home-screen icon stays put.
+ */
+export async function applyNativeAppIconTheme(_themeRaw: string): Promise<void> {
+  /* no-op — see ThemeIconHelper.java */
 }
 
 export async function applyAppIconTheme(themeRaw: string): Promise<void> {
   applyThemedFavicons(themeRaw);
-  await applyNativeAppIconTheme(themeRaw);
+  // Native launcher aliases are not toggled (crash-prone on Android).
 }

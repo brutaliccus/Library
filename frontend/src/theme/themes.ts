@@ -79,9 +79,9 @@ export function applyThemeCss(theme: ThemeId): void {
 
 export function applyThemeToDocument(theme: ThemeId): void {
   applyThemeCss(theme);
-  // Browser tab favicon + Android launcher / Android Auto icons.
+  // Browser/PWA favicons only — native launcher icon swap is disabled (crashes).
   void import("./themeIcon")
-    .then((m) => m.applyAppIconTheme(theme))
+    .then((m) => m.applyThemedFavicons(theme))
     .catch(() => {
       /* ignore */
     });

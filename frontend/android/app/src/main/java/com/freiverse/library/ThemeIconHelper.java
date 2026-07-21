@@ -6,11 +6,19 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.util.Log;
 
-/** Switches launcher activity-aliases + Android Auto MediaBrowserService icons by theme. */
+/**
+ * Persists the preferred theme for Android Auto service selection.
+ *
+ * Launcher activity-alias switching via PackageManager was killing the Capacitor
+ * WebView process on theme change (DONT_KILL_APP is not reliable when disabling
+ * the active launcher). Theme changes now only update in-app CSS + web favicons;
+ * the home-screen icon stays on the default aliases.
+ */
 public final class ThemeIconHelper {
     private static final String TAG = "ThemeIconHelper";
     private static final String PREFS = "library_theme_icon";
     private static final String KEY_THEME = "theme";
+    private static final String KEY_HEALED = "aliases_healed_v1";
     public static final String DEFAULT_THEME = "ocean";
     private static final String[] THEMES = { "ocean", "ember", "forest", "dusk" };
 
@@ -45,57 +53,33 @@ public final class ThemeIconHelper {
     }
 
     /**
-     * Enable the target launcher/AA components first, then disable the others.
-     * Disabling the currently-active launcher alias (or briefly having zero
-     * launchers) can kill the process even with DONT_KILL_APP — which showed up
-     * as "theme change crashes twice then stabilizes" when JS also re-applied
-     * a speculative default theme on reload.
+     * Persist theme preference only — do not toggle launcher aliases.
+     * Also one-time heal: re-enable all aliases disabled by older builds.
      */
     public static void apply(Context context, String themeRaw) {
         String theme = normalize(themeRaw);
-        String saved = getSavedTheme(context);
-        if (theme.equals(saved) && isTargetEnabled(context, theme)) {
-            return;
-        }
-
-        PackageManager pm = context.getPackageManager();
-        String pkg = context.getPackageName();
-
-        // Enable target first so a launcher stays available throughout the switch.
-        setEnabled(pm, new ComponentName(pkg, pkg + ".Launcher" + capitalize(theme)), true);
-        setEnabled(pm, new ComponentName(context, mediaBrowserServiceClass(theme)), true);
-
-        for (String t : THEMES) {
-            if (t.equals(theme)) continue;
-            setEnabled(pm, new ComponentName(pkg, pkg + ".Launcher" + capitalize(t)), false);
-            setEnabled(pm, new ComponentName(context, mediaBrowserServiceClass(t)), false);
-        }
-
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_THEME, theme)
-            .apply();
-        Log.i(TAG, "App / Android Auto icon theme -> " + theme);
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        prefs.edit().putString(KEY_THEME, theme).apply();
+        healAliasesOnce(context, prefs);
+        Log.i(TAG, "Theme preference saved (launcher icon switch disabled): " + theme);
     }
 
-    private static boolean isTargetEnabled(Context context, String theme) {
+    /** Cold start: heal aliases if needed; never disable components. */
+    public static void ensureSafeAliases(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        healAliasesOnce(context, prefs);
+    }
+
+    private static void healAliasesOnce(Context context, SharedPreferences prefs) {
+        if (prefs.getBoolean(KEY_HEALED, false)) return;
         PackageManager pm = context.getPackageManager();
         String pkg = context.getPackageName();
-        try {
-            int launcher = pm.getComponentEnabledSetting(
-                new ComponentName(pkg, pkg + ".Launcher" + capitalize(theme))
-            );
-            int service = pm.getComponentEnabledSetting(
-                new ComponentName(context, mediaBrowserServiceClass(theme))
-            );
-            boolean launcherOn = launcher == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                || (launcher == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT && theme.equals(DEFAULT_THEME));
-            boolean serviceOn = service == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                || (service == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT && theme.equals(DEFAULT_THEME));
-            return launcherOn && serviceOn;
-        } catch (Exception e) {
-            return false;
+        for (String t : THEMES) {
+            setEnabled(pm, new ComponentName(pkg, pkg + ".Launcher" + capitalize(t)), true);
+            setEnabled(pm, new ComponentName(context, mediaBrowserServiceClass(t)), true);
         }
+        prefs.edit().putBoolean(KEY_HEALED, true).apply();
+        Log.i(TAG, "Re-enabled all theme launcher / AA aliases (one-time heal)");
     }
 
     private static void setEnabled(PackageManager pm, ComponentName component, boolean enable) {

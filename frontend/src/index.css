@@ -150,7 +150,8 @@ select {
 }
 
 /*
-  Fiction-style EPUB body: first-line indent for paragraphs/dialogue.
+  Fiction-style EPUB body: first-line indent for ALL body paragraphs,
+  including the first after a chapter title / heading (no :first-child reset).
   Tailwind Typography (`prose`) and embedded EPUB <style> blocks often reset
   indent. Use high-specificity + !important so reading content wins in WebView.
 */
@@ -160,26 +161,6 @@ select {
   margin-top: 0 !important;
   margin-bottom: 0.15em !important;
   line-height: inherit;
-}
-
-/* Chapter openings / after headings traditionally skip the indent */
-.reader-content.prose > p:first-child,
-.reader-content > p:first-child,
-.reader-content.prose h1 + p,
-.reader-content.prose h2 + p,
-.reader-content.prose h3 + p,
-.reader-content.prose h4 + p,
-.reader-content.prose h5 + p,
-.reader-content.prose h6 + p,
-.reader-content.prose hr + p,
-.reader-content h1 + p,
-.reader-content h2 + p,
-.reader-content h3 + p,
-.reader-content h4 + p,
-.reader-content h5 + p,
-.reader-content h6 + p,
-.reader-content hr + p {
-  text-indent: 0 !important;
 }
 
 /* Scene-break spacers (empty paragraphs) shouldn't indent */

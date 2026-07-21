@@ -127,6 +127,55 @@ def test_enrich_items_maps_genres_via_taxonomy():
     asyncio.run(_run())
 
 
+def test_enrich_items_fail_open_on_match_error():
+    async def _run():
+        items = [
+            {"itemId": "1", "title": "Keep Me", "author": "A", "genres": ["Fantasy"]},
+            {"itemId": "2", "title": "Also Keep", "author": "B", "genres": []},
+        ]
+
+        async def boom(**kwargs):
+            raise RuntimeError("Hardcover down")
+
+        with patch.object(hardcover, "match_library_book", new=boom):
+            out = await library_router._enrich_items_via_hardcover(items)
+        assert len(out) == 2
+        assert out[0]["title"] == "Keep Me"
+        assert out[1]["title"] == "Also Keep"
+
+    asyncio.run(_run())
+
+
+def test_enrich_items_fail_open_on_budget_timeout():
+    async def _run():
+        items = [
+            {"itemId": "1", "title": "Slow Book", "author": "A", "genres": ["Fantasy"]},
+        ]
+
+        async def slow(**kwargs):
+            await asyncio.sleep(2)
+            return {"author": "X", "genres": [], "seriesName": "", "sequence": "", "matchedTitle": ""}
+
+        with patch.object(hardcover, "match_library_book", new=slow):
+            out = await library_router._enrich_items_via_hardcover(
+                items, budget_seconds=0.05
+            )
+        assert len(out) == 1
+        assert out[0]["title"] == "Slow Book"
+        assert out[0]["author"] == "A"  # unenriched original
+
+    asyncio.run(_run())
+
+
+def test_normalize_item_genres_tolerates_weird_shapes():
+    # Must not raise on None / int / odd dict shapes.
+    out = library_router._normalize_item_genres(
+        ["Fantasy", None, 12, {"name": "Mystery"}, {"nope": True}]
+    )
+    assert "Fantasy" in out
+    assert any("Mystery" in g for g in out)
+
+
 def test_group_prefers_enriched_series_name():
     async def _run():
         items = [

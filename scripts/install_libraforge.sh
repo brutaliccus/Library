@@ -12,7 +12,7 @@
 set -euo pipefail
 
 STACK_DIR="/opt/stacks/libraforge"
-REPO_URL="${LIBRAFORGE_REPO_URL:-https://github.com/brutaliccus/LibraForge.git}"
+REPO_URL="${LIBRAFORGE_REPO_URL:-https://github.com/coconautilus17/LibraForge.git}"
 FALLBACK_REPO_URL="https://github.com/coconautilus17/LibraForge.git"
 AUDIOBOOKS_HOST="/mnt/Audiobooks"
 
@@ -115,7 +115,8 @@ echo ""
 echo "Next steps:"
 echo "  1. Add Audible auth: ${STACK_DIR}/audible-auth/audible-metadata.json"
 echo "     (see docs/libraforge.md in the Library Site repo)"
-echo "  2. Expose via Nginx Proxy Manager: forge.library.freiverse.com -> http://127.0.0.1:5056"
+echo "  2. Expose via Nginx Proxy Manager: forge.library.freiverse.com -> http://172.17.0.1:5056"
+echo "     (from NPM container use 172.17.0.1, not 127.0.0.1 / LAN IP — see docs/libraforge.md)"
 echo "     Restrict access (VPN / IP allowlist / access list) — LibraForge can modify files."
 echo "  3. Set Library Site .env: LIBRAFORGE_URL + LIBRAFORGE_INTERNAL_URL, then redeploy Library."
 echo "  4. In LibraForge UI, set source to /audiobooks/_unorganized and dest to /audiobooks"

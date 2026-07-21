@@ -1,6 +1,6 @@
 # LibraForge (sibling stack)
 
-[LibraForge](https://github.com/brutaliccus/LibraForge) (fork of [coconautilus17/LibraForge](https://github.com/coconautilus17/LibraForge)) runs **beside** the Library app — not inside it. It shares the same on-disk audiobook library that Audiobookshelf and Library use.
+[LibraForge](https://github.com/coconautilus17/LibraForge) runs **beside** the Library app — not inside it. It shares the same on-disk audiobook library that Audiobookshelf and Library use.
 
 | Service | Host path | In-container path |
 |---------|-----------|-------------------|
@@ -49,7 +49,7 @@ The install script creates `/mnt/Audiobooks/_unorganized` for messy imports.
 
 ## Expose safely (Nginx Proxy Manager)
 
-NPM runs on the Pi as Docker container `nginx-proxy-manager` (`/opt/stacks/nginxproxymanager`), UI on **http://192.168.68.76:81** (ports 80/443 for public traffic). Library deploy only reloads custom nginx snippets — it does **not** create proxy hosts, and this repo has **no** NPM API password/token.
+NPM runs on the Pi as Docker container `nginx-proxy-manager` (`/opt/stacks/nginxproxymanager`), UI on **http://192.168.68.76:81** (ports 80/443 for public traffic). Library deploy only reloads custom nginx snippets - it does **not** create proxy hosts, and this repo has **no** NPM API password/token.
 
 LibraForge listens on `127.0.0.1:5056` and `172.17.0.1:5056` only (not the LAN IP). From the NPM container, **`172.17.0.1:5056` works**; `127.0.0.1` and `192.168.68.76:5056` do not.
 
@@ -59,29 +59,30 @@ These already exist in NPM (other proxy hosts on this box are typically public b
 
 | Item | Value |
 |------|-------|
-| Proxy host | `forge.library.freiverse.com` → `http://172.17.0.1:5056` (websockets on, block exploits on) |
+| Proxy host | `forge.library.freiverse.com` -> `http://172.17.0.1:5056` (websockets on, block exploits on) |
 | Access list | `home-or-vpn` (Satisfy Any): allow `192.168.68.0/22`, `192.168.0.0/16`, `100.64.0.0/10` (Tailscale), `10.0.0.0/8`, `172.16.0.0/12`, `127.0.0.1/32`; NPM adds `deny all` |
-| SSL | **Pending** — add DNS first, then request Let's Encrypt + Force SSL in the NPM UI (or API) |
+| SSL | Let's Encrypt cert id **39**, Force SSL on (expires ~2026-10-19). DNS A -> `74.135.86.77` (DNS-only / grey-cloud; not Cloudflare-proxied) |
 
-Local check (from Pi / NPM): `curl -sS http://172.17.0.1:5056/health` and `curl -sS -H 'Host: forge.library.freiverse.com' http://127.0.0.1/health`.
+Local check (from Pi): `curl -sS http://172.17.0.1:5056/health` and `curl -sS --resolve forge.library.freiverse.com:443:127.0.0.1 https://forge.library.freiverse.com/`.
 
-### Remaining: Cloudflare DNS + SSL
+### DNS + SSL (done)
 
-1. In Cloudflare (zone `freiverse.com`), add an **A** (or CNAME) for `forge.library.freiverse.com` pointing at the **same public IP** as `library.freiverse.com` (currently `74.135.86.77`). No Cloudflare API token was found on the Pi or this repo.
-2. After DNS propagates (not NXDOMAIN), in NPM UI → edit the forge proxy host → SSL → Request new Let's Encrypt certificate → **Force SSL**.
-3. Test: `https://forge.library.freiverse.com` from an allowed LAN/VPN IP; confirm **403** from the public Internet.
+Cloudflare A record for `forge.library.freiverse.com` -> `74.135.86.77` (same as `library.freiverse.com`). Keep the record **DNS only** (grey cloud) so HTTP-01 renewals work; orange-cloud proxy can break Let's Encrypt HTTP-01.
+
+From an allowed LAN/VPN IP, `https://forge.library.freiverse.com` should load; from the public Internet expect **403** (`home-or-vpn`).
 
 Do **not** leave the forge host on Public / without an access list. It can rewrite tags and move files.
-
 ## Audible authentication
 
 Metadata Forge needs an **unencrypted** Audible auth JSON at `/auth/audible-metadata.json` (host: `/opt/stacks/libraforge/audible-auth/`). Use a **dedicated** Audible account (not your main one).
 
 ### Does this LibraForge have a browser login GUI?
 
-**No** — the installed stack is [brutaliccus/LibraForge](https://github.com/brutaliccus/LibraForge). The UI only has an “Audible auth file” path field; it does **not** run Amazon OAuth in the browser. Upstream [coconautilus17/LibraForge](https://github.com/coconautilus17/LibraForge) has **Settings → Accounts** with guided browser OAuth; that is **not** what is running on the Pi today.
+**Yes** — the installed stack is upstream [coconautilus17/LibraForge](https://github.com/coconautilus17/LibraForge). Prefer **Settings → Accounts** for guided browser OAuth when available.
 
-### Practical path (Windows → Pi)
+### Practical path (auth file → Pi)
+
+If you already have an unencrypted Audible auth JSON (e.g. from `audible-cli`):
 
 1. On Windows (Python), install the CLI and run quickstart — choose **external browser** login when asked:
 

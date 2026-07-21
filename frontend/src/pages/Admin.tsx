@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api from "../api/client";
 import {
@@ -13,6 +13,7 @@ import {
   Radar,
   Settings2,
   EyeOff,
+  ExternalLink,
 } from "lucide-react";
 import ScraperTab from "../components/admin/ScraperTab";
 import ConfigTab from "../components/admin/ConfigTab";
@@ -547,6 +548,33 @@ function HealthTab() {
         <KavitaEbookDebug />
         <IntegrationsCard />
         <HealthCard
+          title="LibraForge"
+          configured={svc("libraforge").configured !== false}
+          connected={!!svc("libraforge").connected}
+          items={[
+            { label: "URL", value: svc("libraforge").url || "N/A" },
+            {
+              label: "Workflow",
+              value: "Dry-run → backup → apply → Scan ABS",
+            },
+            ...(svc("libraforge").error
+              ? [{ label: "Error", value: String(svc("libraforge").error) }]
+              : []),
+          ]}
+          action={
+            svc("libraforge").url ? (
+              <a
+                href={String(svc("libraforge").url)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 mt-3 text-sm rounded-lg bg-teal-900/40 text-teal-200 border border-teal-800/50 hover:bg-teal-900/60"
+              >
+                <ExternalLink size={14} /> Open LibraForge
+              </a>
+            ) : null
+          }
+        />
+        <HealthCard
           title="Disk Space"
           configured={svc("disk").configured !== false}
           connected={svc("disk").connected !== false}
@@ -891,11 +919,13 @@ function HealthCard({
   connected,
   configured = true,
   items,
+  action,
 }: {
   title: string;
   connected: boolean;
   configured?: boolean;
   items: { label: string; value: string }[];
+  action?: ReactNode;
 }) {
   const dot =
     !configured ? "bg-amber-500" : connected ? "bg-green-500" : "bg-red-500";
@@ -916,6 +946,7 @@ function HealthCard({
           </div>
         ))}
       </div>
+      {action}
     </div>
   );
 }

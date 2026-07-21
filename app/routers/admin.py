@@ -223,6 +223,23 @@ async def system_health(_admin: User = Depends(require_admin)):
     return await collect_system_health()
 
 
+@router.get("/libraforge")
+async def libraforge_status(_admin: User = Depends(require_admin)):
+    """Admin deep-link status for sibling LibraForge (no proxy)."""
+    from app.config import get_settings
+    from app.services.health_checks import _probe_libraforge
+
+    settings = get_settings()
+    probe = await _probe_libraforge()
+    url = (settings.libraforge_url or "").strip() or None
+    return {
+        "url": url,
+        "configured": bool(url) or bool(probe.get("configured")),
+        "connected": bool(probe.get("connected")),
+        "error": probe.get("error"),
+    }
+
+
 @router.get("/kavita-debug")
 async def kavita_debug(_admin: User = Depends(require_admin)):
     """Diagnostic endpoint for Kavita ebook loading. Returns raw API response and errors."""

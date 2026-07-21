@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     abs_api_key: str = ""
     abs_library_id: str = ""
 
+    # LibraForge sibling stack (admin toolkit — link out only; AGPL).
+    # Public URL for Admin "Open LibraForge"; internal URL for health probe from Docker.
+    libraforge_url: str = "https://forge.library.freiverse.com"
+    libraforge_internal_url: str = "http://172.17.0.1:5056"
+
     kavita_url: str = "http://localhost:5000"
     kavita_api_key: str = ""
     kavita_library_id: int = 0
@@ -150,10 +155,11 @@ class Settings(BaseSettings):
         if self.abb_rss_only:
             self.abb_author_crawl_enabled = False
             self.abb_deep_search_enabled = False
-        # In Docker, localhost can't reach host services; use host.docker.internal
+        # In Docker, localhost can't reach host services; use Docker bridge gateway
         if os.path.exists("/.dockerenv"):
             self.abs_url = _host_for_docker(self.abs_url)
             self.kavita_url = _host_for_docker(self.kavita_url)
+            self.libraforge_internal_url = _host_for_docker(self.libraforge_internal_url)
         return self
 
 

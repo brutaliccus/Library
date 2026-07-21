@@ -349,6 +349,43 @@ async def _probe_disk() -> dict[str, Any]:
         return {"configured": True, "connected": False, "error": _err(e)}
 
 
+async def _probe_libraforge() -> dict[str, Any]:
+    """Probe sibling LibraForge stack. Fail-open — never raises."""
+    settings = get_settings()
+    public = (settings.libraforge_url or "").strip().rstrip("/")
+    internal = (settings.libraforge_internal_url or "").strip().rstrip("/")
+    if not public and not internal:
+        return {
+            "configured": False,
+            "connected": False,
+            "url": None,
+            "internal_url": None,
+            "error": "LIBRAFORGE_URL not set",
+        }
+    probe_base = internal or public
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            resp = await client.get(f"{probe_base}/health")
+            if resp.status_code >= 500 or resp.status_code == 404:
+                resp = await client.get(f"{probe_base}/")
+            ok = resp.status_code < 500
+            return {
+                "configured": bool(public or internal),
+                "connected": ok,
+                "url": public or None,
+                "internal_url": internal or None,
+                "error": None if ok else f"HTTP {resp.status_code}",
+            }
+    except Exception as e:
+        return {
+            "configured": bool(public or internal),
+            "connected": False,
+            "url": public or None,
+            "internal_url": internal or None,
+            "error": _err(e),
+        }
+
+
 async def collect_system_health() -> dict[str, Any]:
     """Run all connection probes in parallel (short timeouts)."""
     from app.services.debrid_tokens import apply_server_debrid_tokens
@@ -371,6 +408,7 @@ async def collect_system_health() -> dict[str, Any]:
         "ol_catalog",
         "nyt",
         "disk",
+        "libraforge",
     ]
     coros = [
         _probe_real_debrid(),
@@ -385,6 +423,7 @@ async def collect_system_health() -> dict[str, Any]:
         _probe_ol_catalog(),
         _probe_nyt(),
         _probe_disk(),
+        _probe_libraforge(),
     ]
     results = await asyncio.gather(*coros, return_exceptions=True)
     out: dict[str, Any] = {}

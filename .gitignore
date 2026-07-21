@@ -81,13 +81,11 @@ scripts/check_scraper.py
 scripts/run_check_scraper.sh
 scripts/scan_kavita.py
 scripts/test_*.py
-scripts/install_libraforge.sh
 scripts/make_deploy_archive.py
 scripts/run_flaresolverr_local.ps1
 
-# Internal planning / sibling-product docs
+# Internal planning docs (keep local)
 docs/EREADER-PAGINATION-PLAN.md
-docs/libraforge.md
 nginx/library.freiverse.com.conf
 
 # Misc junk

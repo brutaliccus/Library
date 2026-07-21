@@ -620,6 +620,44 @@ async def get_catalog_volume(volume_id: str) -> dict | None:
     return None
 
 
+async def lookup_cover_url(
+    volume_id: str | None = None,
+    title: str = "",
+    author: str = "",
+) -> str:
+    """Best-effort cover URL when a row was stored without artwork.
+
+    Prefer catalog volume id (OL: / ISBN: / Google), then title(+author) search.
+    """
+    vid = (volume_id or "").strip()
+    if vid and not vid.startswith("rd:"):
+        try:
+            book = await get_catalog_volume(vid)
+            if book:
+                cover = (book.get("coverUrl") or book.get("coverUrlLarge") or "").strip()
+                if cover:
+                    return cover
+        except Exception:
+            logger.debug("cover lookup by volume failed for %s", vid, exc_info=True)
+
+    title = (title or "").strip()
+    if not title:
+        return ""
+    try:
+        q = f'intitle:"{title}"'
+        author = (author or "").strip()
+        if author:
+            q += f" inauthor:{author}"
+        result = await search_volumes(q, max_results=3)
+        for b in (result or {}).get("books") or []:
+            cover = (b.get("coverUrl") or "").strip()
+            if cover:
+                return cover
+    except Exception:
+        logger.debug("cover lookup by search failed for %s", title, exc_info=True)
+    return ""
+
+
 async def enrich_cover_if_missing(book: dict) -> dict:
     """Fill empty/broken coverUrl from ISBNdb / Google / Hardcover / OL ISBN.
 

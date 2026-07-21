@@ -72,6 +72,7 @@ export default function CoverImage({
     <img
       src={toAbsoluteUrl(chain[index])}
       alt={alt}
+      referrerPolicy="no-referrer"
       {...rest}
       onError={handleError}
     />

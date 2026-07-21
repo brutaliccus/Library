@@ -1632,29 +1632,7 @@ async def _get_user_item(item_id: int, user_id: int, db: AsyncSession) -> Stream
 
 async def _lookup_cover_for_volume(volume_id: str, title: str, author: str) -> str:
     """Best-effort cover for Personal Collection rows missing artwork."""
-    try:
-        book = await google_books.get_volume(volume_id)
-        if book:
-            book = await google_books.enrich_cover_if_missing(book)
-            cover = (book.get("coverUrl") or book.get("coverUrlLarge") or "").strip()
-            if cover:
-                return cover
-    except Exception:
-        logger.debug("cover lookup by volume failed for %s", volume_id, exc_info=True)
-    if not title:
-        return ""
-    try:
-        q = f'intitle:"{title}"'
-        if author:
-            q += f" inauthor:{author}"
-        result = await google_books.search_volumes(q, max_results=3)
-        for b in (result or {}).get("books") or []:
-            cover = (b.get("coverUrl") or "").strip()
-            if cover:
-                return cover
-    except Exception:
-        logger.debug("cover lookup by search failed for %s", title, exc_info=True)
-    return ""
+    return await google_books.lookup_cover_url(volume_id, title, author)
 
 
 def _serialize(item: StreamingLibraryItem) -> dict:

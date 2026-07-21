@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from jose import JWTError, jwt
@@ -12,10 +13,12 @@ from app.database import get_db
 from app.models import User, DownloadRequest
 from app.utils.auth import get_current_user
 from app.utils.websocket import ws_manager
+from app.services import google_books
 from app.services.pipeline import process_download, process_aa_download
 
 router = APIRouter(prefix="/api/requests", tags=["requests"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 _ACTIVE_STATUSES = frozenset({
     "pending",
@@ -25,6 +28,7 @@ _ACTIVE_STATUSES = frozenset({
     "organizing",
 })
 _RETRYABLE_STATUSES = frozenset({"failed", "cancelled"})
+_COVER_BACKFILL_LIMIT = 24
 
 
 class CreateDownloadRequest(BaseModel):
@@ -78,6 +82,21 @@ async def create_request(
         raise HTTPException(status_code=400, detail="Either magnet_link or download_url is required")
 
     stored_title = (body.catalog_title or body.title or "").strip() or body.title
+    volume_id = (body.google_volume_id or "").strip() or None
+    cover_url = (body.cover_url or "").strip() or None
+    if not cover_url:
+        try:
+            cover_url = (
+                await google_books.lookup_cover_url(
+                    volume_id, stored_title, body.author or ""
+                )
+            ).strip() or None
+        except Exception:
+            logger.debug("cover lookup on create failed for %s", stored_title, exc_info=True)
+            cover_url = None
+    if cover_url:
+        cover_url = cover_url[:1024]
+
     dl_request = DownloadRequest(
         user_id=user.id,
         title=stored_title,
@@ -89,8 +108,8 @@ async def create_request(
         rd_torrent_id=body.aa_md5 if is_aa else None,
         aa_file_extension=body.aa_file_extension if is_aa else None,
         is_private=user.private_mode,
-        google_volume_id=(body.google_volume_id or "").strip() or None,
-        cover_url=(body.cover_url or "").strip() or None,
+        google_volume_id=volume_id,
+        cover_url=cover_url,
     )
     db.add(dl_request)
     await db.flush()
@@ -114,7 +133,11 @@ async def list_my_requests(
         .where(DownloadRequest.user_id == user.id)
         .order_by(DownloadRequest.created_at.desc())
     )
-    return [_to_response(r) for r in result.scalars().all()]
+    rows = list(result.scalars().all())
+    # Rows created before cover_url existed (or without a client-sent cover)
+    # get a one-time lookup so My Requests cards show real artwork.
+    await _backfill_request_covers(rows)
+    return [_to_response(r) for r in rows]
 
 
 @router.get("/{request_id}", response_model=DownloadRequestResponse)
@@ -230,6 +253,29 @@ async def _get_user_request(request_id: int, user_id: int, db: AsyncSession) -> 
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
     return req
+
+
+async def _backfill_request_covers(rows: list[DownloadRequest]) -> bool:
+    """Fill empty cover_url on request rows; returns True if any were updated."""
+    need = [r for r in rows if not (getattr(r, "cover_url", None) or "").strip()]
+    if not need:
+        return False
+
+    dirty = False
+
+    async def _fill(req: DownloadRequest) -> None:
+        nonlocal dirty
+        cover = await google_books.lookup_cover_url(
+            getattr(req, "google_volume_id", None),
+            req.title or "",
+            req.author or "",
+        )
+        if cover:
+            req.cover_url = cover[:1024]
+            dirty = True
+
+    await asyncio.gather(*[_fill(r) for r in need[:_COVER_BACKFILL_LIMIT]])
+    return dirty
 
 
 def _to_response(req: DownloadRequest) -> DownloadRequestResponse:

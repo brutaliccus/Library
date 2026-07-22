@@ -329,29 +329,52 @@ function HealthTab() {
 
   const fixMetadata = useMutation({
     mutationFn: async () => {
-      const { data } = await api.post("/admin/abs/fix-metadata");
+      // Backend waits up to ~4 min for ABS scan completion; proxy allows 600s.
+      const { data } = await api.post("/admin/abs/fix-metadata", null, { timeout: 600_000 });
       return data as {
         fixed: { itemId: string; oldTitle: string; newTitle: string }[];
         count: number;
         scan_ran: boolean;
+        scan_complete?: boolean;
+        timed_out?: boolean;
+        waited_seconds?: number;
+        items_total?: number | null;
         orphan_cleanup_ok: boolean;
         items_examined: number;
         fetch_error?: string | null;
       };
     },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["abs-collection"] });
-      queryClient.invalidateQueries({ queryKey: ["abs-series"] });
+    onSuccess: async (data) => {
+      const softPollAbs = async () => {
+        for (let i = 0; i < 4; i++) {
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ["abs-collection"] }),
+            queryClient.invalidateQueries({ queryKey: ["abs-series"] }),
+          ]);
+          if (i < 3) await new Promise((r) => setTimeout(r, 2500));
+        }
+      };
+      void softPollAbs();
+
       const fixed = Array.isArray(data.fixed) ? data.fixed : [];
       const bits: string[] = [];
-      if (data.scan_ran) {
+      if (data.scan_complete) {
         bits.push(
           data.orphan_cleanup_ok
-            ? "Library scan finished; Audiobookshelf removed entries whose files are missing."
-            : "Library scan finished.",
+            ? "ABS scan finished; removed entries whose files are missing."
+            : "ABS scan finished.",
         );
+      } else if (data.timed_out) {
+        bits.push(
+          "ABS scan still running after the wait limit — My Library will keep catching up; refresh again shortly if the count looks low.",
+        );
+      } else if (data.scan_ran) {
+        bits.push("Library scan was triggered.");
       } else {
         bits.push("Library scan did not complete; check ABS connectivity and logs.");
+      }
+      if (typeof data.items_total === "number" && data.items_total > 0) {
+        bits.push(`ABS reports ${data.items_total} item(s).`);
       }
       if (data.items_examined > 0) {
         bits.push(`Checked ${data.items_examined} item(s) for title vs. folder name mismatches.`);
@@ -364,12 +387,12 @@ function HealthTab() {
         bits.push(
           `Updated ${data.count} title(s)${fixed.length > 6 ? " (showing first 6)" : ""}: ${sample}${fixed.length > 6 ? " …" : ""}`,
         );
-        toast(bits.join(" "), "success");
+        toast(bits.join(" "), data.timed_out ? "info" : "success");
       } else {
         bits.push(
           "No title/folder mismatches left. Orphaned rows from an old folder layout are removed when their files are missing after a scan.",
         );
-        toast(bits.join(" "), data.scan_ran ? "success" : "info");
+        toast(bits.join(" "), data.scan_complete ? "success" : "info");
       }
     },
     onError: (err: any) => {
@@ -394,13 +417,13 @@ function HealthTab() {
         </button>
         <button
           type="button"
-          title="Runs a full Audiobookshelf library scan, removes library rows whose files are missing (e.g. after a folder restructure), then fixes titles that still differ from the folder name."
+          title="Runs a full Audiobookshelf library scan and waits for it to finish (up to a few minutes), removes library rows whose files are missing (e.g. after a folder restructure), then fixes titles that still differ from the folder name."
           onClick={() => fixMetadata.mutate()}
           disabled={fixMetadata.isPending}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-900/50 text-purple-300 text-sm rounded-lg hover:bg-purple-900/70 border border-purple-800/50 disabled:opacity-50"
         >
           <Wrench size={14} className={fixMetadata.isPending ? "animate-spin" : ""} />
-          {fixMetadata.isPending ? "Scanning…" : "Scan ABS & fix metadata"}
+          {fixMetadata.isPending ? "Waiting for ABS scan…" : "Scan ABS & fix metadata"}
         </button>
       </div>
 

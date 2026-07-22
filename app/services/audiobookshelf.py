@@ -31,6 +31,11 @@ def _headers() -> dict[str, str]:
 
 
 async def scan_library(library_id: str | None = None) -> None:
+    """Trigger an ABS library scan (fire-and-forget on the ABS side).
+
+    ABS responds HTTP 200 immediately and continues scanning in the background.
+    Prefer :func:`scan_library_and_wait` when callers need a complete index.
+    """
     lid = library_id or settings.abs_library_id
     if not lid:
         return
@@ -41,6 +46,163 @@ async def scan_library(library_id: str | None = None) -> None:
             timeout=60,
         )
         resp.raise_for_status()
+
+
+async def get_library(library_id: str | None = None) -> dict[str, Any] | None:
+    """Return a single ABS library object (includes ``lastScan`` after a finished scan)."""
+    lid = library_id or settings.abs_library_id
+    if not lid:
+        return None
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{settings.abs_url}/api/libraries/{lid}",
+            headers=_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and isinstance(data.get("library"), dict):
+            return data["library"]
+        return data if isinstance(data, dict) else None
+
+
+async def get_library_item_total(library_id: str | None = None) -> int | None:
+    """Cheap item count via paginated items endpoint (``total`` field)."""
+    lid = library_id or settings.abs_library_id
+    if not lid:
+        return None
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{settings.abs_url}/api/libraries/{lid}/items",
+                params={"limit": "1", "page": "0", "minified": "1"},
+                headers=_headers(),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            total = data.get("total")
+            return int(total) if total is not None else None
+    except Exception as e:
+        logger.warning("ABS item total fetch failed: %s", e)
+        return None
+
+
+async def scan_library_and_wait(
+    library_id: str | None = None,
+    *,
+    timeout_seconds: float = 240,
+    poll_interval: float = 2.5,
+) -> dict[str, Any]:
+    """Trigger ABS scan and poll until ``lastScan`` advances or timeout.
+
+    Audiobookshelf's ``POST /api/libraries/:id/scan`` returns 200 immediately while
+    ``LibraryScanner`` runs in the background. Completion is observable when the
+    library's ``lastScan`` timestamp updates (set only after a non-canceled scan).
+
+    Returns keys: ``scan_ran``, ``scan_complete``, ``timed_out``, ``items_total``,
+    ``waited_seconds``, ``last_scan``.
+    """
+    lid = library_id or settings.abs_library_id
+    empty = {
+        "scan_ran": False,
+        "scan_complete": False,
+        "timed_out": False,
+        "items_total": None,
+        "waited_seconds": 0.0,
+        "last_scan": None,
+    }
+    if not lid:
+        return empty
+
+    before_lib = await get_library(lid)
+    before_last = (before_lib or {}).get("lastScan")
+    started = time.monotonic()
+
+    await scan_library(lid)
+    empty["scan_ran"] = True
+
+    # Fallback: if lastScan never moves (already-scanning race, older ABS), treat
+    # a stable item total across several polls as "done enough".
+    stable_needed = 3
+    stable_hits = 0
+    last_total: int | None = None
+    after_last = before_last
+    items_total = await get_library_item_total(lid)
+
+    while True:
+        elapsed = time.monotonic() - started
+        if elapsed >= timeout_seconds:
+            logger.warning(
+                "ABS scan wait timed out after %.1fs (library=%s lastScan=%s→%s total=%s)",
+                elapsed,
+                lid,
+                before_last,
+                after_last,
+                items_total,
+            )
+            return {
+                "scan_ran": True,
+                "scan_complete": False,
+                "timed_out": True,
+                "items_total": items_total,
+                "waited_seconds": round(elapsed, 2),
+                "last_scan": after_last,
+            }
+
+        await asyncio.sleep(poll_interval)
+
+        lib = await get_library(lid)
+        after_last = (lib or {}).get("lastScan", after_last)
+        items_total = await get_library_item_total(lid)
+
+        if before_last != after_last and after_last is not None:
+            # lastScan advances only after LibraryScanner finishes successfully.
+            elapsed = time.monotonic() - started
+            logger.info(
+                "ABS scan complete for %s in %.1fs (lastScan %s → %s, items=%s)",
+                lid,
+                elapsed,
+                before_last,
+                after_last,
+                items_total,
+            )
+            invalidate_cache()
+            return {
+                "scan_ran": True,
+                "scan_complete": True,
+                "timed_out": False,
+                "items_total": items_total,
+                "waited_seconds": round(elapsed, 2),
+                "last_scan": after_last,
+            }
+
+        if items_total is not None:
+            if items_total == last_total:
+                stable_hits += 1
+            else:
+                stable_hits = 0
+                last_total = items_total
+            # Require some wall time so we don't declare "done" on a slow start.
+            if stable_hits >= stable_needed and elapsed >= max(8.0, poll_interval * stable_needed):
+                elapsed = time.monotonic() - started
+                logger.info(
+                    "ABS scan inferred complete via stable item total=%s for %s after %.1fs "
+                    "(lastScan unchanged at %s)",
+                    items_total,
+                    lid,
+                    elapsed,
+                    after_last,
+                )
+                invalidate_cache()
+                return {
+                    "scan_ran": True,
+                    "scan_complete": True,
+                    "timed_out": False,
+                    "items_total": items_total,
+                    "waited_seconds": round(elapsed, 2),
+                    "last_scan": after_last,
+                }
 
 
 async def match_all_items(library_id: str | None = None) -> bool:
@@ -557,13 +719,14 @@ async def update_item_metadata(item_id: str, title: str) -> bool:
 
 
 async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, Any]:
-    """Scan ABS, remove items with missing files, then align metadata titles with folder names.
+    """Scan ABS (wait for completion), remove missing-file orphans, align titles with folders.
 
     Duplicate \"covers\" after a folder layout change are usually orphaned library rows whose
     paths no longer exist; a library scan plus ``DELETE /libraries/{{id}}/issues`` clears those.
     Title/folder mismatches are a separate class of problem this pass also fixes.
 
-    Returns keys: ``fixed``, ``count``, ``scan_ran``, ``orphan_cleanup_ok``, ``items_examined``,
+    Returns keys: ``fixed``, ``count``, ``scan_ran``, ``scan_complete``, ``timed_out``,
+    ``waited_seconds``, ``items_total``, ``orphan_cleanup_ok``, ``items_examined``,
     ``fetch_error`` (set when the item list could not be loaded).
     """
     lid = library_id or settings.abs_library_id
@@ -571,6 +734,10 @@ async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, An
         "fixed": [],
         "count": 0,
         "scan_ran": False,
+        "scan_complete": False,
+        "timed_out": False,
+        "waited_seconds": 0.0,
+        "items_total": None,
         "orphan_cleanup_ok": False,
         "items_examined": 0,
         "fetch_error": None,
@@ -580,11 +747,18 @@ async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, An
         return empty
 
     scan_ran = False
+    scan_complete = False
+    timed_out = False
+    waited_seconds = 0.0
+    items_total: int | None = None
     orphan_cleanup_ok = False
     try:
-        await scan_library(lid)
-        scan_ran = True
-        await asyncio.sleep(6)
+        scan_status = await scan_library_and_wait(lid)
+        scan_ran = bool(scan_status.get("scan_ran"))
+        scan_complete = bool(scan_status.get("scan_complete"))
+        timed_out = bool(scan_status.get("timed_out"))
+        waited_seconds = float(scan_status.get("waited_seconds") or 0)
+        items_total = scan_status.get("items_total")
         orphan_cleanup_ok = await remove_items_with_issues(lid)
     except Exception as e:
         logger.warning("fix_metadata_mismatches: library scan / orphan cleanup failed: %s", e)
@@ -593,7 +767,15 @@ async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, An
         items = await _fetch_library_items_all_pages(lid)
     except Exception as e:
         logger.warning("Failed to paginate-fetch ABS items for mismatch fix: %s", e, exc_info=True)
-        out = {**empty, "scan_ran": scan_ran, "orphan_cleanup_ok": orphan_cleanup_ok}
+        out = {
+            **empty,
+            "scan_ran": scan_ran,
+            "scan_complete": scan_complete,
+            "timed_out": timed_out,
+            "waited_seconds": waited_seconds,
+            "items_total": items_total,
+            "orphan_cleanup_ok": orphan_cleanup_ok,
+        }
         out["fetch_error"] = str(e)
         return out
 
@@ -625,6 +807,10 @@ async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, An
         "fixed": fixed,
         "count": len(fixed),
         "scan_ran": scan_ran,
+        "scan_complete": scan_complete,
+        "timed_out": timed_out,
+        "waited_seconds": waited_seconds,
+        "items_total": items_total if items_total is not None else len(items),
         "orphan_cleanup_ok": orphan_cleanup_ok,
         "items_examined": len(items),
         "fetch_error": None,

@@ -290,19 +290,33 @@ export default function MyLibrary() {
   const handleRefreshLibrary = useCallback(async () => {
     setScanning(true);
     try {
-      await Promise.allSettled([
-        api.post("/library/abs/scan"),
+      const [absResult] = await Promise.allSettled([
+        api.post("/library/abs/scan", null, { timeout: 600_000 }),
         api.post("/library/kavita/scan"),
       ]);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["abs-collection"] }),
-        queryClient.invalidateQueries({ queryKey: ["abs-series"] }),
-        queryClient.invalidateQueries({ queryKey: ["kavita-collection"] }),
-        queryClient.invalidateQueries({ queryKey: ["kavita-series"] }),
-        queryClient.invalidateQueries({ queryKey: ["streaming-library"] }),
-        queryClient.invalidateQueries({ queryKey: ["personal-series"] }),
-      ]);
-      toast("Library refreshed — ABS + Kavita scanned", "success");
+      const absTimedOut =
+        absResult.status === "fulfilled" &&
+        Boolean((absResult.value.data as { timed_out?: boolean } | undefined)?.timed_out);
+
+      // Soft-poll while ABS may still be indexing (or after a timed-out wait).
+      const pollRounds = absTimedOut ? 5 : 3;
+      for (let i = 0; i < pollRounds; i++) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["abs-collection"] }),
+          queryClient.invalidateQueries({ queryKey: ["abs-series"] }),
+          queryClient.invalidateQueries({ queryKey: ["kavita-collection"] }),
+          queryClient.invalidateQueries({ queryKey: ["kavita-series"] }),
+          queryClient.invalidateQueries({ queryKey: ["streaming-library"] }),
+          queryClient.invalidateQueries({ queryKey: ["personal-series"] }),
+        ]);
+        if (i < pollRounds - 1) await new Promise((r) => setTimeout(r, 2500));
+      }
+      toast(
+        absTimedOut
+          ? "Library refresh started — ABS was still scanning; count may catch up shortly"
+          : "Library refreshed — ABS + Kavita scanned",
+        absTimedOut ? "info" : "success",
+      );
     } catch {
       toast("Library scan failed", "error");
     } finally {

@@ -1074,13 +1074,24 @@ def _get_tracks(item: StreamingLibraryItem) -> list:
 
 @router.post("/abs/scan")
 async def trigger_abs_scan(user: User = Depends(get_current_user)):
-    """Trigger an ABS library scan, then clean up any missing/orphaned items."""
+    """Trigger an ABS library scan, wait for completion, then clean orphaned items."""
     try:
-        await audiobookshelf.scan_library()
-        await asyncio.sleep(5)
+        scan_status = await audiobookshelf.scan_library_and_wait()
         await audiobookshelf.remove_items_with_issues()
         audiobookshelf.invalidate_cache()
-        return {"ok": True, "message": "Library scanned and cleaned up"}
+        return {
+            "ok": True,
+            "message": (
+                "Library scanned and cleaned up"
+                if scan_status.get("scan_complete")
+                else "Library scan started but did not finish before timeout; refresh again shortly"
+            ),
+            "scan_ran": bool(scan_status.get("scan_ran")),
+            "scan_complete": bool(scan_status.get("scan_complete")),
+            "timed_out": bool(scan_status.get("timed_out")),
+            "waited_seconds": scan_status.get("waited_seconds"),
+            "items_total": scan_status.get("items_total"),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

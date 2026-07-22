@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 from app.config import get_settings
+from app.utils.book_series import parse_abs_series_label
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -534,16 +535,36 @@ def _normalize_abs_item(lib_item: dict, progress_map: dict | None = None) -> dic
     author = meta.get("authorName") or ""
     genres = meta.get("genres", [])
     narrator = meta.get("narratorName") or ""
-    series_list = meta.get("series", [])
+    series_list = meta.get("series") or []
     if isinstance(series_list, dict):
         series_list = [series_list]
     series_info = []
     for s in series_list:
+        if not isinstance(s, dict):
+            continue
+        name = (s.get("name") or "").strip()
+        seq = str(s.get("sequence") or "").strip()
+        if not name:
+            continue
+        # Some ABS matches store "Series #1" in series[].name too.
+        parsed_name, parsed_seq = parse_abs_series_label(name)
+        if parsed_name:
+            name, seq = parsed_name, seq or parsed_seq
         series_info.append({
             "id": s.get("id", ""),
-            "name": s.get("name", ""),
-            "sequence": s.get("sequence", ""),
+            "name": name,
+            "sequence": seq,
         })
+    series_name = ""
+    sequence = ""
+    if series_info:
+        series_name = series_info[0]["name"]
+        sequence = str(series_info[0].get("sequence") or "")
+    else:
+        # Folder Forge / Audible: series array is null; seriesName is "Series #N".
+        series_name, sequence = parse_abs_series_label(meta.get("seriesName"))
+        if series_name:
+            series_info = [{"id": "", "name": series_name, "sequence": sequence}]
     duration = media.get("duration", 0) or 0
     progress = 0.0
     is_finished = False
@@ -559,6 +580,8 @@ def _normalize_abs_item(lib_item: dict, progress_map: dict | None = None) -> dic
         "coverUrl": f"/api/stream/abs/proxy/cover/{item_id}" if item_id else "",
         "genres": genres,
         "series": series_info,
+        "seriesName": series_name,
+        "sequence": sequence,
         "duration": round(duration),
         "progress": round(progress, 3),
         "isFinished": is_finished,

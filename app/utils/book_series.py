@@ -58,6 +58,39 @@ def is_junk_series_hint(name: str | None) -> bool:
     return False
 
 
+# ABS Folder Forge / quick-match often puts "Series Name #1" in metadata.seriesName
+# while leaving metadata.series null.
+_ABS_SERIES_HASH = re.compile(
+    r"^(?P<name>.+?)\s*#\s*(?P<seq>\d+(?:\.\d+)?)\s*$",
+)
+_ABS_SERIES_BOOK = re.compile(
+    r"^(?P<name>.+?)\s*,?\s+Book\s+(?P<seq>\d+(?:\.\d+)?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_abs_series_label(raw: str | None) -> tuple[str, str]:
+    """Parse ABS ``metadata.seriesName`` into (series_name, sequence).
+
+    Handles Folder Forge / Audible-style labels like ``Dungeon Crawler Carl #1``
+    and plain names like ``Practical Magic``. Returns ``("", "")`` for junk.
+    """
+    n = (raw or "").strip()
+    if not n:
+        return "", ""
+    for pat in (_ABS_SERIES_HASH, _ABS_SERIES_BOOK):
+        m = pat.match(n)
+        if m:
+            name = m.group("name").strip().rstrip(",:-")
+            seq = m.group("seq").strip()
+            if name and not is_junk_series_hint(name):
+                return name, seq
+            return "", ""
+    if is_junk_series_hint(n):
+        return "", ""
+    return n, ""
+
+
 def library_series_from_title(title: str) -> tuple[str, str] | None:
     """Infer (series_name, sequence) for local library shelves.
 

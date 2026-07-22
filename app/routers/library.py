@@ -20,7 +20,12 @@ from app.utils.auth import get_current_user
 from app.services import debrid, debrid_tokens, audiobookshelf, kavita, google_books, hardcover
 from app.services import kavita_ebook_match
 from app.services.google_books import GENRE_TAXONOMY
-from app.utils.book_series import is_junk_library_label, is_junk_series_hint, library_series_from_title
+from app.utils.book_series import (
+    is_junk_library_label,
+    is_junk_series_hint,
+    library_series_from_title,
+    parse_abs_series_label,
+)
 from app.routers.stream import tracks_with_stable_urls
 
 logger = logging.getLogger(__name__)
@@ -93,10 +98,14 @@ def _local_series_from_item(item: dict) -> tuple[str, str]:
 
     Prefers seriesName, then series[] entries, then title-inferred labels.
     Junk ASINs / Amazon noise / media-type labels are skipped.
+    ABS Folder Forge labels like ``Dungeon Crawler Carl #1`` are split into
+    name + sequence so filters/grouping share one series bucket.
     """
     sn = (item.get("seriesName") or "").strip()
-    if sn and not is_junk_series_hint(sn):
-        return sn, str(item.get("sequence") or "").strip()
+    if sn:
+        name, seq = parse_abs_series_label(sn)
+        if name:
+            return name, str(item.get("sequence") or seq or "").strip()
     for s in item.get("series") or []:
         if isinstance(s, dict):
             name = (s.get("name") or "").strip()
@@ -104,8 +113,11 @@ def _local_series_from_item(item: dict) -> tuple[str, str]:
         else:
             name = (str(s) if s is not None else "").strip()
             seq = ""
-        if name and not is_junk_series_hint(name):
-            return name, seq
+        if not name:
+            continue
+        parsed_name, parsed_seq = parse_abs_series_label(name)
+        if parsed_name:
+            return parsed_name, seq or parsed_seq
     inferred = library_series_from_title(item.get("title") or "")
     if inferred and not is_junk_series_hint(inferred[0]):
         return inferred[0], str(inferred[1] or "").strip()

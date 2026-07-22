@@ -8,7 +8,7 @@ import {
 } from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { Capacitor } from "@capacitor/core";
-import { readerFileUrlForChapter } from "../utils/ebookCache";
+import { getCachedEbookObjectUrl, readerFileUrlForChapter } from "../utils/ebookCache";
 import "./PdfViewer.css";
 
 GlobalWorkerOptions.workerSrc = pdfjsWorker;
@@ -52,7 +52,39 @@ function NativePdfFrame({
   pageCount: number;
   onReady?: (totalPages: number) => void;
 }) {
-  const url = `${readerFileUrlForChapter(chapterId, true)}#page=${page + 1}`;
+  const [baseUrl, setBaseUrl] = useState(() => readerFileUrlForChapter(chapterId, true));
+  const objectUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const cached = await getCachedEbookObjectUrl(chapterId, true);
+      if (cancelled) {
+        if (cached) URL.revokeObjectURL(cached);
+        return;
+      }
+      if (objectUrlRef.current) {
+        try {
+          URL.revokeObjectURL(objectUrlRef.current);
+        } catch {
+          /* ignore */
+        }
+      }
+      objectUrlRef.current = cached;
+      setBaseUrl(cached || readerFileUrlForChapter(chapterId, true));
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrlRef.current) {
+        try {
+          URL.revokeObjectURL(objectUrlRef.current);
+        } catch {
+          /* ignore */
+        }
+        objectUrlRef.current = null;
+      }
+    };
+  }, [chapterId]);
 
   useEffect(() => {
     if (pageCount > 0) onReady?.(pageCount);
@@ -62,7 +94,7 @@ function NativePdfFrame({
     <iframe
       key={`${chapterId}-${page}`}
       title="PDF"
-      src={url}
+      src={`${baseUrl}#page=${page + 1}`}
       className="w-full flex-1 min-h-0 border-0 rounded-sm bg-white shadow-lg"
     />
   );
@@ -85,18 +117,22 @@ function CanvasPdfViewer({ chapterId, page, onReady }: PdfViewerProps) {
     void docRef.current?.cleanup();
     docRef.current = null;
 
+    let objectUrl: string | null = null;
+
     const load = async () => {
       setLoading(true);
       setError(null);
       try {
-        const url = readerFileUrlForChapter(chapterId, true);
+        // Prefer Cache API blob on native / offline — WebView media often bypasses SW.
+        objectUrl = await getCachedEbookObjectUrl(chapterId, true);
+        const url = objectUrl || readerFileUrlForChapter(chapterId, true);
         // Dinotopia-style pages: base JPEG + overlay with JBIG2 soft mask.
         // Without wasmUrl, JBIG2Decode fails and only the base image paints.
         loadingTask = getDocument({
           url,
-          withCredentials: true,
-          disableRange: false,
-          disableStream: false,
+          withCredentials: !objectUrl,
+          disableRange: !!objectUrl,
+          disableStream: !!objectUrl,
           isOffscreenCanvasSupported: false,
           wasmUrl: `${PDFJS_ASSETS}/wasm/`,
           cMapUrl: `${PDFJS_ASSETS}/cmaps/`,
@@ -125,6 +161,13 @@ function CanvasPdfViewer({ chapterId, page, onReady }: PdfViewerProps) {
     void load();
     return () => {
       cancelled = true;
+      if (objectUrl) {
+        try {
+          URL.revokeObjectURL(objectUrl);
+        } catch {
+          /* ignore */
+        }
+      }
       try {
         loadingTask?.destroy();
       } catch {

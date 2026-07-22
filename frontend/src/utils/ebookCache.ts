@@ -65,9 +65,43 @@ export async function isEbookCached(chapterId: number, isPdf = true): Promise<bo
   }
 }
 
+/**
+ * Object URL for a fully-downloaded ebook, or null when not cached.
+ * Callers own the URL and must revoke via URL.revokeObjectURL().
+ * Needed on Capacitor WebView where media/fetch may not hit the Cache API via SW.
+ */
+export async function getCachedEbookObjectUrl(
+  chapterId: number,
+  isPdf = true
+): Promise<string | null> {
+  if (!cacheSupported()) return null;
+  try {
+    const cache = await caches.open(EBOOK_CACHE);
+    const url = cacheStorageKey(readerFileUrlForChapter(chapterId, isPdf));
+    const resp = await cache.match(url);
+    if (!resp) return null;
+    const blob = await resp.blob();
+    if (blob.size === 0) return null;
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
+}
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  try {
+    const token = localStorage.getItem("access_token");
+    if (token) headers.Authorization = `Bearer ${token}`;
+  } catch {
+    /* ignore */
+  }
+  return headers;
+}
+
 async function fetchChunk(url: string, offset: number): Promise<Response | null> {
   await waitForDownloadSlot();
-  const headers = { Range: `bytes=${offset}-${offset + CHUNK_SIZE - 1}` };
+  const headers = authHeaders({ Range: `bytes=${offset}-${offset + CHUNK_SIZE - 1}` });
   try {
     return await fetch(url, { headers, credentials: "include" });
   } catch {
@@ -156,20 +190,43 @@ async function downloadFile(cache: Cache, url: string): Promise<boolean> {
   }
 }
 
-export async function cacheBookEbook(chapterId: number, isPdf = true): Promise<void> {
-  if (!cacheSupported() || inFlight.has(chapterId)) return;
+export type CacheBookEbookOptions = {
+  /** Skip the post-open warmup delay (explicit "Save offline" taps). */
+  immediate?: boolean;
+  onProgress?: (phase: "start" | "done" | "error") => void;
+};
+
+export async function cacheBookEbook(
+  chapterId: number,
+  isPdf = true,
+  opts?: CacheBookEbookOptions
+): Promise<boolean> {
+  if (!cacheSupported() || inFlight.has(chapterId)) return false;
   inFlight.add(chapterId);
 
   try {
-    await sleep(START_DELAY_MS);
-    if (shouldDeferEbookDownload()) {
-      await sleep(5_000);
+    if (!opts?.immediate) {
+      await sleep(START_DELAY_MS);
+      if (shouldDeferEbookDownload()) {
+        await sleep(5_000);
+      }
     }
+    opts?.onProgress?.("start");
     await requestPersistentStorage();
     const cache = await caches.open(EBOOK_CACHE);
     const url = cacheStorageKey(readerFileUrlForChapter(chapterId, isPdf));
-    if (await cache.match(url)) return;
-    if (await downloadFile(cache, url)) notifyCacheUpdated();
+    if (await cache.match(url)) {
+      opts?.onProgress?.("done");
+      return true;
+    }
+    const ok = await downloadFile(cache, url);
+    if (ok) {
+      notifyCacheUpdated();
+      opts?.onProgress?.("done");
+      return true;
+    }
+    opts?.onProgress?.("error");
+    return false;
   } finally {
     inFlight.delete(chapterId);
   }

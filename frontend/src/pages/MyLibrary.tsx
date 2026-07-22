@@ -24,20 +24,33 @@ import {
   ChevronRight,
   X,
   RefreshCw,
+  Download,
 } from "lucide-react";
 import { getProgress, clearProgress } from "../utils/readingProgress";
 import { isBookCached } from "../utils/audioCache";
 import {
   getOfflineProgress,
   getRdOfflineManifest,
+  isAbsOfflineReady,
+  isEbookOfflineReady,
   isLikelyOffline,
+  isRdOfflineReady,
+  listDownloadedItems,
   progressKeyForRd,
+  type OfflineManifest,
 } from "../utils/offlinePlayback";
+import {
+  removeAbsOffline,
+  removeEbookOffline,
+  removeRdOffline,
+} from "../utils/downloadOffline";
 import {
   absCollectionHasOrphans,
   purgeLibraryCollectionQueries,
   stripCollectionEntriesFromPersist,
 } from "../utils/shelfQueryCache";
+import { useOnlineStatus } from "../hooks/useOnlineStatus";
+import SaveOfflineButton from "../components/SaveOfflineButton";
 
 interface LibraryItem {
   id: number;
@@ -115,7 +128,7 @@ interface KavitaItem {
   source: "kavita";
 }
 
-type Tab = "abs" | "streams" | "ebooks";
+type Tab = "abs" | "streams" | "ebooks" | "downloaded";
 type MediaFilter = "all" | "audiobooks" | "ebooks";
 type TabView = "all" | "genre" | "series" | "author";
 
@@ -218,6 +231,8 @@ export default function MyLibrary() {
   const { playABS, playRD } = usePlayer();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const online = useOnlineStatus();
+  const offline = !online || isLikelyOffline();
 
   const [tab, setTab] = useState<Tab>("abs");
   const [absView, setAbsView] = useState<TabView>("all");
@@ -231,6 +246,12 @@ export default function MyLibrary() {
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [resolvingId, setResolvingId] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [cachedAbsIds, setCachedAbsIds] = useState<Set<string>>(new Set());
+  const [cachedRdIds, setCachedRdIds] = useState<Set<number>>(new Set());
+  const [cachedEbookIds, setCachedEbookIds] = useState<Set<number>>(new Set());
+  const [downloadedItems, setDownloadedItems] = useState<
+    Array<OfflineManifest & { cached: true }>
+  >([]);
   const [continueModal, setContinueModal] = useState<{
     chapterId: number;
     item: KavitaItem;
@@ -334,8 +355,45 @@ export default function MyLibrary() {
       const { data } = await api.get(`/library/search?${params}`);
       return data as { results: SearchResult[] };
     },
-    enabled: debouncedQuery.length >= 2,
+    enabled: !offline && debouncedQuery.length >= 2,
   });
+
+  const refreshCacheFlags = useCallback(async () => {
+    const absIds = new Set<string>();
+    const rdIds = new Set<number>();
+    const ebookIds = new Set<number>();
+    const downloaded = await listDownloadedItems();
+    for (const m of downloaded) {
+      if (m.source === "abs") absIds.add(m.itemId);
+      else if (m.source === "rd" && m.libraryItemId != null) rdIds.add(m.libraryItemId);
+      else if (m.source === "ebook") ebookIds.add(m.chapterId);
+    }
+    // Also mark ready by probing known manifests even if listDownloaded missed a key.
+    for (const m of downloaded) {
+      if (m.source === "abs" && (await isAbsOfflineReady(m.itemId))) absIds.add(m.itemId);
+      if (m.source === "rd" && (await isRdOfflineReady(m))) {
+        if (m.libraryItemId != null) rdIds.add(m.libraryItemId);
+      }
+      if (m.source === "ebook" && (await isEbookOfflineReady(m.chapterId))) {
+        ebookIds.add(m.chapterId);
+      }
+    }
+    setCachedAbsIds(absIds);
+    setCachedRdIds(rdIds);
+    setCachedEbookIds(ebookIds);
+    setDownloadedItems(downloaded);
+  }, []);
+
+  useEffect(() => {
+    void refreshCacheFlags();
+    const onUpdate = () => void refreshCacheFlags();
+    window.addEventListener("audio-cache-updated", onUpdate);
+    window.addEventListener("ebook-cache-updated", onUpdate);
+    return () => {
+      window.removeEventListener("audio-cache-updated", onUpdate);
+      window.removeEventListener("ebook-cache-updated", onUpdate);
+    };
+  }, [refreshCacheFlags]);
 
   const removeMutation = useMutation({
     mutationFn: (id: number) => api.delete(`/library/${id}`),
@@ -387,6 +445,10 @@ export default function MyLibrary() {
 
   const handlePlayABS = useCallback(
     async (itemId: string) => {
+      if (offline && !(await isAbsOfflineReady(itemId))) {
+        toast("Not downloaded — save this book while online to play offline", "info");
+        return;
+      }
       try {
         await playABS(itemId);
       } catch (err) {
@@ -397,7 +459,27 @@ export default function MyLibrary() {
         toast(msg, "error");
       }
     },
-    [playABS, toast]
+    [playABS, toast, offline]
+  );
+
+  const removeDownloaded = useCallback(
+    async (item: OfflineManifest) => {
+      try {
+        if (item.source === "abs") await removeAbsOffline(item.itemId);
+        else if (item.source === "rd") {
+          await removeRdOffline({
+            libraryItemId: item.libraryItemId,
+            streamHistoryId: item.streamHistoryId,
+            tracks: item.tracks,
+          });
+        } else await removeEbookOffline(item.chapterId);
+        toast("Removed from this device", "info");
+        void refreshCacheFlags();
+      } catch {
+        toast("Could not remove download", "error");
+      }
+    },
+    [toast, refreshCacheFlags]
   );
 
   const handlePlayRD = useCallback(
@@ -468,7 +550,11 @@ export default function MyLibrary() {
   );
 
   const handleReadEbook = useCallback(
-    (chapterId: number, item: KavitaItem) => {
+    async (chapterId: number, item: KavitaItem) => {
+      if (offline && !(await isEbookOfflineReady(chapterId))) {
+        toast("Not downloaded — save this ebook while online to read offline", "info");
+        return;
+      }
       const progress = getProgress(chapterId);
       if (progress) {
         setContinueModal({ chapterId, item, progress });
@@ -476,7 +562,7 @@ export default function MyLibrary() {
         navigate(`/read/${chapterId}`);
       }
     },
-    [navigate]
+    [navigate, offline, toast]
   );
 
   const handleContinueReading = useCallback(
@@ -614,7 +700,7 @@ export default function MyLibrary() {
   }, [allAbsItems]);
 
   const filteredAbsItems = useMemo(() => {
-    return allAbsItems.filter((item) => {
+    const filtered = allAbsItems.filter((item) => {
       if (filterGenre && !(item.genres || []).some((g) => g === filterGenre || g.toLowerCase().includes(filterGenre.toLowerCase()))) {
         return false;
       }
@@ -622,7 +708,14 @@ export default function MyLibrary() {
       if (filterAuthor && item.author !== filterAuthor) return false;
       return true;
     });
-  }, [allAbsItems, filterGenre, filterSeries, filterAuthor]);
+    // Cached / downloaded first, then uncached (for offline browsing).
+    return [...filtered].sort((a, b) => {
+      const ac = cachedAbsIds.has(a.itemId) ? 0 : 1;
+      const bc = cachedAbsIds.has(b.itemId) ? 0 : 1;
+      if (ac !== bc) return ac - bc;
+      return (b.addedAt || 0) - (a.addedAt || 0);
+    });
+  }, [allAbsItems, filterGenre, filterSeries, filterAuthor, cachedAbsIds]);
 
   const absByGenre = useMemo(() => {
     const groups: Record<string, ABSItem[]> = {};
@@ -672,13 +765,19 @@ export default function MyLibrary() {
   }, [allEbookItems]);
 
   const filteredEbookItems = useMemo(() => {
-    return allEbookItems.filter((item) => {
+    const filtered = allEbookItems.filter((item) => {
       if (filterGenre && !(item.genres || []).includes(filterGenre)) return false;
       if (filterSeries && localSeriesName(item) !== filterSeries) return false;
       if (filterAuthor && item.author !== filterAuthor) return false;
       return true;
     });
-  }, [allEbookItems, filterGenre, filterSeries, filterAuthor]);
+    return [...filtered].sort((a, b) => {
+      const ac = a.chapterId != null && cachedEbookIds.has(a.chapterId) ? 0 : 1;
+      const bc = b.chapterId != null && cachedEbookIds.has(b.chapterId) ? 0 : 1;
+      if (ac !== bc) return ac - bc;
+      return (b.addedAt || 0) - (a.addedAt || 0);
+    });
+  }, [allEbookItems, filterGenre, filterSeries, filterAuthor, cachedEbookIds]);
 
   const ebookByGenre = useMemo(() => {
     const groups: Record<string, KavitaItem[]> = {};
@@ -731,7 +830,7 @@ export default function MyLibrary() {
   }, [rdItemsSorted]);
 
   const filteredRdItems = useMemo(() => {
-    return rdItemsSorted.filter((item) => {
+    const filtered = rdItemsSorted.filter((item) => {
       const itemGenres = item.genres?.length ? item.genres : (item.genre ? [item.genre] : []);
       if (filterGenre && !itemGenres.includes(filterGenre) && (item.genre || "Uncategorized") !== filterGenre) {
         return false;
@@ -740,7 +839,15 @@ export default function MyLibrary() {
       if (filterAuthor && item.author !== filterAuthor) return false;
       return true;
     });
-  }, [rdItemsSorted, filterGenre, filterSeries, filterAuthor]);
+    return [...filtered].sort((a, b) => {
+      const ac = cachedRdIds.has(a.id) ? 0 : 1;
+      const bc = cachedRdIds.has(b.id) ? 0 : 1;
+      if (ac !== bc) return ac - bc;
+      const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return tb - ta;
+    });
+  }, [rdItemsSorted, filterGenre, filterSeries, filterAuthor, cachedRdIds]);
 
   const rdByGenre = useMemo(() => {
     const groups: Record<string, LibraryItem[]> = {};
@@ -944,22 +1051,29 @@ export default function MyLibrary() {
         <div className="flex items-center gap-2">
           <button
             onClick={handleRefreshLibrary}
-            disabled={scanning}
+            disabled={scanning || offline}
             className="flex items-center gap-2 px-3 py-2 bg-gray-700 text-gray-200 rounded-lg hover:bg-gray-600 transition-colors text-sm font-medium disabled:opacity-50"
-            title="Rescan library and remove stale entries"
+            title={offline ? "Unavailable offline" : "Rescan library and remove stale entries"}
           >
             <RefreshCw size={15} className={scanning ? "animate-spin" : ""} />
             {scanning ? "Scanning..." : "Refresh"}
           </button>
           <button
             onClick={() => navigate("/")}
-            className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-500 transition-colors text-sm font-medium"
+            disabled={offline}
+            className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-500 transition-colors text-sm font-medium disabled:opacity-50"
           >
             <Search size={16} />
             Browse Store
           </button>
         </div>
       </div>
+
+      {offline && (
+        <div className="mb-4 rounded-lg border border-amber-800/50 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+          Showing your last-synced catalog. Downloaded titles are listed first; others are greyed out until you reconnect.
+        </div>
+      )}
 
       {/* Search */}
       <div className="relative mb-6">
@@ -968,8 +1082,9 @@ export default function MyLibrary() {
           type="text"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search your library..."
-          className="w-full pl-10 pr-10 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500"
+          placeholder={offline ? "Search unavailable offline" : "Search your library..."}
+          disabled={offline}
+          className="w-full pl-10 pr-10 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500 disabled:opacity-50"
         />
         {searchQuery && (
           <button onClick={() => setSearchQuery("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
@@ -1065,7 +1180,7 @@ export default function MyLibrary() {
       ) : (
         <>
           {/* Tabs */}
-          <div className="flex gap-1 mb-6 bg-gray-800/50 p-1 rounded-lg w-fit">
+          <div className="flex gap-1 mb-6 bg-gray-800/50 p-1 rounded-lg w-fit flex-wrap">
             <button
               onClick={() => setTab("abs")}
               className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -1093,6 +1208,18 @@ export default function MyLibrary() {
               <Radio size={14} />
               Personal Collection
             </button>
+            <button
+              onClick={() => setTab("downloaded")}
+              className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                tab === "downloaded" ? "bg-brand-600 text-white" : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              <Download size={14} />
+              Downloaded
+              {downloadedItems.length > 0 && (
+                <span className="text-[10px] opacity-80">({downloadedItems.length})</span>
+              )}
+            </button>
           </div>
 
           {/* ABS Tab */}
@@ -1119,6 +1246,8 @@ export default function MyLibrary() {
                           onPlay={handlePlayABS}
                           onNavigate={handleNavigateToBook}
                           hasEbook={formatMatches?.[item.title]?.hasEbook}
+                          cached={cachedAbsIds.has(item.itemId)}
+                          unavailable={offline && !cachedAbsIds.has(item.itemId)}
                         />
                       ))}
                     </div>
@@ -1135,7 +1264,16 @@ export default function MyLibrary() {
                   ) : (
                     <>
                       {Object.entries(absByGenre).map(([genre, items]) => (
-                        <ABSGenreRow key={genre} genre={genre} items={items} onPlay={handlePlayABS} onNavigate={handleNavigateToBook} formatMatches={formatMatches} />
+                        <ABSGenreRow
+                          key={genre}
+                          genre={genre}
+                          items={items}
+                          onPlay={handlePlayABS}
+                          onNavigate={handleNavigateToBook}
+                          formatMatches={formatMatches}
+                          cachedIds={cachedAbsIds}
+                          offline={offline}
+                        />
                       ))}
                       {Object.keys(absByGenre).length === 0 && (
                         <EmptyABS onBrowse={() => navigate("/")} />
@@ -1151,7 +1289,16 @@ export default function MyLibrary() {
                     <LibraryGridSkeleton />
                   ) : (
                     Object.entries(absByAuthor).map(([author, items]) => (
-                      <ABSGenreRow key={author} genre={author} items={items} onPlay={handlePlayABS} onNavigate={handleNavigateToBook} formatMatches={formatMatches} />
+                      <ABSGenreRow
+                        key={author}
+                        genre={author}
+                        items={items}
+                        onPlay={handlePlayABS}
+                        onNavigate={handleNavigateToBook}
+                        formatMatches={formatMatches}
+                        cachedIds={cachedAbsIds}
+                        offline={offline}
+                      />
                     ))
                   )}
                 </div>
@@ -1161,7 +1308,12 @@ export default function MyLibrary() {
                 absLoading && !absCollection ? (
                   <LibraryGridSkeleton />
                 ) : absSeriesLocal.length > 0 ? (
-                  <SeriesDrilldown series={absSeriesLocal} onPlay={handlePlayABS} />
+                  <SeriesDrilldown
+                    series={absSeriesLocal}
+                    onPlay={handlePlayABS}
+                    cachedIds={cachedAbsIds}
+                    offline={offline}
+                  />
                 ) : (
                   <p className="text-sm text-gray-500 text-center py-12">
                     No multi-book series found in your audiobook library yet.
@@ -1194,7 +1346,17 @@ export default function MyLibrary() {
                           key={item.seriesId}
                           item={item}
                           onNavigateToBook={handleNavigateToBook}
+                          onRead={
+                            item.chapterId != null
+                              ? () => void handleReadEbook(item.chapterId!, item)
+                              : undefined
+                          }
                           hasAudio={formatMatches?.[item.title]?.hasAudio}
+                          cached={item.chapterId != null && cachedEbookIds.has(item.chapterId)}
+                          unavailable={
+                            offline &&
+                            (item.chapterId == null || !cachedEbookIds.has(item.chapterId))
+                          }
                         />
                       ))}
                     </div>
@@ -1202,7 +1364,15 @@ export default function MyLibrary() {
                   {ebookView === "genre" && (
                     <div className="space-y-6">
                       {Object.entries(ebookByGenre).map(([genre, items]) => (
-                        <EbookGenreRow key={genre} genre={genre} items={items} onNavigateToBook={handleNavigateToBook} formatMatches={formatMatches} />
+                        <EbookGenreRow
+                          key={genre}
+                          genre={genre}
+                          items={items}
+                          onNavigateToBook={handleNavigateToBook}
+                          formatMatches={formatMatches}
+                          cachedIds={cachedEbookIds}
+                          offline={offline}
+                        />
                       ))}
                     </div>
                   )}
@@ -1216,6 +1386,8 @@ export default function MyLibrary() {
                             items={s.books as KavitaItem[]}
                             onNavigateToBook={handleNavigateToBook}
                             formatMatches={formatMatches}
+                            cachedIds={cachedEbookIds}
+                            offline={offline}
                           />
                         ))}
                       </div>
@@ -1228,7 +1400,15 @@ export default function MyLibrary() {
                   {ebookView === "author" && (
                     <div className="space-y-6">
                       {Object.entries(ebookByAuthor).map(([author, items]) => (
-                        <EbookGenreRow key={author} genre={author} items={items} onNavigateToBook={handleNavigateToBook} formatMatches={formatMatches} />
+                        <EbookGenreRow
+                          key={author}
+                          genre={author}
+                          items={items}
+                          onNavigateToBook={handleNavigateToBook}
+                          formatMatches={formatMatches}
+                          cachedIds={cachedEbookIds}
+                          offline={offline}
+                        />
                       ))}
                     </div>
                   )}
@@ -1273,6 +1453,8 @@ export default function MyLibrary() {
                       onResolve={() => handleResolveRD(item)}
                       onRemove={() => removeMutation.mutate(item.id)}
                       onNavigate={() => handlePersonalCollectionNavigate(item)}
+                      unavailable={offline && !cachedRdIds.has(item.id)}
+                      cached={cachedRdIds.has(item.id)}
                     />
                   ))}
                 </div>
@@ -1290,6 +1472,8 @@ export default function MyLibrary() {
                         onResolve={() => handleResolveRD(item)}
                         onRemove={() => removeMutation.mutate(item.id)}
                         onNavigate={() => handlePersonalCollectionNavigate(item)}
+                        unavailable={offline && !cachedRdIds.has(item.id)}
+                        cached={cachedRdIds.has(item.id)}
                       />
                     ))}
                   </div>
@@ -1313,6 +1497,8 @@ export default function MyLibrary() {
                             onResolve={() => handleResolveRD(item as LibraryItem)}
                             onRemove={() => removeMutation.mutate(item.id)}
                             onNavigate={() => handlePersonalCollectionNavigate(item as LibraryItem)}
+                            unavailable={offline && !cachedRdIds.has(item.id)}
+                            cached={cachedRdIds.has(item.id)}
                           />
                         ))}
                       </div>
@@ -1337,11 +1523,120 @@ export default function MyLibrary() {
                         onResolve={() => handleResolveRD(item)}
                         onRemove={() => removeMutation.mutate(item.id)}
                         onNavigate={() => handlePersonalCollectionNavigate(item)}
+                        unavailable={offline && !cachedRdIds.has(item.id)}
+                        cached={cachedRdIds.has(item.id)}
                       />
                     ))}
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Downloaded tab — local cache only */}
+          {tab === "downloaded" && (
+            <div>
+              {downloadedItems.length === 0 ? (
+                <div className="text-center py-16">
+                  <Download className="mx-auto mb-4 text-gray-600" size={40} />
+                  <h3 className="text-base font-semibold text-gray-300 mb-2">Nothing downloaded yet</h3>
+                  <p className="text-sm text-gray-500 mb-4 max-w-md mx-auto">
+                    Open a book and tap Save offline, or listen/read while online — files stay on this device for offline play.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {downloadedItems.map((item) => {
+                    const key =
+                      item.source === "abs"
+                        ? `abs:${item.itemId}`
+                        : item.source === "ebook"
+                          ? `ebook:${item.chapterId}`
+                          : `rd:${item.libraryItemId ?? item.streamHistoryId}`;
+                    return (
+                      <div
+                        key={key}
+                        className="flex items-center gap-3 p-2.5 rounded-lg bg-gray-800/40 border border-gray-800"
+                      >
+                        {item.coverUrl ? (
+                          <CoverImage
+                            src={item.coverUrl}
+                            alt=""
+                            className="w-12 h-[4.5rem] rounded object-cover shrink-0"
+                          />
+                        ) : (
+                          <div className="w-12 h-[4.5rem] rounded bg-gray-700 shrink-0 flex items-center justify-center">
+                            {item.source === "ebook" ? (
+                              <BookOpen size={16} className="text-gray-500" />
+                            ) : (
+                              <Headphones size={16} className="text-gray-500" />
+                            )}
+                          </div>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-gray-100 truncate">{item.title}</p>
+                          {item.author && (
+                            <p className="text-xs text-gray-400 truncate">{item.author}</p>
+                          )}
+                          <p className="text-[10px] text-gray-500 mt-0.5">
+                            {item.source === "abs"
+                              ? "Audiobook"
+                              : item.source === "ebook"
+                                ? "Ebook"
+                                : "Personal Collection"}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {item.source === "ebook" ? (
+                            <button
+                              type="button"
+                              onClick={() => navigate(`/read/${item.chapterId}`)}
+                              className="px-2.5 py-1.5 text-xs font-medium rounded-md bg-amber-600 text-white hover:bg-amber-500"
+                            >
+                              Read
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (item.source === "abs") void handlePlayABS(item.itemId);
+                                else {
+                                  const rdItem = rdLibrary?.items?.find(
+                                    (i) => i.id === item.libraryItemId
+                                  );
+                                  if (rdItem) void handlePlayRD(rdItem);
+                                  else {
+                                    playRD(
+                                      item.tracks,
+                                      item.title,
+                                      item.author,
+                                      item.coverUrl,
+                                      item.streamHistoryId,
+                                      0,
+                                      item.libraryItemId
+                                    );
+                                  }
+                                }
+                              }}
+                              className="px-2.5 py-1.5 text-xs font-medium rounded-md bg-emerald-600 text-white hover:bg-emerald-500 inline-flex items-center gap-1"
+                            >
+                              <Play size={12} /> Play
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void removeDownloaded(item)}
+                            className="p-1.5 rounded-md text-gray-400 hover:text-red-300 hover:bg-gray-800"
+                            title="Remove from this device"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </>
@@ -1350,7 +1645,21 @@ export default function MyLibrary() {
   );
 }
 
-function EbookGenreRow({ genre, items, onNavigateToBook, formatMatches }: { genre: string; items: KavitaItem[]; onNavigateToBook: NavigateToBook; formatMatches?: Record<string, { hasEbook: boolean; hasAudio: boolean }> }) {
+function EbookGenreRow({
+  genre,
+  items,
+  onNavigateToBook,
+  formatMatches,
+  cachedIds,
+  offline,
+}: {
+  genre: string;
+  items: KavitaItem[];
+  onNavigateToBook: NavigateToBook;
+  formatMatches?: Record<string, { hasEbook: boolean; hasAudio: boolean }>;
+  cachedIds?: Set<number>;
+  offline?: boolean;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const scroll = (dir: "left" | "right") => {
     if (!scrollRef.current) return;
@@ -1371,15 +1680,41 @@ function EbookGenreRow({ genre, items, onNavigateToBook, formatMatches }: { genr
         </div>
       </div>
       <div ref={scrollRef} className="grid grid-flow-col auto-cols-[20%] sm:auto-cols-[14%] md:auto-cols-[10%] lg:auto-cols-[8%] xl:auto-cols-[6.5%] gap-2 overflow-x-auto pb-2 scroll-smooth scrollbar-hide">
-        {items.map((item) => (
-          <EbookCard key={item.seriesId} item={item} onNavigateToBook={onNavigateToBook} hasAudio={formatMatches?.[item.title]?.hasAudio} />
-        ))}
+        {items.map((item) => {
+          const cached = item.chapterId != null && !!cachedIds?.has(item.chapterId);
+          return (
+            <EbookCard
+              key={item.seriesId}
+              item={item}
+              onNavigateToBook={onNavigateToBook}
+              hasAudio={formatMatches?.[item.title]?.hasAudio}
+              cached={cached}
+              unavailable={offline && (item.chapterId == null || !cached)}
+            />
+          );
+        })}
       </div>
     </section>
   );
 }
 
-function ABSGenreRow({ genre, items, onPlay, onNavigate, formatMatches }: { genre: string; items: ABSItem[]; onPlay: (id: string) => void; onNavigate?: NavigateToBook; formatMatches?: Record<string, { hasEbook: boolean; hasAudio: boolean }> }) {
+function ABSGenreRow({
+  genre,
+  items,
+  onPlay,
+  onNavigate,
+  formatMatches,
+  cachedIds,
+  offline,
+}: {
+  genre: string;
+  items: ABSItem[];
+  onPlay: (id: string) => void;
+  onNavigate?: NavigateToBook;
+  formatMatches?: Record<string, { hasEbook: boolean; hasAudio: boolean }>;
+  cachedIds?: Set<string>;
+  offline?: boolean;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const scroll = (dir: "left" | "right") => {
     if (!scrollRef.current) return;
@@ -1413,6 +1748,8 @@ function ABSGenreRow({ genre, items, onPlay, onNavigate, formatMatches }: { genr
             onPlay={onPlay}
             onNavigate={onNavigate}
             hasEbook={formatMatches?.[item.title]?.hasEbook}
+            cached={cachedIds?.has(item.itemId)}
+            unavailable={offline && !cachedIds?.has(item.itemId)}
           />
         ))}
       </div>
@@ -1420,7 +1757,21 @@ function ABSGenreRow({ genre, items, onPlay, onNavigate, formatMatches }: { genr
   );
 }
 
-function EbookCard({ item, onNavigateToBook, hasAudio }: { item: KavitaItem; onNavigateToBook: NavigateToBook; hasAudio?: boolean }) {
+function EbookCard({
+  item,
+  onNavigateToBook,
+  onRead,
+  hasAudio,
+  cached,
+  unavailable,
+}: {
+  item: KavitaItem;
+  onNavigateToBook: NavigateToBook;
+  onRead?: () => void;
+  hasAudio?: boolean;
+  cached?: boolean;
+  unavailable?: boolean;
+}) {
   const [imgError, setImgError] = useState(false);
   const [isVisible, setIsVisible] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -1439,6 +1790,10 @@ function EbookCard({ item, onNavigateToBook, hasAudio }: { item: KavitaItem; onN
   }, [item.coverUrl]);
 
   const handleClick = () => {
+    if (onRead) {
+      onRead();
+      return;
+    }
     if (item.chapterId) {
       onNavigateToBook(item.title, item.author, { ebookChapterId: item.chapterId });
     } else {
@@ -1453,7 +1808,12 @@ function EbookCard({ item, onNavigateToBook, hasAudio }: { item: KavitaItem; onN
   );
   const showCover = item.coverUrl && !imgError && isVisible;
   return (
-    <div ref={cardRef} className="group bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-amber-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-amber-900/10 hover:-translate-y-0.5 h-full relative">
+    <div
+      ref={cardRef}
+      className={`group bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-amber-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-amber-900/10 hover:-translate-y-0.5 h-full relative ${
+        unavailable ? "opacity-45 grayscale-[0.35]" : ""
+      }`}
+    >
       <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden cursor-pointer" onClick={handleClick}>
         {showCover ? (
           <CoverImage
@@ -1469,6 +1829,11 @@ function EbookCard({ item, onNavigateToBook, hasAudio }: { item: KavitaItem; onN
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center">
           <BookOpen size={24} className="text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg" />
         </div>
+        {cached && (
+          <span className="absolute top-1 left-1 px-1 py-0.5 rounded bg-black/65 text-[8px] font-semibold text-amber-300">
+            Offline
+          </span>
+        )}
         <div className="absolute bottom-1 right-1 flex items-center gap-0.5">
           <BookOpen size={10} className="text-amber-400 drop-shadow" />
           {hasAudio && <Headphones size={10} className="text-emerald-400 drop-shadow" />}
@@ -1477,22 +1842,39 @@ function EbookCard({ item, onNavigateToBook, hasAudio }: { item: KavitaItem; onN
       <div className="p-1.5">
         <h3 className="text-[10px] font-semibold text-gray-100 line-clamp-2 leading-tight cursor-pointer hover:text-amber-400 transition-colors" onClick={handleClick}>{item.title}</h3>
         {item.author && <p className="text-[9px] text-gray-400 line-clamp-1">{item.author}</p>}
+        {item.chapterId != null && (
+          <div className="mt-1" onClick={(e) => e.stopPropagation()}>
+            <SaveOfflineButton
+              size="sm"
+              target={{
+                kind: "ebook",
+                chapterId: item.chapterId,
+                title: item.title,
+                author: item.author,
+                coverUrl: item.coverUrl,
+                isPdf: true,
+              }}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate }: {
+function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate, unavailable, cached }: {
   item: LibraryItem;
   isResolving: boolean;
   onPlay: () => void;
   onResolve: () => void;
   onRemove: () => void;
   onNavigate: () => void;
+  unavailable?: boolean;
+  cached?: boolean;
 }) {
   const canPlay = item.streamStatus === "ready" && item.tracks.length > 0;
   return (
-    <div className="group bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-gray-700 transition-colors relative">
+    <div className={`group bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-gray-700 transition-colors relative ${unavailable ? "opacity-45 grayscale-[0.35]" : ""}`}>
       <div className="relative aspect-[2/3] bg-gray-900 cursor-pointer" onClick={onNavigate}>
         <CoverImage
           src={item.coverUrl}
@@ -1503,6 +1885,11 @@ function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate }: 
             <div className="w-full h-full flex items-center justify-center text-gray-700"><BookOpen size={16} /></div>
           }
         />
+        {cached && (
+          <span className="absolute top-1 left-1 px-1 py-0.5 rounded bg-black/65 text-[8px] font-semibold text-emerald-300">
+            Offline
+          </span>
+        )}
         {item.totalSeconds > 0 && item.progressSeconds > 0 && (
           <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-gray-700">
             <div className="h-full bg-purple-500" style={{ width: `${Math.round((item.progressSeconds / item.totalSeconds) * 100)}%` }} />
@@ -1517,7 +1904,7 @@ function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate }: 
               <Play size={8} /> Play
             </button>
           ) : item.magnetLink ? (
-            <button onClick={onResolve} disabled={isResolving} className="flex-1 flex items-center justify-center gap-0.5 py-1 bg-brand-600 text-white text-[9px] font-medium rounded hover:bg-brand-500 disabled:opacity-50 transition-colors">
+            <button onClick={onResolve} disabled={isResolving || unavailable} className="flex-1 flex items-center justify-center gap-0.5 py-1 bg-brand-600 text-white text-[9px] font-medium rounded hover:bg-brand-500 disabled:opacity-50 transition-colors">
               {isResolving ? <Loader2 size={8} className="animate-spin" /> : <Play size={8} />}
               {isResolving ? "..." : "Stream"}
             </button>

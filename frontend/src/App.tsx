@@ -28,8 +28,11 @@ import Settings from "./pages/Settings";
 import Onboarding from "./pages/Onboarding";
 import JoinInvite from "./pages/JoinInvite";
 import LibrariesPage from "./pages/Libraries";
+import OfflineBanner from "./components/OfflineBanner";
 import { useLibraryGroup } from "./hooks/useLibraryGroup";
 import { useThemeSync } from "./theme/useThemeSync";
+import { useOnlineStatus } from "./hooks/useOnlineStatus";
+import { isLikelyOffline } from "./utils/networkStatus";
 
 function ThemeSync() {
   useThemeSync();
@@ -42,20 +45,31 @@ function authGatePath(user: { mustChangePassword: boolean; mustSetEmail: boolean
 }
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { user, isLoading, sessionReady } = useAuth();
+  const { user, isLoading, sessionReady, offlineSession } = useAuth();
+  const online = useOnlineStatus();
   const hasLibraryToken = !!localStorage.getItem("access_token");
   const libraryQuery = useLibraryGroup(
     !!user &&
       sessionReady &&
       !user.mustChangePassword &&
       !user.mustSetEmail &&
-      hasLibraryToken
+      hasLibraryToken &&
+      online &&
+      !offlineSession
   );
   if (isLoading || !sessionReady) return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
   if (!hasLibraryToken || !user) return <Navigate to="/libraries" />;
   const gate = authGatePath(user);
-  if (gate) return <Navigate to={gate} />;
-  if (libraryQuery.data && libraryQuery.data.library === null) return <Navigate to="/onboarding" />;
+  // Offline unlock restores must_* flags from cache — don't block reading offline.
+  if (gate && online && !offlineSession && !isLikelyOffline()) return <Navigate to={gate} />;
+  if (
+    libraryQuery.data &&
+    libraryQuery.data.library === null &&
+    online &&
+    !offlineSession
+  ) {
+    return <Navigate to="/onboarding" />;
+  }
   return <>{children}</>;
 }
 
@@ -132,10 +146,13 @@ export default function App() {
         !user.mustChangePassword &&
         !user.mustSetEmail &&
         location.pathname !== "/libraries" && (
-        <Navbar
-          onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
-          genreActiveCount={showGenreButton ? genreActiveCount : 0}
-        />
+        <>
+          <Navbar
+            onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
+            genreActiveCount={showGenreButton ? genreActiveCount : 0}
+          />
+          <OfflineBanner />
+        </>
       )}
       {expanded && <PlayerPage />}
       <ThemeSync />

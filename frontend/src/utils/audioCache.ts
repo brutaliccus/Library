@@ -240,21 +240,36 @@ interface ChunkResult {
  * The body read must be inside the retry loop: a proxy stream that dies
  * mid-transfer rejects blob() or yields an empty blob.
  */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  try {
+    const token = localStorage.getItem("access_token");
+    if (token) headers.Authorization = `Bearer ${token}`;
+  } catch {
+    /* ignore */
+  }
+  return headers;
+}
+
 async function fetchChunkWithBody(
   url: string,
-  offset: number
+  offset: number,
+  opts?: { force?: boolean }
 ): Promise<ChunkResult | "eof" | null> {
   const absoluteUrl = toAbsoluteUrl(url);
-  const headers = { Range: `bytes=${offset}-${offset + CHUNK_SIZE - 1}` };
+  const headers = authHeaders({ Range: `bytes=${offset}-${offset + CHUNK_SIZE - 1}` });
   for (let attempt = 0; attempt < CHUNK_RETRIES; attempt++) {
     if (attempt > 0) await sleep(Math.min(12_000, 1_500 * 2 ** attempt));
-    await waitForDownloadSlot();
-    if (shouldDeferCacheDownload()) {
-      // Playback reclaimed bandwidth — back off and let the outer loop retry.
-      return null;
+    if (!opts?.force) {
+      await waitForDownloadSlot();
+      if (shouldDeferCacheDownload()) {
+        // Playback reclaimed bandwidth — back off and let the outer loop retry.
+        return null;
+      }
     }
     try {
       // Native APK: absolute URL is cross-origin from https://localhost.
+      // Bearer covers cases where cookies are not sent cross-origin.
       const resp = await fetch(absoluteUrl, { headers, credentials: "include" });
       if (resp.status === 416) return "eof";
       if (resp.status !== 206 && resp.status !== 200) {
@@ -403,13 +418,19 @@ async function assembleParts(
  * Download a single track in ranged chunks, persisting each chunk immediately.
  * Returns true when the fully assembled track ended up in the cache.
  */
-async function downloadTrack(cache: Cache, url: string): Promise<boolean> {
+async function downloadTrack(
+  cache: Cache,
+  url: string,
+  opts?: { force?: boolean }
+): Promise<boolean> {
   const storageKey = cacheStorageKey(url);
   const state = await loadExistingParts(cache, storageKey);
 
   while (state.total == null || state.offset < state.total) {
-    await waitForDownloadSlot();
-    if (shouldDeferCacheDownload()) return false;
+    if (!opts?.force) {
+      await waitForDownloadSlot();
+      if (shouldDeferCacheDownload()) return false;
+    }
 
     if (!(await hasStorageRoom(CHUNK_SIZE))) {
       console.warn("[audioCache] stopping — storage quota nearly full");
@@ -417,7 +438,7 @@ async function downloadTrack(cache: Cache, url: string): Promise<boolean> {
       return false;
     }
 
-    const chunk = await fetchChunkWithBody(url, state.offset);
+    const chunk = await fetchChunkWithBody(url, state.offset, opts);
     if (chunk === "eof") {
       state.total = state.offset;
       break;
@@ -462,20 +483,50 @@ async function downloadTrack(cache: Cache, url: string): Promise<boolean> {
   return ok;
 }
 
+export type CacheBookAudioOptions = {
+  /** Skip the post-play warmup delay (explicit "Save offline" taps). */
+  immediate?: boolean;
+  onProgress?: (done: number, total: number) => void;
+};
+
+/** Wait until another cacheBookAudio for the same book finishes (or give up). */
+async function waitForInFlightClear(prefix: string, maxMs = 120_000): Promise<void> {
+  const start = Date.now();
+  while (inFlight.has(prefix) && Date.now() - start < maxMs) {
+    await sleep(400);
+  }
+}
+
 export async function cacheBookAudio(
   tracks: CacheableTrack[],
-  onProgress?: (done: number, total: number) => void,
+  onProgressOrOpts?: ((done: number, total: number) => void) | CacheBookAudioOptions,
 ): Promise<void> {
+  const opts: CacheBookAudioOptions =
+    typeof onProgressOrOpts === "function"
+      ? { onProgress: onProgressOrOpts }
+      : onProgressOrOpts || {};
+  const onProgress = opts.onProgress;
+  const force = Boolean(opts.immediate);
+
   if (!cacheSupported() || tracks.length === 0) return;
   const cacheable = tracks.filter((t) => t.contentUrl && isCacheableUrl(t.contentUrl));
   if (cacheable.length === 0) return;
 
   const prefix = rowPrefixFromTrackUrl(cacheable[0].contentUrl) || cacheable[0].contentUrl;
-  if (inFlight.has(prefix)) return;
+  if (inFlight.has(prefix)) {
+    // Explicit Save offline must not bail silently if a background pass is running.
+    await waitForInFlightClear(prefix);
+    if (inFlight.has(prefix)) return;
+    // Re-check — the other pass may have finished the book.
+    if (await isBookCached(tracks)) {
+      onProgress?.(tracks.length, tracks.length);
+      return;
+    }
+  }
   inFlight.add(prefix);
 
   try {
-    await sleep(START_DELAY_MS);
+    if (!force) await sleep(START_DELAY_MS);
     await requestPersistentStorage();
     const cache = await caches.open(AUDIO_CACHE);
 
@@ -483,9 +534,11 @@ export async function cacheBookAudio(
     let pending = cacheable;
 
     for (let pass = 0; pass < MAX_TRACK_PASSES && pending.length > 0; pass++) {
-      // Yield entirely while playback is warming up or buffering.
-      while (shouldDeferCacheDownload()) {
-        await sleep(2_000);
+      // Background listens yield to playback; explicit Save offline does not.
+      if (!force) {
+        while (shouldDeferCacheDownload()) {
+          await sleep(2_000);
+        }
       }
 
       if (pass > 0) {
@@ -501,8 +554,10 @@ export async function cacheBookAudio(
 
       const failed: CacheableTrack[] = [];
       for (const t of pending) {
-        while (shouldDeferCacheDownload()) {
-          await sleep(2_000);
+        if (!force) {
+          while (shouldDeferCacheDownload()) {
+            await sleep(2_000);
+          }
         }
 
         const url = t.contentUrl;
@@ -512,7 +567,7 @@ export async function cacheBookAudio(
           onProgress?.(done, tracks.length);
           continue;
         }
-        if (await downloadTrack(cache, url)) {
+        if (await downloadTrack(cache, url, { force })) {
           notifyCacheUpdated();
           done++;
           onProgress?.(done, tracks.length);

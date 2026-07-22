@@ -11,8 +11,8 @@ import App from "./App";
 import { bootstrapThemeFromCache } from "./theme/themes";
 import {
   LIBRARY_COLLECTION_PREFIXES,
-  SHELF_PERSIST_KEY,
   clearLegacyShelfPersist,
+  shelfPersistKey,
 } from "./utils/shelfQueryCache";
 import "./index.css";
 
@@ -33,9 +33,7 @@ const queryClient = new QueryClient({
 // (stale-while-revalidate via each query's staleTime). Never auth tokens or
 // "continue listening" progress — only shelf/collection payloads.
 //
-// v4 buster: prior generations could keep ASIN-titled ABS orphans after LibraForge
-// metadata fixes because soft-poll invalidate left localStorage untouched.
-const PERSIST_KEY = SHELF_PERSIST_KEY;
+// v5: origin-scoped keys so multi-library devices never mix catalogs.
 const PERSIST_PREFIXES = [
   "trending-books",
   "new-releases",
@@ -60,7 +58,7 @@ function shelfLooksCoverBroken(data: unknown): boolean {
 
 try {
   clearLegacyShelfPersist();
-  const raw = localStorage.getItem(PERSIST_KEY);
+  const raw = localStorage.getItem(shelfPersistKey());
   if (raw) {
     const saved = JSON.parse(raw) as { t: number; entries: [unknown, unknown][] };
     if (saved && Date.now() - saved.t < PERSIST_MAX_AGE && Array.isArray(saved.entries)) {
@@ -103,7 +101,7 @@ queryClient.getQueryCache().subscribe(() => {
         }
       }
       // Always rewrite (including empty) so removeQueries drops orphans from disk.
-      localStorage.setItem(PERSIST_KEY, JSON.stringify({ t: Date.now(), entries }));
+      localStorage.setItem(shelfPersistKey(), JSON.stringify({ t: Date.now(), entries }));
     } catch {
       // localStorage full/unavailable — skip persistence this round
     }

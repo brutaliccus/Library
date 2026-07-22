@@ -9,10 +9,13 @@ import {
   Pencil,
   Loader2,
   X,
+  WifiOff,
 } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
 import CoverImage from "../components/CoverImage";
+import OfflineUnlockModal from "../components/OfflineUnlockModal";
 import {
+  getSessionForOrigin,
   listRememberedLibraries,
   loadRegistry,
   removeRememberedLibrary,
@@ -27,11 +30,14 @@ import { applyApiBaseUrl } from "../api/client";
 import api from "../api/client";
 import { setInstanceUrl, normalizeInstanceUrl } from "../api/instanceUrl";
 import { useToast } from "../contexts/ToastContext";
+import { useOnlineStatus } from "../hooks/useOnlineStatus";
+import { hasOfflineUnlock } from "../utils/offlineUnlock";
 
 export default function LibrariesPage() {
-  const { user, logout, enterLibrary, login, sessionReady } = useAuth();
+  const { user, logout, enterLibrary, enterLibraryOffline, login, sessionReady } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const online = useOnlineStatus();
   const email = user?.email || loadRegistry().email || "";
   const [tick, setTick] = useState(0);
   const libraries = useMemo(
@@ -59,6 +65,8 @@ export default function LibrariesPage() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState("");
+  const [unlockLib, setUnlockLib] = useState<RememberedLibrary | null>(null);
+  const [unlockMode, setUnlockMode] = useState<"setup" | "unlock">("unlock");
 
   if (!sessionReady) {
     return (
@@ -69,6 +77,22 @@ export default function LibrariesPage() {
     );
   }
 
+  const libraryStatus = (lib: RememberedLibrary) => {
+    const session = getSessionForOrigin(lib.origin);
+    const unlock = hasOfflineUnlock(lib.origin, lib.email || session?.email || "");
+    if (!session) {
+      return { canOpenOnline: online, canOpenOffline: false, reason: "Sign in once online" as const };
+    }
+    if (!unlock) {
+      return {
+        canOpenOnline: online,
+        canOpenOffline: false,
+        reason: "Set up offline unlock" as const,
+      };
+    }
+    return { canOpenOnline: online, canOpenOffline: true, reason: null };
+  };
+
   const openLibrary = async (lib: RememberedLibrary) => {
     setBusyOrigin(lib.origin);
     try {
@@ -77,12 +101,50 @@ export default function LibrariesPage() {
         navigate("/", { replace: true });
         return;
       }
-      setLoginLib(lib);
-      setLoginEmail(lib.email || email || "");
-      setLoginPassword("");
-      setLoginError("");
+      if (result === "need_offline_unlock") {
+        setUnlockMode("unlock");
+        setUnlockLib(lib);
+        return;
+      }
+      if (result === "need_offline_setup") {
+        if (online) {
+          setUnlockMode("setup");
+          setUnlockLib(lib);
+          toast("Set a PIN to open this library offline", "info");
+          return;
+        }
+        toast("Set up offline unlock while online first", "info");
+        return;
+      }
+      if (result === "need_login") {
+        if (!online) {
+          toast("Sign in once online to save a session for offline use", "info");
+          return;
+        }
+        setLoginLib(lib);
+        setLoginEmail(lib.email || email || "");
+        setLoginPassword("");
+        setLoginError("");
+        return;
+      }
+      toast("Could not open library", "error");
     } catch (e: any) {
       toast(e?.message || "Could not open library", "error");
+    } finally {
+      setBusyOrigin(null);
+    }
+  };
+
+  const finishOfflineOpen = async (lib: RememberedLibrary) => {
+    setBusyOrigin(lib.origin);
+    try {
+      const result = await enterLibraryOffline(lib.origin);
+      if (result === "ok") {
+        setUnlockLib(null);
+        navigate("/my-library", { replace: true });
+        return;
+      }
+      toast("Could not open offline library", "error");
     } finally {
       setBusyOrigin(null);
     }
@@ -95,6 +157,12 @@ export default function LibrariesPage() {
     try {
       await login(loginEmail.trim(), loginPassword, loginLib.origin);
       setLoginLib(null);
+      // Prompt offline unlock setup after first password login.
+      if (!hasOfflineUnlock(loginLib.origin, loginEmail.trim())) {
+        setUnlockMode("setup");
+        setUnlockLib(loginLib);
+        return;
+      }
       navigate("/", { replace: true });
     } catch (e: any) {
       setLoginError(e?.response?.data?.detail || "Sign in failed");
@@ -137,7 +205,6 @@ export default function LibrariesPage() {
       toast("Enter a valid library URL", "error");
       return;
     }
-    // Re-key membership if URL changed.
     if (origin !== editLib.origin) {
       removeRememberedLibrary(editLib.origin, editLib.email);
     }
@@ -165,11 +232,14 @@ export default function LibrariesPage() {
       setAddError("Use a full invite link (https://…/join/CODE) so the app knows which server");
       return;
     }
+    if (!online) {
+      setAddError("Connect to the internet to join a library");
+      return;
+    }
     setAddBusy(true);
     try {
       setInstanceUrl(origin);
       applyApiBaseUrl();
-      // Preview then go to join flow with code filled.
       navigate(`/join/${code}`, { replace: false });
       setShowAdd(false);
       setInviteInput("");
@@ -191,10 +261,25 @@ export default function LibrariesPage() {
       setSignInError("Enter your email or username and password");
       return;
     }
+    if (!online) {
+      setSignInError("Password sign-in needs a connection. Use Open offline if set up.");
+      return;
+    }
     setSignInBusy(true);
     try {
       await login(signInEmail.trim(), signInPassword, origin);
       setShowSignIn(false);
+      if (!hasOfflineUnlock(origin, signInEmail.trim())) {
+        setUnlockMode("setup");
+        setUnlockLib({
+          origin,
+          name: "Library",
+          coverUrl: null,
+          email: signInEmail.trim().toLowerCase(),
+          lastUsedAt: Date.now(),
+        });
+        return;
+      }
       navigate("/", { replace: true });
     } catch (e: any) {
       setSignInError(e?.response?.data?.detail || "Sign in failed");
@@ -217,6 +302,12 @@ export default function LibrariesPage() {
               Saved on this device. Add libraries with an invite link — each server keeps your
               account.
             </p>
+            {!online && (
+              <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-amber-300/90">
+                <WifiOff size={13} />
+                Offline — open a library with offline unlock, or connect to sign in.
+              </p>
+            )}
           </div>
           <div className="flex gap-2 shrink-0">
             {user ? (
@@ -239,14 +330,16 @@ export default function LibrariesPage() {
             <BookOpen size={36} className="mx-auto text-gray-600 mb-3" />
             <p className="text-gray-200 font-medium">No libraries on this device</p>
             <p className="text-sm text-gray-500 mt-1 mb-5">
-              Paste an invite link to join as a new member, or sign in if you already have an
-              account on a library (admins don’t need an invite).
+              {online
+                ? "Paste an invite link to join as a new member, or sign in if you already have an account on a library (admins don’t need an invite)."
+                : "Connect once to join or sign in, then set up offline unlock for next time."}
             </p>
             <div className="flex flex-wrap justify-center gap-3">
               <button
                 type="button"
                 onClick={() => setShowAdd(true)}
-                className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-brand-600 text-white hover:bg-brand-500"
+                disabled={!online}
+                className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40"
                 title="Add library with invite"
                 aria-label="Add library with invite"
               >
@@ -255,7 +348,8 @@ export default function LibrariesPage() {
               <button
                 type="button"
                 onClick={() => setShowSignIn(true)}
-                className="inline-flex items-center justify-center gap-2 px-4 h-12 rounded-full border border-gray-700 text-gray-200 hover:bg-gray-800"
+                disabled={!online}
+                className="inline-flex items-center justify-center gap-2 px-4 h-12 rounded-full border border-gray-700 text-gray-200 hover:bg-gray-800 disabled:opacity-40"
                 title="Sign in to existing library"
               >
                 <LogIn size={18} />
@@ -271,63 +365,78 @@ export default function LibrariesPage() {
           </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-            {libraries.map((lib) => (
-              <button
-                key={`${lib.origin}:${lib.email}`}
-                type="button"
-                onClick={() => void openLibrary(lib)}
-                disabled={busyOrigin === lib.origin}
-                className="group text-left rounded-xl overflow-hidden border border-gray-800 bg-gray-900/50 hover:border-brand-600/50 hover:bg-gray-900 transition-all disabled:opacity-60"
-              >
-                <div className="relative aspect-[2/3] bg-gray-800">
-                  <CoverImage
-                    src={lib.coverUrl}
-                    alt={lib.name}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                    fallback={
-                      <div className="w-full h-full flex items-center justify-center text-gray-600">
-                        <BookOpen size={32} />
+            {libraries.map((lib) => {
+              const status = libraryStatus(lib);
+              const disabledOffline = !online && !status.canOpenOffline;
+              return (
+                <button
+                  key={`${lib.origin}:${lib.email}`}
+                  type="button"
+                  onClick={() => void openLibrary(lib)}
+                  disabled={busyOrigin === lib.origin || disabledOffline}
+                  className="group text-left rounded-xl overflow-hidden border border-gray-800 bg-gray-900/50 hover:border-brand-600/50 hover:bg-gray-900 transition-all disabled:opacity-60"
+                >
+                  <div className="relative aspect-[2/3] bg-gray-800">
+                    <CoverImage
+                      src={lib.coverUrl}
+                      alt={lib.name}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                      fallback={
+                        <div className="w-full h-full flex items-center justify-center text-gray-600">
+                          <BookOpen size={32} />
+                        </div>
+                      }
+                    />
+                    {busyOrigin === lib.origin && (
+                      <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                        <Loader2 className="animate-spin text-white" size={24} />
                       </div>
-                    }
-                  />
-                  {busyOrigin === lib.origin && (
-                    <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                      <Loader2 className="animate-spin text-white" size={24} />
+                    )}
+                    <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => startEdit(lib, e)}
+                        className="p-1.5 rounded-lg bg-black/60 text-gray-300 hover:text-white"
+                        title="Edit"
+                      >
+                        <Pencil size={14} />
+                      </span>
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => void leaveLibrary(lib, e)}
+                        className="p-1.5 rounded-lg bg-black/60 text-gray-300 hover:text-red-300"
+                        title="Remove from this device"
+                      >
+                        <Trash2 size={14} />
+                      </span>
                     </div>
-                  )}
-                  <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => startEdit(lib, e)}
-                      className="p-1.5 rounded-lg bg-black/60 text-gray-300 hover:text-white"
-                      title="Edit"
-                    >
-                      <Pencil size={14} />
-                    </span>
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => void leaveLibrary(lib, e)}
-                      className="p-1.5 rounded-lg bg-black/60 text-gray-300 hover:text-red-300"
-                      title="Remove from this device"
-                    >
-                      <Trash2 size={14} />
-                    </span>
                   </div>
-                </div>
-                <div className="p-3">
-                  <p className="text-sm font-semibold text-gray-100 truncate">{lib.name}</p>
-                  <p className="text-[11px] text-gray-500 truncate mt-0.5">
-                    {lib.origin.replace(/^https?:\/\//, "")}
-                  </p>
-                </div>
-              </button>
-            ))}
+                  <div className="p-3">
+                    <p className="text-sm font-semibold text-gray-100 truncate">{lib.name}</p>
+                    <p className="text-[11px] text-gray-500 truncate mt-0.5">
+                      {lib.origin.replace(/^https?:\/\//, "")}
+                    </p>
+                    {!online && (
+                      <p className="text-[10px] mt-1 text-amber-400/90">
+                        {status.canOpenOffline
+                          ? "Open offline"
+                          : status.reason || "Unavailable offline"}
+                      </p>
+                    )}
+                    {online && status.reason === "Set up offline unlock" && (
+                      <p className="text-[10px] mt-1 text-gray-500">Offline unlock not set</p>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
             <button
               type="button"
               onClick={() => setShowAdd(true)}
-              className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-gray-700 aspect-[2/3] text-gray-400 hover:border-brand-600/50 hover:text-brand-300 hover:bg-gray-900/40 transition-colors"
+              disabled={!online}
+              className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-gray-700 aspect-[2/3] text-gray-400 hover:border-brand-600/50 hover:text-brand-300 hover:bg-gray-900/40 transition-colors disabled:opacity-40"
               title="Add library"
               aria-label="Add library"
             >
@@ -336,7 +445,8 @@ export default function LibrariesPage() {
             <button
               type="button"
               onClick={() => setShowSignIn(true)}
-              className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-gray-700 aspect-[2/3] text-gray-400 hover:border-brand-600/50 hover:text-brand-300 hover:bg-gray-900/40 transition-colors"
+              disabled={!online}
+              className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-gray-700 aspect-[2/3] text-gray-400 hover:border-brand-600/50 hover:text-brand-300 hover:bg-gray-900/40 transition-colors disabled:opacity-40"
               title="Sign in to existing library"
               aria-label="Sign in to existing library"
             >
@@ -473,6 +583,45 @@ export default function LibrariesPage() {
             {loginBusy ? "Signing in…" : "Sign in"}
           </button>
         </Modal>
+      )}
+
+      {unlockLib && (
+        <OfflineUnlockModal
+          mode={unlockMode}
+          libraryName={unlockLib.name}
+          origin={unlockLib.origin}
+          email={unlockLib.email || email}
+          onClose={() => setUnlockLib(null)}
+          onUnlocked={() => {
+            void (async () => {
+              // After PIN setup while online, re-enter with live /auth/me.
+              if (online && unlockMode === "setup") {
+                setBusyOrigin(unlockLib.origin);
+                try {
+                  const result = await enterLibrary(unlockLib.origin);
+                  setUnlockLib(null);
+                  if (result === "ok") {
+                    navigate("/", { replace: true });
+                    return;
+                  }
+                  if (result === "need_offline_unlock") {
+                    await finishOfflineOpen(unlockLib);
+                    return;
+                  }
+                  await finishOfflineOpen(unlockLib);
+                } finally {
+                  setBusyOrigin(null);
+                }
+                return;
+              }
+              await finishOfflineOpen(unlockLib);
+            })();
+          }}
+          onSetupComplete={() => {
+            setTick((t) => t + 1);
+            toast("Offline unlock ready", "success");
+          }}
+        />
       )}
     </div>
   );

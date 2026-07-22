@@ -22,6 +22,8 @@ import {
   upsertRememberedLibrary,
   type LibrarySession,
 } from "../api/libraryRegistry";
+import { hasOfflineUnlock } from "../utils/offlineUnlock";
+import { isAuthReject, isLikelyOffline, isNetworkError } from "../utils/networkStatus";
 
 interface AuthUser {
   username: string;
@@ -41,11 +43,20 @@ interface SessionTokens {
   must_set_email?: boolean;
 }
 
+export type EnterLibraryResult =
+  | "ok"
+  | "need_login"
+  | "need_offline_unlock"
+  | "need_offline_setup"
+  | "offline_no_session";
+
 interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
   sessionReady: boolean;
   setupRequired: boolean;
+  /** True when the active session was restored offline (no live /auth/me). */
+  offlineSession: boolean;
   login: (email: string, password: string, origin?: string) => Promise<void>;
   setup: (email: string, password: string, origin?: string) => Promise<void>;
   acceptSession: (data: SessionTokens) => void;
@@ -55,7 +66,12 @@ interface AuthContextType {
   refreshSetupRequired: () => Promise<boolean>;
   rememberCurrentLibrary: () => Promise<void>;
   /** Switch to a saved library; restores session if present. */
-  enterLibrary: (origin: string) => Promise<"ok" | "need_login">;
+  enterLibrary: (origin: string) => Promise<EnterLibraryResult>;
+  /**
+   * Restore a cached session after local PIN/biometric unlock.
+   * Call only after verifyOfflinePin / verifyOfflineBiometric succeeds.
+   */
+  enterLibraryOffline: (origin: string) => Promise<EnterLibraryResult>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -67,6 +83,16 @@ function userFromTokens(data: SessionTokens, emailFallback?: string | null): Aut
     role: data.role,
     mustChangePassword: !!data.must_change_password,
     mustSetEmail: !!data.must_set_email,
+  };
+}
+
+function userFromSession(session: LibrarySession): AuthUser {
+  return {
+    username: session.username,
+    email: session.email,
+    role: session.role,
+    mustChangePassword: !!session.must_change_password,
+    mustSetEmail: !!session.must_set_email,
   };
 }
 
@@ -100,6 +126,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const [sessionReady, setSessionReady] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
+  const [offlineSession, setOfflineSession] = useState(false);
 
   const refreshSetupRequired = useCallback(async () => {
     applyApiBaseUrl();
@@ -158,6 +185,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const cachedUsername = localStorage.getItem("username");
       const cachedRole = localStorage.getItem("user_role");
       const cachedEmail = localStorage.getItem("user_email");
+
+      // Cold start offline: keep tokens in registry/localStorage but do not
+      // auto-enter the library — user opens via Libraries + PIN/biometric.
+      if (token && isLikelyOffline()) {
+        setUser(null);
+        setOfflineSession(false);
+        setIsLoading(false);
+        setSessionReady(true);
+        return;
+      }
+
       if (token && cachedUsername && cachedRole) {
         setUser({
           username: cachedUsername,
@@ -189,6 +227,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             mustChangePassword: !!data.must_change_password,
             mustSetEmail: !!data.must_set_email,
           });
+          setOfflineSession(false);
           const origin = currentOrigin();
           if (origin) {
             const access = localStorage.getItem("access_token") || "";
@@ -218,15 +257,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               }
             }
           }
-        } catch {
-          clearActiveSession();
-          setUser(null);
-          try {
-            const { data } = await api.get("/auth/setup-required");
-            setSetupRequired(!!data.setup_required);
-          } catch {
-            /* unreachable */
+        } catch (err) {
+          // Network blip / offline mid-check: keep the cached session.
+          // Only real logout or a confirmed online auth reject clears it.
+          if (isNetworkError(err) || isLikelyOffline()) {
+            if (cachedUsername && cachedRole) {
+              setOfflineSession(true);
+            }
+          } else if (isAuthReject(err)) {
+            clearActiveSession();
+            setUser(null);
+            setOfflineSession(false);
+            try {
+              const { data } = await api.get("/auth/setup-required");
+              setSetupRequired(!!data.setup_required);
+            } catch {
+              /* unreachable */
+            }
           }
+          // Other HTTP errors: keep cached user if we painted one.
         }
       } else if (!isNativeApp() || getStoredInstanceUrl()) {
         try {
@@ -250,6 +299,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { data } = await api.post("/auth/login", { email, password });
     persistSession(data, origin || currentOrigin());
     setUser(userFromTokens(data, email));
+    setOfflineSession(false);
     const o = origin || currentOrigin();
     const identity = data.email || email || data.username;
     if (o && identity) {
@@ -289,6 +339,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       mustChangePassword: false,
       mustSetEmail: false,
     });
+    setOfflineSession(false);
     setSetupRequired(false);
   }, []);
 
@@ -296,6 +347,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const origin = currentOrigin();
     persistSession(data, origin);
     setUser(userFromTokens(data));
+    setOfflineSession(false);
     setSetupRequired(false);
     const email = data.email;
     if (origin && email) {
@@ -320,12 +372,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const enterLibrary = useCallback(async (origin: string): Promise<"ok" | "need_login"> => {
+  const enterLibrary = useCallback(async (origin: string): Promise<EnterLibraryResult> => {
     const key = origin.replace(/\/+$/, "");
     const existing = getSessionForOrigin(key);
     switchToLibrary(key);
     applyApiBaseUrl();
     if (!existing) return "need_login";
+
+    if (isLikelyOffline()) {
+      const email = existing.email || existing.username || "";
+      if (!hasOfflineUnlock(key, email)) return "need_offline_setup";
+      return "need_offline_unlock";
+    }
+
     try {
       const { data } = await api.get("/auth/me");
       setUser({
@@ -335,6 +394,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         mustChangePassword: !!data.must_change_password,
         mustSetEmail: !!data.must_set_email,
       });
+      setOfflineSession(false);
       localStorage.setItem("must_set_email", String(!!data.must_set_email));
       if (data.email) {
         try {
@@ -350,16 +410,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
       return "ok";
-    } catch {
-      clearActiveSession();
-      setUser(null);
-      return "need_login";
+    } catch (err) {
+      if (isNetworkError(err) || isLikelyOffline()) {
+        // Unreachable server with a cached session — require local unlock.
+        const email = existing.email || existing.username || "";
+        if (!hasOfflineUnlock(key, email)) return "need_offline_setup";
+        return "need_offline_unlock";
+      }
+      if (isAuthReject(err)) {
+        clearActiveSession();
+        setUser(null);
+        setOfflineSession(false);
+        return "need_login";
+      }
+      // Unexpected HTTP error with a valid cached session — stay usable.
+      setUser(userFromSession(existing));
+      setOfflineSession(true);
+      return "ok";
     }
+  }, []);
+
+  const enterLibraryOffline = useCallback(async (origin: string): Promise<EnterLibraryResult> => {
+    const key = origin.replace(/\/+$/, "");
+    const existing = getSessionForOrigin(key);
+    if (!existing) return "offline_no_session";
+    const email = existing.email || existing.username || "";
+    if (!hasOfflineUnlock(key, email)) return "need_offline_setup";
+    switchToLibrary(key);
+    applyApiBaseUrl();
+    setUser(userFromSession(existing));
+    setOfflineSession(true);
+    return "ok";
   }, []);
 
   const logout = useCallback(() => {
     clearActiveSession();
     setUser(null);
+    setOfflineSession(false);
   }, []);
 
   const clearMustChangePassword = useCallback(() => {
@@ -377,6 +464,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const applyEmailUpdate = useCallback((data: SessionTokens) => {
     persistSession({ ...data, must_set_email: false }, currentOrigin());
     setUser(userFromTokens({ ...data, must_set_email: false }));
+    setOfflineSession(false);
   }, []);
 
   return (
@@ -386,6 +474,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isLoading,
         sessionReady,
         setupRequired,
+        offlineSession,
         login,
         setup,
         acceptSession,
@@ -395,6 +484,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         refreshSetupRequired,
         rememberCurrentLibrary,
         enterLibrary,
+        enterLibraryOffline,
       }}
     >
       {children}

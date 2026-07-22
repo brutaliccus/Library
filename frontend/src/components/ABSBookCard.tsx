@@ -21,6 +21,10 @@ interface Props {
     target?: { ebookChapterId?: number; absItemId?: string }
   ) => void;
   hasEbook?: boolean;
+  /** Fully cached for offline play */
+  cached?: boolean;
+  /** Greyed / non-playable (e.g. offline + not cached) */
+  unavailable?: boolean;
 }
 
 function formatDuration(secs: number): string {
@@ -30,7 +34,19 @@ function formatDuration(secs: number): string {
   return `${m}m`;
 }
 
-export default function ABSBookCard({ itemId, title, author, coverUrl, duration, progress, onPlay, onNavigate, hasEbook }: Props) {
+export default function ABSBookCard({
+  itemId,
+  title,
+  author,
+  coverUrl,
+  duration,
+  progress,
+  onPlay,
+  onNavigate,
+  hasEbook,
+  cached,
+  unavailable,
+}: Props) {
   const { toast } = useToast();
   const { user } = useAuth();
   const queryClient = useQueryClient();
@@ -58,7 +74,9 @@ export default function ABSBookCard({ itemId, title, author, coverUrl, duration,
   return (
     <button
       onClick={() => onPlay(itemId)}
-      className="group text-left flex flex-col bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-emerald-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-emerald-900/10 hover:-translate-y-0.5 h-full relative"
+      className={`group text-left flex flex-col bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-emerald-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-emerald-900/10 hover:-translate-y-0.5 h-full relative ${
+        unavailable ? "opacity-45 grayscale-[0.35]" : ""
+      }`}
     >
       <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
         <CoverImage
@@ -75,6 +93,11 @@ export default function ABSBookCard({ itemId, title, author, coverUrl, duration,
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center">
           <Play size={24} className="text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg" />
         </div>
+        {cached && (
+          <span className="absolute top-1 left-1 px-1 py-0.5 rounded bg-black/65 text-[8px] font-semibold text-emerald-300">
+            Offline
+          </span>
+        )}
         {progress > 0 && progress < 1 && (
           <div className="absolute bottom-0 left-0 right-0 h-1 bg-gray-700/80">
             <div className="h-full bg-emerald-500" style={{ width: `${Math.round(progress * 100)}%` }} />

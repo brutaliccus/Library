@@ -4,6 +4,7 @@ import api from "../api/client";
 import { toAbsoluteUrl } from "../api/instanceUrl";
 import PdfViewer from "../components/PdfViewer";
 import { cacheBookEbook } from "../utils/ebookCache";
+import { saveEbookOfflineManifest } from "../utils/offlinePlayback";
 import { getProgress, saveProgress } from "../utils/readingProgress";
 import {
   ChevronLeft,
@@ -216,6 +217,13 @@ export default function Ereader() {
   useEffect(() => {
     if (!bookInfo || !cid || isNaN(cid)) return;
     const isPdf = bookInfo.seriesFormat === 4;
+    saveEbookOfflineManifest({
+      chapterId: cid,
+      title: bookInfo.bookTitle || bookInfo.seriesName || "Ebook",
+      author: "",
+      coverUrl: toAbsoluteUrl(`/api/library/reader/cover/chapter/${cid}`),
+      isPdf,
+    });
     void cacheBookEbook(cid, isPdf);
   }, [bookInfo, cid]);
 

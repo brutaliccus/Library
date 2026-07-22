@@ -370,6 +370,85 @@ def first_audio_file_id(lib_item: dict | None) -> str | None:
     return None
 
 
+def offline_download_info_from_item(lib_item: dict | None) -> dict | None:
+    """Build proxied track URLs for offline download without starting an ABS play session.
+
+    Uses expanded library-item audio metadata (tracks / audioFiles) so Save offline
+    works even if the user has never pressed Listen.
+    """
+    if not lib_item:
+        return None
+    item_id = str(lib_item.get("id") or "").strip()
+    if not item_id:
+        return None
+    media = lib_item.get("media") or {}
+    meta = media.get("metadata") or {}
+    raw = media.get("tracks") or []
+    if not raw:
+        raw = media.get("audioFiles") or []
+
+    tracks: list[dict] = []
+    offset = 0.0
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            continue
+        ino = entry.get("ino") or entry.get("inode")
+        if ino is None or not str(ino).strip():
+            continue
+        file_id = str(ino).strip()
+        try:
+            dur = float(entry.get("duration") or 0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        start_raw = entry.get("startOffset")
+        try:
+            start = float(start_raw) if start_raw is not None else offset
+        except (TypeError, ValueError):
+            start = offset
+        file_meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        title = (
+            (entry.get("title") or "").strip()
+            or (file_meta.get("filename") or "").strip()
+            or (file_meta.get("title") or "").strip()
+            or f"Track {i + 1}"
+        )
+        tracks.append({
+            "index": entry.get("index", i),
+            "startOffset": start,
+            "duration": dur,
+            "title": title,
+            "contentUrl": f"/api/stream/abs/proxy/audio/{item_id}/{file_id}",
+            "mimeType": entry.get("mimeType") or "audio/mpeg",
+        })
+        offset = start + dur
+
+    if not tracks:
+        return None
+
+    total_duration = media.get("duration") or offset
+    try:
+        total_duration = float(total_duration or 0)
+    except (TypeError, ValueError):
+        total_duration = offset
+
+    return {
+        "sessionId": "",
+        "tracks": tracks,
+        "startOffset": 0.0,
+        "coverUrl": f"/api/stream/abs/proxy/cover/{item_id}",
+        "title": meta.get("title") or lib_item.get("title") or "Audiobook",
+        "author": meta.get("authorName") or "",
+        "duration": total_duration,
+        "chapters": chapters_from_library_item(lib_item),
+    }
+
+
+async def get_offline_download_info(item_id: str) -> dict | None:
+    """Fetch ABS item metadata and return offline-download track info (no play session)."""
+    item = await get_library_item(item_id)
+    return offline_download_info_from_item(item)
+
+
 async def warmup_item_playback(item_id: str) -> bool:
     """Read the first ~256KB of the first audio file so spinning disks / ABS can serve playback sooner."""
     item = await get_library_item(item_id)

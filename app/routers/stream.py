@@ -377,6 +377,31 @@ async def warmup_abs_playback(
     return {"ok": ok}
 
 
+@router.get("/abs/{item_id}/offline")
+async def abs_offline_download_info(
+    item_id: str,
+    _user: User = Depends(get_current_user),
+):
+    """Return proxied track URLs + metadata for offline download without starting playback.
+
+    Save offline uses this so users can cache a book they have never pressed Listen on.
+    Callers may POST /play if this returns 404 (rare ABS shapes without track inodes).
+    """
+    info = await audiobookshelf.get_offline_download_info(item_id)
+    if not info or not info.get("tracks"):
+        raise HTTPException(status_code=404, detail="No audio tracks found for offline download")
+    return {
+        "sessionId": info.get("sessionId") or "",
+        "tracks": info["tracks"],
+        "startOffset": float(info.get("startOffset") or 0),
+        "coverUrl": info.get("coverUrl") or "",
+        "title": info.get("title") or "Audiobook",
+        "author": info.get("author") or "",
+        "duration": float(info.get("duration") or 0),
+        "chapters": info.get("chapters") or [],
+    }
+
+
 @router.post("/abs/{item_id}/play")
 async def start_abs_playback(
     item_id: str,

@@ -4,11 +4,25 @@
  * Persisted react-query shelves must REPLACE on fetch (never merge item lists).
  * After ABS/Kavita scans, drop in-memory + localStorage collection rows so phones
  * cannot keep orphan ASIN titles alongside newly fixed items.
+ *
+ * Persist blobs are origin-scoped (v5) so multi-library devices never mix catalogs.
  */
 import type { QueryClient } from "@tanstack/react-query";
+import { currentOrigin } from "../api/libraryRegistry";
 
-export const SHELF_PERSIST_KEY = "rq-shelf-cache-v4";
-export const SHELF_PERSIST_LEGACY_KEYS = ["rq-shelf-cache-v2", "rq-shelf-cache-v3"] as const;
+/** Base prefix; use shelfPersistKey() for the active origin. */
+export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v5:";
+export const SHELF_PERSIST_LEGACY_KEYS = [
+  "rq-shelf-cache-v2",
+  "rq-shelf-cache-v3",
+  "rq-shelf-cache-v4",
+] as const;
+
+/** Origin-scoped localStorage key for shelf query persistence. */
+export function shelfPersistKey(origin?: string): string {
+  const o = (origin || currentOrigin() || "default").replace(/\/+$/, "") || "default";
+  return `${SHELF_PERSIST_KEY_PREFIX}${o}`;
+}
 
 /** Query key prefixes persisted for My Library (and related shelves). */
 export const LIBRARY_COLLECTION_PREFIXES = [
@@ -89,7 +103,7 @@ export async function purgeLibraryCollectionQueries(
 /** Remove collection rows from the shelf persist blob immediately (sync). */
 export function stripCollectionEntriesFromPersist(
   storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> = localStorage,
-  persistKey: string = SHELF_PERSIST_KEY,
+  persistKey: string = shelfPersistKey(),
 ): void {
   try {
     const raw = storage.getItem(persistKey);

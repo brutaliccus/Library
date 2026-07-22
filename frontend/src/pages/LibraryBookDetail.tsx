@@ -8,6 +8,8 @@ import {
   ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
+import SaveOfflineButton from "../components/SaveOfflineButton";
+import { useOnlineStatus } from "../hooks/useOnlineStatus";
 
 interface ABSItemDetail {
   itemId: string;
@@ -40,6 +42,7 @@ export default function LibraryBookDetail() {
   const navigate = useNavigate();
   const { playABS } = usePlayer();
   const { toast } = useToast();
+  const online = useOnlineStatus();
   const [playLoading, setPlayLoading] = useState(false);
   const [storeLoading, setStoreLoading] = useState(false);
 
@@ -173,9 +176,10 @@ export default function LibraryBookDetail() {
           Read
         </button>
       ) : null}
+      {itemId && <SaveOfflineButton target={{ kind: "abs", itemId }} />}
       <button
         onClick={handleViewInStore}
-        disabled={storeLoading}
+        disabled={storeLoading || !online}
         className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
       >
         {storeLoading ? <Loader2 size={16} className="animate-spin" /> : <Store size={16} />}

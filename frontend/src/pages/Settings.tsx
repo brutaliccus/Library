@@ -34,6 +34,13 @@ import {
 } from "../utils/appUpdate";
 import { ANDROID_APK_GITHUB_RELEASES_URL } from "../utils/appUpdateConfig";
 import { Capacitor } from "@capacitor/core";
+import OfflineUnlockModal from "../components/OfflineUnlockModal";
+import {
+  biometricAvailable,
+  clearOfflineUnlock,
+  hasOfflineUnlock,
+  setBiometricEnabled,
+} from "../utils/offlineUnlock";
 
 interface UserSettings {
   private_mode: boolean;
@@ -725,6 +732,23 @@ export default function Settings() {
   const { user } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const origin = currentOrigin();
+  const unlockEmail = (user?.email || user?.username || "").toLowerCase();
+  const [unlockSetupOpen, setUnlockSetupOpen] = useState(false);
+  const [unlockEnrolled, setUnlockEnrolled] = useState(() =>
+    origin && unlockEmail ? hasOfflineUnlock(origin, unlockEmail) : false
+  );
+  const [bioSupported, setBioSupported] = useState(false);
+
+  useEffect(() => {
+    void biometricAvailable().then(setBioSupported);
+  }, []);
+
+  useEffect(() => {
+    if (origin && unlockEmail) {
+      setUnlockEnrolled(hasOfflineUnlock(origin, unlockEmail));
+    }
+  }, [origin, unlockEmail]);
 
   const { data: cacheBytes } = useQuery({
     queryKey: ["audio-cache-usage"],
@@ -953,6 +977,74 @@ export default function Settings() {
               </div>
             </div>
           </div>
+        )}
+
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <div className="flex items-start gap-4">
+            <div className="p-2 bg-gray-800 rounded-lg shrink-0">
+              <KeyRound size={20} className="text-amber-400" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-gray-100">Offline unlock</h3>
+              <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+                A local PIN (and optional biometric) unlocks this library when you&apos;re offline.
+                It stays on this device and is never sent to the server.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setUnlockSetupOpen(true)}
+                  className="px-3 py-2 bg-gray-800 text-gray-200 text-xs font-medium rounded-lg hover:bg-gray-700"
+                >
+                  {unlockEnrolled ? "Change PIN" : "Set up PIN"}
+                </button>
+                {unlockEnrolled && bioSupported && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void setBiometricEnabled(origin, unlockEmail, true).then((ok) => {
+                        toast(ok ? "Biometric unlock enabled" : "Biometric not available", ok ? "success" : "error");
+                      });
+                    }}
+                    className="px-3 py-2 bg-gray-800 text-gray-200 text-xs font-medium rounded-lg hover:bg-gray-700"
+                  >
+                    Enable biometric
+                  </button>
+                )}
+                {unlockEnrolled && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearOfflineUnlock(origin, unlockEmail);
+                      setUnlockEnrolled(false);
+                      toast("Offline unlock removed", "info");
+                    }}
+                    className="px-3 py-2 bg-gray-800 text-red-300 text-xs font-medium rounded-lg hover:bg-red-900/40"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <p className="text-[11px] text-gray-500 mt-2">
+                Status: {unlockEnrolled ? "Ready for offline open" : "Not set up"}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {unlockSetupOpen && origin && unlockEmail && (
+          <OfflineUnlockModal
+            mode="setup"
+            libraryName="This library"
+            origin={origin}
+            email={unlockEmail}
+            onClose={() => setUnlockSetupOpen(false)}
+            onUnlocked={() => {
+              setUnlockSetupOpen(false);
+              setUnlockEnrolled(true);
+              toast("Offline unlock ready", "success");
+            }}
+          />
         )}
 
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">

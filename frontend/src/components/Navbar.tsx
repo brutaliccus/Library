@@ -1,6 +1,7 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { usePlayer } from "../contexts/PlayerContext";
+import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useState, FormEvent, useEffect } from "react";
 import { BookOpen, Home, List, Shield, LogOut, Search, Headphones, Library, LayoutGrid, SlidersHorizontal, Lock, Unlock, Settings } from "lucide-react";
 
@@ -10,13 +11,15 @@ interface Props {
 }
 
 export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
-  const { user, logout } = useAuth();
+  const { user, logout, offlineSession } = useAuth();
   const { nowPlaying, isPlaying, setExpanded } = usePlayer();
+  const online = useOnlineStatus();
   const location = useLocation();
   const navigate = useNavigate();
   const [searchValue, setSearchValue] = useState("");
   const [rotationLocked, setRotationLocked] = useState(!!document.fullscreenElement);
   const [rotationLockSupported, setRotationLockSupported] = useState(false);
+  const onlineOnly = online && !offlineSession;
 
   useEffect(() => {
     const orient = screen.orientation as ScreenOrientation & { lock?: (mode: string) => Promise<void> };
@@ -47,11 +50,11 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
 
   const links = [
     { to: "/libraries", label: "Libraries", icon: LayoutGrid },
-    { to: "/", label: "Home", icon: Home },
+    { to: "/", label: "Home", icon: Home, onlineOnly: true },
     { to: "/my-library", label: "My Library", icon: Library },
-    { to: "/requests", label: "My Requests", icon: List },
+    { to: "/requests", label: "My Requests", icon: List, onlineOnly: true },
     ...(user.role === "admin"
-      ? [{ to: "/admin", label: "Admin", icon: Shield }]
+      ? [{ to: "/admin", label: "Admin", icon: Shield, onlineOnly: true }]
       : []),
   ];
 
@@ -77,22 +80,28 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
           <span className="hidden sm:inline">Library</span>
         </Link>
 
-        <form onSubmit={handleSearch} className="relative flex-1 max-w-md hidden sm:block">
-          <Search
-            size={16}
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500"
-          />
-          <input
-            type="text"
-            value={searchValue}
-            onChange={(e) => setSearchValue(e.target.value)}
-            placeholder="Search books..."
-            className="w-full pl-9 pr-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500"
-          />
-        </form>
+        {onlineOnly ? (
+          <form onSubmit={handleSearch} className="relative flex-1 max-w-md hidden sm:block">
+            <Search
+              size={16}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500"
+            />
+            <input
+              type="text"
+              value={searchValue}
+              onChange={(e) => setSearchValue(e.target.value)}
+              placeholder="Search books..."
+              className="w-full pl-9 pr-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500"
+            />
+          </form>
+        ) : (
+          <div className="flex-1 max-w-md hidden sm:block text-xs text-gray-500 px-2">
+            Search unavailable offline
+          </div>
+        )}
 
         <div className="flex items-center gap-1">
-          {onGenreToggle && (
+          {onGenreToggle && onlineOnly && (
             <button
               onClick={onGenreToggle}
               className="lg:hidden flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
@@ -108,20 +117,34 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
             </button>
           )}
 
-          {links.map(({ to, label, icon: Icon }) => (
-            <Link
-              key={to}
-              to={to}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                isActive(to)
-                  ? "bg-brand-600/20 text-brand-400"
-                  : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-              }`}
-            >
-              <Icon size={16} />
-              <span className="hidden md:inline">{label}</span>
-            </Link>
-          ))}
+          {links.map(({ to, label, icon: Icon, onlineOnly: needsOnline }) => {
+            if (needsOnline && !onlineOnly) {
+              return (
+                <span
+                  key={to}
+                  title="Unavailable offline"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-gray-600 cursor-not-allowed"
+                >
+                  <Icon size={16} />
+                  <span className="hidden md:inline">{label}</span>
+                </span>
+              );
+            }
+            return (
+              <Link
+                key={to}
+                to={to}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  isActive(to)
+                    ? "bg-brand-600/20 text-brand-400"
+                    : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+                }`}
+              >
+                <Icon size={16} />
+                <span className="hidden md:inline">{label}</span>
+              </Link>
+            );
+          })}
 
           {nowPlaying && (
             <button

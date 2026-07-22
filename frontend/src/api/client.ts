@@ -1,5 +1,6 @@
 import axios from "axios";
 import { getApiBaseUrl, toAbsoluteUrl } from "./instanceUrl";
+import { isLikelyOffline, isNetworkError } from "../utils/networkStatus";
 
 const api = axios.create({
   baseURL: getApiBaseUrl(),
@@ -92,24 +93,34 @@ api.interceptors.response.use(
           const newToken = await refreshPromise;
           original.headers.Authorization = `Bearer ${newToken}`;
           return api(original);
-        } catch {
+        } catch (refreshErr) {
           refreshPromise = null;
+          // Offline / unreachable: keep tokens so offline unlock + cached play still work.
+          if (isLikelyOffline() || isNetworkError(refreshErr)) {
+            return Promise.reject(error);
+          }
           localStorage.removeItem("access_token");
           localStorage.removeItem("refresh_token");
           localStorage.removeItem("user_role");
           localStorage.removeItem("username");
           localStorage.removeItem("must_change_password");
           localStorage.removeItem("must_set_email");
-          window.location.href = "/login";
+          window.location.href = "/libraries";
         }
       } else {
+        if (isLikelyOffline()) {
+          return Promise.reject(error);
+        }
         localStorage.removeItem("access_token");
         localStorage.removeItem("user_role");
         localStorage.removeItem("username");
         localStorage.removeItem("must_change_password");
         localStorage.removeItem("must_set_email");
-        if (!window.location.pathname.startsWith("/login")) {
-          window.location.href = "/login";
+        if (
+          !window.location.pathname.startsWith("/login") &&
+          !window.location.pathname.startsWith("/libraries")
+        ) {
+          window.location.href = "/libraries";
         }
       }
     }

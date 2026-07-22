@@ -6,6 +6,7 @@ import { useAuth } from "../hooks/useAuth";
 import { useToast } from "../contexts/ToastContext";
 import { usePlayer } from "../contexts/PlayerContext";
 import ABSBookCard from "../components/ABSBookCard";
+import BookCardSkeleton from "../components/BookCardSkeleton";
 import SeriesDrilldown from "../components/SeriesDrilldown";
 import AuthImage from "../components/AuthImage";
 import CoverImage from "../components/CoverImage";
@@ -154,13 +155,18 @@ export default function MyLibrary() {
     return () => clearTimeout(debounceRef.current);
   }, [searchQuery]);
 
-  const { data: absCollection } = useQuery({
+  const {
+    data: absCollection,
+    isLoading: absLoading,
+    isFetching: absFetching,
+  } = useQuery({
     queryKey: ["abs-collection"],
     queryFn: async () => {
       const { data } = await api.get("/library/abs/collection");
       return data as { genres: Record<string, ABSItem[]>; ungrouped: ABSItem[]; totalItems: number };
     },
-    staleTime: 5 * 60 * 1000,
+    staleTime: 30 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
     enabled: !!user && sessionReady,
   });
@@ -173,6 +179,7 @@ export default function MyLibrary() {
     },
     // Hardcover-backed (same as book-detail “More in this series”) — cache longer
     staleTime: 30 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
     enabled: !!user && sessionReady && tab === "abs",
   });
@@ -192,16 +199,20 @@ export default function MyLibrary() {
       };
     },
     staleTime: 30 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
     enabled: !!user && sessionReady && tab === "ebooks",
   });
 
-  const { data: rdLibrary, isLoading: rdLoading } = useQuery({
+  const { data: rdLibrary, isLoading: rdLoading, isFetching: rdFetching } = useQuery({
     queryKey: ["streaming-library"],
     queryFn: async () => {
       const { data } = await api.get("/library");
       return data as { items: LibraryItem[] };
     },
+    staleTime: 10 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
+    refetchOnWindowFocus: false,
     enabled: !!user && sessionReady,
   });
 
@@ -212,17 +223,25 @@ export default function MyLibrary() {
       return data as { series: PersonalSeries[] };
     },
     staleTime: 30 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
     enabled: !!user && sessionReady && tab === "streams",
   });
 
-  const { data: kavitaCollection, isLoading: kavitaLoading, isError: kavitaError, refetch: refetchKavita } = useQuery({
+  const {
+    data: kavitaCollection,
+    isLoading: kavitaLoading,
+    isFetching: kavitaFetching,
+    isError: kavitaError,
+    refetch: refetchKavita,
+  } = useQuery({
     queryKey: ["kavita-collection"],
     queryFn: async () => {
       const { data } = await api.get("/library/kavita/collection");
       return data as { items: KavitaItem[]; totalItems: number };
     },
-    staleTime: 5 * 60 * 1000,
+    staleTime: 30 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
     enabled: !!user && sessionReady,
   });
@@ -848,9 +867,22 @@ export default function MyLibrary() {
           <div>
             <h1 className="text-2xl font-bold text-gray-100">My Library</h1>
             <p className="text-sm text-gray-400">
-              {absCollection ? `${absCollection.totalItems} audiobooks` : ""}
-              {kavitaCollection?.totalItems ? ` · ${kavitaCollection.totalItems} ebooks` : ""}
-              {rdLibrary?.items?.length ? ` · ${rdLibrary.items.length} in collection` : ""}
+              {absLoading && !absCollection
+                ? "Loading library…"
+                : [
+                    absCollection ? `${absCollection.totalItems} audiobooks` : "",
+                    kavitaCollection?.totalItems ? `${kavitaCollection.totalItems} ebooks` : "",
+                    rdLibrary?.items?.length ? `${rdLibrary.items.length} in collection` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+              {(absFetching || kavitaFetching || rdFetching) &&
+                (absCollection || kavitaCollection || rdLibrary) && (
+                  <span className="ml-2 inline-flex items-center gap-1 text-gray-500">
+                    <Loader2 size={12} className="animate-spin" />
+                    Updating
+                  </span>
+                )}
             </p>
           </div>
         </div>
@@ -1016,7 +1048,9 @@ export default function MyLibrary() {
 
               {absView === "all" && (
                 <div>
-                  {filteredAbsItems.length > 0 ? (
+                  {absLoading && !absCollection ? (
+                    <LibraryGridSkeleton />
+                  ) : filteredAbsItems.length > 0 ? (
                     <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
                       {filteredAbsItems.map((item) => (
                         <ABSBookCard
@@ -1041,20 +1075,30 @@ export default function MyLibrary() {
 
               {absView === "genre" && (
                 <div className="space-y-6">
-                  {Object.entries(absByGenre).map(([genre, items]) => (
-                    <ABSGenreRow key={genre} genre={genre} items={items} onPlay={handlePlayABS} onNavigate={handleNavigateToBook} formatMatches={formatMatches} />
-                  ))}
-                  {Object.keys(absByGenre).length === 0 && (
-                    <EmptyABS onBrowse={() => navigate("/")} />
+                  {absLoading && !absCollection ? (
+                    <LibraryGridSkeleton />
+                  ) : (
+                    <>
+                      {Object.entries(absByGenre).map(([genre, items]) => (
+                        <ABSGenreRow key={genre} genre={genre} items={items} onPlay={handlePlayABS} onNavigate={handleNavigateToBook} formatMatches={formatMatches} />
+                      ))}
+                      {Object.keys(absByGenre).length === 0 && (
+                        <EmptyABS onBrowse={() => navigate("/")} />
+                      )}
+                    </>
                   )}
                 </div>
               )}
 
               {absView === "author" && (
                 <div className="space-y-6">
-                  {Object.entries(absByAuthor).map(([author, items]) => (
-                    <ABSGenreRow key={author} genre={author} items={items} onPlay={handlePlayABS} onNavigate={handleNavigateToBook} formatMatches={formatMatches} />
-                  ))}
+                  {absLoading && !absCollection ? (
+                    <LibraryGridSkeleton />
+                  ) : (
+                    Object.entries(absByAuthor).map(([author, items]) => (
+                      <ABSGenreRow key={author} genre={author} items={items} onPlay={handlePlayABS} onNavigate={handleNavigateToBook} formatMatches={formatMatches} />
+                    ))
+                  )}
                 </div>
               )}
 
@@ -1080,13 +1124,8 @@ export default function MyLibrary() {
             <div>
               {viewToggle(ebookView, setEbookView)}
               <FilterBar options={ebookFilterOptions} />
-              {kavitaLoading && (
-                <div className="flex justify-center py-12 text-gray-400 gap-2">
-                  <Loader2 size={16} className="animate-spin" />
-                  Loading ebooks...
-                </div>
-              )}
-              {kavitaError && (
+              {kavitaLoading && !kavitaCollection && <LibraryGridSkeleton />}
+              {kavitaError && !kavitaCollection && (
                 <div className="text-center py-16">
                   <p className="text-red-400 mb-4">Failed to load ebooks. Check Kavita connection.</p>
                   <button onClick={() => refetchKavita()} className="px-4 py-2 bg-gray-700 text-gray-200 rounded-lg hover:bg-gray-600">
@@ -1094,7 +1133,7 @@ export default function MyLibrary() {
                   </button>
                 </div>
               )}
-              {!kavitaLoading && !kavitaError && allEbookItems.length > 0 && (
+              {!kavitaError && allEbookItems.length > 0 && (
                 <>
                   {ebookView === "all" && (
                     <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
@@ -1163,12 +1202,7 @@ export default function MyLibrary() {
             <div>
               {viewToggle(rdView, setRdView)}
               <FilterBar options={rdFilterOptions} />
-              {rdLoading && (
-                <div className="flex items-center justify-center py-12 text-gray-400 gap-2">
-                  <Loader2 size={16} className="animate-spin" />
-                  Loading...
-                </div>
-              )}
+              {rdLoading && !rdLibrary && <LibraryGridSkeleton />}
               {!rdLoading && rdItemsSorted.length === 0 && (
                 <div className="text-center py-16">
                   <BookOpen className="mx-auto mb-4 text-gray-600" size={40} />
@@ -1450,6 +1484,22 @@ function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate }: 
             <Trash2 size={10} />
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function LibraryGridSkeleton({ count = 18 }: { count?: number }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 text-sm text-gray-400">
+        <Loader2 size={16} className="animate-spin text-brand-400" />
+        Loading your library…
+      </div>
+      <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
+        {Array.from({ length: count }, (_, i) => (
+          <BookCardSkeleton key={i} />
+        ))}
       </div>
     </div>
   );

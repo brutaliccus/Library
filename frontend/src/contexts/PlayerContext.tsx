@@ -64,6 +64,11 @@ function absolutizeTracks(tracks: Track[]): Track[] {
 interface PlayerState {
   nowPlaying: NowPlaying | null;
   isPlaying: boolean;
+  /**
+   * User/transport wants playback (play pressed, not yet deliberately paused).
+   * Media session / AA sync use this so brief audio pauses don't report "paused".
+   */
+  wantPlaying: boolean;
   currentTime: number;
   duration: number;
   currentTrackIndex: number;
@@ -171,9 +176,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   );
   /** Ignore pause events fired while we reset the audio element between tracks. */
   const suppressPauseIntentRef = useRef(false);
+  /** Resume after a transient system pause while play intent is still true. */
+  const resumeAfterTransientPauseRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [state, setState] = useState<PlayerState>({
     nowPlaying: null,
     isPlaying: false,
+    wantPlaying: false,
     currentTime: 0,
     duration: 0,
     currentTrackIndex: 0,
@@ -185,6 +193,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     sleepTimerSecondsRemaining: null,
     sleepTimerPresetMinutes: null,
   });
+
+  const setPlayIntent = useCallback((want: boolean) => {
+    playIntentRef.current = want;
+    setState((s) => (s.wantPlaying === want ? s : { ...s, wantPlaying: want }));
+  }, []);
 
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -257,6 +270,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       pendingSeekRef.current = startTime > 0 ? startTime : null;
       staleTickCountRef.current = 0;
       playIntentRef.current = true;
+      setState((s) => (s.wantPlaying ? s : { ...s, wantPlaying: true }));
       stallWatchRef.current = { time: startTime, at: Date.now() };
 
       suppressPauseIntentRef.current = true;
@@ -451,12 +465,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const onPlaying = () => {
       retryCountRef.current = 0;
       suppressPauseIntentRef.current = false;
-      setState((s) => ({ ...s, isPlaying: true, buffering: false }));
+      if (resumeAfterTransientPauseRef.current) {
+        clearTimeout(resumeAfterTransientPauseRef.current);
+        resumeAfterTransientPauseRef.current = null;
+      }
+      setState((s) => ({
+        ...s,
+        isPlaying: true,
+        wantPlaying: true,
+        buffering: false,
+      }));
     };
     const onPause = () => {
-      if (!suppressPauseIntentRef.current) {
-        playIntentRef.current = false;
-      }
       setState((s) => ({ ...s, isPlaying: false }));
       // Persist on every pause so a later force-close can't lose the position.
       const np = stateRef.current.nowPlaying;
@@ -464,6 +484,27 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (np && pos?.key === npKey(np)) {
         void syncProgress(np, pos.time, pos.trackIndex, pos.trackLocal);
       }
+      // Track swaps intentionally pause the element — don't clear play intent.
+      if (suppressPauseIntentRef.current) return;
+      // Deliberate pause() already cleared intent. Transient system pauses
+      // (focus blip / WebView wake) must keep intent and resume, or lock-screen
+      // / AA play starts then stops ~0.5s later.
+      if (playIntentRef.current) {
+        setState((s) => ({ ...s, wantPlaying: true, buffering: true }));
+        if (resumeAfterTransientPauseRef.current) {
+          clearTimeout(resumeAfterTransientPauseRef.current);
+        }
+        resumeAfterTransientPauseRef.current = setTimeout(() => {
+          resumeAfterTransientPauseRef.current = null;
+          if (!playIntentRef.current) return;
+          const a = audioRef.current;
+          if (a && a.paused && a.src) {
+            a.play().catch(() => {});
+          }
+        }, 250);
+        return;
+      }
+      setState((s) => (s.wantPlaying ? { ...s, wantPlaying: false } : s));
     };
     const onWaiting = () => setState((s) => ({ ...s, buffering: true }));
     const onCanPlay = () => setState((s) => ({ ...s, buffering: false }));
@@ -483,10 +524,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (!np) return;
       if (ti < np.tracks.length - 1) {
         playIntentRef.current = true;
+        setState((s) => (s.wantPlaying ? s : { ...s, wantPlaying: true }));
         suppressPauseIntentRef.current = true;
         loadTrack(np, ti + 1, 0);
       } else {
-        setState((s) => ({ ...s, isPlaying: false }));
+        playIntentRef.current = false;
+        setState((s) => ({ ...s, isPlaying: false, wantPlaying: false }));
         if (np.source === "abs" && np.sessionId) {
           api
             .post(`/stream/abs/${np.sessionId}/close`, {
@@ -564,13 +607,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (endAt == null) return;
       const now = Date.now();
       if (now >= endAt) {
-        getAudio().pause();
+        playIntentRef.current = false;
         setState((s) => ({
           ...s,
+          wantPlaying: false,
           sleepTimerEndAt: null,
           sleepTimerSecondsRemaining: null,
           sleepTimerPresetMinutes: null,
         }));
+        getAudio().pause();
         return;
       }
       setState((s) => ({
@@ -588,7 +633,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     async (itemId: string) => {
       probeAbortRef.current?.abort();
       retryCountRef.current = 0;
-      playIntentRef.current = true;
+      setPlayIntent(true);
 
       const startFromManifest = async () => {
         const manifest = getAbsOfflineManifest(itemId);
@@ -741,7 +786,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         throw err;
       }
     },
-    [loadTrack]
+    [loadTrack, setPlayIntent]
   );
 
   const playRD = useCallback(
@@ -756,7 +801,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     ) => {
       probeAbortRef.current?.abort();
       retryCountRef.current = 0;
-      playIntentRef.current = true;
+      setPlayIntent(true);
       const tracksCopy = absolutizeTracks(tracks.map((t) => ({ ...t })));
       const totalDuration = recalcOffsets(tracksCopy);
       const np = withAbsoluteMediaUrls({
@@ -841,25 +886,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         void cacheBookAudio(tracksCopy);
       }
     },
-    [loadTrack, probeAllTracks]
+    [loadTrack, probeAllTracks, setPlayIntent]
   );
 
   const togglePlay = useCallback(() => {
     const audio = getAudio();
     if (audio.paused) {
-      playIntentRef.current = true;
+      setPlayIntent(true);
       audio.play().catch(() => {});
     } else {
-      playIntentRef.current = false;
+      setPlayIntent(false);
       audio.pause();
     }
-  }, [getAudio]);
+  }, [getAudio, setPlayIntent]);
 
   // Explicit play/pause for external controllers (Android Auto, lock screen).
   // Toggle semantics there are dangerous: if native and web state disagree,
   // "pause" would start playback.
   const play = useCallback(() => {
-    playIntentRef.current = true;
+    setPlayIntent(true);
     const audio = getAudio();
     const np = stateRef.current.nowPlaying;
 
@@ -939,12 +984,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       });
     };
     attemptPlay(5);
-  }, [getAudio, playABS, playRD]);
+  }, [getAudio, playABS, playRD, setPlayIntent]);
 
   const pause = useCallback(() => {
-    playIntentRef.current = false;
+    if (resumeAfterTransientPauseRef.current) {
+      clearTimeout(resumeAfterTransientPauseRef.current);
+      resumeAfterTransientPauseRef.current = null;
+    }
+    setPlayIntent(false);
     getAudio().pause();
-  }, [getAudio]);
+  }, [getAudio, setPlayIntent]);
 
   const seek = useCallback(
     (time: number) => {
@@ -1006,7 +1055,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const dismissPlayer = useCallback(() => {
     probeAbortRef.current?.abort();
-    playIntentRef.current = false;
+    if (resumeAfterTransientPauseRef.current) {
+      clearTimeout(resumeAfterTransientPauseRef.current);
+      resumeAfterTransientPauseRef.current = null;
+    }
+    setPlayIntent(false);
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
@@ -1032,6 +1085,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         ...s,
         nowPlaying: null,
         isPlaying: false,
+        wantPlaying: false,
         currentTime: 0,
         duration: 0,
         currentTrackIndex: 0,
@@ -1049,7 +1103,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
 
     void persistPlaybackProgress(np, pos.time, pos.trackIndex, pos.trackLocal).finally(teardown);
-  }, [getAudio, persistPlaybackProgress]);
+  }, [getAudio, persistPlaybackProgress, setPlayIntent]);
 
   const setSleepTimer = useCallback((minutes: number | null) => {
     if (minutes == null) {
@@ -1108,7 +1162,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       // Last chapter marker but more audio files remain — advance track.
       const ti = stateRef.current.currentTrackIndex;
       if (np.tracks.length > 1 && ti < np.tracks.length - 1) {
-        playIntentRef.current = true;
+        setPlayIntent(true);
         suppressPauseIntentRef.current = true;
         jumpToTrack(ti + 1);
       }
@@ -1116,13 +1170,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
     const ti = stateRef.current.currentTrackIndex;
     if (np.tracks.length > 1 && ti < np.tracks.length - 1) jumpToTrack(ti + 1);
-  }, [seek, jumpToTrack]);
+  }, [seek, jumpToTrack, setPlayIntent]);
 
   // Lock screen / browser / Android Auto controls and metadata.
   usePlayerMediaSession(
     {
       nowPlaying: state.nowPlaying,
       isPlaying: state.isPlaying,
+      wantPlaying: state.wantPlaying,
       buffering: state.buffering,
       currentTime: state.currentTime,
       currentTrackIndex: state.currentTrackIndex,

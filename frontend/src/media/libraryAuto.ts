@@ -19,12 +19,21 @@ let playHandlers: AutoPlayHandlers | null = null;
 let lastMetaKey = "";
 let lastPosSyncAt = 0;
 let lastPlayingSynced: boolean | null = null;
+/** After AA/lock play, ignore stale playing=false syncs until audio catches up. */
+let ignorePausedSyncUntil = 0;
 const POS_SYNC_INTERVAL_MS = 1_000;
+const PAUSED_SYNC_GRACE_MS = 2_500;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function markOptimisticPlaying(): void {
+  lastPlayingSynced = true;
+  ignorePausedSyncUntil = Date.now() + PAUSED_SYNC_GRACE_MS;
+}
+
 /** Wake the WebView before transport play so audio.play() isn't rejected while frozen. */
 async function withWebViewReady(fn: () => void): Promise<void> {
+  markOptimisticPlaying();
   try {
     await LibraryAuto.bringToForeground();
     await sleep(350);
@@ -61,7 +70,14 @@ export async function registerAndroidAutoHandlers(
           void withWebViewReady(() => handlers.play());
         },
       },
-      { action: "pause", fn: () => handlers.pause() },
+      {
+        action: "pause",
+        fn: () => {
+          ignorePausedSyncUntil = 0;
+          lastPlayingSynced = false;
+          handlers.pause();
+        },
+      },
       { action: "stop", fn: () => handlers.dismissPlayer() },
       { action: "seekbackward", fn: () => handlers.seekRelative(-SKIP) },
       { action: "seekforward", fn: () => handlers.seekRelative(SKIP) },
@@ -110,6 +126,7 @@ export async function syncAndroidAutoPlayback(
     if (!np) {
       lastMetaKey = "";
       lastPlayingSynced = null;
+      ignorePausedSyncUntil = 0;
       await LibraryAuto.syncPlayback({ active: false, playing: false });
       return;
     }
@@ -124,8 +141,13 @@ export async function syncAndroidAutoPlayback(
     const pos = scope.position;
     const metaKey = `${scope.label}|${np.title}|${np.author}|${np.coverUrl}|${trackIndex}|${trackLabel}|${d}`;
     const metaChanged = metaKey !== lastMetaKey;
-    const playingChanged = lastPlayingSynced !== isPlaying;
     const now = Date.now();
+    // Keep reporting playing while an AA/lock play is settling — React state often
+    // still says paused until the audio element fires "playing".
+    const reportPlaying =
+      isPlaying || (lastPlayingSynced === true && now < ignorePausedSyncUntil);
+    if (isPlaying) ignorePausedSyncUntil = 0;
+    const playingChanged = lastPlayingSynced !== reportPlaying;
     const posDue = now - lastPosSyncAt >= POS_SYNC_INTERVAL_MS;
 
     // Never throttle play/pause — AA button state must track the phone immediately.
@@ -133,7 +155,7 @@ export async function syncAndroidAutoPlayback(
 
     if (metaChanged) lastMetaKey = metaKey;
     if (posDue || playingChanged) lastPosSyncAt = now;
-    lastPlayingSynced = isPlaying;
+    lastPlayingSynced = reportPlaying;
 
     const safePos = isFinite(pos) ? Math.max(0, pos) : 0;
     if ("source" in np && (np.source === "abs" || np.source === "rd")) {
@@ -156,7 +178,7 @@ export async function syncAndroidAutoPlayback(
 
       await LibraryAuto.syncPlayback({
         active: true,
-        playing: isPlaying,
+        playing: reportPlaying,
         // Android Auto MediaSession: TITLE (large) + ARTIST (small).
         // Put chapter in artist so the car shows Book / Chapter, not Author / Chapter.
         title: np.title || "Audiobook",
@@ -172,7 +194,7 @@ export async function syncAndroidAutoPlayback(
 
     await LibraryAuto.syncPlayback({
       active: true,
-      playing: isPlaying,
+      playing: reportPlaying,
       position: safePos,
       playbackRate: Math.max(playbackRate, 0.25),
       positionOnly: true,

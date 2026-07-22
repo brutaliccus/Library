@@ -24,9 +24,9 @@ const queryClient = new QueryClient({
 // A reopened PWA (killed after idle) starts with an empty cache and re-fetches
 // everything against a cold server — the "takes ages" cold start. We persist a
 // whitelist of slow-changing shelves to localStorage and restore them on boot,
-// so Home paints instantly and revalidates in the background (stale-while-
-// revalidate via each query's staleTime). Only cacheable, user-agnostic shelves
-// are stored — never auth or "continue listening".
+// so Home / My Library paint instantly and revalidate in the background
+// (stale-while-revalidate via each query's staleTime). Never auth tokens or
+// "continue listening" progress — only shelf/collection payloads.
 const PERSIST_KEY = "rq-shelf-cache-v3";
 const PERSIST_PREFIXES = [
   "trending-books",
@@ -35,6 +35,13 @@ const PERSIST_PREFIXES = [
   "category-carousel",
   "genres",
   "curated-slugs",
+  // My Library — slow ABS/Kavita/PC collection payloads
+  "abs-collection",
+  "abs-series",
+  "kavita-collection",
+  "kavita-series",
+  "streaming-library",
+  "personal-series",
 ];
 const PERSIST_MAX_AGE = 24 * 60 * 60 * 1000; // 24h
 

@@ -49,6 +49,8 @@ export interface PlayerPlayActions {
 interface MediaSessionPlayerState {
   nowPlaying: NowPlaying | null;
   isPlaying: boolean;
+  /** Transport wants playback — preferred over isPlaying for session sync. */
+  wantPlaying: boolean;
   buffering: boolean;
   currentTime: number;
   currentTrackIndex: number;
@@ -176,12 +178,12 @@ export function usePlayerMediaSession(
     }
   }, [state.nowPlaying, state.currentTrackIndex, state.currentTime]);
 
-  // Web playback state.
+  // Web playback state — prefer wantPlaying so brief buffers/pauses don't flip
+  // lock-screen controls to paused and fight a resume in progress.
   useEffect(() => {
     if (!("mediaSession" in navigator) || !state.nowPlaying) return;
-    navigator.mediaSession.playbackState =
-      state.isPlaying && !state.buffering ? "playing" : "paused";
-  }, [state.isPlaying, state.buffering, state.nowPlaying]);
+    navigator.mediaSession.playbackState = state.wantPlaying ? "playing" : "paused";
+  }, [state.wantPlaying, state.nowPlaying]);
 
   // Web position state (progress bar on lock screens that support it).
   useEffect(() => {
@@ -218,10 +220,12 @@ export function usePlayerMediaSession(
   ]);
 
   // Native (Android Auto + plugin) metadata/state/position sync.
+  // Sync wantPlaying (intent) so AA/lock screen don't get a stale paused tick
+  // between transport play and the audio element "playing" event.
   useEffect(() => {
     void syncNativeMediaSession(
       state.nowPlaying,
-      state.isPlaying,
+      state.wantPlaying || state.isPlaying,
       state.currentTime,
       state.currentTrackIndex,
       state.playbackRate,
@@ -229,6 +233,7 @@ export function usePlayerMediaSession(
     );
   }, [
     state.nowPlaying,
+    state.wantPlaying,
     state.isPlaying,
     state.currentTime,
     state.currentTrackIndex,

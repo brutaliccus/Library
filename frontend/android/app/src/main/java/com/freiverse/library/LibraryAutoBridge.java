@@ -94,6 +94,13 @@ public final class LibraryAutoBridge {
     private boolean hasAudioFocus = false;
     /** True when we were playing before a transient focus loss (call / nav prompt). */
     private boolean resumeAfterFocusGain = false;
+    /**
+     * Ignore stale playing=false syncs from the WebView for a short window after
+     * an optimistic AA/lock-screen play. Otherwise the first position tick still
+     * reports paused and flips the session back (~0.5s play-then-pause).
+     */
+    private long ignorePausedSyncUntilElapsed = 0;
+    private static final long PAUSED_SYNC_GRACE_MS = 2_500;
 
     private LibraryAutoBridge() {}
 
@@ -144,7 +151,7 @@ public final class LibraryAutoBridge {
             this.artwork = null;
         }
         this.active = active;
-        this.playing = playing;
+        this.playing = applyPlayingSync(playing);
         this.durationMs = Math.max(0, durationMs);
         this.positionMs = Math.max(0, positionMs);
         this.playbackSpeed = playbackSpeed > 0 ? playbackSpeed : 1.0f;
@@ -160,11 +167,23 @@ public final class LibraryAutoBridge {
 
     /** Position / transport-only sync — avoids rebuilding browse tree artwork. */
     public void updatePosition(boolean playing, long positionMs, float playbackSpeed) {
-        this.playing = playing;
+        this.playing = applyPlayingSync(playing);
         this.positionMs = Math.max(0, positionMs);
         this.playbackSpeed = playbackSpeed > 0 ? playbackSpeed : 1.0f;
         refreshSession(false);
         persistSession();
+    }
+
+    /** Drop stale paused syncs while an optimistic play is still settling. */
+    private boolean applyPlayingSync(boolean playing) {
+        if (playing) {
+            ignorePausedSyncUntilElapsed = 0;
+            return true;
+        }
+        if (SystemClock.elapsedRealtime() < ignorePausedSyncUntilElapsed) {
+            return this.playing;
+        }
+        return false;
     }
 
     private String nowPlayingRootKey() {
@@ -185,6 +204,12 @@ public final class LibraryAutoBridge {
             return;
         }
         this.playing = playing;
+        if (playing) {
+            ignorePausedSyncUntilElapsed =
+                SystemClock.elapsedRealtime() + PAUSED_SYNC_GRACE_MS;
+        } else {
+            ignorePausedSyncUntilElapsed = 0;
+        }
         refreshSession(false);
     }
 
@@ -293,11 +318,14 @@ public final class LibraryAutoBridge {
                 abandonAudioFocus();
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
                 // Phone call / nav prompt — remember to resume when focus returns.
                 resumeAfterFocusGain = playing || resumeAfterFocusGain;
                 setPlayingOptimistic(false);
                 dispatch("pause", null);
+                break;
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+                // Another app wants a brief duck (nav chime, etc.). Keep playing —
+                // pausing here races lock-screen / AA play and causes play-then-pause.
                 break;
             case AudioManager.AUDIOFOCUS_GAIN:
                 hasAudioFocus = true;

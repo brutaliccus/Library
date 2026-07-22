@@ -33,6 +33,11 @@ import {
   isLikelyOffline,
   progressKeyForRd,
 } from "../utils/offlinePlayback";
+import {
+  absCollectionHasOrphans,
+  purgeLibraryCollectionQueries,
+  stripCollectionEntriesFromPersist,
+} from "../utils/shelfQueryCache";
 
 interface LibraryItem {
   id: number;
@@ -244,13 +249,27 @@ export default function MyLibrary() {
     isFetching: absFetching,
   } = useQuery({
     queryKey: ["abs-collection"],
-    queryFn: async () => {
+    queryFn: async ({ client }) => {
       const { data } = await api.get("/library/abs/collection");
-      return data as { genres: Record<string, ABSItem[]>; ungrouped: ABSItem[]; totalItems: number };
+      const fresh = data as {
+        genres: Record<string, ABSItem[]>;
+        ungrouped: ABSItem[];
+        totalItems: number;
+      };
+      // Authoritative replace: if persist/memory still holds itemIds ABS dropped
+      // (old ASIN folders), wipe disk rows so the next persist cannot resurrect them.
+      const prev = client.getQueryData<typeof fresh>(["abs-collection"]);
+      if (absCollectionHasOrphans(prev, fresh)) {
+        // Persist only — in-memory is replaced by this return value.
+        stripCollectionEntriesFromPersist();
+      }
+      return fresh;
     },
     staleTime: 30 * 60 * 1000,
     gcTime: 24 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
+    // Full list replace — never structural-share nested genre arrays across fetches.
+    structuralSharing: false,
     enabled: !!user && sessionReady,
   });
 
@@ -263,6 +282,7 @@ export default function MyLibrary() {
     staleTime: 10 * 60 * 1000,
     gcTime: 24 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
+    structuralSharing: false,
     enabled: !!user && sessionReady,
   });
 
@@ -281,6 +301,7 @@ export default function MyLibrary() {
     staleTime: 30 * 60 * 1000,
     gcTime: 24 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
+    structuralSharing: false,
     enabled: !!user && sessionReady,
   });
 
@@ -335,14 +356,13 @@ export default function MyLibrary() {
         absResult.status === "fulfilled" &&
         Boolean((absResult.value.data as { timed_out?: boolean } | undefined)?.timed_out);
 
+      // Drop memory + persist first so soft-poll cannot merge with ASIN orphans.
+      await purgeLibraryCollectionQueries(queryClient);
+
       // Soft-poll while ABS may still be indexing (or after a timed-out wait).
       const pollRounds = absTimedOut ? 5 : 3;
       for (let i = 0; i < pollRounds; i++) {
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ["abs-collection"] }),
-          queryClient.invalidateQueries({ queryKey: ["kavita-collection"] }),
-          queryClient.invalidateQueries({ queryKey: ["streaming-library"] }),
-        ]);
+        await purgeLibraryCollectionQueries(queryClient, { refetch: true });
         if (i < pollRounds - 1) await new Promise((r) => setTimeout(r, 2500));
       }
       toast(

@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import api from "../api/client";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
+import { purgeLibraryCollectionQueries } from "../utils/shelfQueryCache";
 import CoverImage from "./CoverImage";
 
 interface Props {
@@ -40,8 +41,7 @@ export default function ABSBookCard({ itemId, title, author, coverUrl, duration,
     setRematching(true);
     try {
       await api.post(`/admin/abs/rematch/${itemId}`);
-      queryClient.invalidateQueries({ queryKey: ["abs-collection"] });
-      queryClient.invalidateQueries({ queryKey: ["abs-series"] });
+      await purgeLibraryCollectionQueries(queryClient, { refetch: true });
       toast("Book re-matched. Metadata updated.", "success");
     } catch {
       toast("Failed to re-match book", "error");

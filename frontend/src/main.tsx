@@ -9,6 +9,11 @@ import ToastContainer from "./components/Toast";
 import UpdateBanner from "./components/UpdateBanner";
 import App from "./App";
 import { bootstrapThemeFromCache } from "./theme/themes";
+import {
+  LIBRARY_COLLECTION_PREFIXES,
+  SHELF_PERSIST_KEY,
+  clearLegacyShelfPersist,
+} from "./utils/shelfQueryCache";
 import "./index.css";
 
 // Paint last-chosen theme before React mounts (avoids ocean→real bounce).
@@ -27,7 +32,10 @@ const queryClient = new QueryClient({
 // so Home / My Library paint instantly and revalidate in the background
 // (stale-while-revalidate via each query's staleTime). Never auth tokens or
 // "continue listening" progress — only shelf/collection payloads.
-const PERSIST_KEY = "rq-shelf-cache-v3";
+//
+// v4 buster: prior generations could keep ASIN-titled ABS orphans after LibraForge
+// metadata fixes because soft-poll invalidate left localStorage untouched.
+const PERSIST_KEY = SHELF_PERSIST_KEY;
 const PERSIST_PREFIXES = [
   "trending-books",
   "new-releases",
@@ -37,11 +45,10 @@ const PERSIST_PREFIXES = [
   "curated-slugs",
   // My Library — slow ABS/Kavita/PC collection payloads
   // Series/author shelves are derived client-side from these collections (offline-safe).
-  "abs-collection",
-  "kavita-collection",
-  "streaming-library",
+  ...LIBRARY_COLLECTION_PREFIXES,
 ];
 const PERSIST_MAX_AGE = 24 * 60 * 60 * 1000; // 24h
+const LIBRARY_COLLECTION_SET = new Set<string>(LIBRARY_COLLECTION_PREFIXES);
 
 /** Drop persisted shelf rows that still have blank/stub covers (stale after enrich fixes). */
 function shelfLooksCoverBroken(data: unknown): boolean {
@@ -52,8 +59,7 @@ function shelfLooksCoverBroken(data: unknown): boolean {
 }
 
 try {
-  // Drop prior persist generations that froze blank OL stub covers for 24h.
-  localStorage.removeItem("rq-shelf-cache-v2");
+  clearLegacyShelfPersist();
   const raw = localStorage.getItem(PERSIST_KEY);
   if (raw) {
     const saved = JSON.parse(raw) as { t: number; entries: [unknown, unknown][] };
@@ -66,9 +72,10 @@ try {
         ) {
           continue; // force network fetch for broken shelf snapshots
         }
-        // Restore with the ORIGINAL timestamp so staleTime still triggers a
-        // background refresh when appropriate (instant paint, fresh data soon).
-        queryClient.setQueryData(key as readonly unknown[], data, { updatedAt: saved.t });
+        // Collection shelves: paint instantly from disk, but mark stale so a
+        // background refetch always replaces the full list (drops orphans).
+        const updatedAt = LIBRARY_COLLECTION_SET.has(first) ? 0 : saved.t;
+        queryClient.setQueryData(key as readonly unknown[], data, { updatedAt });
       }
     }
   }
@@ -90,12 +97,13 @@ queryClient.getQueryCache().subscribe(() => {
           q.state.status === "success" &&
           q.state.data !== undefined
         ) {
-          entries.push([q.queryKey, q.state.data]);
+          // Store a plain JSON clone so later in-place mutations cannot leak
+          // into localStorage, and restore always gets a full replacement array.
+          entries.push([q.queryKey, JSON.parse(JSON.stringify(q.state.data))]);
         }
       }
-      if (entries.length) {
-        localStorage.setItem(PERSIST_KEY, JSON.stringify({ t: Date.now(), entries }));
-      }
+      // Always rewrite (including empty) so removeQueries drops orphans from disk.
+      localStorage.setItem(PERSIST_KEY, JSON.stringify({ t: Date.now(), entries }));
     } catch {
       // localStorage full/unavailable — skip persistence this round
     }

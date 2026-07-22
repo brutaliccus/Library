@@ -36,12 +36,10 @@ const PERSIST_PREFIXES = [
   "genres",
   "curated-slugs",
   // My Library — slow ABS/Kavita/PC collection payloads
+  // Series/author shelves are derived client-side from these collections (offline-safe).
   "abs-collection",
-  "abs-series",
   "kavita-collection",
-  "kavita-series",
   "streaming-library",
-  "personal-series",
 ];
 const PERSIST_MAX_AGE = 24 * 60 * 60 * 1000; // 24h
 

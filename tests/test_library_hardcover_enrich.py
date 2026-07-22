@@ -1,4 +1,4 @@
-"""Unit tests for Hardcover library-item matching / enrichment."""
+"""Unit tests for library-item genre enrichment and local series grouping."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def test_match_library_book_caches_empty():
     asyncio.run(_run())
 
 
-def test_enrich_items_maps_genres_via_taxonomy():
+def test_enrich_items_maps_genres_only_keeps_local_author_series():
     async def _run():
         items = [
             {
@@ -102,14 +102,16 @@ def test_enrich_items_maps_genres_via_taxonomy():
                 "title": "The Gates of Sleep",
                 "author": "M. Lackey",
                 "genres": ["Audiobook"],
-                "series": [],
+                "seriesName": "Elemental Masters",
+                "sequence": "3",
+                "series": [{"name": "Elemental Masters", "sequence": "3"}],
             }
         ]
         match = {
             "author": "Mercedes Lackey",
             "genres": ["Fantasy", "Audiobook", "Fiction"],
-            "seriesName": "Elemental Masters",
-            "sequence": "3",
+            "seriesName": "HC Wrong Series",
+            "sequence": "99",
             "matchedTitle": "The Gates of Sleep",
         }
         with patch.object(
@@ -117,12 +119,14 @@ def test_enrich_items_maps_genres_via_taxonomy():
         ):
             out = await library_router._enrich_items_via_hardcover(items)
         assert len(out) == 1
-        assert out[0]["author"] == "Mercedes Lackey"
-        assert out[0]["seriesName"] == "Elemental Masters"
-        assert out[0]["sequence"] == "3"
+        # Genres enriched + taxonomy-mapped
         assert "Fantasy" in out[0]["genres"]
         assert "Audiobook" not in out[0]["genres"]
         assert "Fiction" not in out[0]["genres"]
+        # Author / series stay local — not overwritten by Hardcover
+        assert out[0]["author"] == "M. Lackey"
+        assert out[0]["seriesName"] == "Elemental Masters"
+        assert out[0]["sequence"] == "3"
 
     asyncio.run(_run())
 
@@ -176,33 +180,74 @@ def test_normalize_item_genres_tolerates_weird_shapes():
     assert any("Mystery" in g for g in out)
 
 
-def test_group_prefers_enriched_series_name():
-    async def _run():
-        items = [
-            {
-                "itemId": "1",
-                "title": "Book One",
-                "author": "Author",
-                "seriesName": "My Series",
-                "sequence": "1",
-                "coverUrl": "",
-                "duration": 0,
-            },
-            {
-                "itemId": "2",
-                "title": "Book Two",
-                "author": "Author",
-                "seriesName": "My Series",
-                "sequence": "2",
-                "coverUrl": "",
-                "duration": 0,
-            },
-        ]
-        with patch.object(hardcover, "get_series_for_book", new=AsyncMock()) as gs:
-            groups = await library_router._group_items_by_hardcover_series(items)
-        assert len(groups) == 1
-        assert groups[0]["name"] == "My Series"
-        assert groups[0]["bookCount"] == 2
-        gs.assert_not_called()
+def test_group_by_local_series_no_hardcover_calls():
+    items = [
+        {
+            "itemId": "1",
+            "title": "Book One",
+            "author": "Author",
+            "seriesName": "My Series",
+            "sequence": "1",
+            "coverUrl": "",
+            "duration": 0,
+        },
+        {
+            "itemId": "2",
+            "title": "Book Two",
+            "author": "Author",
+            "seriesName": "My Series",
+            "sequence": "2",
+            "coverUrl": "",
+            "duration": 0,
+        },
+        {
+            "itemId": "3",
+            "title": "Standalone",
+            "author": "Author",
+            "seriesName": "",
+            "series": [],
+            "coverUrl": "",
+            "duration": 0,
+        },
+    ]
+    with patch.object(hardcover, "get_series_for_book", new=AsyncMock()) as gs:
+        with patch.object(hardcover, "match_library_book", new=AsyncMock()) as mb:
+            groups = library_router._group_items_by_local_series(items)
+    assert len(groups) == 1
+    assert groups[0]["name"] == "My Series"
+    assert groups[0]["bookCount"] == 2
+    gs.assert_not_called()
+    mb.assert_not_called()
 
-    asyncio.run(_run())
+
+def test_group_by_local_series_from_series_array_and_title():
+    items = [
+        {
+            "itemId": "1",
+            "title": "Phoenix and Ashes (Elemental Masters, Book 3)",
+            "author": "Mercedes Lackey",
+            "series": [],
+            "coverUrl": "",
+            "duration": 10,
+        },
+        {
+            "itemId": "2",
+            "title": "The Gates of Sleep",
+            "author": "Mercedes Lackey",
+            "series": [{"name": "Elemental Masters", "sequence": "1"}],
+            "coverUrl": "c2",
+            "duration": 20,
+        },
+    ]
+    groups = library_router._group_items_by_local_series(items)
+    assert len(groups) == 1
+    assert groups[0]["name"] == "Elemental Masters"
+    assert groups[0]["bookCount"] == 2
+
+
+def test_local_series_from_item_skips_junk():
+    name, seq = library_router._local_series_from_item(
+        {"title": "Some Book", "seriesName": "B0ABCDEF12", "series": []}
+    )
+    assert name == ""
+    assert seq == ""

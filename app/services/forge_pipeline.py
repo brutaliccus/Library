@@ -35,11 +35,11 @@ FORGE_STATUSES = frozenset({
     "organizing",  # legacy alias during transition
 })
 
+# Truly finished — quarantined is NOT terminal (admin may continue review).
 PIPELINE_TERMINAL = frozenset({
     "completed",
     "failed",
     "cancelled",
-    "quarantined",
     "admin_rejected",
 })
 
@@ -458,13 +458,19 @@ async def reject_quarantined_request(
 
 
 async def continue_after_manual_review(request_id: int) -> None:
-    """Resume forge pipeline after admin applied metadata in LibraForge Manual Review."""
+    """Resume forge pipeline after admin applied metadata in LibraForge Manual Review.
+
+    The admin continue endpoint normally flips status to ``m4b_convert`` (and
+    clears quarantine) before scheduling this task so UIs update immediately.
+    ``m4b_convert`` is therefore an accepted starting status here.
+    """
+    p = _pipeline()
     async with async_session() as db:
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
         req = result.scalar_one_or_none()
         if not req:
             raise FileNotFoundError(f"Request {request_id} not found")
-        if req.status not in ("quarantined", "metadata_forge"):
+        if req.status not in ("quarantined", "metadata_forge", "m4b_convert"):
             raise ValueError(f"Cannot continue request in status '{req.status}'")
         staging_str = (req.staging_path or "").strip()
         if not staging_str:
@@ -479,8 +485,17 @@ async def continue_after_manual_review(request_id: int) -> None:
                 raise FileNotFoundError(f"Staging folder missing: {staging_str}")
         user_id = req.user_id
         title = req.title
-        req.quarantine_reason = None
-        await db.commit()
+        if req.quarantine_reason is not None:
+            req.quarantine_reason = None
+            await db.commit()
+        # If the HTTP handler did not already leave quarantine, do it now (WS).
+        if req.status in ("quarantined", "metadata_forge"):
+            await p._update_status(
+                db,
+                request_id,
+                "m4b_convert",
+                "Resuming after manual review…",
+            )
 
     await run_forge_after_download(
         request_id,

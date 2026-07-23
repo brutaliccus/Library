@@ -24,6 +24,48 @@ export interface DownloadRequestProgress {
   username?: string;
 }
 
+/** Truly finished — no further pipeline work expected. */
+export const TERMINAL_REQUEST_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "admin_rejected",
+]);
+
+/**
+ * In-flight download/forge steps the user can cancel.
+ * Quarantined is waiting on admin, not user cancel.
+ */
+export const CANCELLABLE_REQUEST_STATUSES = new Set([
+  "pending",
+  "sent_to_rd",
+  "downloading_rd",
+  "transferring",
+  "organizing",
+  "metadata_forge",
+  "m4b_convert",
+  "folder_forge",
+  "finalizing",
+]);
+
+/** Statuses that need live UI updates (poll / WS). Includes quarantined. */
+export function isLiveRequestStatus(status: string): boolean {
+  return !!status && !TERMINAL_REQUEST_STATUSES.has(status);
+}
+
+export function hasLiveRequests(
+  requests: Array<{ status: string }> | undefined
+): boolean {
+  return requests?.some((r) => isLiveRequestStatus(r.status)) ?? false;
+}
+
+/** Fast poll while any request may still change (incl. quarantine → continue). */
+export function requestListRefetchInterval(
+  requests: Array<{ status: string }> | undefined
+): number | false {
+  return hasLiveRequests(requests) ? 5000 : false;
+}
+
 export function applyRequestWsUpdate(
   requests: DownloadRequestProgress[] | undefined,
   msg: WSMessage

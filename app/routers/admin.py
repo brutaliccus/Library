@@ -198,6 +198,7 @@ async def continue_forge_after_review(
 ):
     """After Manual Review in LibraForge, resume M4B → Folder Forge → ABS."""
     from app.services.forge_pipeline import continue_after_manual_review
+    from app.services.pipeline import _update_status
 
     result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
     req = result.scalar_one_or_none()
@@ -211,8 +212,24 @@ async def continue_forge_after_review(
     if not (req.staging_path or "").strip():
         raise HTTPException(status_code=400, detail="Request has no staging_path")
 
+    # Flip out of quarantined before returning so Admin/My Requests refetch
+    # immediately sees progress (background task may take a moment to start).
+    req.quarantine_reason = None
+    await db.commit()
+    await _update_status(
+        db,
+        request_id,
+        "m4b_convert",
+        "Resuming after manual review…",
+    )
+
     asyncio.create_task(continue_after_manual_review(request_id))
-    return {"ok": True, "id": request_id, "message": "Continuing LibraForge pipeline"}
+    return {
+        "ok": True,
+        "id": request_id,
+        "status": "m4b_convert",
+        "message": "Continuing LibraForge pipeline",
+    }
 
 
 @router.post("/download-requests/{request_id}/reorganize")

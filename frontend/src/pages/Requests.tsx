@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api/client";
 import RequestStatusBadge from "../components/RequestStatus";
@@ -8,7 +8,13 @@ import CoverImage from "../components/CoverImage";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { usePushNotifications } from "../hooks/usePushNotifications";
 import { useToast } from "../contexts/ToastContext";
-import { applyRequestWsUpdate, type DownloadRequestProgress } from "../utils/requestProgress";
+import {
+  applyRequestWsUpdate,
+  CANCELLABLE_REQUEST_STATUSES,
+  hasLiveRequests,
+  requestListRefetchInterval,
+  type DownloadRequestProgress,
+} from "../utils/requestProgress";
 import type { WSMessage } from "../hooks/wsClient";
 import { List, Bell, EyeOff, BookOpen, RotateCcw, X } from "lucide-react";
 
@@ -28,22 +34,7 @@ function formatDate(iso: string): string {
   });
 }
 
-const ACTIVE = new Set([
-  "pending",
-  "sent_to_rd",
-  "downloading_rd",
-  "transferring",
-  "organizing",
-  "metadata_forge",
-  "m4b_convert",
-  "folder_forge",
-  "finalizing",
-]);
 const RETRYABLE = new Set(["failed", "cancelled", "admin_rejected"]);
-
-function hasActiveDownloads(requests: DownloadRequestProgress[] | undefined): boolean {
-  return requests?.some((r) => ACTIVE.has(r.status)) ?? false;
-}
 
 function catalogBookPath(volumeId: string | null | undefined, title: string): string {
   if (volumeId && !volumeId.startsWith("rd:")) {
@@ -64,8 +55,28 @@ export default function RequestsPage() {
       const { data } = await api.get("/requests");
       return data as DownloadRequestProgress[];
     },
-    refetchInterval: (query) => (hasActiveDownloads(query.state.data) ? 5000 : 15000),
+    // Quarantined is non-terminal: admin may continue → m4b/folder/finalize.
+    // Keep a short poll while any request can still change; stop when all done.
+    refetchInterval: (query) => requestListRefetchInterval(query.state.data),
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
+
+  // React Query pauses refetchInterval in background tabs; when the page is
+  // visible again, pull fresh status (admin may have continued review).
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!hasLiveRequests(requests)) return;
+      void queryClient.invalidateQueries({ queryKey: ["my-requests"] });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [queryClient, requests]);
 
   const cancelMutation = useMutation({
     mutationFn: (id: number) => api.post(`/requests/${id}/cancel`),
@@ -98,6 +109,8 @@ export default function RequestsPage() {
           msg.status === "quarantined" ||
           msg.status === "admin_rejected"
         ) {
+          // Full refetch for terminal / quarantine (extra fields like completed_at).
+          // Step progress uses setQueryData above so bars update without a round-trip.
           queryClient.invalidateQueries({ queryKey: ["my-requests"] });
         }
       } else {
@@ -244,7 +257,7 @@ export default function RequestsPage() {
       {requests && requests.length > 0 && (
         <div className="space-y-3">
           {requests.map((req) => {
-            const canCancel = ACTIVE.has(req.status);
+            const canCancel = CANCELLABLE_REQUEST_STATUSES.has(req.status);
             const canRetry = RETRYABLE.has(req.status);
             const clickable =
               req.status === "completed" ||

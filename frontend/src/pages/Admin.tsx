@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api from "../api/client";
 import {
@@ -28,6 +28,10 @@ import RequestProgress from "../components/RequestProgress";
 import Modal from "../components/Modal";
 import { useToast } from "../contexts/ToastContext";
 import { purgeLibraryCollectionQueries } from "../utils/shelfQueryCache";
+import {
+  hasLiveRequests,
+  requestListRefetchInterval,
+} from "../utils/requestProgress";
 
 type Tab = "users" | "requests" | "scraper" | "health" | "config";
 
@@ -268,24 +272,26 @@ function AllRequestsTab() {
       const { data } = await api.get("/admin/download-requests");
       return data as any[];
     },
-    refetchInterval: (query) => {
-      const rows = query.state.data as any[] | undefined;
-      const active = rows?.some((r) =>
-        [
-          "pending",
-          "sent_to_rd",
-          "downloading_rd",
-          "transferring",
-          "organizing",
-          "metadata_forge",
-          "m4b_convert",
-          "folder_forge",
-          "finalizing",
-        ].includes(r.status)
-      );
-      return active ? 5000 : 15000;
-    },
+    // Include quarantined: admin continue → forge steps must stay live.
+    refetchInterval: (query) =>
+      requestListRefetchInterval(query.state.data as Array<{ status: string }> | undefined),
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!hasLiveRequests(requests as Array<{ status: string }> | undefined)) return;
+      void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [queryClient, requests]);
 
   const rejectMutation = useMutation({
     mutationFn: (id: number) =>

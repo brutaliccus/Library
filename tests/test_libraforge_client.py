@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.services.libraforge import (
     metadata_auto_applied,
     metadata_matched_without_apply,
@@ -13,10 +15,16 @@ from app.services.libraforge import (
 )
 from app.services.forge_pipeline import (
     audiobook_staging_dir,
+    build_staging_tree,
     clean_catalog_title,
+    cover_url_from_staging,
+    delete_staging_entry,
     needs_m4b_conversion,
+    resolve_staging_dir,
+    safe_path_under_staging,
     seed_staging_metadata_hints,
     staging_has_applied_metadata,
+    _remove_source_audio_after_m4b,
 )
 
 
@@ -192,3 +200,85 @@ def test_staging_has_applied_metadata_asin(tmp_path):
         encoding="utf-8",
     )
     assert staging_has_applied_metadata(staging)
+
+
+def test_resolve_staging_dir_docker_style(tmp_path, monkeypatch):
+    from app.services import forge_pipeline
+
+    monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
+    staging = tmp_path / "_unorganized" / "req_9_Timeline"
+    staging.mkdir(parents=True)
+    (staging / "a.mp3").write_bytes(b"x")
+    resolved = resolve_staging_dir("/audiobooks/_unorganized/req_9_Timeline")
+    assert resolved == staging.resolve()
+
+
+def test_resolve_staging_dir_rejects_outside_unorganized(tmp_path, monkeypatch):
+    from app.services import forge_pipeline
+
+    monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
+    outside = tmp_path / "Michael Crichton" / "Timeline"
+    outside.mkdir(parents=True)
+    with pytest.raises(FileNotFoundError):
+        resolve_staging_dir(str(outside))
+
+
+def test_safe_path_under_staging_blocks_traversal(tmp_path):
+    staging = tmp_path / "_unorganized" / "req_1"
+    staging.mkdir(parents=True)
+    (staging / "keep.mp3").write_bytes(b"x")
+    with pytest.raises(ValueError):
+        safe_path_under_staging(staging, "../secret")
+    with pytest.raises(ValueError):
+        safe_path_under_staging(staging, "/etc/passwd")
+    ok = safe_path_under_staging(staging, "keep.mp3")
+    assert ok.name == "keep.mp3"
+
+
+def test_build_staging_tree_and_delete(tmp_path):
+    staging = tmp_path / "req_12_Timeline"
+    sub = staging / "Audio"
+    sub.mkdir(parents=True)
+    (sub / "Timeline.mp3").write_bytes(b"12345")
+    (sub / "Timeline.m4a").write_bytes(b"xx")
+    (staging / "metadata.json").write_text("{}", encoding="utf-8")
+
+    tree = build_staging_tree(staging)
+    assert tree["root_name"] == "req_12_Timeline"
+    assert tree["entry_count"] >= 3
+    names = {e["name"] for e in tree["entries"]}
+    assert "Audio" in names or "metadata.json" in names
+
+    delete_staging_entry(staging, "Audio/Timeline.m4a")
+    assert not (sub / "Timeline.m4a").exists()
+    assert (sub / "Timeline.mp3").exists()
+
+    with pytest.raises(ValueError, match="not empty"):
+        delete_staging_entry(staging, "Audio")
+
+    delete_staging_entry(staging, "Audio/Timeline.mp3")
+    # empty dir prune after file delete
+    assert not sub.exists()
+
+
+def test_cover_url_from_staging(tmp_path):
+    staging = tmp_path / "req_1"
+    staging.mkdir()
+    (staging / "metadata.json").write_text(
+        json.dumps({"title": "Timeline", "cover_url": "https://images.example/cover.jpg"}),
+        encoding="utf-8",
+    )
+    assert cover_url_from_staging(staging) == "https://images.example/cover.jpg"
+
+
+def test_remove_source_audio_after_m4b(tmp_path):
+    staging = tmp_path / "req_1"
+    staging.mkdir()
+    (staging / "Timeline.mp3").write_bytes(b"a")
+    (staging / "Timeline.m4a").write_bytes(b"b")
+    (staging / "Timeline.m4b").write_bytes(b"c")
+    removed = _remove_source_audio_after_m4b(staging)
+    assert removed == 2
+    assert (staging / "Timeline.m4b").exists()
+    assert not (staging / "Timeline.mp3").exists()
+    assert not (staging / "Timeline.m4a").exists()

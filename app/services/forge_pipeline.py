@@ -1,4 +1,4 @@
-"""Post-download LibraForge orchestration: metadata → M4B → Folder Forge → ABS."""
+"""Post-download LibraForge orchestration: metadata → M4B → re-apply → Folder Forge → ABS."""
 
 from __future__ import annotations
 
@@ -201,6 +201,325 @@ def seed_staging_metadata_hints(
         logger.warning("Could not seed metadata.json in %s: %s", target_dir, e)
 
 
+def resolve_staging_dir(staging_str: str) -> Path:
+    """Resolve a request staging_path to a real directory under `_unorganized`.
+
+    Accepts the POSIX Docker-style path stored in the DB (e.g.
+    ``/audiobooks/_unorganized/req_12_Title``) or a host path. Rejects anything
+    outside the configured audiobook library's ``_unorganized`` tree.
+    """
+    raw = (staging_str or "").strip()
+    if not raw:
+        raise FileNotFoundError("Request has no staging_path")
+
+    audiobook_root = Path(settings.audiobook_dir).resolve()
+    unorganized = (audiobook_root / UNORGANIZED_DIRNAME).resolve()
+    candidates: list[Path] = [Path(raw)]
+
+    # Normalize Docker / host mount prefixes to paths under audiobook_dir.
+    # Path.parts keeps the root as '/' or 'C:\\'; drop that for remapping.
+    norm_parts = [x for x in Path(raw.replace("\\", "/")).parts if x not in ("/", "\\")]
+    if norm_parts:
+        mapped = list(norm_parts)
+        if mapped[0].lower() == "mnt" and len(mapped) >= 2:
+            # /mnt/Audiobooks/_unorganized/...
+            mapped = mapped[2:]
+        elif mapped[0].lower() in {"audiobooks", "data"}:
+            mapped = mapped[1:]
+        if mapped:
+            candidates.append(audiobook_root.joinpath(*mapped))
+        if UNORGANIZED_DIRNAME in mapped:
+            idx = mapped.index(UNORGANIZED_DIRNAME)
+            candidates.append(audiobook_root.joinpath(*mapped[idx:]))
+        # Bare req_* folder name
+        candidates.append(unorganized / mapped[-1])
+
+    if not Path(raw).is_absolute():
+        candidates.append(audiobook_root / raw)
+
+    seen: set[Path] = set()
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            resolved.relative_to(unorganized)
+        except ValueError:
+            continue
+        if resolved.is_dir():
+            return resolved
+
+    raise FileNotFoundError(f"Staging folder missing or outside _unorganized: {raw}")
+
+
+def safe_path_under_staging(staging: Path, relative: str) -> Path:
+    """Resolve ``relative`` under staging; reject traversal / absolute paths."""
+    rel = (relative or "").strip().replace("\\", "/")
+    if not rel or rel in {".", "./"}:
+        raise ValueError("Path is required")
+    if rel.startswith("/") or rel.startswith("~"):
+        raise ValueError("Absolute paths are not allowed")
+    if ".." in Path(rel).parts:
+        raise ValueError("Path traversal is not allowed")
+
+    staging_res = staging.resolve()
+    target = (staging_res / rel).resolve()
+    try:
+        target.relative_to(staging_res)
+    except ValueError as e:
+        raise ValueError("Path escapes staging folder") from e
+    return target
+
+
+def _entry_size(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def build_staging_tree(staging: Path, *, max_entries: int = 2000) -> dict[str, Any]:
+    """Nested folder/file tree for the admin staging browser (relative paths only)."""
+    staging_res = staging.resolve()
+    count = 0
+    truncated = False
+
+    def walk(folder: Path) -> list[dict[str, Any]]:
+        nonlocal count, truncated
+        entries: list[dict[str, Any]] = []
+        try:
+            children = sorted(folder.iterdir(), key=lambda c: (not c.is_dir(), c.name.casefold()))
+        except OSError:
+            return entries
+        for child in children:
+            if truncated:
+                break
+            # Skip obscure dotdirs; keep metadata sidecars (.m4b-tool-metadata.json).
+            if child.name.startswith(".") and child.name not in {
+                ".m4b-tool-metadata.json",
+            }:
+                continue
+            if child.name == "-tmpfiles" or "-tmpfiles" in child.parts:
+                continue
+            if count >= max_entries:
+                truncated = True
+                break
+            count += 1
+            try:
+                rel = child.relative_to(staging_res).as_posix()
+            except ValueError:
+                continue
+            if child.is_dir():
+                entries.append({
+                    "name": child.name,
+                    "path": rel,
+                    "type": "dir",
+                    "size": None,
+                    "ext": None,
+                    "children": walk(child),
+                })
+            elif child.is_file():
+                ext = child.suffix.lower() or None
+                entries.append({
+                    "name": child.name,
+                    "path": rel,
+                    "type": "file",
+                    "size": _entry_size(child),
+                    "ext": ext,
+                    "children": None,
+                })
+        return entries
+
+    return {
+        "staging_path": staging_path_for_libraforge(staging_res),
+        "root_name": staging_res.name,
+        "entries": walk(staging_res),
+        "entry_count": count,
+        "truncated": truncated,
+    }
+
+
+def delete_staging_entry(staging: Path, relative: str) -> dict[str, Any]:
+    """Delete a file or empty directory under staging. Path-traversal safe."""
+    target = safe_path_under_staging(staging, relative)
+    if target == staging.resolve():
+        raise ValueError("Cannot delete the staging root")
+    if not target.exists():
+        raise FileNotFoundError(f"Not found: {relative}")
+    if target.is_dir():
+        try:
+            next(target.iterdir())
+            raise ValueError("Directory is not empty — delete files first")
+        except StopIteration:
+            target.rmdir()
+            return {"ok": True, "deleted": relative, "type": "dir"}
+    if not target.is_file():
+        raise ValueError("Not a file or directory")
+    target.unlink()
+    # Prune empty parent dirs up to (but not including) staging root
+    parent = target.parent
+    staging_res = staging.resolve()
+    while parent != staging_res and parent.is_relative_to(staging_res):
+        try:
+            next(parent.iterdir())
+            break
+        except StopIteration:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+        except OSError:
+            break
+    return {"ok": True, "deleted": relative, "type": "file"}
+
+
+def _remove_source_audio_after_m4b(staging: Path) -> int:
+    """After a successful M4B merge, remove non-.m4b audio left in staging.
+
+    Keeps a single book for Metadata Forge re-apply and Folder Forge. Does not
+    touch files outside ``staging``. Returns number of files removed.
+    """
+    audio = _collect_audio(staging)
+    m4bs = [f for f in audio if f.suffix.lower() == ".m4b"]
+    if len(m4bs) < 1:
+        return 0
+    removed = 0
+    for path in audio:
+        if path.suffix.lower() == ".m4b":
+            continue
+        try:
+            path.unlink()
+            removed += 1
+            logger.info("Removed source audio after M4B: %s", path)
+        except OSError as e:
+            logger.warning("Could not remove source audio %s: %s", path, e)
+    return removed
+
+
+def cover_url_from_staging(staging: Path) -> str | None:
+    """Best-effort cover URL from metadata.json / libraforge.json for M4B --cover."""
+    if not staging.is_dir():
+        return None
+    for meta_path in staging.rglob("metadata.json"):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        for key in ("cover_url", "cover", "image_url"):
+            val = str(meta.get(key) or "").strip()
+            if val.startswith("http"):
+                return val
+    for marker_path in staging.rglob("libraforge.json"):
+        try:
+            data = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for block_key in ("marker", "sidecar", "book", "audible", "backup"):
+            block = data.get(block_key)
+            if not isinstance(block, dict):
+                continue
+            for key in ("cover_url", "cover", "image_url"):
+                val = str(block.get(key) or "").strip()
+                if val.startswith("http"):
+                    return val
+            applied = block.get("applied_tags") if isinstance(block.get("applied_tags"), dict) else {}
+            val = str(applied.get("cover_url") or applied.get("cover") or "").strip()
+            if val.startswith("http"):
+                return val
+        val = str(data.get("cover_url") or "").strip()
+        if val.startswith("http"):
+            return val
+    return None
+
+
+async def _apply_metadata_forge(
+    request_id: int,
+    *,
+    staging: Path,
+    user_id: int,
+    phase_detail: str = "Matching metadata via LibraForge…",
+) -> bool:
+    """Run Metadata Forge apply (overwrite + replace_cover). Returns True if applied.
+
+    On failure / no write evidence, quarantines and returns False.
+    """
+    p = _pipeline()
+    lf_path = staging_path_for_libraforge(staging)
+
+    async def _abort_if_cancelled() -> bool:
+        return await p._is_cancelled(request_id)
+
+    async with async_session() as db:
+        await p._update_status(db, request_id, "metadata_forge", phase_detail)
+
+    async def _on_meta(state: dict[str, Any]) -> None:
+        await _forge_progress(request_id, user_id, "metadata_forge", state)
+
+    try:
+        run_id = await libraforge.start_metadata_run(
+            lf_path,
+            apply=True,
+            min_score=settings.libraforge_min_score,
+            write_mode="overwrite",
+            cover_if_missing=False,
+            replace_cover=True,
+        )
+        await _persist_staging(request_id, staging, run_id=run_id)
+        report = await libraforge.wait_for_run(
+            run_id,
+            poll_seconds=3.0,
+            timeout_seconds=settings.libraforge_metadata_timeout,
+            on_progress=_on_meta,
+            should_abort=_abort_if_cancelled,
+        )
+    except libraforge.LibraForgeError as e:
+        if "cancelled" in str(e).lower():
+            return False
+        await _set_quarantine(
+            request_id,
+            f"LibraForge Metadata Forge unavailable or failed: {e}",
+            staging,
+        )
+        return False
+
+    if libraforge.run_failed(report):
+        err = report.get("error") or report.get("status") or "Metadata Forge failed"
+        await _set_quarantine(request_id, str(err)[:500], staging)
+        return False
+
+    if not libraforge.metadata_auto_applied(report):
+        await _set_quarantine(
+            request_id,
+            libraforge.quarantine_reason_from_report(report),
+            staging,
+        )
+        return False
+
+    if not staging_has_applied_metadata(staging):
+        await _set_quarantine(
+            request_id,
+            (
+                "Metadata Forge reported a write, but no applied libraforge.json / "
+                "ASIN metadata.json was found in staging. Match may not have been "
+                "persisted (permissions or apply race)."
+            ),
+            staging,
+        )
+        return False
+    return True
+
+
 def staging_has_applied_metadata(staging: Path) -> bool:
     """True when staging contains LibraForge apply markers / ABS metadata with ASIN.
 
@@ -320,7 +639,11 @@ async def run_forge_after_download(
     author: str | None = None,
     resume_from: str | None = None,
 ) -> None:
-    """Run Metadata Forge → M4B → Folder Forge → ABS scan.
+    """Run Metadata Forge → M4B → post-M4B Metadata Forge → Folder Forge → ABS.
+
+    After a successful M4B convert, Metadata Forge is re-applied (overwrite +
+    replace_cover) because m4b-tool re-encode does not preserve embedded covers
+    and ``enforce_m4b_output_metadata`` only writes text tags.
 
     ``resume_from``: None (full), ``m4b``, ``folder``, or ``finalize``.
     Used after admin Manual Review in LibraForge.
@@ -352,68 +675,16 @@ async def run_forge_after_download(
                         title = req_row.title
         seed_staging_metadata_hints(staging, title=title, author=author)
 
-        async with async_session() as db:
-            await p._update_status(db, request_id, "metadata_forge", "Matching metadata via LibraForge…")
-
-        async def _on_meta(state: dict[str, Any]) -> None:
-            await _forge_progress(request_id, user_id, "metadata_forge", state)
-
-        try:
-            # Score ≥ min_score means match identity is trusted — not that the
-            # torrent's existing tags/cover are correct. Force full overwrite.
-            run_id = await libraforge.start_metadata_run(
-                lf_path,
-                apply=True,
-                min_score=settings.libraforge_min_score,
-                write_mode="overwrite",
-                cover_if_missing=False,
-                replace_cover=True,
-            )
-            await _persist_staging(request_id, staging, run_id=run_id)
-            report = await libraforge.wait_for_run(
-                run_id,
-                poll_seconds=3.0,
-                timeout_seconds=settings.libraforge_metadata_timeout,
-                on_progress=_on_meta,
-                should_abort=_abort_if_cancelled,
-            )
-        except libraforge.LibraForgeError as e:
-            if "cancelled" in str(e).lower():
-                return
-            await _set_quarantine(
-                request_id,
-                f"LibraForge Metadata Forge unavailable or failed: {e}",
-                staging,
-            )
+        # Score ≥ min_score means match identity is trusted — not that the
+        # torrent's existing tags/cover are correct. Force full overwrite.
+        applied = await _apply_metadata_forge(
+            request_id,
+            staging=staging,
+            user_id=user_id,
+            phase_detail="Matching metadata via LibraForge…",
+        )
+        if not applied:
             return
-
-        if libraforge.run_failed(report):
-            err = report.get("error") or report.get("status") or "Metadata Forge failed"
-            await _set_quarantine(request_id, str(err)[:500], staging)
-            return
-
-        if not libraforge.metadata_auto_applied(report):
-            await _set_quarantine(
-                request_id,
-                libraforge.quarantine_reason_from_report(report),
-                staging,
-            )
-            return
-
-        # Defense in depth: report said written — confirm markers on disk before
-        # M4B / Folder Forge run on stale tags.
-        if not staging_has_applied_metadata(staging):
-            await _set_quarantine(
-                request_id,
-                (
-                    "Metadata Forge reported a write, but no applied libraforge.json / "
-                    "ASIN metadata.json was found in staging. Match may not have been "
-                    "persisted (permissions or apply race)."
-                ),
-                staging,
-            )
-            return
-
         start_step = "m4b"
 
     if await p._is_cancelled(request_id):
@@ -421,6 +692,7 @@ async def run_forge_after_download(
 
     # --- M4B (Pi LibraForge) ---
     if start_step == "m4b":
+        m4b_produced_new_file = False
         if needs_m4b_conversion(staging):
             async with async_session() as db:
                 await p._update_status(db, request_id, "m4b_convert", "Converting to M4B on Pi…")
@@ -431,6 +703,16 @@ async def run_forge_after_download(
             try:
                 loaded = await libraforge.m4b_load(lf_path)
                 meta = loaded.get("metadata") if isinstance(loaded.get("metadata"), dict) else {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                # m4b-tool re-encodes; embedded covers from Metadata Forge are NOT
+                # copied unless cover_url is passed for --cover. Pull from sidecar.
+                if not str(meta.get("cover_url") or "").strip():
+                    cover = cover_url_from_staging(staging)
+                    if cover:
+                        meta = {**meta, "cover_url": cover}
+                if not meta.get("title"):
+                    meta = {**meta, "title": title}
                 output_path = (
                     loaded.get("output_path")
                     or str((staging / f"{downloader.sanitize_filename(title) or staging.name}.m4b").as_posix())
@@ -440,7 +722,7 @@ async def run_forge_after_download(
                 run_id = await libraforge.start_m4b_run(
                     input_path,
                     str(output_path),
-                    metadata=meta or {"title": title},
+                    metadata=meta,
                     jobs=settings.libraforge_m4b_jobs,
                 )
                 await _persist_staging(request_id, staging, run_id=run_id)
@@ -465,6 +747,10 @@ async def run_forge_after_download(
                             "m4b_convert",
                             "M4B conversion failed on Pi; organizing source audio…",
                         )
+                else:
+                    m4b_produced_new_file = True
+                    # Drop source parts so post-M4B Metadata Forge / ABS see one book.
+                    _remove_source_audio_after_m4b(staging)
             except libraforge.LibraForgeError as e:
                 if "cancelled" in str(e).lower():
                     return
@@ -489,6 +775,26 @@ async def run_forge_after_download(
                     request_id, user_id, "m4b_convert", "Already a single M4B — skipping convert",
                     progress_percent=100.0,
                 )
+
+        # M4B re-encode drops embedded covers / can leave stale tags on the new
+        # file. Re-apply Metadata Forge (overwrite + replace_cover) onto the
+        # post-convert .m4b before Folder Forge moves it into the library.
+        if m4b_produced_new_file:
+            if await p._is_cancelled(request_id):
+                return
+            logger.info(
+                "Re-applying Metadata Forge after M4B for request %s (cover/tags persist)",
+                request_id,
+            )
+            reapplied = await _apply_metadata_forge(
+                request_id,
+                staging=staging,
+                user_id=user_id,
+                phase_detail="Re-applying metadata + cover after M4B…",
+            )
+            if not reapplied:
+                return
+
         start_step = "folder"
 
     if await p._is_cancelled(request_id):

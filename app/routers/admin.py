@@ -125,6 +125,11 @@ class RejectRequestBody(BaseModel):
     delete_files: bool = True
 
 
+class StagingFileDeleteBody(BaseModel):
+    """Relative path inside the request staging tree (POSIX, no ..)."""
+    path: str
+
+
 # --- User Management ---
 
 async def _get_user_or_404(db: AsyncSession, user_id: int) -> User:
@@ -499,6 +504,71 @@ async def continue_forge_after_review(
         "status": "m4b_convert",
         "message": "Continuing LibraForge pipeline",
     }
+
+
+async def _staging_request_or_404(db: AsyncSession, request_id: int) -> DownloadRequest:
+    result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
+    req = result.scalar_one_or_none()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if not (req.staging_path or "").strip():
+        raise HTTPException(status_code=400, detail="Request has no staging_path")
+    return req
+
+
+@router.get("/requests/{request_id}/staging-files")
+@router.get("/download-requests/{request_id}/staging-files")
+async def list_request_staging_files(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List the request's `_unorganized` staging tree (admin file browser)."""
+    from app.services.forge_pipeline import build_staging_tree, resolve_staging_dir
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        staging = resolve_staging_dir(req.staging_path or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    tree = build_staging_tree(staging)
+    return {
+        "request_id": request_id,
+        "title": req.title,
+        "status": req.status,
+        **tree,
+    }
+
+
+@router.delete("/requests/{request_id}/staging-files")
+@router.delete("/download-requests/{request_id}/staging-files")
+async def delete_request_staging_file(
+    request_id: int,
+    body: StagingFileDeleteBody,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete one file (or empty dir) under the request staging tree."""
+    from app.services.forge_pipeline import delete_staging_entry, resolve_staging_dir
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        staging = resolve_staging_dir(req.staging_path or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    try:
+        result = delete_staging_entry(staging, body.path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    logger.info(
+        "Admin %s deleted staging entry for request %s: %s",
+        _admin.username,
+        request_id,
+        body.path,
+    )
+    return result
 
 
 @router.post("/download-requests/{request_id}/reorganize")

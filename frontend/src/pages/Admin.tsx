@@ -19,10 +19,12 @@ import {
   Ban,
   CheckCircle,
   Circle,
+  FolderTree,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import ScraperTab from "../components/admin/ScraperTab";
 import ConfigTab from "../components/admin/ConfigTab";
+import StagingFilesViewer from "../components/admin/StagingFilesViewer";
 import { usePushNotifications } from "../hooks/usePushNotifications";
 import { Link, useSearchParams } from "react-router-dom";
 import RequestStatusBadge from "../components/RequestStatus";
@@ -470,6 +472,10 @@ function UsersTab() {
 function AllRequestsTab() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [stagingViewer, setStagingViewer] = useState<{
+    id: number;
+    title: string;
+  } | null>(null);
   const { data: requests, isLoading } = useQuery({
     queryKey: ["admin-downloads"],
     queryFn: async () => {
@@ -531,6 +537,17 @@ function AllRequestsTab() {
     <div className="space-y-3 min-w-0">
       {requests.map((req: any) => {
         const quarantined = req.status === "quarantined";
+        const hasStaging = Boolean(req.staging_path);
+        const showStagingBrowser =
+          hasStaging &&
+          (quarantined ||
+            [
+              "metadata_forge",
+              "m4b_convert",
+              "folder_forge",
+              "finalizing",
+              "organizing",
+            ].includes(req.status));
         return (
           <div
             key={req.id}
@@ -587,9 +604,21 @@ function AllRequestsTab() {
                   progress_total_bytes={req.progress_total_bytes}
                   progress_speed_bps={req.progress_speed_bps}
                 />
-                {quarantined && (
+                {(quarantined || showStagingBrowser) && (
                   <div className="mt-2 flex flex-wrap gap-2">
-                    {req.manual_review_url && (
+                    {showStagingBrowser && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setStagingViewer({ id: req.id, title: req.title || "Request" })
+                        }
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
+                      >
+                        <FolderTree size={12} />
+                        Staging files
+                      </button>
+                    )}
+                    {quarantined && req.manual_review_url && (
                       <a
                         href={req.manual_review_url}
                         target="_blank"
@@ -600,24 +629,28 @@ function AllRequestsTab() {
                         Manual Review
                       </a>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => continueMutation.mutate(req.id)}
-                      disabled={continueMutation.isPending}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-teal-700/50 text-teal-300 hover:bg-teal-900/30 disabled:opacity-50"
-                    >
-                      <Play size={12} />
-                      Continue pipeline
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => rejectMutation.mutate(req.id)}
-                      disabled={rejectMutation.isPending}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-red-700/50 text-red-300 hover:bg-red-900/30 disabled:opacity-50"
-                    >
-                      <Ban size={12} />
-                      Reject / delete
-                    </button>
+                    {quarantined && (
+                      <button
+                        type="button"
+                        onClick={() => continueMutation.mutate(req.id)}
+                        disabled={continueMutation.isPending}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-teal-700/50 text-teal-300 hover:bg-teal-900/30 disabled:opacity-50"
+                      >
+                        <Play size={12} />
+                        Continue pipeline
+                      </button>
+                    )}
+                    {quarantined && (
+                      <button
+                        type="button"
+                        onClick={() => rejectMutation.mutate(req.id)}
+                        disabled={rejectMutation.isPending}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-red-700/50 text-red-300 hover:bg-red-900/30 disabled:opacity-50"
+                      >
+                        <Ban size={12} />
+                        Reject / delete
+                      </button>
+                    )}
                     {req.staging_path && (
                       <span
                         className="text-[10px] text-gray-500 truncate max-w-full"
@@ -633,6 +666,14 @@ function AllRequestsTab() {
           </div>
         );
       })}
+      {stagingViewer && (
+        <StagingFilesViewer
+          requestId={stagingViewer.id}
+          title={stagingViewer.title}
+          open={!!stagingViewer}
+          onClose={() => setStagingViewer(null)}
+        />
+      )}
     </div>
   );
 }

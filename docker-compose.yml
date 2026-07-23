@@ -2,13 +2,15 @@ services:
   app:
     build: .
     container_name: audiobook-request
+    # Match LibraForge/host library owner (pihole=1000) so pipeline staging dirs are writable by M4B/Folder Forge.
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "8085:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
-      # Host library mounts — override via .env (see .env.example)
+      # Host library mounts - override via .env (see .env.example)
       - ${AUDIOBOOK_HOST_DIR:-./media/audiobooks}:/audiobooks
       - ${EBOOK_HOST_DIR:-./media/ebooks}:/ebooks
       - ${OPENLIBRARY_HOST_DIR:-./media/openlibrary}:/openlibrary
@@ -16,7 +18,7 @@ services:
     environment:
       - FLARESOLVERR_URL=http://flaresolverr:8191
       - JACKETT_URL=http://audiobook-jackett:9117
-      # Only ABB Flare/RSS/live paths use this (see audiobookbay.py) — not the whole stack.
+      # Only ABB Flare/RSS/live paths use this (see audiobookbay.py) â€” not the whole stack.
       - ABB_PROXY_URL=http://gluetun:8888
       - PYTHONUNBUFFERED=1
     dns:
@@ -28,7 +30,7 @@ services:
       - gluetun
     restart: unless-stopped
 
-  # Mullvad WireGuard — HTTP proxy only. Jackett/Prowlarr/app stay on the LAN
+  # Mullvad WireGuard â€” HTTP proxy only. Jackett/Prowlarr/app stay on the LAN
   # bridge; ABB FlareSolverr sessions attach to this proxy so only ABB egress
   # pays the VPN latency.
   gluetun:
@@ -93,7 +95,7 @@ services:
       - gluetun
     restart: unless-stopped
 
-  # Normal bridge network — Knaben/other indexers are NOT slowed by Mullvad.
+  # Normal bridge network â€” Knaben/other indexers are NOT slowed by Mullvad.
   jackett:
     image: linuxserver/jackett:latest
     container_name: audiobook-jackett

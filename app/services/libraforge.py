@@ -122,19 +122,37 @@ async def wait_for_run(
 
 
 async def _finalize_run_report(run_id: str, state: dict[str, Any]) -> dict[str, Any]:
-    """Prefer the persisted report JSON when the live poll payload is thin."""
-    if state.get("report_items") or state.get("items"):
+    """Prefer the persisted report once Pass-2 write facets are present.
+
+    Match facets (``mode:full`` / ``status:matched``) land during Pass 1. Apply
+    facets (``write:written``) land during Pass 2. Returning too early makes a
+    1.0 match look "done" before tags/covers are written.
+    """
+    def _has_write_signal(rep: dict[str, Any]) -> bool:
+        return metadata_auto_applied(rep)
+
+    if _has_write_signal(state) and (state.get("report_items") or state.get("items")):
         return state
-    # Brief settle so LibraForge can flush write_final_report to disk.
-    for _ in range(5):
-        await asyncio.sleep(0.4)
+
+    # Settle for disk flush + late WRITE_ACTION_JSON merges.
+    best = state
+    for _ in range(10):
+        await asyncio.sleep(0.5)
         try:
             disk = await get_run(run_id)
         except LibraForgeError:
             break
-        if disk.get("report_items") or disk.get("items") or disk.get("files_by_category"):
+        best = disk
+        if _has_write_signal(disk):
             return disk
-    return state
+        # No match either — nothing to wait for (skip/fail path).
+        cats = _category_map(disk)
+        if _has_category_items(cats, "status:skipped", "write:write_skipped", "mode:none"):
+            return disk
+        if disk.get("report_items") or disk.get("items") or disk.get("files_by_category"):
+            # Keep looping briefly in case write facets arrive next.
+            continue
+    return best
 
 
 async def start_metadata_run(
@@ -244,60 +262,80 @@ def _has_category_items(cats: dict[str, Any], *keys: str) -> bool:
 
 
 def metadata_auto_applied(report: dict[str, Any]) -> bool:
-    """True when Metadata Forge wrote a full (or equivalent) match for at least one file.
+    """True only when Metadata Forge actually wrote tags / metadata.json.
 
-    ``status:matched`` alone is NOT enough — that can mean a weak candidate was
-    considered and then skipped (write:write_skipped). Require write evidence or
-    an explicit applied/updated status.
+    A perfect score / ``mode:full`` / ``status:matched`` is NOT enough. Pass-1
+    match results appear before Pass-2 writes; treating match as apply lets the
+    pipeline continue with stale tags. Require write evidence.
     """
     cats = _category_map(report)
 
-    # Strongest signal: tags / metadata.json were actually written.
-    if _has_category_items(cats, "write:written", "status:manual_applied", "status:updated", "status:applied"):
+    # Written / applied facets from the API (live or disk report).
+    if _has_category_items(
+        cats,
+        "write:written",
+        "status:manual_applied",
+        "status:updated",
+        "status:applied",
+    ):
         return True
 
-    # mode:full without a write facet can appear mid-run; only trust it when
-    # there is no contradictory skip/manual-review payload.
     report_items = report.get("report_items") or []
     if isinstance(report_items, list) and report_items:
-        written = 0
         for item in report_items:
             if not isinstance(item, dict):
                 continue
             action = str(item.get("write_action") or "").lower()
             status = str(item.get("status") or "").lower()
-            if action in {"written", "updated", "applied"} or status in {
-                "updated",
-                "applied",
-                "manual_applied",
-            }:
-                written += 1
-            elif item.get("was_manually_applied"):
-                written += 1
-        if written > 0:
-            return True
-        # Explicit per-item report with zero writes → not auto-applied.
+            if action in {"written", "updated", "applied"}:
+                return True
+            if status in {"updated", "applied", "manual_applied"}:
+                return True
+            if item.get("was_manually_applied"):
+                return True
+        # Explicit per-item report with zero writes → not applied (even if
+        # mode:full / score 1.0). Dry-run "would_write" also lands here.
         return False
 
     stats = report.get("stats") or {}
     if not isinstance(stats, dict):
-        stats = {}
+        return False
 
+    # Legacy counters only — never trust mode_breakdown.full alone.
     for key in ("updated", "applied", "edited", "written"):
         if int(stats.get(key) or 0) > 0:
             return True
+    return False
 
-    matched = int(stats.get("matched") or 0)
-    skipped = int(stats.get("skipped") or 0)
-    breakdown = stats.get("mode_breakdown") or {}
+
+def metadata_matched_without_apply(report: dict[str, Any]) -> bool:
+    """True when a high-confidence full match exists but tags were not written.
+
+    Low-score / mode:none skips are handled by skip_reasons messaging instead.
+    """
+    if metadata_auto_applied(report):
+        return False
+    cats = _category_map(report)
+    stats = report.get("stats") or {}
+    breakdown = stats.get("mode_breakdown") if isinstance(stats, dict) else {}
     full = int(breakdown.get("full") or 0) if isinstance(breakdown, dict) else 0
-    manual = report.get("manual_review_items") or []
-
-    # Full matches counted and nothing skipped / queued for review.
-    if full > 0 and matched > 0 and skipped == 0 and not manual:
-        if _has_category_items(cats, "mode:full"):
-            return True
-
+    if full > 0 or _has_category_items(cats, "mode:full"):
+        return True
+    for item in report.get("report_items") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            score = float(item.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        mode = str(item.get("mode") or "").lower()
+        status = str(item.get("status") or "").lower()
+        action = str(item.get("write_action") or "").lower()
+        if status == "skipped" and mode not in {"full", ""}:
+            continue
+        if mode == "full" or (score >= 0.7 and status in {"matched", "updated", ""}):
+            if action in {"", "would_write", "write_skipped", "no_op", "smart_skipped"}:
+                return True
     return False
 
 
@@ -324,6 +362,29 @@ def organizer_moved_files(report: dict[str, Any]) -> bool:
 
 
 def quarantine_reason_from_report(report: dict[str, Any]) -> str:
+    if metadata_matched_without_apply(report):
+        best = None
+        for item in report.get("report_items") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                score = float(item.get("score") or 0)
+            except (TypeError, ValueError):
+                score = 0.0
+            action = str(item.get("write_action") or "none")
+            title = ((item.get("match") or {}).get("title") if isinstance(item.get("match"), dict) else None) or item.get("path")
+            if best is None or score > best[0]:
+                best = (score, action, title)
+        if best:
+            return (
+                f"Metadata Forge matched (score={best[0]}) but did not apply tags "
+                f"(write_action={best[1]}, title={best[2]!s}). Quarantining before M4B/Folder Forge."
+            )[:500]
+        return (
+            "Metadata Forge matched a book but did not write tags/covers "
+            "(apply missing or incomplete). Quarantining before M4B/Folder Forge."
+        )
+
     stats = report.get("stats") or {}
     if isinstance(stats, dict):
         skip_reasons = stats.get("skip_reasons") or {}

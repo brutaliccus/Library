@@ -201,6 +201,41 @@ def seed_staging_metadata_hints(
         logger.warning("Could not seed metadata.json in %s: %s", target_dir, e)
 
 
+def staging_has_applied_metadata(staging: Path) -> bool:
+    """True when staging contains LibraForge apply markers / ABS metadata with ASIN.
+
+    Used as a second gate after the API report claims a write, so we do not
+    continue to M4B/Folder Forge on a match-only / dry-run result.
+    """
+    if not staging.is_dir():
+        return False
+    for marker in staging.rglob("libraforge.json"):
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        m = data.get("marker") if isinstance(data.get("marker"), dict) else data
+        if m.get("applied") is True or m.get("manually_applied") is True:
+            return True
+        backup = data.get("backup") if isinstance(data.get("backup"), dict) else {}
+        applied_tags = backup.get("applied_tags") if isinstance(backup.get("applied_tags"), dict) else {}
+        if applied_tags.get("asin") or applied_tags.get("title"):
+            return True
+    for meta_path in staging.rglob("metadata.json"):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        asin = str(meta.get("asin") or "").strip()
+        if asin:
+            return True
+    return False
+
+
 async def _persist_staging(request_id: int, staging: Path, run_id: str | None = None) -> None:
     async with async_session() as db:
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
@@ -348,6 +383,20 @@ async def run_forge_after_download(
             await _set_quarantine(
                 request_id,
                 libraforge.quarantine_reason_from_report(report),
+                staging,
+            )
+            return
+
+        # Defense in depth: report said written — confirm markers on disk before
+        # M4B / Folder Forge run on stale tags.
+        if not staging_has_applied_metadata(staging):
+            await _set_quarantine(
+                request_id,
+                (
+                    "Metadata Forge reported a write, but no applied libraforge.json / "
+                    "ASIN metadata.json was found in staging. Match may not have been "
+                    "persisted (permissions or apply race)."
+                ),
                 staging,
             )
             return

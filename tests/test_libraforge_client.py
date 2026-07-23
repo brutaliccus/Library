@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 from app.services.libraforge import (
     metadata_auto_applied,
+    metadata_matched_without_apply,
     organizer_moved_files,
     quarantine_reason_from_report,
     run_failed,
@@ -13,6 +16,7 @@ from app.services.forge_pipeline import (
     clean_catalog_title,
     needs_m4b_conversion,
     seed_staging_metadata_hints,
+    staging_has_applied_metadata,
 )
 
 
@@ -20,13 +24,29 @@ def test_metadata_auto_applied_write_written():
     assert metadata_auto_applied({"files_by_category": {"write:written": [{"path": "/x"}]}})
 
 
-def test_metadata_auto_applied_mode_full_with_matched_stats():
-    assert metadata_auto_applied(
-        {
-            "files_by_category": {"mode:full": [{"path": "/x"}]},
-            "stats": {"mode_breakdown": {"full": 1}, "matched": 1, "skipped": 0},
-        }
-    )
+def test_mode_full_without_write_is_not_applied():
+    """Dark Tower race: Pass-1 match must not count as apply."""
+    report = {
+        "files_by_category": {
+            "mode:full": [{"path": "/x"}],
+            "status:matched": [{"path": "/x"}],
+        },
+        "stats": {"mode_breakdown": {"full": 1}, "matched": 1, "skipped": 0},
+        "report_items": [
+            {
+                "path": "/x",
+                "status": "matched",
+                "score": 1.0,
+                "mode": "full",
+                "write_action": "",
+                "match": {"title": "Dark Tower I"},
+            }
+        ],
+    }
+    assert not metadata_auto_applied(report)
+    assert metadata_matched_without_apply(report)
+    reason = quarantine_reason_from_report(report)
+    assert "did not apply" in reason.lower() or "write_action" in reason
 
 
 def test_metadata_not_applied_when_matched_but_write_skipped():
@@ -150,3 +170,25 @@ def test_seed_metadata_hints_skips_series_packs(tmp_path):
     )
     assert not (audio / "metadata.json").exists()
     assert not (other / "metadata.json").exists()
+
+
+def test_staging_has_applied_metadata_marker(tmp_path):
+    staging = tmp_path / "req_147"
+    staging.mkdir()
+    (staging / "book.m4b").write_bytes(b"x")
+    assert not staging_has_applied_metadata(staging)
+    (staging / "libraforge.json").write_text(
+        json.dumps({"marker": {"applied": True, "score": 1.0}}),
+        encoding="utf-8",
+    )
+    assert staging_has_applied_metadata(staging)
+
+
+def test_staging_has_applied_metadata_asin(tmp_path):
+    staging = tmp_path / "req_147"
+    staging.mkdir()
+    (staging / "metadata.json").write_text(
+        json.dumps({"title": "The Gunslinger", "asin": "B019NNU7XE"}),
+        encoding="utf-8",
+    )
+    assert staging_has_applied_metadata(staging)

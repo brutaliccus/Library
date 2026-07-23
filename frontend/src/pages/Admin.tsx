@@ -337,7 +337,7 @@ function UsersTab() {
                       <dd className="text-gray-200">{user.finished_streams}</dd>
                     </div>
                     <div>
-                      <dt className="text-gray-500">Stream sessions</dt>
+                      <dt className="text-gray-500">Listening sessions</dt>
                       <dd className="text-gray-200">
                         {user.stream_sessions}
                         <span className="text-gray-500 font-normal">

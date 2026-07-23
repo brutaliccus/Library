@@ -8,6 +8,7 @@ import logging
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote, unquote
 
@@ -457,16 +458,20 @@ async def start_abs_playback(
         )
     )
     row = existing.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
     if row:
         row.title = play_title
         row.author = play_author
         row.hidden = False  # playing again un-hides it from Continue Listening
+        # Always bump — SQLAlchemy onupdate skips when no other columns dirty.
+        row.last_played_at = now
     else:
         db.add(ABSPlayTracking(
             user_id=user.id,
             abs_item_id=item_id,
             title=play_title,
             author=play_author,
+            last_played_at=now,
         ))
     await db.commit()
 

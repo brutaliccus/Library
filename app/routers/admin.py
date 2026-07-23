@@ -64,12 +64,31 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def later_datetime(*values: datetime | None) -> datetime | None:
+    """Return the latest non-None timestamp (naive treated as UTC)."""
+    best: datetime | None = None
+    for raw in values:
+        dt = _as_utc(raw)
+        if dt is None:
+            continue
+        if best is None or dt > best:
+            best = dt
+    return best
+
+
 def user_is_online(last_seen_at: datetime | None, *, now: datetime | None = None) -> bool:
     """True when last_seen_at is within ONLINE_THRESHOLD of now."""
     if last_seen_at is None:
         return False
     now = now or datetime.now(timezone.utc)
-    seen = last_seen_at if last_seen_at.tzinfo else last_seen_at.replace(tzinfo=timezone.utc)
+    seen = _as_utc(last_seen_at)
+    assert seen is not None
     return (now - seen) <= ONLINE_THRESHOLD
 
 
@@ -253,6 +272,10 @@ async def list_users(
     for user, library_name in rows:
         st = stream_stats.get(user.id, {})
         ab = abs_stats.get(user.id, {})
+        rd_sessions = int(st.get("sessions") or 0)
+        abs_titles = int(ab.get("titles") or 0)
+        # Listening activity spans debrid stream_history AND ABS library playback.
+        # ABS never writes stream_history (progress goes to ABS + abs_play_tracking).
         out.append(
             UserResponse(
                 id=user.id,
@@ -264,9 +287,11 @@ async def list_users(
                 last_seen_at=_iso(user.last_seen_at),
                 is_online=user_is_online(user.last_seen_at, now=now),
                 requests_total=int(req_counts.get(user.id) or 0),
-                stream_sessions=int(st.get("sessions") or 0),
-                last_stream_at=_iso(st.get("last_stream")),
-                abs_titles_played=int(ab.get("titles") or 0),
+                stream_sessions=rd_sessions + abs_titles,
+                last_stream_at=_iso(
+                    later_datetime(st.get("last_stream"), ab.get("last_played"))
+                ),
+                abs_titles_played=abs_titles,
                 last_abs_played_at=_iso(ab.get("last_played")),
                 active_alerts=int(alert_counts.get(user.id) or 0),
                 finished_streams=int(st.get("finished") or 0),

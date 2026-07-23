@@ -33,6 +33,7 @@ import OfflineUnlockSetupPrompt from "./components/OfflineUnlockSetupPrompt";
 import { useLibraryGroup } from "./hooks/useLibraryGroup";
 import { useThemeSync } from "./theme/useThemeSync";
 import { useOnlineStatus } from "./hooks/useOnlineStatus";
+import { usePresenceHeartbeat } from "./hooks/usePresenceHeartbeat";
 import { isLikelyOffline } from "./utils/networkStatus";
 
 function ThemeSync() {
@@ -107,12 +108,13 @@ function DeepLinkNavigator() {
 }
 
 export default function App() {
-  const { user, sessionReady } = useAuth();
+  const { user, sessionReady, offlineSession } = useAuth();
   const { nowPlaying, expanded } = usePlayer();
   const location = useLocation();
 
   const authReady =
     !!user && sessionReady && !user.mustChangePassword && !user.mustSetEmail;
+  usePresenceHeartbeat(authReady && !offlineSession);
   useNativeNotifications(authReady);
   const {
     pendingUpdate,

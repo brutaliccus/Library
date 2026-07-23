@@ -18,6 +18,7 @@ import {
   Play,
   Ban,
   CheckCircle,
+  Circle,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import ScraperTab from "../components/admin/ScraperTab";
@@ -36,6 +37,43 @@ import {
 } from "../utils/requestProgress";
 
 type Tab = "users" | "requests" | "scraper" | "health" | "config";
+
+type AdminUser = {
+  id: number;
+  username: string;
+  role: string;
+  is_active: boolean;
+  created_at: string;
+  library_name: string | null;
+  last_seen_at: string | null;
+  is_online: boolean;
+  requests_total: number;
+  stream_sessions: number;
+  last_stream_at: string | null;
+  abs_titles_played: number;
+  last_abs_played_at: string | null;
+  active_alerts: number;
+  finished_streams: number;
+};
+
+function formatRelativeTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "—";
+  const diffSec = Math.round((Date.now() - t) / 1000);
+  if (diffSec < 45) return "just now";
+  if (diffSec < 3600) {
+    const m = Math.max(1, Math.round(diffSec / 60));
+    return `${m}m ago`;
+  }
+  if (diffSec < 86400) {
+    const h = Math.max(1, Math.round(diffSec / 3600));
+    return `${h}h ago`;
+  }
+  const d = Math.max(1, Math.round(diffSec / 86400));
+  if (d < 30) return `${d}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
 
 function resolveTab(raw: string | null): Tab {
   if (raw === "approvals") return "users";
@@ -152,8 +190,10 @@ function UsersTab() {
     queryKey: ["admin-users"],
     queryFn: async () => {
       const { data } = await api.get("/admin/users");
-      return data as any[];
+      return data as AdminUser[];
     },
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
   });
 
   const setActive = useMutation({
@@ -214,73 +254,154 @@ function UsersTab() {
         {!users?.length ? (
           <p className="text-center py-8 text-gray-500">No users yet</p>
         ) : (
-          users.map((user: any) => {
-            const isSelf = me?.username === user.username;
-            return (
-              <div
-                key={user.id}
-                className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
-              >
-                <div>
-                  <p className="font-semibold text-gray-100">
-                    {user.username}
-                    {user.role === "admin" && (
-                      <span className="ml-2 text-xs bg-brand-900/30 text-brand-400 px-2 py-0.5 rounded-full">
-                        admin
-                      </span>
-                    )}
-                    {!user.is_active && (
-                      <span className="ml-2 text-xs bg-red-900/30 text-red-400 px-2 py-0.5 rounded-full">
-                        disabled
-                      </span>
-                    )}
-                    {isSelf && (
-                      <span className="ml-2 text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded-full">
-                        you
-                      </span>
-                    )}
-                  </p>
-                  <p className="text-xs text-gray-500">
-                    Joined {new Date(user.created_at).toLocaleDateString()}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2 shrink-0">
-                  <button
-                    onClick={() => resetPw.mutate(user.id)}
-                    className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600"
-                  >
-                    <RefreshCw size={14} /> Reset PW
-                  </button>
-                  {!isSelf && (
-                    user.is_active ? (
-                      <button
-                        onClick={() => setDisableUserModal({ id: user.id, username: user.username })}
-                        className="flex items-center gap-1 px-3 py-1.5 bg-amber-900/30 text-amber-400 text-sm rounded-lg hover:bg-amber-900/50"
+          <div className="grid gap-3 sm:grid-cols-2">
+            {users.map((user) => {
+              const isSelf = me?.username === user.username;
+              const presenceLabel = user.is_online
+                ? "Online"
+                : user.last_seen_at
+                  ? `Last seen ${formatRelativeTime(user.last_seen_at)}`
+                  : "Offline";
+              return (
+                <div
+                  key={user.id}
+                  className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex flex-col gap-3 min-w-0"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-gray-100 truncate">
+                        {user.username}
+                        {isSelf && (
+                          <span className="ml-2 text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded-full align-middle">
+                            you
+                          </span>
+                        )}
+                      </p>
+                      <p className="mt-1 flex items-center gap-1.5 text-xs text-gray-400">
+                        <Circle
+                          size={8}
+                          className={
+                            user.is_online
+                              ? "fill-emerald-400 text-emerald-400"
+                              : "fill-gray-600 text-gray-600"
+                          }
+                        />
+                        <span className={user.is_online ? "text-emerald-400" : ""}>
+                          {presenceLabel}
+                        </span>
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 justify-end shrink-0">
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded-full ${
+                          user.role === "admin"
+                            ? "bg-brand-900/30 text-brand-400"
+                            : "bg-gray-700/80 text-gray-300"
+                        }`}
                       >
-                        <Ban size={14} /> Disable
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setActive.mutate({ id: user.id, is_active: true })}
-                        disabled={setActive.isPending}
-                        className="flex items-center gap-1 px-3 py-1.5 bg-emerald-900/30 text-emerald-400 text-sm rounded-lg hover:bg-emerald-900/50 disabled:opacity-50"
+                        {user.role}
+                      </span>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded-full ${
+                          user.is_active
+                            ? "bg-emerald-900/30 text-emerald-400"
+                            : "bg-red-900/30 text-red-400"
+                        }`}
                       >
-                        <CheckCircle size={14} /> Enable
-                      </button>
-                    )
-                  )}
-                  {!isSelf && (
+                        {user.is_active ? "active" : "disabled"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                    <div>
+                      <dt className="text-gray-500">Joined</dt>
+                      <dd className="text-gray-200">
+                        {user.created_at
+                          ? new Date(user.created_at).toLocaleDateString()
+                          : "—"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-gray-500">Library</dt>
+                      <dd className="text-gray-200 truncate" title={user.library_name || undefined}>
+                        {user.library_name || "—"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-gray-500">Requests</dt>
+                      <dd className="text-gray-200">{user.requests_total}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-gray-500">Finished streams</dt>
+                      <dd className="text-gray-200">{user.finished_streams}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-gray-500">Stream sessions</dt>
+                      <dd className="text-gray-200">
+                        {user.stream_sessions}
+                        <span className="text-gray-500 font-normal">
+                          {" "}
+                          · last {formatRelativeTime(user.last_stream_at)}
+                        </span>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-gray-500">ABS titles played</dt>
+                      <dd className="text-gray-200">
+                        {user.abs_titles_played}
+                        <span className="text-gray-500 font-normal">
+                          {" "}
+                          · last {formatRelativeTime(user.last_abs_played_at)}
+                        </span>
+                      </dd>
+                    </div>
+                    <div className="col-span-2">
+                      <dt className="text-gray-500">Availability alerts</dt>
+                      <dd className="text-gray-200">
+                        {user.active_alerts} active
+                      </dd>
+                    </div>
+                  </dl>
+
+                  <div className="flex flex-wrap gap-2 pt-1 border-t border-gray-700/80">
                     <button
-                      onClick={() => setDeleteUserModal({ id: user.id, username: user.username })}
-                      className="flex items-center gap-1 px-3 py-1.5 bg-red-900/30 text-red-400 text-sm rounded-lg hover:bg-red-900/50"
+                      onClick={() => resetPw.mutate(user.id)}
+                      className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600"
                     >
-                      <Trash2 size={14} /> Delete
+                      <RefreshCw size={14} /> Reset PW
                     </button>
-                  )}
+                    {!isSelf && (
+                      user.is_active ? (
+                        <button
+                          onClick={() => setDisableUserModal({ id: user.id, username: user.username })}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-amber-900/30 text-amber-400 text-sm rounded-lg hover:bg-amber-900/50"
+                        >
+                          <Ban size={14} /> Disable
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setActive.mutate({ id: user.id, is_active: true })}
+                          disabled={setActive.isPending}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-emerald-900/30 text-emerald-400 text-sm rounded-lg hover:bg-emerald-900/50 disabled:opacity-50"
+                        >
+                          <CheckCircle size={14} /> Enable
+                        </button>
+                      )
+                    )}
+                    {!isSelf && (
+                      <button
+                        onClick={() => setDeleteUserModal({ id: user.id, username: user.username })}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-red-900/30 text-red-400 text-sm rounded-lg hover:bg-red-900/50"
+                      >
+                        <Trash2 size={14} /> Delete
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })
+              );
+            })}
+          </div>
         )}
       </section>
 

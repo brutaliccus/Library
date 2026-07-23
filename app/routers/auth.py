@@ -169,6 +169,18 @@ async def me(user: User = Depends(get_current_user)):
     )
 
 
+@router.post("/heartbeat")
+async def heartbeat(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight presence ping from the SPA while the tab is open/focused."""
+    now = datetime.now(timezone.utc)
+    user.last_seen_at = now
+    await db.commit()
+    return {"ok": True, "last_seen_at": now.isoformat()}
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     # Prefer email; also accept username in either field for legacy accounts.
@@ -185,8 +197,9 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
         ).scalar_one_or_none()
         if taken is None:
             user.email = em
-            await db.commit()
-            await db.refresh(user)
+    user.last_seen_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(user)
 
     return _token_response(user)
 

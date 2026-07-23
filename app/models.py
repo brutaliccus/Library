@@ -60,6 +60,8 @@ class User(Base):
     # (owner/admin see the invite code; owner manages members and API keys)
     library_role: Mapped[str] = mapped_column(String(16), default="member")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Updated by client heartbeat while the SPA is open/focused.
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     download_requests: Mapped[list["DownloadRequest"]] = relationship(back_populates="user")
 

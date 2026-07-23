@@ -1,11 +1,12 @@
 import asyncio
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -31,6 +32,9 @@ from app.services.pipeline import (
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger(__name__)
 
+# Client heartbeats ~every 60s while focused; treat as online within ~3 minutes.
+ONLINE_THRESHOLD = timedelta(minutes=3)
+
 
 class UserResponse(BaseModel):
     id: int
@@ -38,8 +42,35 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: str
+    library_name: str | None = None
+    last_seen_at: str | None = None
+    is_online: bool = False
+    requests_total: int = 0
+    stream_sessions: int = 0
+    last_stream_at: str | None = None
+    abs_titles_played: int = 0
+    last_abs_played_at: str | None = None
+    active_alerts: int = 0
+    finished_streams: int = 0
 
     model_config = {"from_attributes": True}
+
+
+def _iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def user_is_online(last_seen_at: datetime | None, *, now: datetime | None = None) -> bool:
+    """True when last_seen_at is within ONLINE_THRESHOLD of now."""
+    if last_seen_at is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    seen = last_seen_at if last_seen_at.tzinfo else last_seen_at.replace(tzinfo=timezone.utc)
+    return (now - seen) <= ONLINE_THRESHOLD
 
 
 class SetActiveBody(BaseModel):
@@ -156,18 +187,92 @@ async def list_users(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(User).order_by(User.created_at.desc()))
-    users = result.scalars().all()
-    return [
-        UserResponse(
-            id=u.id,
-            username=u.username,
-            role=u.role,
-            is_active=u.is_active,
-            created_at=u.created_at.isoformat() if u.created_at else "",
+    """List accounts with per-user activity stats (aggregated — no N+1)."""
+    rows = (
+        await db.execute(
+            select(User, LibraryGroup.name)
+            .outerjoin(LibraryGroup, User.library_group_id == LibraryGroup.id)
+            .order_by(User.created_at.desc())
         )
-        for u in users
-    ]
+    ).all()
+
+    req_counts = dict(
+        (
+            await db.execute(
+                select(DownloadRequest.user_id, func.count())
+                .group_by(DownloadRequest.user_id)
+            )
+        ).all()
+    )
+    stream_rows = (
+        await db.execute(
+            select(
+                StreamHistory.user_id,
+                func.count().label("sessions"),
+                func.coalesce(
+                    func.sum(case((StreamHistory.status == "finished", 1), else_=0)),
+                    0,
+                ).label("finished"),
+                func.max(StreamHistory.updated_at).label("last_stream"),
+            ).group_by(StreamHistory.user_id)
+        )
+    ).all()
+    stream_stats = {
+        uid: {
+            "sessions": int(sessions or 0),
+            "finished": int(finished or 0),
+            "last_stream": last_stream,
+        }
+        for uid, sessions, finished, last_stream in stream_rows
+    }
+    abs_rows = (
+        await db.execute(
+            select(
+                ABSPlayTracking.user_id,
+                func.count().label("titles"),
+                func.max(ABSPlayTracking.last_played_at).label("last_played"),
+            ).group_by(ABSPlayTracking.user_id)
+        )
+    ).all()
+    abs_stats = {
+        uid: {"titles": int(titles or 0), "last_played": last_played}
+        for uid, titles, last_played in abs_rows
+    }
+    alert_counts = dict(
+        (
+            await db.execute(
+                select(AvailabilityAlert.user_id, func.count())
+                .where(AvailabilityAlert.notified_at.is_(None))
+                .group_by(AvailabilityAlert.user_id)
+            )
+        ).all()
+    )
+
+    now = datetime.now(timezone.utc)
+    out: list[UserResponse] = []
+    for user, library_name in rows:
+        st = stream_stats.get(user.id, {})
+        ab = abs_stats.get(user.id, {})
+        out.append(
+            UserResponse(
+                id=user.id,
+                username=user.username,
+                role=user.role,
+                is_active=user.is_active,
+                created_at=_iso(user.created_at) or "",
+                library_name=library_name,
+                last_seen_at=_iso(user.last_seen_at),
+                is_online=user_is_online(user.last_seen_at, now=now),
+                requests_total=int(req_counts.get(user.id) or 0),
+                stream_sessions=int(st.get("sessions") or 0),
+                last_stream_at=_iso(st.get("last_stream")),
+                abs_titles_played=int(ab.get("titles") or 0),
+                last_abs_played_at=_iso(ab.get("last_played")),
+                active_alerts=int(alert_counts.get(user.id) or 0),
+                finished_streams=int(st.get("finished") or 0),
+            )
+        )
+    return out
 
 
 @router.patch("/users/{user_id}")

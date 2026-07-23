@@ -166,6 +166,7 @@ async def cancel_request(
     req = await _get_user_request(request_id, user.id, db)
     if req.status not in _ACTIVE_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot cancel request in status '{req.status}'")
+    forge_run_id = (getattr(req, "libraforge_run_id", None) or "").strip() or None
     req.status = "cancelled"
     req.status_detail = "Cancelled by user"
     req.progress_percent = None
@@ -181,8 +182,19 @@ async def cancel_request(
             "request_id": req.id,
             "status": req.status,
             "detail": req.status_detail,
+            "progress_percent": None,
+            "progress_bytes": None,
+            "progress_total_bytes": None,
+            "progress_speed_bps": None,
         },
     )
+    if forge_run_id:
+        try:
+            from app.services import libraforge
+
+            await libraforge.cancel_run(forge_run_id)
+        except Exception:
+            logger.debug("LibraForge cancel_run for request %s failed", request_id, exc_info=True)
     return _to_response(req)
 
 

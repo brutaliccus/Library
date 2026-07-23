@@ -250,6 +250,8 @@ async def _persist_staging(request_id: int, staging: Path, run_id: str | None = 
 
 async def _set_quarantine(request_id: int, reason: str, staging: Path) -> None:
     p = _pipeline()
+    if await p._is_cancelled(request_id):
+        return
     async with async_session() as db:
         review_url = libraforge.public_manual_review_url()
         detail = reason[:500]
@@ -259,6 +261,8 @@ async def _set_quarantine(request_id: int, reason: str, staging: Path) -> None:
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
         req = result.scalar_one_or_none()
         if req:
+            if req.status == "cancelled":
+                return
             req.staging_path = staging_path_for_libraforge(staging)
             req.quarantine_reason = reason[:500]
             req.progress_percent = None
@@ -330,6 +334,9 @@ async def run_forge_after_download(
     if await p._is_cancelled(request_id):
         return
 
+    async def _abort_if_cancelled() -> bool:
+        return await p._is_cancelled(request_id)
+
     # --- Metadata Forge ---
     if start_step == "metadata":
         # Prefer catalog title/author when tags are empty (single-book only).
@@ -368,8 +375,11 @@ async def run_forge_after_download(
                 poll_seconds=3.0,
                 timeout_seconds=settings.libraforge_metadata_timeout,
                 on_progress=_on_meta,
+                should_abort=_abort_if_cancelled,
             )
         except libraforge.LibraForgeError as e:
+            if "cancelled" in str(e).lower():
+                return
             await _set_quarantine(
                 request_id,
                 f"LibraForge Metadata Forge unavailable or failed: {e}",
@@ -439,6 +449,7 @@ async def run_forge_after_download(
                     poll_seconds=5.0,
                     timeout_seconds=settings.libraforge_m4b_timeout,
                     on_progress=_on_m4b,
+                    should_abort=_abort_if_cancelled,
                 )
                 if libraforge.run_failed(report):
                     # Soft-fail: keep going to Folder Forge with source audio
@@ -455,6 +466,8 @@ async def run_forge_after_download(
                             "M4B conversion failed on Pi; organizing source audio…",
                         )
             except libraforge.LibraForgeError as e:
+                if "cancelled" in str(e).lower():
+                    return
                 # Pi may be underpowered — note tradeoff, don't hard-fail the request
                 logger.warning(
                     "M4B on Pi failed for request %s (%s). "
@@ -507,12 +520,15 @@ async def run_forge_after_download(
                 poll_seconds=3.0,
                 timeout_seconds=settings.libraforge_organizer_timeout,
                 on_progress=_on_folder,
+                should_abort=_abort_if_cancelled,
             )
             if libraforge.run_failed(report):
                 raise libraforge.LibraForgeError(
                     str(report.get("error") or report.get("status") or "Folder Forge failed")
                 )
         except libraforge.LibraForgeError as e:
+            if "cancelled" in str(e).lower():
+                return
             raise RuntimeError(f"Folder Forge failed: {e}") from e
 
         # Folder Forge reporting success with zero moves while audio still sits

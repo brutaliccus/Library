@@ -73,25 +73,32 @@ export function applyRequestWsUpdate(
   if (!requests || msg.type !== "status_update" || msg.request_id == null) {
     return requests;
   }
-  return requests.map((r) =>
-    r.id === msg.request_id
-      ? {
-          ...r,
-          status: msg.status ?? r.status,
-          status_detail: msg.detail ?? r.status_detail,
-          progress_percent:
-            msg.progress_percent !== undefined ? msg.progress_percent : r.progress_percent,
-          progress_bytes:
-            msg.progress_bytes !== undefined ? msg.progress_bytes : r.progress_bytes,
-          progress_total_bytes:
-            msg.progress_total_bytes !== undefined
-              ? msg.progress_total_bytes
-              : r.progress_total_bytes,
-          progress_speed_bps:
-            msg.progress_speed_bps !== undefined
-              ? msg.progress_speed_bps
-              : r.progress_speed_bps,
-        }
-      : r
-  );
+  return requests.map((r) => {
+    if (r.id !== msg.request_id) return r;
+    // Cancel is terminal — ignore late progress WS that would revive the card.
+    if (
+      r.status === "cancelled" &&
+      msg.status != null &&
+      msg.status !== "cancelled"
+    ) {
+      return r;
+    }
+    return {
+      ...r,
+      status: msg.status ?? r.status,
+      status_detail: msg.detail ?? r.status_detail,
+      progress_percent:
+        msg.progress_percent !== undefined ? msg.progress_percent : r.progress_percent,
+      progress_bytes:
+        msg.progress_bytes !== undefined ? msg.progress_bytes : r.progress_bytes,
+      progress_total_bytes:
+        msg.progress_total_bytes !== undefined
+          ? msg.progress_total_bytes
+          : r.progress_total_bytes,
+      progress_speed_bps:
+        msg.progress_speed_bps !== undefined
+          ? msg.progress_speed_bps
+          : r.progress_speed_bps,
+    };
+  });
 }

@@ -22,6 +22,7 @@ DEFAULT_ORGANIZER_SCRIPT = "organize-audiobooks-by-metadata-v3_13.py"
 DEFAULT_NAMING_TEMPLATE = "{author}/{series} [{edition}]/{title}/{filename}"
 
 ProgressCb = Callable[[dict[str, Any]], Awaitable[None]] | None
+AbortCb = Callable[[], Awaitable[bool] | bool] | None
 
 
 class LibraForgeError(RuntimeError):
@@ -89,14 +90,37 @@ async def get_run(run_id: str) -> dict[str, Any]:
     return await _request("GET", f"/api/runs/{run_id}", timeout=60.0)
 
 
+async def cancel_run(run_id: str) -> None:
+    """Best-effort stop of an in-flight LibraForge run (DELETE or POST cancel)."""
+    run_id = (run_id or "").strip()
+    if not run_id:
+        return
+    for method, path in (
+        ("DELETE", f"/api/runs/{run_id}"),
+        ("POST", f"/api/runs/{run_id}/cancel"),
+    ):
+        try:
+            await _request(method, path, timeout=15.0)
+            return
+        except LibraForgeError:
+            continue
+        except Exception:
+            logger.debug("LibraForge cancel via %s %s failed", method, path, exc_info=True)
+
+
 async def wait_for_run(
     run_id: str,
     *,
     poll_seconds: float = 3.0,
     timeout_seconds: float | None = None,
     on_progress: ProgressCb = None,
+    should_abort: AbortCb = None,
 ) -> dict[str, Any]:
-    """Poll until a LibraForge run finishes. Returns the final report/status dict."""
+    """Poll until a LibraForge run finishes. Returns the final report/status dict.
+
+    ``should_abort``: optional async/sync predicate; when true, raises
+    ``LibraForgeError("cancelled")`` so callers can stop without waiting out the run.
+    """
     deadline = None
     if timeout_seconds is not None and timeout_seconds > 0:
         deadline = asyncio.get_event_loop().time() + timeout_seconds
@@ -105,6 +129,16 @@ async def wait_for_run(
     # while work is still flushing and must not short-circuit the poll loop.
     terminal = {"completed", "failed", "cancelled", "canceled", "success", "error", "done"}
     while True:
+        if should_abort is not None:
+            abort = should_abort()
+            if asyncio.iscoroutine(abort):
+                abort = await abort
+            if abort:
+                try:
+                    await cancel_run(run_id)
+                except Exception:
+                    logger.debug("LibraForge cancel_run(%s) failed", run_id, exc_info=True)
+                raise LibraForgeError("cancelled")
         state = await get_run(run_id)
         status = str(state.get("status") or "").lower()
         if on_progress:

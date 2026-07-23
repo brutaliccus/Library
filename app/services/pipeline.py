@@ -64,41 +64,59 @@ async def _report_progress(
     progress_speed_bps: float | None = None,
     persist: bool = True,
 ):
-    payload = {
-        "type": "status_update",
-        "request_id": request_id,
-        "status": status,
-        "detail": detail,
-        "progress_percent": progress_percent,
-        "progress_bytes": progress_bytes,
-        "progress_total_bytes": progress_total_bytes,
-        "progress_speed_bps": progress_speed_bps,
-    }
-    await ws_manager.send_to_user(user_id, payload)
-
+    # Cancel is terminal. In-flight RD/AA/forge progress must not revive cancelled.
     if not persist:
+        if await _is_cancelled(request_id):
+            return
+        await ws_manager.send_to_user(
+            user_id,
+            {
+                "type": "status_update",
+                "request_id": request_id,
+                "status": status,
+                "detail": detail,
+                "progress_percent": progress_percent,
+                "progress_bytes": progress_bytes,
+                "progress_total_bytes": progress_total_bytes,
+                "progress_speed_bps": progress_speed_bps,
+            },
+        )
         return
 
     now = time.monotonic()
     last = _progress_db_throttle.get(request_id, 0.0)
-    if now - last < 2.0 and progress_percent is not None and progress_percent < 100:
-        return
-    _progress_db_throttle[request_id] = now
+    throttled = now - last < 2.0 and progress_percent is not None and progress_percent < 100
 
     async with async_session() as db:
         result = await db.execute(
             select(DownloadRequest).where(DownloadRequest.id == request_id)
         )
         req = result.scalar_one_or_none()
-        if not req:
+        if not req or req.status == "cancelled":
             return
-        req.status = status
-        req.status_detail = detail
-        req.progress_percent = progress_percent
-        req.progress_bytes = progress_bytes
-        req.progress_total_bytes = progress_total_bytes
-        req.progress_speed_bps = progress_speed_bps
-        await db.commit()
+        if not throttled:
+            _progress_db_throttle[request_id] = now
+            req.status = status
+            req.status_detail = detail
+            req.progress_percent = progress_percent
+            req.progress_bytes = progress_bytes
+            req.progress_total_bytes = progress_total_bytes
+            req.progress_speed_bps = progress_speed_bps
+            await db.commit()
+
+    await ws_manager.send_to_user(
+        user_id,
+        {
+            "type": "status_update",
+            "request_id": request_id,
+            "status": status,
+            "detail": detail,
+            "progress_percent": progress_percent,
+            "progress_bytes": progress_bytes,
+            "progress_total_bytes": progress_total_bytes,
+            "progress_speed_bps": progress_speed_bps,
+        },
+    )
 
 
 async def _is_cancelled(request_id: int) -> bool:
@@ -606,6 +624,8 @@ async def process_download(request_id: int) -> None:
                 await _update_status(db, request_id, "downloading_rd", "Waiting for Real-Debrid to finish")
 
                 async def _on_rd_progress(info: dict) -> None:
+                    if await _is_cancelled(request_id):
+                        raise RuntimeError("cancelled")
                     detail, pct, speed = _rd_progress_detail(info)
                     await _report_progress(
                         request_id,
@@ -616,9 +636,14 @@ async def process_download(request_id: int) -> None:
                         progress_speed_bps=speed,
                     )
 
-                torrent_info = await real_debrid.poll_until_ready(
-                    rd_id, on_progress=_on_rd_progress
-                )
+                try:
+                    torrent_info = await real_debrid.poll_until_ready(
+                        rd_id, on_progress=_on_rd_progress
+                    )
+                except RuntimeError as e:
+                    if "cancelled" in str(e).lower():
+                        return
+                    raise
             else:
                 logger.info(f"Request {request_id}: RD torrent already downloaded, skipping poll")
                 torrent_info = rd_info
@@ -643,6 +668,8 @@ async def process_download(request_id: int) -> None:
                     idx: int = file_index,
                     total: int = total_links,
                 ) -> None:
+                    if await _is_cancelled(request_id):
+                        raise RuntimeError("cancelled")
                     if total_bytes and total_bytes > 0:
                         file_pct = min(100.0, bytes_done / total_bytes * 100)
                         overall = ((idx - 1) + file_pct / 100) / total * 100
@@ -665,6 +692,8 @@ async def process_download(request_id: int) -> None:
                         progress_speed_bps=speed_bps if speed_bps > 0 else None,
                     )
 
+                if await _is_cancelled(request_id):
+                    return
                 await _update_status(
                     db,
                     request_id,
@@ -682,13 +711,28 @@ async def process_download(request_id: int) -> None:
                         )
                         last_dl_err = None
                         break
+                    except RuntimeError as e:
+                        if "cancelled" in str(e).lower():
+                            return
+                        last_dl_err = e
+                        logger.warning(
+                            "RD file download attempt %s/3 failed for request %s: %s",
+                            attempt + 1,
+                            request_id,
+                            e,
+                        )
+                        if attempt < 2:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            try:
+                                direct_url = await real_debrid.unrestrict_link(rd_link)
+                            except Exception:
+                                pass
                     except (
                         httpx.RemoteProtocolError,
                         httpx.ReadError,
                         httpx.ReadTimeout,
                         httpx.ConnectError,
                         httpx.ConnectTimeout,
-                        RuntimeError,
                     ) as e:
                         last_dl_err = e
                         logger.warning(

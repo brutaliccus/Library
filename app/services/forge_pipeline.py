@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,16 @@ settings = get_settings()
 
 UNORGANIZED_DIRNAME = "_unorganized"
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".ogg", ".opus", ".flac", ".wav", ".wma", ".aac", ".mp4"}
+# Torrent / catalog noise that hurts Audible search when used as a title hint.
+_TITLE_JUNK_RE = re.compile(
+    r"\s*[\[(](?:complete\s+series|chapterized|full[-\s]?cast(?:\s+edition)?|"
+    r"mp3|m4b|64\s*kbps|128\s*kbps|audiobook)[\])]|\s*[\[(]\d{3,4}p[\])]",
+    re.IGNORECASE,
+)
+_SERIES_PACK_RE = re.compile(
+    r"\b(?:complete\s+series|books?\s*\d+\s*[-–]\s*\d+|omnibus|box\s*set)\b",
+    re.IGNORECASE,
+)
 
 
 def _pipeline():
@@ -87,6 +99,106 @@ def needs_m4b_conversion(folder: Path) -> bool:
     if len(m4bs) == 1 and len(audio) == 1:
         return False
     return True
+
+
+def clean_catalog_title(title: str) -> str:
+    """Strip torrent / pack noise so Metadata Forge gets a usable title hint."""
+    t = (title or "").strip()
+    if not t:
+        return ""
+    t = _TITLE_JUNK_RE.sub("", t)
+    # "Book Title, Complete Series, Chapterized" → "Book Title"
+    t = re.sub(
+        r"\s*,\s*(?:complete\s+series|chapterized|full[-\s]?cast(?:\s+edition)?)\b.*$",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    # "Book Title (The Series I)" — keep for Gunslinger-style; series pack phrases already removed
+    t = re.sub(r"\s{2,}", " ", t).strip(" -–_|,")
+    return t
+
+
+def _audio_parent_dirs(folder: Path) -> list[Path]:
+    """Unique parent directories that directly contain audio files."""
+    parents: list[Path] = []
+    seen: set[Path] = set()
+    for audio in _collect_audio(folder):
+        parent = audio.parent
+        if parent in seen:
+            continue
+        seen.add(parent)
+        parents.append(parent)
+    return parents
+
+
+def seed_staging_metadata_hints(
+    staging: Path,
+    *,
+    title: str,
+    author: str | None,
+) -> None:
+    """Write ABS-style metadata.json hints for single-book staging folders.
+
+    LibraForge Metadata Forge derives Audible queries from local tags / folder
+    names. Catalog title+author from DownloadRequest are much more reliable for
+    typical one-book downloads with empty tags. Multi-book packs are left alone
+    (folder names are better than a series-pack request title).
+    """
+    audio = _collect_audio(staging)
+    if not audio:
+        return
+    parents = _audio_parent_dirs(staging)
+    # One loose file, or one chapter-folder — not a multi-title pack.
+    if len(parents) != 1:
+        return
+    raw_title = (title or "").strip()
+    if raw_title and _SERIES_PACK_RE.search(raw_title):
+        return
+
+    hint_title = clean_catalog_title(raw_title) or raw_title
+    hint_author = (author or "").strip()
+    if not hint_title and not hint_author:
+        return
+
+    target_dir = parents[0]
+    meta_path = target_dir / "metadata.json"
+    meta: dict[str, Any] = {}
+    if meta_path.is_file():
+        try:
+            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                meta = loaded
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+
+    changed = False
+    if hint_title and not str(meta.get("title") or "").strip():
+        meta["title"] = hint_title
+        changed = True
+    if hint_author and hint_author.lower() != "unknown":
+        authors = meta.get("authors")
+        if not isinstance(authors, list):
+            authors = []
+        if not any(str(a).strip() for a in authors):
+            meta["authors"] = [hint_author]
+            changed = True
+        if not str(meta.get("author") or "").strip():
+            meta["author"] = hint_author
+            changed = True
+
+    if not changed:
+        return
+    try:
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info(
+            "Seeded Metadata Forge hints in %s (title=%r author=%r)",
+            meta_path,
+            meta.get("title"),
+            hint_author,
+        )
+    except OSError as e:
+        logger.warning("Could not seed metadata.json in %s: %s", target_dir, e)
 
 
 async def _persist_staging(request_id: int, staging: Path, run_id: str | None = None) -> None:
@@ -166,6 +278,7 @@ async def run_forge_after_download(
     staging: Path,
     user_id: int,
     title: str,
+    author: str | None = None,
     resume_from: str | None = None,
 ) -> None:
     """Run Metadata Forge → M4B → Folder Forge → ABS scan.
@@ -184,6 +297,19 @@ async def run_forge_after_download(
 
     # --- Metadata Forge ---
     if start_step == "metadata":
+        # Prefer catalog title/author when tags are empty (single-book only).
+        if not author:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(DownloadRequest).where(DownloadRequest.id == request_id)
+                )
+                req_row = result.scalar_one_or_none()
+                if req_row:
+                    author = req_row.author
+                    if not title:
+                        title = req_row.title
+        seed_staging_metadata_hints(staging, title=title, author=author)
+
         async with async_session() as db:
             await p._update_status(db, request_id, "metadata_forge", "Matching metadata via LibraForge…")
 
@@ -337,6 +463,22 @@ async def run_forge_after_download(
         except libraforge.LibraForgeError as e:
             raise RuntimeError(f"Folder Forge failed: {e}") from e
 
+        # Folder Forge reporting success with zero moves while audio still sits
+        # in staging means metadata was never applied (or tags are unusable).
+        # Do not mark the request completed — quarantine for admin review.
+        leftover_audio = _collect_audio(staging)
+        if leftover_audio and not libraforge.organizer_moved_files(report):
+            await _set_quarantine(
+                request_id,
+                (
+                    "Folder Forge made no library moves while audio remains in staging "
+                    f"({len(leftover_audio)} file(s)). Metadata was likely not applied — "
+                    "use LibraForge Manual Review, then Continue pipeline."
+                ),
+                staging,
+            )
+            return
+
         # Clean empty staging dir if Folder Forge left it
         try:
             if staging.is_dir() and not any(staging.iterdir()):
@@ -485,6 +627,7 @@ async def continue_after_manual_review(request_id: int) -> None:
                 raise FileNotFoundError(f"Staging folder missing: {staging_str}")
         user_id = req.user_id
         title = req.title
+        author = req.author
         if req.quarantine_reason is not None:
             req.quarantine_reason = None
             await db.commit()
@@ -502,5 +645,6 @@ async def continue_after_manual_review(request_id: int) -> None:
         staging=staging,
         user_id=user_id,
         title=title,
+        author=author,
         resume_from="m4b",
     )

@@ -101,20 +101,40 @@ async def wait_for_run(
     if timeout_seconds is not None and timeout_seconds > 0:
         deadline = asyncio.get_event_loop().time() + timeout_seconds
 
+    # Only treat run *status* as terminal — phase labels like "complete" appear
+    # while work is still flushing and must not short-circuit the poll loop.
     terminal = {"completed", "failed", "cancelled", "canceled", "success", "error", "done"}
     while True:
         state = await get_run(run_id)
-        status = str(state.get("status") or state.get("phase") or "").lower()
+        status = str(state.get("status") or "").lower()
         if on_progress:
             try:
                 await on_progress(state)
             except Exception:
                 logger.debug("LibraForge progress callback failed", exc_info=True)
         if state.get("done") is True or status in terminal:
-            return state
+            # Live in-memory responses omit report_items; prefer the on-disk
+            # report once available so auto-apply / quarantine checks see writes.
+            return await _finalize_run_report(run_id, state)
         if deadline is not None and asyncio.get_event_loop().time() >= deadline:
             raise LibraForgeError(f"LibraForge run {run_id} timed out after {timeout_seconds}s")
         await asyncio.sleep(poll_seconds)
+
+
+async def _finalize_run_report(run_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    """Prefer the persisted report JSON when the live poll payload is thin."""
+    if state.get("report_items") or state.get("items"):
+        return state
+    # Brief settle so LibraForge can flush write_final_report to disk.
+    for _ in range(5):
+        await asyncio.sleep(0.4)
+        try:
+            disk = await get_run(run_id)
+        except LibraForgeError:
+            break
+        if disk.get("report_items") or disk.get("items") or disk.get("files_by_category"):
+            return disk
+    return state
 
 
 async def start_metadata_run(
@@ -206,23 +226,78 @@ async def start_m4b_run(
     return run_id
 
 
-def metadata_auto_applied(report: dict[str, Any]) -> bool:
-    """True when Metadata Forge wrote a full (or equivalent) match for at least one file."""
-    cats = report.get("files_by_category") or {}
-    if not isinstance(cats, dict):
-        cats = {}
-    for key in ("mode:full", "status:manual_applied", "status:updated", "status:applied"):
+def _category_map(report: dict[str, Any]) -> dict[str, Any]:
+    """LibraForge exposes facets as files_by_category (live) or categories (disk)."""
+    cats = report.get("files_by_category")
+    if isinstance(cats, dict) and cats:
+        return cats
+    cats = report.get("categories")
+    return cats if isinstance(cats, dict) else {}
+
+
+def _has_category_items(cats: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
         items = cats.get(key) or []
         if items:
             return True
-    stats = report.get("stats") or {}
-    breakdown = stats.get("mode_breakdown") or {}
-    if isinstance(breakdown, dict) and int(breakdown.get("full") or 0) > 0:
+    return False
+
+
+def metadata_auto_applied(report: dict[str, Any]) -> bool:
+    """True when Metadata Forge wrote a full (or equivalent) match for at least one file.
+
+    ``status:matched`` alone is NOT enough — that can mean a weak candidate was
+    considered and then skipped (write:write_skipped). Require write evidence or
+    an explicit applied/updated status.
+    """
+    cats = _category_map(report)
+
+    # Strongest signal: tags / metadata.json were actually written.
+    if _has_category_items(cats, "write:written", "status:manual_applied", "status:updated", "status:applied"):
         return True
-    # Some reports only expose counters
+
+    # mode:full without a write facet can appear mid-run; only trust it when
+    # there is no contradictory skip/manual-review payload.
+    report_items = report.get("report_items") or []
+    if isinstance(report_items, list) and report_items:
+        written = 0
+        for item in report_items:
+            if not isinstance(item, dict):
+                continue
+            action = str(item.get("write_action") or "").lower()
+            status = str(item.get("status") or "").lower()
+            if action in {"written", "updated", "applied"} or status in {
+                "updated",
+                "applied",
+                "manual_applied",
+            }:
+                written += 1
+            elif item.get("was_manually_applied"):
+                written += 1
+        if written > 0:
+            return True
+        # Explicit per-item report with zero writes → not auto-applied.
+        return False
+
+    stats = report.get("stats") or {}
+    if not isinstance(stats, dict):
+        stats = {}
+
     for key in ("updated", "applied", "edited", "written"):
         if int(stats.get(key) or 0) > 0:
             return True
+
+    matched = int(stats.get("matched") or 0)
+    skipped = int(stats.get("skipped") or 0)
+    breakdown = stats.get("mode_breakdown") or {}
+    full = int(breakdown.get("full") or 0) if isinstance(breakdown, dict) else 0
+    manual = report.get("manual_review_items") or []
+
+    # Full matches counted and nothing skipped / queued for review.
+    if full > 0 and matched > 0 and skipped == 0 and not manual:
+        if _has_category_items(cats, "mode:full"):
+            return True
+
     return False
 
 
@@ -237,21 +312,53 @@ def run_failed(report: dict[str, Any]) -> bool:
     return False
 
 
+def organizer_moved_files(report: dict[str, Any]) -> bool:
+    """True when Folder Forge actually moved at least one book into the library."""
+    stats = report.get("stats") or {}
+    if not isinstance(stats, dict):
+        return False
+    if int(stats.get("moves_succeeded") or 0) > 0:
+        return True
+    moves = stats.get("move_items") or []
+    return isinstance(moves, list) and len(moves) > 0
+
+
 def quarantine_reason_from_report(report: dict[str, Any]) -> str:
+    stats = report.get("stats") or {}
+    if isinstance(stats, dict):
+        skip_reasons = stats.get("skip_reasons") or {}
+        if isinstance(skip_reasons, dict) and skip_reasons:
+            parts = [f"{k} ×{v}" for k, v in list(skip_reasons.items())[:4]]
+            return "Metadata Forge did not auto-apply: " + "; ".join(parts)[:400]
+
+    report_items = report.get("report_items") or []
+    if isinstance(report_items, list):
+        for item in report_items:
+            if not isinstance(item, dict):
+                continue
+            skip = (item.get("skip_reason") or "").strip()
+            if skip:
+                score = item.get("score")
+                score_bit = f" (score={score})" if score not in (None, "", 0, 0.0) else ""
+                return f"Metadata Forge skipped book: {skip}{score_bit}"[:500]
+
     manual = report.get("manual_review_items") or []
     if isinstance(manual, list) and manual:
         reasons = []
         for item in manual[:5]:
             if isinstance(item, dict):
-                reasons.append(str(item.get("reason") or item.get("title") or item.get("path") or "review"))
+                raw = item.get("reasons") or item.get("reason") or item.get("title")
+                if isinstance(raw, list):
+                    raw = ", ".join(str(x) for x in raw if x)
+                reasons.append(str(raw or item.get("path") or "review"))
             else:
                 reasons.append(str(item))
         return "Metadata match needs admin review: " + "; ".join(reasons)[:400]
-    cats = report.get("files_by_category") or {}
-    if isinstance(cats, dict):
-        skipped = cats.get("status:skipped") or []
-        if skipped:
-            first = skipped[0] if isinstance(skipped[0], dict) else {}
-            reason = first.get("reason") or first.get("title") or "score below minimum / no match"
-            return f"Metadata Forge skipped book ({reason})"
+
+    cats = _category_map(report)
+    skipped = cats.get("status:skipped") or []
+    if skipped:
+        first = skipped[0] if isinstance(skipped[0], dict) else {}
+        reason = first.get("reason") or first.get("title") or "score below minimum / no match"
+        return f"Metadata Forge skipped book ({reason})"
     return "Metadata Forge did not auto-apply a high-confidence match"

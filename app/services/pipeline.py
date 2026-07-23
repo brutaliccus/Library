@@ -720,6 +720,7 @@ async def process_download(request_id: int) -> None:
                     staging=dest_dir,
                     user_id=req.user_id,
                     title=title,
+                    author=author,
                 )
                 return
 
@@ -990,6 +991,7 @@ async def process_aa_download(request_id: int) -> None:
                     staging=dest_dir,
                     user_id=req.user_id,
                     title=title,
+                    author=author,
                 )
                 return
 
@@ -1138,6 +1140,7 @@ async def resume_interrupted_downloads() -> None:
                         staging=staging,
                         user_id=req.user_id,
                         title=req.title,
+                        author=req.author,
                         resume_from=forge_from,
                     )
                 )

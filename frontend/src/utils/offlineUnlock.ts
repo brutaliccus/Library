@@ -8,6 +8,8 @@
  */
 
 const STORE_KEY = "offline-unlock-v1";
+/** One-time "set this later" dismissals for existing accounts (per origin+email). */
+const PROMPT_DISMISS_KEY = "offline-unlock-prompt-dismissed-v1";
 
 export interface OfflineUnlockRecord {
   origin: string;
@@ -94,6 +96,48 @@ export function getOfflineUnlock(
 
 export function hasOfflineUnlock(origin: string, email: string): boolean {
   return !!getOfflineUnlock(origin, email)?.pinHash;
+}
+
+function readDismissed(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(PROMPT_DISMISS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, boolean>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** True when this device already has a PIN for the account. */
+export function wasOfflineUnlockPromptDismissed(
+  origin: string,
+  email: string
+): boolean {
+  if (!origin || !email) return false;
+  return !!readDismissed()[recordKey(origin, email)];
+}
+
+/** Mark one-time setup prompt as dismissed (Settings remains available). */
+export function dismissOfflineUnlockPrompt(origin: string, email: string): void {
+  if (!origin || !email) return;
+  try {
+    const store = readDismissed();
+    store[recordKey(origin, email)] = true;
+    localStorage.setItem(PROMPT_DISMISS_KEY, JSON.stringify(store));
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+/** Show a skippable setup prompt once for existing accounts with no PIN. */
+export function shouldPromptOfflineUnlockSetup(
+  origin: string,
+  email: string
+): boolean {
+  if (!origin || !email) return false;
+  if (hasOfflineUnlock(origin, email)) return false;
+  return !wasOfflineUnlockPromptDismissed(origin, email);
 }
 
 export async function enrollOfflineUnlock(opts: {

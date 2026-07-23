@@ -4,7 +4,15 @@ import { useQueryClient } from "@tanstack/react-query";
 import api, { applyApiBaseUrl } from "../api/client";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
-import { Library, KeyRound, Users, Loader2, ArrowRight, ImagePlus } from "lucide-react";
+import {
+  Library,
+  KeyRound,
+  Users,
+  Loader2,
+  ArrowRight,
+  ImagePlus,
+  Fingerprint,
+} from "lucide-react";
 import {
   applyInvitePaste,
   normalizeInviteCode,
@@ -16,8 +24,13 @@ import { isNativeApp } from "../api/instanceUrl";
 import { upsertRememberedLibrary, currentOrigin } from "../api/libraryRegistry";
 import ThemePicker from "../components/ThemePicker";
 import { applyThemeToDocument, DEFAULT_THEME, type ThemeId } from "../theme/themes";
+import {
+  biometricAvailable,
+  enrollOfflineUnlock,
+  hasOfflineUnlock,
+} from "../utils/offlineUnlock";
 
-type Mode = "choose" | "create" | "join";
+type Mode = "choose" | "create" | "join" | "offline-pin";
 
 export default function Onboarding() {
   const navigate = useNavigate();
@@ -26,11 +39,13 @@ export default function Onboarding() {
   const { user } = useAuth();
   const [searchParams] = useSearchParams();
   const initialMode =
-    searchParams.get("mode") === "create"
-      ? "create"
-      : searchParams.get("mode") === "join"
-        ? "join"
-        : "choose";
+    searchParams.get("step") === "offline-pin"
+      ? "offline-pin"
+      : searchParams.get("mode") === "create"
+        ? "create"
+        : searchParams.get("mode") === "join"
+          ? "join"
+          : "choose";
 
   const [mode, setMode] = useState<Mode>(initialMode);
   const [busy, setBusy] = useState(false);
@@ -44,7 +59,31 @@ export default function Onboarding() {
   const [inviteCode, setInviteCode] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  const [pin, setPin] = useState("");
+  const [pinConfirm, setPinConfirm] = useState("");
+  const [enableBio, setEnableBio] = useState(false);
+  const [bioOk, setBioOk] = useState(false);
+  const [pendingLibName, setPendingLibName] = useState("Library");
+
   useEffect(() => {
+    void biometricAvailable().then(setBioOk);
+  }, []);
+
+  // Invite signup lands here; skip if PIN already enrolled on this device.
+  useEffect(() => {
+    if (searchParams.get("step") !== "offline-pin") return;
+    const origin = currentOrigin();
+    const email = user?.email || localStorage.getItem("user_email") || "";
+    if (origin && email && hasOfflineUnlock(origin, email)) {
+      navigate("/libraries", { replace: true });
+    }
+  }, [searchParams, user?.email, navigate]);
+
+  useEffect(() => {
+    if (searchParams.get("step") === "offline-pin") {
+      setMode("offline-pin");
+      return;
+    }
     const pending = peekPendingInvite();
     if (pending) {
       setInviteCode(pending);
@@ -62,25 +101,75 @@ export default function Onboarding() {
     }
   }, [searchParams, user?.role]);
 
+  const accountEmail = () =>
+    user?.email || localStorage.getItem("user_email") || "";
+
   const rememberLibrary = (
     lib: { name?: string; coverUrl?: string | null } | null | undefined
   ) => {
     const origin = currentOrigin();
-    const email = user?.email || localStorage.getItem("user_email") || "";
+    const email = accountEmail();
     if (!origin || !email) return;
     upsertRememberedLibrary({
       origin,
-      name: lib?.name || name.trim() || "Library",
+      name: lib?.name || name.trim() || pendingLibName || "Library",
       coverUrl: lib?.coverUrl || null,
       email,
     });
   };
 
-  const finish = async (lib?: { name?: string; coverUrl?: string | null } | null) => {
+  const goHome = async (lib?: { name?: string; coverUrl?: string | null } | null) => {
     rememberLibrary(lib);
     await queryClient.invalidateQueries({ queryKey: ["library-group"] });
     await queryClient.invalidateQueries({ queryKey: ["user-settings"] });
     navigate("/libraries", { replace: true });
+  };
+
+  /** After create/join (or invite signup), require offline PIN unless already enrolled. */
+  const finish = async (lib?: { name?: string; coverUrl?: string | null } | null) => {
+    rememberLibrary(lib);
+    await queryClient.invalidateQueries({ queryKey: ["library-group"] });
+    await queryClient.invalidateQueries({ queryKey: ["user-settings"] });
+    const origin = currentOrigin();
+    const email = accountEmail();
+    if (origin && email && !hasOfflineUnlock(origin, email)) {
+      setPendingLibName(lib?.name || name.trim() || "Library");
+      setError(null);
+      setPin("");
+      setPinConfirm("");
+      setMode("offline-pin");
+      return;
+    }
+    navigate("/libraries", { replace: true });
+  };
+
+  const handleOfflinePin = async () => {
+    setError(null);
+    const origin = currentOrigin();
+    const email = accountEmail();
+    if (!origin || !email) {
+      setError("Missing library or account — try again from Libraries.");
+      return;
+    }
+    if (pin !== pinConfirm) {
+      setError("PINs do not match");
+      return;
+    }
+    setBusy(true);
+    try {
+      await enrollOfflineUnlock({
+        origin,
+        email,
+        pin,
+        enableBiometric: enableBio && bioOk,
+      });
+      toast("Offline unlock ready", "success");
+      await goHome({ name: pendingLibName });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save PIN");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const onCoverPicked = (file: File | null) => {
@@ -171,18 +260,28 @@ export default function Onboarding() {
     }
   };
 
+  const pinStepOnly = searchParams.get("step") === "offline-pin";
+
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-10">
       <div className="w-full max-w-lg">
         <div className="text-center mb-8">
           <div className="inline-flex p-3 bg-brand-900/40 rounded-2xl mb-4">
-            <Library size={32} className="text-brand-400" />
+            {mode === "offline-pin" ? (
+              <KeyRound size={32} className="text-brand-400" />
+            ) : (
+              <Library size={32} className="text-brand-400" />
+            )}
           </div>
-          <h1 className="text-2xl font-bold text-gray-100">Set up your library</h1>
+          <h1 className="text-2xl font-bold text-gray-100">
+            {mode === "offline-pin" ? "Set your offline PIN" : "Set up your library"}
+          </h1>
           <p className="text-sm text-gray-400 mt-2">
-            {mode === "create" || initialMode === "create"
-              ? "Name your library, optionally add cover art, and add debrid keys. You'll get an invite link to share — that's how friends create accounts."
-              : "All downloaded books are shared. This choice only decides whose debrid account powers your streaming."}
+            {mode === "offline-pin"
+              ? "Create a local PIN so you can open this library when you're offline. It stays on this device and is never sent to the server."
+              : mode === "create" || initialMode === "create"
+                ? "Name your library, optionally add cover art, and add debrid keys. You'll get an invite link to share — that's how friends create accounts."
+                : "All downloaded books are shared. This choice only decides whose debrid account powers your streaming."}
           </p>
         </div>
 
@@ -395,6 +494,62 @@ export default function Onboarding() {
                 {busy ? "Joining..." : "Join library"}
               </button>
             </div>
+          </div>
+        )}
+
+        {mode === "offline-pin" && (
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+            <p className="text-xs text-gray-400 leading-relaxed">
+              Required so you can open downloads offline. Optional fingerprint / face unlock
+              uses this device&apos;s biometrics.
+            </p>
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1.5">
+                Choose a PIN (4–8 digits)
+              </label>
+              <input
+                type="password"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={pin}
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 8))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 tracking-widest focus:outline-none focus:border-brand-500"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1.5">Confirm PIN</label>
+              <input
+                type="password"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={pinConfirm}
+                onChange={(e) => setPinConfirm(e.target.value.replace(/\D/g, "").slice(0, 8))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 tracking-widest focus:outline-none focus:border-brand-500"
+              />
+            </div>
+            {bioOk && (
+              <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={enableBio}
+                  onChange={(e) => setEnableBio(e.target.checked)}
+                  className="rounded border-gray-600"
+                />
+                <Fingerprint size={14} className="text-brand-400" />
+                Also unlock with fingerprint / face
+              </label>
+            )}
+            {error && <p className="text-xs text-red-400">{error}</p>}
+            <button
+              type="button"
+              onClick={() => void handleOfflinePin()}
+              disabled={busy || pin.length < 4 || pinConfirm.length < 4}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-500 disabled:opacity-50 transition-colors"
+            >
+              {busy ? <Loader2 size={15} className="animate-spin" /> : <KeyRound size={15} />}
+              {busy ? "Saving…" : pinStepOnly ? "Save & continue" : "Save PIN & finish"}
+            </button>
           </div>
         )}
       </div>

@@ -214,8 +214,19 @@ export default function JoinInvite() {
       });
       acceptSession(data);
       takePendingInvite();
+      const origin = currentOrigin();
+      const em = email.trim().toLowerCase();
+      if (origin && em) {
+        upsertRememberedLibrary({
+          origin,
+          name: libraryName || "Library",
+          coverUrl: null,
+          email: em,
+        });
+      }
       toast(`Welcome — you're in ${libraryName || "the library"}!`, "success");
-      navigate("/libraries", { replace: true });
+      // New accounts: set offline PIN as the next onboarding step.
+      navigate("/onboarding?step=offline-pin", { replace: true });
     } catch (err: any) {
       setError(
         err.response?.data?.detail ||

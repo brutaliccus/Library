@@ -31,7 +31,11 @@ import api from "../api/client";
 import { setInstanceUrl, normalizeInstanceUrl } from "../api/instanceUrl";
 import { useToast } from "../contexts/ToastContext";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
-import { hasOfflineUnlock } from "../utils/offlineUnlock";
+import {
+  dismissOfflineUnlockPrompt,
+  hasOfflineUnlock,
+  shouldPromptOfflineUnlockSetup,
+} from "../utils/offlineUnlock";
 
 export default function LibrariesPage() {
   const { user, logout, enterLibrary, enterLibraryOffline, login, sessionReady } = useAuth();
@@ -67,6 +71,8 @@ export default function LibrariesPage() {
   const [loginError, setLoginError] = useState("");
   const [unlockLib, setUnlockLib] = useState<RememberedLibrary | null>(null);
   const [unlockMode, setUnlockMode] = useState<"setup" | "unlock">("unlock");
+  /** Post-login one-time prompt may be dismissed; intentional setup from Open may not. */
+  const [unlockAllowSkip, setUnlockAllowSkip] = useState(false);
 
   if (!sessionReady) {
     return (
@@ -103,12 +109,14 @@ export default function LibrariesPage() {
       }
       if (result === "need_offline_unlock") {
         setUnlockMode("unlock");
+        setUnlockAllowSkip(false);
         setUnlockLib(lib);
         return;
       }
       if (result === "need_offline_setup") {
         if (online) {
           setUnlockMode("setup");
+          setUnlockAllowSkip(false);
           setUnlockLib(lib);
           toast("Set a PIN to open this library offline", "info");
           return;
@@ -157,9 +165,10 @@ export default function LibrariesPage() {
     try {
       await login(loginEmail.trim(), loginPassword, loginLib.origin);
       setLoginLib(null);
-      // Prompt offline unlock setup after first password login.
-      if (!hasOfflineUnlock(loginLib.origin, loginEmail.trim())) {
+      // One-time prompt for existing accounts that never enrolled a PIN.
+      if (shouldPromptOfflineUnlockSetup(loginLib.origin, loginEmail.trim())) {
         setUnlockMode("setup");
+        setUnlockAllowSkip(true);
         setUnlockLib(loginLib);
         return;
       }
@@ -269,8 +278,9 @@ export default function LibrariesPage() {
     try {
       await login(signInEmail.trim(), signInPassword, origin);
       setShowSignIn(false);
-      if (!hasOfflineUnlock(origin, signInEmail.trim())) {
+      if (shouldPromptOfflineUnlockSetup(origin, signInEmail.trim())) {
         setUnlockMode("setup");
+        setUnlockAllowSkip(true);
         setUnlockLib({
           origin,
           name: "Library",
@@ -591,7 +601,24 @@ export default function LibrariesPage() {
           libraryName={unlockLib.name}
           origin={unlockLib.origin}
           email={unlockLib.email || email}
-          onClose={() => setUnlockLib(null)}
+          allowSkip={unlockAllowSkip}
+          onClose={() => {
+            if (unlockMode === "setup" && unlockAllowSkip) {
+              dismissOfflineUnlockPrompt(
+                unlockLib.origin,
+                unlockLib.email || email || loginEmail || signInEmail
+              );
+            }
+            setUnlockLib(null);
+          }}
+          onSkip={() => {
+            dismissOfflineUnlockPrompt(
+              unlockLib.origin,
+              unlockLib.email || email || loginEmail || signInEmail
+            );
+            setUnlockLib(null);
+            navigate("/", { replace: true });
+          }}
           onUnlocked={() => {
             void (async () => {
               // After PIN setup while online, re-enter with live /auth/me.

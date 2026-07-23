@@ -29,6 +29,7 @@ import Onboarding from "./pages/Onboarding";
 import JoinInvite from "./pages/JoinInvite";
 import LibrariesPage from "./pages/Libraries";
 import OfflineBanner from "./components/OfflineBanner";
+import OfflineUnlockSetupPrompt from "./components/OfflineUnlockSetupPrompt";
 import { useLibraryGroup } from "./hooks/useLibraryGroup";
 import { useThemeSync } from "./theme/useThemeSync";
 import { useOnlineStatus } from "./hooks/useOnlineStatus";
@@ -153,6 +154,9 @@ export default function App() {
           />
           <OfflineBanner />
         </>
+      )}
+      {user && !user.mustChangePassword && !user.mustSetEmail && (
+        <OfflineUnlockSetupPrompt />
       )}
       {expanded && <PlayerPage />}
       <ThemeSync />

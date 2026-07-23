@@ -17,6 +17,11 @@ interface Props {
   onClose: () => void;
   onUnlocked: () => void;
   onSetupComplete?: () => void;
+  /** Setup only: hide dismiss controls (used during account onboarding). */
+  required?: boolean;
+  /** Setup only: show “set later in Settings” (existing accounts, one-time). */
+  allowSkip?: boolean;
+  onSkip?: () => void;
 }
 
 export default function OfflineUnlockModal({
@@ -27,6 +32,9 @@ export default function OfflineUnlockModal({
   onClose,
   onUnlocked,
   onSetupComplete,
+  required = false,
+  allowSkip = false,
+  onSkip,
 }: Props) {
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
@@ -105,14 +113,16 @@ export default function OfflineUnlockModal({
           <h2 className="text-sm font-semibold text-gray-100">
             {mode === "setup" ? "Set up offline unlock" : `Open offline — ${libraryName}`}
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-200"
-            aria-label="Close"
-          >
-            <X size={18} />
-          </button>
+          {!(mode === "setup" && required) && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1 text-gray-500 hover:text-gray-200"
+              aria-label="Close"
+            >
+              <X size={18} />
+            </button>
+          )}
         </div>
 
         <p className="text-xs text-gray-400 mb-4">
@@ -179,6 +189,17 @@ export default function OfflineUnlockModal({
               ? "Save & continue"
               : "Unlock"}
         </button>
+
+        {mode === "setup" && allowSkip && !required && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => (onSkip ? onSkip() : onClose())}
+            className="w-full mt-2 py-2 text-xs text-gray-500 hover:text-gray-300 disabled:opacity-50"
+          >
+            You can set this later in Settings
+          </button>
+        )}
 
         {mode === "unlock" && bioOk && (
           <button

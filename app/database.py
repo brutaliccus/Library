@@ -106,21 +106,57 @@ def _run_migrations() -> None:
     Databases created before Alembic was adopted already have the baseline
     schema but no alembic_version table — stamp them at the baseline revision
     so upgrade only applies the newer migrations.
-    """
-    from alembic import command
-    from sqlalchemy import create_engine, inspect
 
-    sync_engine = create_engine(_sync_database_url())
+    Prefer a fast in-process version check; when an upgrade is needed, run
+    Alembic in a subprocess so it cannot interact with uvicorn/uvloop/aiosqlite
+    state (in-process command.upgrade() has spun forever on the Pi).
+    """
+    import os
+    import subprocess
+    import sys
+
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import create_engine, inspect, text
+
+    sync_engine = create_engine(
+        _sync_database_url(),
+        connect_args={"timeout": 30},
+    )
     try:
         insp = inspect(sync_engine)
         pre_alembic = insp.has_table("users") and not insp.has_table("alembic_version")
+        current = None
+        if not pre_alembic and insp.has_table("alembic_version"):
+            with sync_engine.connect() as conn:
+                current = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
     finally:
         sync_engine.dispose()
 
     cfg = _alembic_config()
+    heads = {h.revision for h in ScriptDirectory.from_config(cfg).get_revisions("heads")}
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_PROJECT_ROOT)
+
     if pre_alembic:
-        command.stamp(cfg, "0001")
-    command.upgrade(cfg, "head")
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "stamp", "0001"],
+            check=True,
+            cwd=str(_PROJECT_ROOT),
+            env=env,
+        )
+        current = "0001"
+
+    if current and current in heads:
+        logger.info("Alembic already at head (%s)", current)
+        return
+
+    logger.info("Alembic upgrading to head (current=%s heads=%s)", current, sorted(heads))
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        check=True,
+        cwd=str(_PROJECT_ROOT),
+        env=env,
+    )
 
 
 async def init_db():
@@ -131,6 +167,12 @@ async def init_db():
     guarantee they match the 0001 baseline before it gets stamped; the list is
     FROZEN — add new schema changes as Alembic revisions instead.
     """
+    # Run sync Alembic BEFORE opening any aiosqlite pool connection. Doing the
+    # reverse deadlocks on SQLite (async pool holds the file lock; upgrade waits).
+    # Call synchronously (not to_thread): under uvloop, Alembic-in-a-thread has
+    # been observed to spin at ~100% CPU and never finish on this host.
+    _run_migrations()
+
     async with engine.begin() as conn:
         result = await conn.execute(
             text(
@@ -162,13 +204,6 @@ async def init_db():
             await _add_column_if_missing(conn, "scraper_state", "last_query", "VARCHAR(256)")
             await _add_column_if_missing(conn, "scraper_state", "last_upserted_count", "INTEGER DEFAULT 0")
             await _add_column_if_missing(conn, "scraper_state", "last_matches_created", "INTEGER DEFAULT 0")
-
-    # Drop pooled aiosqlite connections before sync Alembic — otherwise the open
-    # async handle can hold a SQLite lock and command.upgrade() hangs forever.
-    await engine.dispose()
-
-    # Alembic's command API is synchronous — run it off the event loop.
-    await asyncio.to_thread(_run_migrations)
 
     # First-boot warm cache from the shipped seed (no-op if already populated).
     try:

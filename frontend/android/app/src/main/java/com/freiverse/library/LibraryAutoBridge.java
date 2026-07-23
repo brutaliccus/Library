@@ -101,6 +101,14 @@ public final class LibraryAutoBridge {
      */
     private long ignorePausedSyncUntilElapsed = 0;
     private static final long PAUSED_SYNC_GRACE_MS = 2_500;
+    /**
+     * After AA/lock play we request native audio focus, then the WebView HTML5
+     * {@code <audio>} element requests its own focus. That steals focus from us
+     * and used to dispatch pause (~0.5s of audio then stop). Ignore focus loss
+     * briefly so WebView can take over without killing playback.
+     */
+    private long ignoreFocusLossUntilElapsed = 0;
+    private static final long FOCUS_LOSS_GRACE_MS = 8_000;
 
     private LibraryAutoBridge() {}
 
@@ -205,10 +213,12 @@ public final class LibraryAutoBridge {
         }
         this.playing = playing;
         if (playing) {
-            ignorePausedSyncUntilElapsed =
-                SystemClock.elapsedRealtime() + PAUSED_SYNC_GRACE_MS;
+            long now = SystemClock.elapsedRealtime();
+            ignorePausedSyncUntilElapsed = now + PAUSED_SYNC_GRACE_MS;
+            ignoreFocusLossUntilElapsed = now + FOCUS_LOSS_GRACE_MS;
         } else {
             ignorePausedSyncUntilElapsed = 0;
+            ignoreFocusLossUntilElapsed = 0;
         }
         refreshSession(false);
     }
@@ -237,6 +247,8 @@ public final class LibraryAutoBridge {
     public void clear() {
         abandonAudioFocus();
         resumeAfterFocusGain = false;
+        ignorePausedSyncUntilElapsed = 0;
+        ignoreFocusLossUntilElapsed = 0;
         update("", "", "", null, false, false, 0, 0, 1.0f);
         Context ctx = appContextRef.get();
         if (ctx != null) {
@@ -252,6 +264,11 @@ public final class LibraryAutoBridge {
 
     /** Request audio focus before resuming; returns false if focus was denied. */
     public boolean requestAudioFocusForPlay() {
+        // Always arm the grace window — even if we already hold focus — because
+        // the upcoming WebView audio.play() may still steal it from us.
+        ignoreFocusLossUntilElapsed =
+            SystemClock.elapsedRealtime() + FOCUS_LOSS_GRACE_MS;
+
         if (audioManager == null) {
             Context ctx = appContextRef.get();
             if (ctx != null) {
@@ -268,14 +285,17 @@ public final class LibraryAutoBridge {
         int result;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (focusRequest == null) {
+                // MUSIC (not SPEECH): matches HTML5 media focus usage and reduces
+                // odd OEM focus hand-offs when the WebView starts the same stream.
                 AudioAttributes attrs = new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .build();
                 focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                     .setAudioAttributes(attrs)
                     .setOnAudioFocusChangeListener(this::onAudioFocusChange, mainHandler)
                     .setAcceptsDelayedFocusGain(true)
+                    .setWillPauseWhenDucked(false)
                     .build();
             }
             result = audioManager.requestAudioFocus(focusRequest);
@@ -312,17 +332,27 @@ public final class LibraryAutoBridge {
     private void onAudioFocusChange(int focusChange) {
         switch (focusChange) {
             case AudioManager.AUDIOFOCUS_LOSS:
-                resumeAfterFocusGain = false;
-                setPlayingOptimistic(false);
-                dispatch("pause", null);
-                abandonAudioFocus();
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT: {
+                // WebView HTML5 audio taking focus after our MediaSession play —
+                // do not pause or the user hears ~0.5s then silence.
+                if (SystemClock.elapsedRealtime() < ignoreFocusLossUntilElapsed) {
+                    Log.i(TAG, "Ignoring focus loss during play settle (WebView audio)");
+                    hasAudioFocus = false;
+                    return;
+                }
+                if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
+                    resumeAfterFocusGain = false;
+                    setPlayingOptimistic(false);
+                    dispatch("pause", null);
+                    abandonAudioFocus();
+                } else {
+                    // Phone call / nav prompt — remember to resume when focus returns.
+                    resumeAfterFocusGain = playing || resumeAfterFocusGain;
+                    setPlayingOptimistic(false);
+                    dispatch("pause", null);
+                }
                 break;
-            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                // Phone call / nav prompt — remember to resume when focus returns.
-                resumeAfterFocusGain = playing || resumeAfterFocusGain;
-                setPlayingOptimistic(false);
-                dispatch("pause", null);
-                break;
+            }
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
                 // Another app wants a brief duck (nav chime, etc.). Keep playing —
                 // pausing here races lock-screen / AA play and causes play-then-pause.

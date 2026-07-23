@@ -306,7 +306,12 @@ public class LibraryAutoPlugin extends Plugin
         if ("play".equals(action) || "playmedia".equals(action)) {
             // Soft-wake first, then deliver play so audio.play() isn't rejected
             // by a still-frozen WebView (phone call / car reconnect).
-            mainHandler.postDelayed(() -> deliverToJs(action, extras), PLAY_WAKE_DELAY_MS);
+            // Re-arm focus-loss grace so it covers WebView audio.play(), not just
+            // the earlier MediaSession onPlay focus request.
+            mainHandler.postDelayed(() -> {
+                LibraryAutoBridge.getInstance().requestAudioFocusForPlay();
+                deliverToJs(action, extras);
+            }, PLAY_WAKE_DELAY_MS);
             return;
         }
 

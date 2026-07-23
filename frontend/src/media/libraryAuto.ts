@@ -24,8 +24,6 @@ let ignorePausedSyncUntil = 0;
 const POS_SYNC_INTERVAL_MS = 1_000;
 const PAUSED_SYNC_GRACE_MS = 2_500;
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 function markOptimisticPlaying(): void {
   lastPlayingSynced = true;
   ignorePausedSyncUntil = Date.now() + PAUSED_SYNC_GRACE_MS;
@@ -35,8 +33,10 @@ function markOptimisticPlaying(): void {
 async function withWebViewReady(fn: () => void): Promise<void> {
   markOptimisticPlaying();
   try {
-    await LibraryAuto.bringToForeground();
-    await sleep(350);
+    // Native LibraryAutoPlugin already bringToForeground + delays ~400ms before
+    // delivering play. Do not stack another sleep here — that delayed audio.play()
+    // and widened the native-focus vs WebView-focus race.
+    void LibraryAuto.bringToForeground();
   } catch {
     /* native only */
   }

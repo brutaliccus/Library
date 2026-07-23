@@ -17,6 +17,7 @@ import {
   BookOpen,
   Play,
   Ban,
+  CheckCircle,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import ScraperTab from "../components/admin/ScraperTab";
@@ -27,6 +28,7 @@ import RequestStatusBadge from "../components/RequestStatus";
 import RequestProgress from "../components/RequestProgress";
 import Modal from "../components/Modal";
 import { useToast } from "../contexts/ToastContext";
+import { useAuth } from "../hooks/useAuth";
 import { purgeLibraryCollectionQueries } from "../utils/shelfQueryCache";
 import {
   hasLiveRequests,
@@ -142,7 +144,9 @@ export default function AdminPage() {
 function UsersTab() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const [disableUserModal, setDisableUserModal] = useState<number | null>(null);
+  const { user: me } = useAuth();
+  const [disableUserModal, setDisableUserModal] = useState<{ id: number; username: string } | null>(null);
+  const [deleteUserModal, setDeleteUserModal] = useState<{ id: number; username: string } | null>(null);
 
   const { data: users, isLoading: usersLoading } = useQuery({
     queryKey: ["admin-users"],
@@ -152,14 +156,33 @@ function UsersTab() {
     },
   });
 
-  const deleteUser = useMutation({
-    mutationFn: async (id: number) => {
-      await api.delete(`/admin/users/${id}`);
+  const setActive = useMutation({
+    mutationFn: async ({ id, is_active }: { id: number; is_active: boolean }) => {
+      const { data } = await api.patch(`/admin/users/${id}`, { is_active });
+      return data as { message: string; is_active: boolean };
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["admin-users"] });
       setDisableUserModal(null);
-      toast("User disabled.", "info");
+      toast(data.message, data.is_active ? "success" : "info");
+    },
+    onError: (err: any) => {
+      toast(err.response?.data?.detail || "Failed to update user", "error");
+    },
+  });
+
+  const deleteUser = useMutation({
+    mutationFn: async (id: number) => {
+      const { data } = await api.delete(`/admin/users/${id}`);
+      return data as { message: string };
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      setDeleteUserModal(null);
+      toast(data.message || "User deleted.", "info");
+    },
+    onError: (err: any) => {
+      toast(err.response?.data?.detail || "Failed to delete user", "error");
     },
   });
 
@@ -180,8 +203,8 @@ function UsersTab() {
   return (
     <div className="space-y-6 min-w-0">
       <p className="text-sm text-gray-400">
-        New members join with an invite link from Settings — no approval step. You can still
-        reset passwords or disable accounts here.
+        New members join with an invite link from Settings — no approval step. You can reset
+        passwords, disable/enable accounts, or permanently delete them here.
       </p>
 
       <section className="space-y-3">
@@ -191,47 +214,73 @@ function UsersTab() {
         {!users?.length ? (
           <p className="text-center py-8 text-gray-500">No users yet</p>
         ) : (
-          users.map((user: any) => (
-            <div
-              key={user.id}
-              className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
-            >
-              <div>
-                <p className="font-semibold text-gray-100">
-                  {user.username}
-                  {user.role === "admin" && (
-                    <span className="ml-2 text-xs bg-brand-900/30 text-brand-400 px-2 py-0.5 rounded-full">
-                      admin
-                    </span>
-                  )}
-                  {!user.is_active && (
-                    <span className="ml-2 text-xs bg-red-900/30 text-red-400 px-2 py-0.5 rounded-full">
-                      disabled
-                    </span>
-                  )}
-                </p>
-                <p className="text-xs text-gray-500">
-                  Joined {new Date(user.created_at).toLocaleDateString()}
-                </p>
-              </div>
-              <div className="flex gap-2 shrink-0">
-                <button
-                  onClick={() => resetPw.mutate(user.id)}
-                  className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600"
-                >
-                  <RefreshCw size={14} /> Reset PW
-                </button>
-                {user.role !== "admin" && (
+          users.map((user: any) => {
+            const isSelf = me?.username === user.username;
+            return (
+              <div
+                key={user.id}
+                className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+              >
+                <div>
+                  <p className="font-semibold text-gray-100">
+                    {user.username}
+                    {user.role === "admin" && (
+                      <span className="ml-2 text-xs bg-brand-900/30 text-brand-400 px-2 py-0.5 rounded-full">
+                        admin
+                      </span>
+                    )}
+                    {!user.is_active && (
+                      <span className="ml-2 text-xs bg-red-900/30 text-red-400 px-2 py-0.5 rounded-full">
+                        disabled
+                      </span>
+                    )}
+                    {isSelf && (
+                      <span className="ml-2 text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded-full">
+                        you
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Joined {new Date(user.created_at).toLocaleDateString()}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 shrink-0">
                   <button
-                    onClick={() => setDisableUserModal(user.id)}
-                    className="flex items-center gap-1 px-3 py-1.5 bg-red-900/30 text-red-400 text-sm rounded-lg hover:bg-red-900/50"
+                    onClick={() => resetPw.mutate(user.id)}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600"
                   >
-                    <Trash2 size={14} /> Disable
+                    <RefreshCw size={14} /> Reset PW
                   </button>
-                )}
+                  {!isSelf && (
+                    user.is_active ? (
+                      <button
+                        onClick={() => setDisableUserModal({ id: user.id, username: user.username })}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-amber-900/30 text-amber-400 text-sm rounded-lg hover:bg-amber-900/50"
+                      >
+                        <Ban size={14} /> Disable
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setActive.mutate({ id: user.id, is_active: true })}
+                        disabled={setActive.isPending}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-emerald-900/30 text-emerald-400 text-sm rounded-lg hover:bg-emerald-900/50 disabled:opacity-50"
+                      >
+                        <CheckCircle size={14} /> Enable
+                      </button>
+                    )
+                  )}
+                  {!isSelf && (
+                    <button
+                      onClick={() => setDeleteUserModal({ id: user.id, username: user.username })}
+                      className="flex items-center gap-1 px-3 py-1.5 bg-red-900/30 text-red-400 text-sm rounded-lg hover:bg-red-900/50"
+                    >
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </section>
 
@@ -240,7 +289,10 @@ function UsersTab() {
         show={disableUserModal !== null}
         onClose={() => setDisableUserModal(null)}
       >
-        <p className="text-sm text-gray-400 mb-4">Disable this user? They will no longer be able to log in.</p>
+        <p className="text-sm text-gray-400 mb-4">
+          Disable <span className="text-gray-200">{disableUserModal?.username}</span>? They will no
+          longer be able to log in. You can re-enable them later.
+        </p>
         <div className="flex gap-2 justify-end">
           <button
             type="button"
@@ -251,11 +303,42 @@ function UsersTab() {
           </button>
           <button
             type="button"
-            onClick={() => disableUserModal !== null && deleteUser.mutate(disableUserModal)}
+            onClick={() =>
+              disableUserModal !== null &&
+              setActive.mutate({ id: disableUserModal.id, is_active: false })
+            }
+            disabled={setActive.isPending}
+            className="px-3 py-1.5 bg-amber-600 text-white rounded-lg hover:bg-amber-500 disabled:opacity-50"
+          >
+            {setActive.isPending ? "Disabling..." : "Disable"}
+          </button>
+        </div>
+      </Modal>
+
+      <Modal
+        title="Delete account"
+        show={deleteUserModal !== null}
+        onClose={() => setDeleteUserModal(null)}
+      >
+        <p className="text-sm text-gray-400 mb-4">
+          Permanently delete <span className="text-gray-200">{deleteUserModal?.username}</span>?
+          Their requests, play history, and related data will be removed. This cannot be undone.
+        </p>
+        <div className="flex gap-2 justify-end">
+          <button
+            type="button"
+            onClick={() => setDeleteUserModal(null)}
+            className="px-3 py-1.5 text-gray-300 hover:bg-gray-700 rounded-lg"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => deleteUserModal !== null && deleteUser.mutate(deleteUserModal.id)}
             disabled={deleteUser.isPending}
             className="px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-500 disabled:opacity-50"
           >
-            {deleteUser.isPending ? "Disabling..." : "Disable"}
+            {deleteUser.isPending ? "Deleting..." : "Delete"}
           </button>
         </div>
       </Modal>

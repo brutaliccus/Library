@@ -5,11 +5,21 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import User, DownloadRequest
+from app.models import (
+    ABSPlayTracking,
+    AvailabilityAlert,
+    DownloadRequest,
+    LibraryGroup,
+    PushSubscription,
+    SearchHistory,
+    StreamHistory,
+    StreamingLibraryItem,
+    User,
+)
 from app.utils.auth import require_admin, hash_password
 from app.services import real_debrid, audiobookshelf, kavita, downloader, goodreads
 from app.services.pipeline import (
@@ -30,6 +40,10 @@ class UserResponse(BaseModel):
     created_at: str
 
     model_config = {"from_attributes": True}
+
+
+class SetActiveBody(BaseModel):
+    is_active: bool
 
 
 class AdminDownloadResponse(BaseModel):
@@ -63,6 +77,80 @@ class RejectRequestBody(BaseModel):
 
 # --- User Management ---
 
+async def _get_user_or_404(db: AsyncSession, user_id: int) -> User:
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+async def _ensure_not_last_active_admin(
+    db: AsyncSession,
+    user: User,
+    *,
+    action: str,
+) -> None:
+    """Block disabling/deleting an admin when no other active admin would remain."""
+    if user.role != "admin":
+        return
+    # Disabling an already-disabled account is a no-op path; skip.
+    if action == "disable" and not user.is_active:
+        return
+    other = (
+        await db.execute(
+            select(func.count())
+            .select_from(User)
+            .where(User.role == "admin")
+            .where(User.is_active.is_(True))
+            .where(User.id != user.id)
+        )
+    ).scalar_one()
+    if int(other or 0) < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot {action} the last active admin",
+        )
+
+
+async def _ensure_can_remove_library_owner(db: AsyncSession, user: User) -> None:
+    """Owners can't be deleted while other library members remain (same as leave)."""
+    owned = (
+        await db.execute(select(LibraryGroup).where(LibraryGroup.owner_user_id == user.id))
+    ).scalars().all()
+    for group in owned:
+        others = (
+            await db.execute(
+                select(User.id)
+                .where(User.library_group_id == group.id)
+                .where(User.id != user.id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if others is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "User owns a library with other members. "
+                    "Promote a new owner or remove members first."
+                ),
+            )
+
+
+async def _delete_user_related_rows(db: AsyncSession, user_id: int) -> None:
+    """Remove FK-dependent rows before hard-deleting a user (no ON DELETE CASCADE)."""
+    for model in (
+        DownloadRequest,
+        SearchHistory,
+        StreamHistory,
+        PushSubscription,
+        ABSPlayTracking,
+        StreamingLibraryItem,
+        AvailabilityAlert,
+    ):
+        await db.execute(delete(model).where(model.user_id == user_id))
+
+
 @router.get("/users", response_model=list[UserResponse])
 async def list_users(
     _admin: User = Depends(require_admin),
@@ -82,23 +170,77 @@ async def list_users(
     ]
 
 
+@router.patch("/users/{user_id}")
+async def set_user_active(
+    user_id: int,
+    body: SetActiveBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Enable or disable an account (soft toggle via is_active)."""
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="Cannot change your own active status")
+
+    user = await _get_user_or_404(db, user_id)
+    if body.is_active == user.is_active:
+        state = "enabled" if user.is_active else "disabled"
+        return {"message": f"User {user.username} is already {state}", "is_active": user.is_active}
+
+    if not body.is_active:
+        await _ensure_not_last_active_admin(db, user, action="disable")
+
+    user.is_active = body.is_active
+    await db.commit()
+    state = "enabled" if user.is_active else "disabled"
+    return {"message": f"User {user.username} {state}", "is_active": user.is_active}
+
+
 @router.delete("/users/{user_id}")
 async def delete_user(
     user_id: int,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
+    """Hard-delete a user account and related per-user rows."""
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
 
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    user = await _get_user_or_404(db, user_id)
+    await _ensure_not_last_active_admin(db, user, action="delete")
+    await _ensure_can_remove_library_owner(db, user)
 
-    user.is_active = False
+    username = user.username
+    owned_group_ids = [
+        g.id
+        for g in (
+            await db.execute(select(LibraryGroup).where(LibraryGroup.owner_user_id == user.id))
+        ).scalars().all()
+    ]
+
+    await _delete_user_related_rows(db, user_id)
+
+    # Break circular FK: clear membership, drop empty owned groups, then user.
+    user.library_group_id = None
+    user.library_role = "member"
+    await db.flush()
+
+    for group_id in owned_group_ids:
+        remaining = (
+            await db.execute(
+                select(User.id).where(User.library_group_id == group_id).limit(1)
+            )
+        ).scalar_one_or_none()
+        if remaining is None:
+            group = (
+                await db.execute(select(LibraryGroup).where(LibraryGroup.id == group_id))
+            ).scalar_one_or_none()
+            if group:
+                await db.delete(group)
+                await db.flush()
+
+    await db.delete(user)
     await db.commit()
-    return {"message": f"User {user.username} disabled"}
+    return {"message": f"User {username} deleted"}
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -107,10 +249,7 @@ async def reset_password(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    user = await _get_user_or_404(db, user_id)
 
     default_password = "changeme"
     user.hashed_password = hash_password(default_password)

@@ -37,9 +37,15 @@ After loading, pin the extension if you like, then open **Settings** (extension 
 3. Or select a magnet URL text → **Send selection to …**.
 4. A notification confirms success or failure. If login expired, you’ll be prompted to reconnect.
 
+Menus refresh automatically when you connect or disconnect a library (no extension reload required after that). After installing an update to this extension, reload it once on `chrome://extensions` / `brave://extensions`.
+
 Also supported when the link matches:
 - Anna’s Archive `/md5/{hash}` pages (ebook request via `annas_archive`)
 - Direct `.torrent` file URLs
+
+### Chromium / Brave note (magnet links)
+
+Chrome and Brave **do not** accept `magnet:` in context-menu `targetUrlPatterns` (only `http` / `https` / `file` / `ftp` match patterns). Filtering magnets that way silently fails menu creation. This extension therefore shows **Send to …** on all links and selections; unsupported targets get a “Nothing to send” notification.
 
 ## API endpoints used
 

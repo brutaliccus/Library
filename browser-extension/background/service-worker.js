@@ -23,32 +23,38 @@ const MENU_SINGLE = "send-to-library-single";
 const MENU_PREFIX = "send-to-library:";
 const MENU_SELECTION = "send-to-library-selection";
 const MENU_SELECTION_PREFIX = "send-to-library-sel:";
+const MENU_SEL_ROOT = "send-to-library-sel-root";
+
+/** @type {Promise<void> | null} */
+let rebuildMenusChain = null;
 
 chrome.runtime.onInstalled.addListener(() => {
-  rebuildMenus();
+  scheduleRebuildMenus();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  rebuildMenus();
+  scheduleRebuildMenus();
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.library_extension_registry_v1) {
-    rebuildMenus();
+    scheduleRebuildMenus();
   }
 });
 
 // Refresh menus periodically in case SW was restarted mid-session
 chrome.alarms.create("rebuild-menus", { periodInMinutes: 30 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "rebuild-menus") rebuildMenus();
+  if (alarm.name === "rebuild-menus") scheduleRebuildMenus();
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "rebuild-menus") {
-    rebuildMenus().then(() => sendResponse({ ok: true })).catch((e) => {
-      sendResponse({ ok: false, error: e.message });
-    });
+    scheduleRebuildMenus()
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => {
+        sendResponse({ ok: false, error: e.message });
+      });
     return true;
   }
   if (msg?.type === "send-test") {
@@ -60,12 +66,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
+/** Serialize rebuilds so overlapping connect/storage/SW events cannot clear menus. */
+function scheduleRebuildMenus() {
+  rebuildMenusChain = (rebuildMenusChain || Promise.resolve())
+    .catch(() => {})
+    .then(() => rebuildMenus());
+  return rebuildMenusChain;
+}
+
+/**
+ * Build context menus from the current library registry.
+ *
+ * Important: Chromium match patterns do NOT support the `magnet:` scheme.
+ * Using `targetUrlPatterns: ["magnet:*", …]` makes contextMenus.create fail
+ * (Invalid url pattern), so the whole "Send to …" link item never appears.
+ * Show on all links/selections; the click handler filters unsupported targets.
+ */
 async function rebuildMenus() {
   await chrome.contextMenus.removeAll();
   const libraries = await listLibraries();
 
   if (libraries.length === 0) {
-    createMenu({
+    await createMenu({
       id: MENU_ROOT,
       title: "Send to Library (connect a library first…)",
       contexts: ["link", "selection"],
@@ -74,65 +96,79 @@ async function rebuildMenus() {
     return;
   }
 
-  // Magnets + AA md5 detail links + direct .torrent files.
-  // ABB: right-click the magnet link itself (domains rotate; magnets are the primary path).
-  const safeLinkPatterns = ["magnet:*", "*://*/md5/*", "*://*/*.torrent"];
-
   if (libraries.length === 1) {
     const lib = libraries[0];
-    createMenu({
+    const name = libraryMenuTitle(lib);
+    await createMenu({
       id: MENU_SINGLE,
-      title: `Send to ${lib.name}`,
+      title: `Send to ${name}`,
       contexts: ["link"],
-      targetUrlPatterns: safeLinkPatterns,
     });
-    createMenu({
+    await createMenu({
       id: MENU_SELECTION,
-      title: `Send selection to ${lib.name}`,
+      title: `Send selection to ${name}`,
       contexts: ["selection"],
     });
     await chrome.storage.session.set({ soleLibraryId: lib.id });
     return;
   }
 
-  createMenu({
+  await createMenu({
     id: MENU_ROOT,
     title: "Send to Library",
     contexts: ["link"],
-    targetUrlPatterns: safeLinkPatterns,
   });
-  createMenu({
-    id: "send-to-library-sel-root",
+  await createMenu({
+    id: MENU_SEL_ROOT,
     title: "Send selection to Library",
     contexts: ["selection"],
   });
 
   for (const lib of libraries) {
-    createMenu({
+    const name = libraryMenuTitle(lib);
+    await createMenu({
       id: `${MENU_PREFIX}${lib.id}`,
       parentId: MENU_ROOT,
-      title: lib.name,
+      title: name,
       contexts: ["link"],
     });
-    createMenu({
+    await createMenu({
       id: `${MENU_SELECTION_PREFIX}${lib.id}`,
-      parentId: "send-to-library-sel-root",
-      title: lib.name,
+      parentId: MENU_SEL_ROOT,
+      title: name,
       contexts: ["selection"],
     });
   }
 }
 
-/** @param {chrome.contextMenus.CreateProperties} props */
-function createMenu(props) {
+/** @param {{ name?: string, origin?: string }} lib */
+function libraryMenuTitle(lib) {
+  const name = (lib?.name || "").trim();
+  if (name) return name;
   try {
-    chrome.contextMenus.create(props, () => {
-      const err = chrome.runtime.lastError;
-      if (err) console.warn("contextMenus.create:", err.message);
-    });
-  } catch (e) {
-    console.warn("contextMenus.create failed", e);
+    return new URL(lib.origin || "").hostname || "Library";
+  } catch {
+    return "Library";
   }
+}
+
+/**
+ * @param {chrome.contextMenus.CreateProperties} props
+ * @returns {Promise<void>}
+ */
+function createMenu(props) {
+  return new Promise((resolve) => {
+    try {
+      chrome.contextMenus.create(props, () => {
+        const err = chrome.runtime.lastError;
+        if (err) console.warn("contextMenus.create:", err.message);
+        resolve();
+      });
+    } catch (e) {
+      console.warn("contextMenus.create failed", e);
+      resolve();
+    }
+  });
 }
 
 chrome.contextMenus.onClicked.addListener(async (info) => {
@@ -313,5 +349,5 @@ async function notify(title, message, isError) {
   }
 }
 
-// Initial build when SW loads
-rebuildMenus();
+// Initial build when SW loads (also covers connect without requiring reload)
+scheduleRebuildMenus();

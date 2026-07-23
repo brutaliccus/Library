@@ -61,7 +61,7 @@ form.addEventListener("submit", async (e) => {
     document.getElementById("password").value = "";
     showStatus(`Connected to ${name}`, "ok");
     await refreshList();
-    chrome.runtime.sendMessage({ type: "rebuild-menus" });
+    await requestMenuRebuild();
   } catch (err) {
     showStatus(err.message || "Connection failed", "err");
   } finally {
@@ -99,7 +99,7 @@ tokenForm.addEventListener("submit", async (e) => {
     tokenForm.reset();
     showStatus(`Saved session for ${name}`, "ok");
     await refreshList();
-    chrome.runtime.sendMessage({ type: "rebuild-menus" });
+    await requestMenuRebuild();
   } catch (err) {
     showStatus(err.message || "Could not save tokens", "err");
   }
@@ -169,12 +169,21 @@ async function refreshList() {
       await removeLibrary(lib.id);
       showStatus(`Disconnected ${lib.name}`, "ok");
       await refreshList();
-      chrome.runtime.sendMessage({ type: "rebuild-menus" });
+      await requestMenuRebuild();
     });
 
     actions.append(testBtn, removeBtn);
     li.append(meta, actions);
     listEl.append(li);
+  }
+}
+
+/** Ask the service worker to rebuild context menus (storage.onChanged is backup). */
+async function requestMenuRebuild() {
+  try {
+    await chrome.runtime.sendMessage({ type: "rebuild-menus" });
+  } catch {
+    // SW may be waking; storage.onChanged / onStartup will rebuild.
   }
 }
 

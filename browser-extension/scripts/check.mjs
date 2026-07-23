@@ -24,6 +24,18 @@ assert.ok(manifest.background?.service_worker);
 assert.ok(manifest.permissions.includes("contextMenus"));
 assert.ok(manifest.optional_host_permissions?.length);
 
+// Chromium rejects magnet: in match patterns; that breaks contextMenus.create.
+const sw = readFileSync(join(root, "background/service-worker.js"), "utf8");
+const swCode = sw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+assert.equal(
+  /targetUrlPatterns/.test(swCode),
+  false,
+  "service worker must not use targetUrlPatterns (magnet: is unsupported)"
+);
+assert.match(sw, /chrome\.runtime\.onStartup/);
+assert.match(sw, /chrome\.storage\.onChanged/);
+assert.match(sw, /scheduleRebuildMenus/);
+
 const magnet =
   "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Patrick+Rothfuss+-+The+Name+of+the+Wind";
 assert.equal(extractMagnet(`  ${magnet}  `), magnet);

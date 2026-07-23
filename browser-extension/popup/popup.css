@@ -1,0 +1,88 @@
+:root {
+  --ink: #1a2e2e;
+  --muted: #4a6363;
+  --teal: #1a5c5c;
+  --line: #d5cdc0;
+  --paper: #f7f3ea;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  width: 280px;
+  font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+  color: var(--ink);
+  background: linear-gradient(160deg, #e7e1d3, var(--paper));
+}
+
+header {
+  padding: 14px 14px 10px;
+}
+
+.brand {
+  margin: 0;
+  font-family: Georgia, "Iowan Old Style", serif;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f3f3f;
+}
+
+.sub {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#libs {
+  list-style: none;
+  margin: 0;
+  padding: 0 10px;
+}
+
+#libs li {
+  padding: 8px 6px;
+  border-top: 1px solid var(--line);
+}
+
+#libs strong {
+  display: block;
+}
+
+#libs span {
+  color: var(--muted);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.empty {
+  margin: 0;
+  padding: 4px 16px 12px;
+  color: var(--muted);
+}
+
+.hidden {
+  display: none !important;
+}
+
+footer {
+  padding: 10px 14px 14px;
+}
+
+button {
+  width: 100%;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--teal);
+  color: #fff;
+}
+
+button:hover {
+  filter: brightness(0.95);
+}

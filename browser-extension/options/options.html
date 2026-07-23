@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Library Site — Connect</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="hero">
+        <p class="brand">Library Site</p>
+        <h1>Connect your library</h1>
+        <p class="lede">
+          Sign in with the same email and password you use in the app. Then right-click
+          magnet links on torrent sites and choose <strong>Send to Library</strong>.
+        </p>
+      </header>
+
+      <section class="panel" aria-labelledby="add-heading">
+        <h2 id="add-heading">Add library</h2>
+        <form id="connect-form" autocomplete="on">
+          <label>
+            Library URL
+            <input
+              id="origin"
+              name="origin"
+              type="url"
+              placeholder="https://library.example.com"
+              required
+            />
+          </label>
+          <label>
+            Email
+            <input id="email" name="email" type="email" autocomplete="username" required />
+          </label>
+          <label>
+            Password
+            <input
+              id="password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              required
+            />
+          </label>
+          <p class="hint">
+            Tokens are stored only in this browser’s extension storage. Magnets are never logged.
+          </p>
+          <div class="row">
+            <button type="submit" id="connect-btn">Connect</button>
+            <button type="button" id="advanced-toggle" class="ghost">Paste tokens instead</button>
+          </div>
+        </form>
+
+        <form id="token-form" class="hidden" autocomplete="off">
+          <label>
+            Library URL
+            <input id="token-origin" type="url" placeholder="https://library.example.com" required />
+          </label>
+          <label>
+            Access token
+            <input id="access-token" type="password" required />
+          </label>
+          <label>
+            Refresh token
+            <input id="refresh-token" type="password" required />
+          </label>
+          <label>
+            Display name (optional)
+            <input id="token-name" type="text" placeholder="My Library" />
+          </label>
+          <div class="row">
+            <button type="submit">Save tokens</button>
+            <button type="button" id="advanced-back" class="ghost">Back to login</button>
+          </div>
+        </form>
+
+        <p id="status" class="status" role="status" hidden></p>
+      </section>
+
+      <section class="panel" aria-labelledby="list-heading">
+        <h2 id="list-heading">Connected libraries</h2>
+        <ul id="library-list" class="library-list"></ul>
+        <p id="empty" class="empty">No libraries connected yet.</p>
+      </section>
+
+      <footer class="foot">
+        <p>
+          Permissions: context menus, notifications, and host access only for the library URLs you
+          add. See the README for details.
+        </p>
+      </footer>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

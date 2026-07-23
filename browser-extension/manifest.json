@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Library Site — Send to Library",
+  "version": "1.0.0",
+  "description": "Right-click magnet links on torrent sites and send them to your Library Site request queue.",
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "notifications",
+    "alarms"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Library Site",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

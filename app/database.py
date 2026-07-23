@@ -163,6 +163,10 @@ async def init_db():
             await _add_column_if_missing(conn, "scraper_state", "last_upserted_count", "INTEGER DEFAULT 0")
             await _add_column_if_missing(conn, "scraper_state", "last_matches_created", "INTEGER DEFAULT 0")
 
+    # Drop pooled aiosqlite connections before sync Alembic — otherwise the open
+    # async handle can hold a SQLite lock and command.upgrade() hangs forever.
+    await engine.dispose()
+
     # Alembic's command API is synchronous — run it off the event loop.
     await asyncio.to_thread(_run_migrations)
 

@@ -90,7 +90,8 @@ class Settings(BaseSettings):
     # Public URL for Admin "Open LibraForge"; internal URL for API calls from Docker.
     libraforge_url: str = "https://forge.library.freiverse.com"
     libraforge_internal_url: str = "http://172.17.0.1:5056"
-    # Auto-apply threshold (LibraForge default 0.70). Below → quarantine for admin review.
+    # Auto-apply threshold (LibraForge default 0.70). At/above → full metadata overwrite
+    # + replace-cover (write_mode=overwrite). Below → quarantine for admin review.
     libraforge_min_score: float = 0.70
     libraforge_naming_template: str = "{author}/{series} [{edition}]/{title}/{filename}"
     # Pi M4B jobs — keep low on Raspberry Pi; Windows :5057 is manual fallback for heavy books.

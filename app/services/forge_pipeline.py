@@ -352,11 +352,14 @@ async def run_forge_after_download(
             await _forge_progress(request_id, user_id, "metadata_forge", state)
 
         try:
+            # Score ≥ min_score means match identity is trusted — not that the
+            # torrent's existing tags/cover are correct. Force full overwrite.
             run_id = await libraforge.start_metadata_run(
                 lf_path,
                 apply=True,
                 min_score=settings.libraforge_min_score,
-                cover_if_missing=True,
+                write_mode="overwrite",
+                cover_if_missing=False,
                 replace_cover=True,
             )
             await _persist_staging(request_id, staging, run_id=run_id)

@@ -114,7 +114,7 @@ The auth directory is mounted into the container at `/auth`. Encrypted auth file
 When `LIBRAFORGE_PIPELINE_ENABLED=true` (default), audiobook requests:
 
 1. Land in `/audiobooks/_unorganized/req_{id}_{slug}/` (host: `/mnt/Audiobooks/_unorganized/…`).
-2. **Metadata Forge** (`POST /api/runs`, `apply=true`, `min_score` from `LIBRAFORGE_MIN_SCORE`, covers on).
+2. **Metadata Forge** (`POST /api/runs`, `apply=true`, `write_mode=overwrite`, `replace_cover=true`, `min_score` from `LIBRAFORGE_MIN_SCORE`). Above-threshold matches always force-write all tags and replace the embedded cover — score means match identity is trusted, not that the download’s existing tags/cover were correct. Continues only when write evidence exists (`write:written` / applied markers); otherwise quarantines.
 3. **M4B** on Pi (`POST /api/m4b/runs`) if not already a single `.m4b`.
 4. **Folder Forge** (`POST /api/organizer/runs`) with template  
    `{author}/{series} [{edition}]/{title}/{filename}` → `/audiobooks`.

@@ -160,9 +160,11 @@ async def start_metadata_run(
     *,
     apply: bool = True,
     min_score: float | None = None,
-    cover_if_missing: bool = True,
+    # Above-threshold match = identity is correct, not that existing tags/cover are.
+    # Always full-overwrite tags and replace embedded cover from the match.
+    cover_if_missing: bool = False,
     replace_cover: bool = True,
-    write_mode: str = "smart",
+    write_mode: str = "overwrite",
     limit: int = 50,
     script_name: str | None = None,
 ) -> str:
@@ -172,6 +174,8 @@ async def start_metadata_run(
         "target_path": target_path,
         "apply": apply,
         "backup": False,
+        # Maps to Metadata Forge CLI: --apply --write-mode overwrite --replace-cover
+        # (not --cover-if-missing / smart — those leave torrent tags/covers in place).
         "cover_if_missing": cover_if_missing,
         "replace_cover": replace_cover,
         "min_score": min_score if min_score is not None else settings.libraforge_min_score,

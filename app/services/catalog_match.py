@@ -54,24 +54,14 @@ _FORMAT_NOISE_RE = re.compile(
 # Trailing scene release-group tag, e.g. "... -BitBook", "... -DiSTRiBUTiON".
 _RELEASE_GROUP_RE = re.compile(r"\s*-\s*[A-Za-z0-9]{2,}\s*$")
 
-# Positive "this is NOT a book" signals (video/music/software miscategorised as
-# audiobook/ebook by the Knaben scrape). Used to gate pruning so we only drop a
+# Positive "this is NOT a book" signals (video/music/software/adult miscategorised
+# as audiobook/ebook by the Knaben scrape). Used to gate pruning so we only drop a
 # no-match entry when it clearly isn't a book — legit-but-messy or foreign-
 # language books that merely fail to match stay put.
-_NON_BOOK_RE = re.compile(
-    r"\b(s\d{1,2}e\d{1,2}|season\s*\d+\s*(episode|ep)\b|tv\s+mini\s+series|mini\s+series|"
-    r"x264|x265|h\.?264|h\.?265|hevc|xvid|divx|mpeg2|"
-    r"1080p|720p|480p|2160p|4k|bluray|blu-ray|brrip|bdrip|webrip|web-dl|hdtv|dvdrip|"
-    r"\d{3,4}x\d{3,4}|"
-    r"discography|soundtrack|\bost\b|\bflac\b|320kbps|\bvst\b|plugin|"
-    r"onlyfans|brazzers|bellesa|pornhub|xvideos|\bxxx\b|"
-    r"\.iso|\.exe|\.ts\b|\.m2ts\b|\.rar\b|repack-|proper-)\b",
-    re.I,
-)
-
-
 def _looks_non_book(title: str) -> bool:
-    return bool(_NON_BOOK_RE.search(title or ""))
+    from app.services.rss_content_filters import title_is_non_book
+
+    return title_is_non_book(title)
 
 
 def _clean_release_text(raw_title: str) -> str:

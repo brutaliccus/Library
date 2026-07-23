@@ -53,18 +53,26 @@ KNABEN_BOOK_CATEGORY_IDS = frozenset({
 })
 KNABEN_DEFAULT_CATEGORIES = (KNABEN_AUDIOBOOK_CATEGORY, KNABEN_EBOOK_CATEGORY)
 KNABEN_MUSIC_CATEGORY_IDS = frozenset({1_001_000, 1_002_000})
-
-_KNABEN_MUSIC_TITLE = re.compile(
-    r"\b(discography|unplugged|vinyl\s+rip|bootleg)\b"
-    r"|\b(?:flac|mp3|aac|wav)\s+(?:album|collection)\b"
-    r"|\b(?:album|mixtape|single)\s+(?:flac|mp3|aac|wav)\b"
-    r"|\b(?:ost|soundtrack)\s+(?:flac|mp3|aac)\b",
-    re.IGNORECASE,
-)
+# Knaben top-level non-book categories (from knaben.org browse / public API docs).
+KNABEN_TV_CATEGORY = 2_000_000
+KNABEN_MOVIES_CATEGORY = 3_000_000
+KNABEN_ANIME_CATEGORY = 6_000_000
+# XXX / adult branch (Video, ImageSet, Games, Hentai, Other).
+KNABEN_XXX_CATEGORY = 5_000_000
+KNABEN_ADULT_CATEGORY_IDS = frozenset({
+    KNABEN_XXX_CATEGORY,
+    5_001_000,
+    5_002_000,
+    5_003_000,
+    5_004_000,
+    5_005_000,
+})
 
 
 def knaben_title_looks_like_music(title: str) -> bool:
-    return bool(_KNABEN_MUSIC_TITLE.search(title or ""))
+    from app.services.rss_content_filters import title_looks_like_music
+
+    return title_looks_like_music(title)
 
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 CACHE_TTL = 300
@@ -81,12 +89,13 @@ class KnabenSearchOptions:
     search_type: str = "50%"
     search_field: str = "title"
     hide_unsafe: bool = True
+    hide_xxx: bool = True
 
     def cache_key(self) -> str:
         cats = ",".join(str(c) for c in self.categories)
         return (
             f"{self.query.lower().strip()}|{cats}|{self.order_by}|{self.order_direction}"
-            f"|{self.search_type}|{self.search_field}|{int(self.hide_unsafe)}"
+            f"|{self.search_type}|{self.search_field}|{int(self.hide_unsafe)}|{int(self.hide_xxx)}"
         )
 
     def label(self) -> str:
@@ -311,13 +320,43 @@ def _is_knaben_native_book_category(category_id: int | None) -> bool:
     return int(category_id) in KNABEN_BOOK_CATEGORY_IDS
 
 
+def _reject_non_book_category(native_ids: list[int]) -> bool:
+    """True when any native Knaben category is music / video / adult."""
+    for cid in native_ids:
+        c = int(cid)
+        if c in KNABEN_MUSIC_CATEGORY_IDS:
+            return True
+        if c in KNABEN_ADULT_CATEGORY_IDS:
+            return True
+        # Top-level ranges: TV 2xxx000, Movies 3xxx000, Anime 6xxx000 (not literature).
+        top = (c // 1_000_000) * 1_000_000
+        if top in (KNABEN_TV_CATEGORY, KNABEN_MOVIES_CATEGORY):
+            return True
+        if top == KNABEN_ANIME_CATEGORY and c != 6_006_000:  # keep Anime Literature
+            return True
+        if top == KNABEN_XXX_CATEGORY:
+            return True
+    return False
+
+
 def _knaben_hit_is_book(hit: dict[str, Any]) -> bool:
     """Only keep hits tagged Audiobook or EBook on Knaben."""
+    from app.services.rss_content_filters import title_is_non_book, title_looks_adult
+
     native_ids = _normalize_category_ids(hit.get("categoryId"))
-    if any(cid in KNABEN_MUSIC_CATEGORY_IDS for cid in native_ids):
+    if _reject_non_book_category(native_ids):
+        return False
+    cat_label = (hit.get("category") or "").strip().lower()
+    if cat_label and (
+        cat_label.startswith("xxx")
+        or "hentai" in cat_label
+        or cat_label in ("adult", "porn")
+        or "/xxx" in cat_label
+    ):
         return False
     title = (hit.get("title") or "").strip()
-    if knaben_title_looks_like_music(title):
+    # RSS forces an audiobook category id — title filters catch miscategorized porn/music/movies.
+    if title_is_non_book(title) or title_looks_adult(title):
         return False
     return any(cid in KNABEN_BOOK_CATEGORY_IDS for cid in native_ids)
 
@@ -352,7 +391,10 @@ def _hit_to_result(hit: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     from app.services.indexer_cache import ebook_size_acceptable
+    from app.services.rss_content_filters import is_too_small_for_audiobook
 
+    if is_too_small_for_audiobook(size, media_type):
+        return None
     if not ebook_size_acceptable(media_type, size):
         return None
 
@@ -409,6 +451,7 @@ async def _fetch_page_raw(
         "from": offset,
         "size": page_size,
         "hide_unsafe": opts.hide_unsafe,
+        "hide_xxx": opts.hide_xxx,
         "search_type": opts.search_type,
         "search_field": opts.search_field,
     }
@@ -533,7 +576,9 @@ async def crawl_full_category_batch(
 
 
 def _rss_url_for_category(category_id: int, *, size: int = 150) -> str:
-    return f"{RSS_URL}//{category_id}/{size}/hide_unsafe"
+    # hide_unsafe + hide_xxx — adult torrents still leak into audiobook RSS via
+    # miscategorization; title filters catch those. The flags help for tagged XXX.
+    return f"{RSS_URL}//{category_id}/{size}/hide_unsafe/hide_xxx"
 
 
 def _parse_rss_size_bytes(text: str) -> int:

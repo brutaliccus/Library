@@ -33,6 +33,20 @@ class _PreloadCandidate:
     has_torbox_id: bool
 
 
+def _row_ok_for_preload(row: IndexerTorrent) -> bool:
+    """Final gate before RD/TorBox — never preload adult/music/movie/tiny-audio junk."""
+    from app.services.rss_content_filters import (
+        is_too_small_for_audiobook,
+        title_is_non_book,
+    )
+
+    if title_is_non_book(row.title or ""):
+        return False
+    if is_too_small_for_audiobook(row.size_bytes, row.media_type):
+        return False
+    return True
+
+
 async def _select_audio_files(client, torrent_id: str) -> None:
     info = await client.get_torrent_info(torrent_id)
     audio_ids: list[str] = []
@@ -175,6 +189,8 @@ async def run_preload_batch(
         ).scalars().unique().all()
 
         for row in linked:
+            if not _row_ok_for_preload(row):
+                continue
             need = _needs_provider(row, providers)
             if not need:
                 continue
@@ -213,6 +229,8 @@ async def run_preload_batch(
 
             for row in extra:
                 if row.info_hash in seen_hashes:
+                    continue
+                if not _row_ok_for_preload(row):
                     continue
                 need = _needs_provider(row, providers)
                 if not need:

@@ -120,18 +120,6 @@ def _is_knaben_indexer(indexer: str) -> bool:
     return "knaben" in n or "knaben" in compact
 
 
-# Knaben is a general torrent indexer — reject obvious non-book results.
-_NON_BOOK_TITLE = re.compile(
-    r"\.(mp4|mkv|avi|wmv|flv|webm|ts|m2ts|exe|msi|iso)\b"
-    r"|\b(?:1080p|720p|480p|2160p|4k|x264|x265|hevc|bluray|web-dl|webrip|mpeg2)\b"
-    r"|\b\d{3,4}x\d{3,4}\b"
-    r"|\b(?:season|s\d{2}e\d{2}|complete\s+series|tv\s+mini\s+series|mini\s+series)\b"
-    r"|\b(?:pre-?activated|crack|keygen|ftuapps)\b"
-    r"|\b(?:onlyfans|brazzers|bellesa|pornhub|xvideos|xxx)\b",
-    re.IGNORECASE,
-)
-
-
 def _is_builtin_trusted_indexer(indexer: str) -> bool:
     return _is_audiobookbay_indexer(indexer) or _is_knaben_indexer(indexer)
 
@@ -145,9 +133,21 @@ def is_book_related(
     size_bytes: int = 0,
 ) -> bool:
     """Return True if the result is potentially a book (audiobook or ebook)."""
+    from app.services.rss_content_filters import (
+        is_too_small_for_audiobook,
+        title_is_non_book,
+    )
+
+    # ABB is audiobook-only, but still drop clear adult / video spam titles.
     if _is_audiobookbay_indexer(indexer):
+        if title_is_non_book(title):
+            return False
+        if is_too_small_for_audiobook(size_bytes, media_type or "audiobook"):
+            return False
         return True
-    if _NON_BOOK_TITLE.search(title):
+    if title_is_non_book(title):
+        return False
+    if is_too_small_for_audiobook(size_bytes, media_type):
         return False
     if AUDIOBOOK_KEYWORDS.search(title) or EBOOK_KEYWORDS.search(title):
         return True
@@ -540,35 +540,50 @@ async def fetch_recent_scraper_releases(
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Recent-release feeds from trusted scraper indexers, merged by hash.
 
-    Background scraper should keep ``include_abb_flare=False`` — ABB via
-    FlareSolverr/Chromium is reserved for occasional live book searches.
-    When ``include_abb_flare`` is True and Mullvad ``abb_proxy_url`` is set,
-    ABB recent posts are fetched via Flare+VPN.
+    When ``include_abb_flare`` is True (ABB RSS-only background mode), recent
+    ABB posts are scraped via FlareSolverr + Mullvad proxy — Jackett Torznab
+    ABB is never polled from the home IP for recent feeds.
     """
     import asyncio
     from app.services.download_discovery import merge_indexer_results
 
     indexers = await get_trusted_indexer_info()
     proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
+    flare = (getattr(settings, "flaresolverr_url", "") or "").strip()
     # Never use Jackett→ABB from the home IP for recent feeds.
     indexers = [i for i in indexers if not _is_audiobookbay_indexer(i.get("name") or "")]
 
     counts: dict[str, int] = {}
     batches: list[list[dict[str, Any]]] = []
 
-    if include_abb_flare and proxy:
-        from app.services import audiobookbay
+    if include_abb_flare:
+        if proxy or flare:
+            from app.services import audiobookbay
 
-        try:
-            abb_rows = await audiobookbay.fetch_recent_listings(max_pages=1)
-            abb_rows = await enrich_audiobookbay_for_cache(abb_rows[:limit_per_indexer])
-            batches.append(abb_rows)
-            counts["AudioBookBay(VPN)"] = len(abb_rows)
-        except Exception as e:
-            logger.warning("ABB VPN recent feed failed: %s", e)
+            try:
+                abb_rows = await audiobookbay.fetch_recent_listings(max_pages=2)
+                # Drop junk before the expensive hash-resolve crawl.
+                abb_rows = [
+                    r for r in abb_rows
+                    if is_book_related(
+                        r.get("categories") or [],
+                        title=r.get("title") or "",
+                        indexer=r.get("indexer") or "AudioBookBay",
+                        media_type=r.get("mediaType") or "audiobook",
+                        size_bytes=int(r.get("size") or 0),
+                    )
+                ]
+                abb_rows = await enrich_audiobookbay_for_cache(abb_rows[:limit_per_indexer])
+                batches.append(abb_rows)
+                counts["AudioBookBay(VPN)"] = len(abb_rows)
+            except Exception as e:
+                logger.warning("ABB VPN recent feed failed: %s", e)
+                counts["AudioBookBay(VPN)"] = 0
+        else:
+            logger.warning(
+                "ABB RSS ingest skipped — set ABB_PROXY_URL (or FlareSolverr) for Flare+VPN recent listings"
+            )
             counts["AudioBookBay(VPN)"] = 0
-    elif proxy:
-        counts["AudioBookBay(VPN)"] = 0  # skipped — Flare reserved for live search
 
     if indexers:
         async def _one(idx: dict) -> list[dict[str, Any]]:

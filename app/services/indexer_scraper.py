@@ -345,11 +345,15 @@ async def _run_rss_job(cfg: ScraperConfig) -> int:
 
     Keyword rotation keeps re-fetching the same popular torrents; the recent
     feed is how genuinely NEW uploads enter the cache cheaply.
+
+    When ABB RSS-only is on, also pull AudioBook Bay recent listings via
+    Flare+VPN (Jackett Torznab ABB is never polled from the home IP).
     """
     global _last_rss_counts
     results, counts = await prowlarr.fetch_recent_scraper_releases(
         limit_per_indexer=cfg.rss_limit_per_indexer,
         timeout=cfg.prowlarr_timeout,
+        include_abb_flare=bool(cfg.abb_rss_only),
     )
     _last_rss_counts = counts
     upserted = await indexer_cache.upsert_torrents(results)

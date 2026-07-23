@@ -49,7 +49,8 @@ class Settings(BaseSettings):
     abb_deep_page_delay_seconds: float = 2.5
     # Env seed for the admin "ABB RSS-only" toggle (Admin → Cache → Tuning is
     # the runtime source of truth). When True, no author/deep Flare crawl —
-    # only Jackett recent-releases RSS. Live Jackett ABB search still works.
+    # background RSS job pulls ABB recent listings via Flare+VPN instead.
+    # Live Jackett ABB search still works.
     abb_rss_only: bool = True
     # Background scraper uses fewer pages than live UI (same serial lock).
     abb_scraper_max_pages: int = 4

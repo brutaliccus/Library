@@ -127,6 +127,10 @@ async def upsert_torrents(results: list[dict], db: AsyncSession | None = None) -
 
     from app.services.prowlarr import title_is_mostly_foreign_script
     from app.services import scraper_settings
+    from app.services.rss_content_filters import (
+        is_too_small_for_audiobook,
+        title_is_non_book,
+    )
 
     now = _utcnow()
     try:
@@ -146,8 +150,13 @@ async def upsert_torrents(results: list[dict], db: AsyncSession | None = None) -
         # Hangul / etc.) — same rule used by prune_non_book_torrents.
         if prune_foreign and title_is_mostly_foreign_script(title):
             continue
+        # Adult / music / movie / software — reject before DB + debrid path.
+        if title_is_non_book(title):
+            continue
         media_type = (r.get("mediaType") or "unknown")[:16]
         size_bytes = r.get("size")
+        if is_too_small_for_audiobook(size_bytes, media_type):
+            continue
         if not ebook_size_acceptable(media_type, size_bytes):
             continue
         parsed[info_hash] = {
@@ -1319,6 +1328,10 @@ async def prune_non_book_torrents() -> int:
     from app.services.prowlarr import is_book_related, title_is_mostly_foreign_script
     from app.services.knaben import knaben_title_looks_like_music
     from app.services import scraper_settings
+    from app.services.rss_content_filters import (
+        is_too_small_for_audiobook,
+        title_is_non_book,
+    )
 
     try:
         prune_foreign = bool((await scraper_settings.get_scraper_config()).foreign_title_prune)
@@ -1343,9 +1356,12 @@ async def prune_non_book_torrents() -> int:
             for row_id, title, indexer, media_type, size_bytes in rows
             if media_type not in ("audiobook", "ebook")
             or not ebook_size_acceptable(media_type, size_bytes)
+            or is_too_small_for_audiobook(size_bytes, media_type)
+            or title_is_non_book(title or "")
             or (prune_foreign and title_is_mostly_foreign_script(title or ""))
             or not is_book_related(
                 [], title=title or "", indexer=indexer or "", media_type=media_type,
+                size_bytes=int(size_bytes or 0),
             )
             or (
                 "knaben" in (indexer or "").lower()

@@ -109,16 +109,36 @@ If you already have an unencrypted Audible auth JSON (e.g. from `audible-cli`):
 
 The auth directory is mounted into the container at `/auth`. Encrypted auth files are **not** supported by this UI.
 
-## Recommended workflow with Library
+## Automated download pipeline (Library → LibraForge)
 
-1. **New downloads** — Library pipeline organizes into `/mnt/Audiobooks/{Author}/{Title}/` as today.
-2. **Messy / legacy books** — move or download into `/mnt/Audiobooks/_unorganized/`.
-3. **LibraForge Metadata Forge** — open from Admin → Health → **Open LibraForge**; dry-run on `_unorganized`, review report, enable backup on first apply, then apply.
-4. **Folder Forge** (`/organizer`) — dry-run moves from `_unorganized` → `/audiobooks` (`Author/Series/Book` layout).
-5. **Audiobookshelf** — run **Scan ABS & fix metadata** from Library Admin → Health (or let ABS scan on its schedule).
-6. **M4B Tool** — optional: merge multi-file books before or after metadata apply.
+When `LIBRAFORGE_PIPELINE_ENABLED=true` (default), audiobook requests:
 
-Always **dry-run first**. Back up media before the first write pass.
+1. Land in `/audiobooks/_unorganized/req_{id}_{slug}/` (host: `/mnt/Audiobooks/_unorganized/…`).
+2. **Metadata Forge** (`POST /api/runs`, `apply=true`, `min_score` from `LIBRAFORGE_MIN_SCORE`, covers on).
+3. **M4B** on Pi (`POST /api/m4b/runs`) if not already a single `.m4b`.
+4. **Folder Forge** (`POST /api/organizer/runs`) with template  
+   `{author}/{series} [{edition}]/{title}/{filename}` → `/audiobooks`.
+5. ABS scan / finalize.
+
+If metadata score is below auto-apply threshold (or LibraForge is down), the request becomes **`quarantined`**: files stay in `_unorganized`, admins are notified, and Admin → Requests offers **Manual Review** (LibraForge), **Continue pipeline**, or **Reject / delete**.
+
+### ABS exclusion for `_unorganized` (required)
+
+`_unorganized` lives **inside** the shared `/mnt/Audiobooks` mount (LibraForge convention). Audiobookshelf does **not** treat `_` as hidden — it will index staging folders unless excluded.
+
+**Decision:** keep `_unorganized` under `/mnt/Audiobooks` for LibraForge defaults, and configure ABS **Folders to Ignore** to include `_unorganized` (library settings). Quarantined books can sit there indefinitely; without this ignore, ABS will show ghost/incomplete items.
+
+Fallback if ABS cannot ignore folders: move staging to a sibling host path outside the ABS library root (e.g. `/mnt/m4b-source-quarantine`) and mount it into Library + LibraForge only — not into ABS.
+
+### Manual / legacy workflow
+
+1. **Messy / legacy books** — drop into `/mnt/Audiobooks/_unorganized/`.
+2. **LibraForge Metadata Forge** — Admin → Health → **Open LibraForge**; dry-run, then apply.
+3. **Folder Forge** (`/organizer`) — dry-run then apply into `/audiobooks`.
+4. **Audiobookshelf** — **Scan ABS & fix metadata** from Library Admin → Health.
+5. **M4B Tool** — optional; heavy converts may use Windows LibraForge `:5057` manually.
+
+Always **dry-run first** for manual batch work. Back up media before the first write pass.
 
 ## Permissions note
 
@@ -137,3 +157,20 @@ docker compose down
 ```
 
 Your audiobook files are not deleted by uninstalling the container.
+
+## abs-agg (specialty metadata)
+
+Optional companion stack: [abs-agg](https://github.com/Vito0912/abs-agg) on the Pi at `/opt/stacks/abs-agg`.
+
+| Item | Value |
+|------|-------|
+| Host ports | `127.0.0.1:3010` and `192.168.68.76:3010` (container listens on 3000) |
+| Docker network | Joined to `libraforge_default` as hostname `abs-agg` |
+| Pi LibraForge URL | `http://abs-agg:3000` (`/opt/stacks/libraforge/config/abs-agg.json`) |
+| Windows LibraForge URL | `http://192.168.68.76:3010` (`C:\dev\LibraForge\config\abs-agg.json`) |
+| Secrets | `HARDCOVER_TOKEN` in `/opt/stacks/abs-agg/.env` (copied from Library Site `integrations.hardcover_api_key`). `GOODREADS_API_KEY` not set (Goodreads provider disabled until you add a LazyLibrarian-style key). Do not put these keys in LibraForge. |
+
+**UI:** LibraForge → **Settings → GraphicAudio / SoundBooth Theater (abs-agg)** → set URL → **Save and verify**. On Manual Review / Metadata Forge, choose metadata provider **abs-agg** and pick a source (Hardcover, GraphicAudio, LibriVox, etc.). Batch runs also use this URL as an automatic specialty fallback when publishers match.
+
+Start/stop: `cd /opt/stacks/abs-agg && docker compose up -d` (does not affect M4B or other stacks).
+

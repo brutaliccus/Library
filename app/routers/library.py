@@ -1540,12 +1540,13 @@ async def _get_private_titles_for_others(current_user_id: int, db: AsyncSession)
     Never includes titles the current user also requested (so you always see
     your own private books even if someone else privately requested the same title).
     """
+    _dead = ("failed", "admin_rejected", "cancelled", "quarantined")
     others = (
         await db.execute(
             select(DownloadRequest.title).where(
                 DownloadRequest.is_private == True,  # noqa: E712
                 DownloadRequest.user_id != current_user_id,
-                DownloadRequest.status != "failed",
+                DownloadRequest.status.notin_(_dead),
             )
         )
     ).scalars().all()
@@ -1553,7 +1554,7 @@ async def _get_private_titles_for_others(current_user_id: int, db: AsyncSession)
         await db.execute(
             select(DownloadRequest.title).where(
                 DownloadRequest.user_id == current_user_id,
-                DownloadRequest.status != "failed",
+                DownloadRequest.status.notin_(_dead),
             )
         )
     ).scalars().all()
@@ -1602,7 +1603,9 @@ async def check_in_library_global(
         return {"inLibrary": False}
 
     result = await db.execute(
-        select(DownloadRequest.title).where(DownloadRequest.status != "failed")
+        select(DownloadRequest.title).where(
+            DownloadRequest.status.notin_(("failed", "admin_rejected", "cancelled", "quarantined"))
+        )
     )
     for req_title in result.scalars().all():
         if req_title and _titles_overlap(title, req_title):

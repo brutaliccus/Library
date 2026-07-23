@@ -79,7 +79,8 @@ class DownloadRequest(Base):
     media_type: Mapped[str] = mapped_column(String(16), default="audiobook")  # audiobook | ebook | unknown
 
     status: Mapped[str] = mapped_column(String(32), default="pending")
-    # pending -> sent_to_rd -> downloading_rd -> transferring -> completed -> failed
+    # pending → sent_to_rd → downloading_rd → transferring → metadata_forge →
+    # m4b_convert → folder_forge → finalizing → completed | quarantined | failed | admin_rejected
     status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     rd_torrent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     aa_file_extension: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -90,6 +91,10 @@ class DownloadRequest(Base):
     progress_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     progress_total_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     progress_speed_bps: Mapped[float | None] = mapped_column(nullable=True)
+    # LibraForge staging: /audiobooks/_unorganized/req_{id}_…
+    staging_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    libraforge_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    quarantine_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

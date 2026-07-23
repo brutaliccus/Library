@@ -14,7 +14,11 @@ import {
   Settings2,
   EyeOff,
   ExternalLink,
+  BookOpen,
+  Play,
+  Ban,
 } from "lucide-react";
+import CoverImage from "../components/CoverImage";
 import ScraperTab from "../components/admin/ScraperTab";
 import ConfigTab from "../components/admin/ConfigTab";
 import { usePushNotifications } from "../hooks/usePushNotifications";
@@ -256,13 +260,53 @@ function UsersTab() {
 }
 
 function AllRequestsTab() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const { data: requests, isLoading } = useQuery({
     queryKey: ["admin-downloads"],
     queryFn: async () => {
       const { data } = await api.get("/admin/download-requests");
       return data as any[];
     },
-    refetchInterval: 10000,
+    refetchInterval: (query) => {
+      const rows = query.state.data as any[] | undefined;
+      const active = rows?.some((r) =>
+        [
+          "pending",
+          "sent_to_rd",
+          "downloading_rd",
+          "transferring",
+          "organizing",
+          "metadata_forge",
+          "m4b_convert",
+          "folder_forge",
+          "finalizing",
+        ].includes(r.status)
+      );
+      return active ? 5000 : 15000;
+    },
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: (id: number) =>
+      api.post(`/admin/download-requests/${id}/reject`, {
+        reason: "Rejected by admin",
+        delete_files: true,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      toast("Request rejected", "info");
+    },
+    onError: (err: any) => toast(err.response?.data?.detail || "Reject failed", "error"),
+  });
+
+  const continueMutation = useMutation({
+    mutationFn: (id: number) => api.post(`/admin/download-requests/${id}/continue-forge`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      toast("Continuing LibraForge pipeline", "success");
+    },
+    onError: (err: any) => toast(err.response?.data?.detail || "Continue failed", "error"),
   });
 
   if (isLoading) return <div className="text-gray-500">Loading...</div>;
@@ -275,44 +319,110 @@ function AllRequestsTab() {
 
   return (
     <div className="space-y-3 min-w-0">
-      {requests.map((req: any) => (
-        <div
-          key={req.id}
-          className="bg-gray-800 border border-gray-700 rounded-xl p-4"
-        >
-          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 min-w-0">
-                <h3 className="font-semibold text-gray-100 truncate">
-                  {req.title}
-                </h3>
-                {req.is_private && (
-                  <span
-                    className="inline-flex items-center gap-1 shrink-0 text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-300 border border-purple-700/40"
-                    title="Requested in private mode — hidden from other members' library browse"
-                  >
-                    <EyeOff size={11} />
-                    Private
-                  </span>
+      {requests.map((req: any) => {
+        const quarantined = req.status === "quarantined";
+        return (
+          <div
+            key={req.id}
+            className={`bg-gray-800 border rounded-xl p-3 sm:p-4 ${
+              quarantined ? "border-amber-700/60" : "border-gray-700"
+            }`}
+          >
+            <div className="flex gap-3 sm:gap-4">
+              <div className="w-16 sm:w-20 h-24 sm:h-28 rounded-lg overflow-hidden bg-gray-900 shrink-0 border border-gray-700">
+                {req.cover_url ? (
+                  <CoverImage src={req.cover_url} alt="" className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-gray-600">
+                    <BookOpen size={22} />
+                  </div>
                 )}
               </div>
-              <div className="flex items-center gap-3 mt-1 text-xs text-gray-500">
-                <span>by {req.username}</span>
-                <span>{new Date(req.created_at).toLocaleString()}</span>
+              <div className="flex-1 min-w-0 flex flex-col">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <h3 className="font-semibold text-gray-100 truncate text-base">
+                        {req.title}
+                      </h3>
+                      {req.is_private && (
+                        <span
+                          className="inline-flex items-center gap-1 shrink-0 text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-300 border border-purple-700/40"
+                          title="Requested in private mode"
+                        >
+                          <EyeOff size={11} />
+                          Private
+                        </span>
+                      )}
+                    </div>
+                    {req.author && (
+                      <p className="text-sm text-gray-400 truncate mt-0.5">{req.author}</p>
+                    )}
+                  </div>
+                  <RequestStatusBadge status={req.status} detail={null} />
+                </div>
+                <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-gray-500">
+                  <span>by {req.username}</span>
+                  <span>{new Date(req.created_at).toLocaleString()}</span>
+                  {req.indexer && <span className="truncate">{req.indexer}</span>}
+                  {req.media_type && req.media_type !== "unknown" && (
+                    <span className="capitalize">{req.media_type}</span>
+                  )}
+                </div>
+                <RequestProgress
+                  status={req.status}
+                  detail={req.status_detail}
+                  progress_percent={req.progress_percent}
+                  progress_bytes={req.progress_bytes}
+                  progress_total_bytes={req.progress_total_bytes}
+                  progress_speed_bps={req.progress_speed_bps}
+                />
+                {quarantined && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {req.manual_review_url && (
+                      <a
+                        href={req.manual_review_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-amber-700/50 text-amber-300 hover:bg-amber-900/30"
+                      >
+                        <ExternalLink size={12} />
+                        Manual Review
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => continueMutation.mutate(req.id)}
+                      disabled={continueMutation.isPending}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-teal-700/50 text-teal-300 hover:bg-teal-900/30 disabled:opacity-50"
+                    >
+                      <Play size={12} />
+                      Continue pipeline
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => rejectMutation.mutate(req.id)}
+                      disabled={rejectMutation.isPending}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-red-700/50 text-red-300 hover:bg-red-900/30 disabled:opacity-50"
+                    >
+                      <Ban size={12} />
+                      Reject / delete
+                    </button>
+                    {req.staging_path && (
+                      <span
+                        className="text-[10px] text-gray-500 truncate max-w-full"
+                        title={req.staging_path}
+                      >
+                        {req.staging_path}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
-              <RequestProgress
-                status={req.status}
-                detail={req.status_detail}
-                progress_percent={req.progress_percent}
-                progress_bytes={req.progress_bytes}
-                progress_total_bytes={req.progress_total_bytes}
-                progress_speed_bps={req.progress_speed_bps}
-              />
             </div>
-            <RequestStatusBadge status={req.status} detail={req.status_detail} />
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

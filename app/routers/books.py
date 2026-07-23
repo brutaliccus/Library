@@ -153,7 +153,11 @@ async def _library_holding_title_keys() -> set[str]:
         async with async_session() as db:
             rows = (
                 await db.execute(
-                    select(DownloadRequest.title).where(DownloadRequest.status != "failed")
+                    select(DownloadRequest.title).where(
+                        DownloadRequest.status.notin_(
+                            ("failed", "admin_rejected", "cancelled", "quarantined")
+                        )
+                    )
                 )
             ).scalars().all()
             for t in rows:

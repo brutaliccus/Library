@@ -136,7 +136,7 @@ async def _update_status(
         req.status_detail = detail or status
     if rd_torrent_id is not None:
         req.rd_torrent_id = rd_torrent_id
-    if status in ("completed", "failed", "cancelled"):
+    if status in ("completed", "failed", "cancelled", "quarantined", "admin_rejected"):
         req.progress_percent = None
         req.progress_bytes = None
         req.progress_total_bytes = None
@@ -448,7 +448,10 @@ def _split_collection(dest_dir: Path, author: str, series_override: str | None =
 
 
 def audiobook_destination_dir(request_id: int, author: str, book_title: str) -> Path:
-    """Filesystem path used by the download pipelines for a single audiobook request."""
+    """Legacy final-library path (Author/Title). Prefer staging when LibraForge pipeline is on."""
+    if settings.libraforge_pipeline_enabled:
+        from app.services.forge_pipeline import audiobook_staging_dir
+        return audiobook_staging_dir(request_id, book_title or author)
     base = Path(settings.audiobook_dir)
     author_dir = base / downloader.sanitize_filename(author)
     if _is_collection_title(book_title):
@@ -623,15 +626,10 @@ async def process_download(request_id: int) -> None:
             await _update_status(db, request_id, "transferring", "Downloading to library")
 
             if media_type == "ebook":
-                base_dir = settings.ebook_dir
-                dest_dir = Path(base_dir) / downloader.sanitize_filename(author) / downloader.sanitize_filename(book_title)
+                dest_dir = Path(settings.ebook_dir) / downloader.sanitize_filename(author) / downloader.sanitize_filename(book_title)
             else:
-                base_dir = settings.audiobook_dir
-                author_dir = Path(base_dir) / downloader.sanitize_filename(author)
-                if _is_collection_title(book_title):
-                    dest_dir = author_dir / f"_incoming_{request_id}"
-                else:
-                    dest_dir = author_dir / downloader.sanitize_filename(book_title)
+                dest_dir = audiobook_destination_dir(request_id, author, book_title)
+                dest_dir.mkdir(parents=True, exist_ok=True)
 
             total_links = len(torrent_info.get("links", []))
             for i, rd_link in enumerate(torrent_info.get("links", []), 1):
@@ -712,6 +710,18 @@ async def process_download(request_id: int) -> None:
 
             if media_type == "ebook":
                 await downloader.convert_ebooks_in_dir(dest_dir)
+
+            if media_type == "audiobook" and settings.libraforge_pipeline_enabled:
+                # Hand off to LibraForge (metadata → m4b → folder forge → ABS).
+                # Completes / quarantines / notifies inside forge_pipeline.
+                from app.services.forge_pipeline import run_forge_after_download
+                await run_forge_after_download(
+                    request_id,
+                    staging=dest_dir,
+                    user_id=req.user_id,
+                    title=title,
+                )
+                return
 
             if media_type == "audiobook":
                 await _update_status(db, request_id, "organizing", "Organizing audiobook files")
@@ -837,15 +847,10 @@ async def process_aa_download(request_id: int) -> None:
                 suggested_filename = f"{safe_title}.{file_ext}"
 
             if media_type == "ebook":
-                base_dir = settings.ebook_dir
-                dest_dir = Path(base_dir) / downloader.sanitize_filename(author) / downloader.sanitize_filename(book_title)
+                dest_dir = Path(settings.ebook_dir) / downloader.sanitize_filename(author) / downloader.sanitize_filename(book_title)
             else:
-                base_dir = settings.audiobook_dir
-                author_dir = Path(base_dir) / downloader.sanitize_filename(author)
-                if _is_collection_title(book_title):
-                    dest_dir = author_dir / f"_incoming_{request_id}"
-                else:
-                    dest_dir = author_dir / downloader.sanitize_filename(book_title)
+                dest_dir = audiobook_destination_dir(request_id, author, book_title)
+                dest_dir.mkdir(parents=True, exist_ok=True)
 
             async def _on_aa_progress(bytes_done: int, total_bytes: int | None, speed_bps: float) -> None:
                 if await _is_cancelled(request_id):
@@ -978,6 +983,16 @@ async def process_aa_download(request_id: int) -> None:
             if media_type == "ebook":
                 await downloader.convert_ebooks_in_dir(dest_dir)
 
+            if media_type == "audiobook" and settings.libraforge_pipeline_enabled:
+                from app.services.forge_pipeline import run_forge_after_download
+                await run_forge_after_download(
+                    request_id,
+                    staging=dest_dir,
+                    user_id=req.user_id,
+                    title=title,
+                )
+                return
+
             if media_type == "audiobook":
                 await _update_status(db, request_id, "organizing", "Organizing audiobook files")
                 series_override = None
@@ -1054,7 +1069,17 @@ async def process_aa_download(request_id: int) -> None:
                     logger.warning("Failed to send admin push notification")
 
 
-RESUMABLE_STATUSES = ("pending", "sent_to_rd", "downloading_rd", "transferring", "organizing")
+RESUMABLE_STATUSES = (
+    "pending",
+    "sent_to_rd",
+    "downloading_rd",
+    "transferring",
+    "organizing",
+    "metadata_forge",
+    "m4b_convert",
+    "folder_forge",
+    "finalizing",
+)
 
 
 def _is_aa_request(req: DownloadRequest) -> bool:
@@ -1066,6 +1091,15 @@ def _is_aa_request(req: DownloadRequest) -> bool:
     if req.indexer and "anna" in req.indexer.lower():
         return True
     return False
+
+
+_FORGE_RESUME = {
+    "metadata_forge": "metadata",
+    "organizing": "metadata",
+    "m4b_convert": "m4b",
+    "folder_forge": "folder",
+    "finalizing": "finalize",
+}
 
 
 async def resume_interrupted_downloads() -> None:
@@ -1082,6 +1116,33 @@ async def resume_interrupted_downloads() -> None:
 
     logger.info(f"Resuming {len(interrupted)} interrupted download(s)")
     for req in interrupted:
+        forge_from = _FORGE_RESUME.get(req.status)
+        if forge_from and settings.libraforge_pipeline_enabled and (req.media_type or "audiobook") == "audiobook":
+            staging_str = (getattr(req, "staging_path", None) or "").strip()
+            staging = Path(staging_str) if staging_str else audiobook_destination_dir(
+                req.id, req.author or "Unknown", req.title
+            )
+            if staging.is_dir():
+                logger.info(
+                    "  -> #%s '%s' (LibraForge resume from %s at %s)",
+                    req.id,
+                    req.title,
+                    forge_from,
+                    staging,
+                )
+                from app.services.forge_pipeline import run_forge_after_download
+
+                asyncio.create_task(
+                    run_forge_after_download(
+                        req.id,
+                        staging=staging,
+                        user_id=req.user_id,
+                        title=req.title,
+                        resume_from=forge_from,
+                    )
+                )
+                continue
+
         kind = "AA" if _is_aa_request(req) else "RD"
         logger.info(
             f"  -> #{req.id} '{req.title}' (status={req.status}, {kind}, id={req.rd_torrent_id})"

@@ -26,8 +26,12 @@ _ACTIVE_STATUSES = frozenset({
     "downloading_rd",
     "transferring",
     "organizing",
+    "metadata_forge",
+    "m4b_convert",
+    "folder_forge",
+    "finalizing",
 })
-_RETRYABLE_STATUSES = frozenset({"failed", "cancelled"})
+_RETRYABLE_STATUSES = frozenset({"failed", "cancelled", "admin_rejected"})
 _COVER_BACKFILL_LIMIT = 24
 
 
@@ -65,6 +69,9 @@ class DownloadRequestResponse(BaseModel):
     progress_bytes: int | None = None
     progress_total_bytes: int | None = None
     progress_speed_bps: float | None = None
+    staging_path: str | None = None
+    quarantine_reason: str | None = None
+    manual_review_url: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -279,6 +286,11 @@ async def _backfill_request_covers(rows: list[DownloadRequest]) -> bool:
 
 
 def _to_response(req: DownloadRequest) -> DownloadRequestResponse:
+    from app.services import libraforge
+
+    review_url = None
+    if req.status == "quarantined":
+        review_url = libraforge.public_manual_review_url() or None
     return DownloadRequestResponse(
         id=req.id,
         title=req.title,
@@ -297,4 +309,7 @@ def _to_response(req: DownloadRequest) -> DownloadRequestResponse:
         progress_bytes=req.progress_bytes,
         progress_total_bytes=req.progress_total_bytes,
         progress_speed_bps=req.progress_speed_bps,
+        staging_path=getattr(req, "staging_path", None),
+        quarantine_reason=getattr(req, "quarantine_reason", None),
+        manual_review_url=review_url,
     )

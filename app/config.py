@@ -86,10 +86,20 @@ class Settings(BaseSettings):
     abs_api_key: str = ""
     abs_library_id: str = ""
 
-    # LibraForge sibling stack (admin toolkit — link out only; AGPL).
-    # Public URL for Admin "Open LibraForge"; internal URL for health probe from Docker.
+    # LibraForge sibling stack (Metadata / M4B / Folder Forge via HTTP — AGPL, no vendor).
+    # Public URL for Admin "Open LibraForge"; internal URL for API calls from Docker.
     libraforge_url: str = "https://forge.library.freiverse.com"
     libraforge_internal_url: str = "http://172.17.0.1:5056"
+    # Auto-apply threshold (LibraForge default 0.70). Below → quarantine for admin review.
+    libraforge_min_score: float = 0.70
+    libraforge_naming_template: str = "{author}/{series} [{edition}]/{title}/{filename}"
+    # Pi M4B jobs — keep low on Raspberry Pi; Windows :5057 is manual fallback for heavy books.
+    libraforge_m4b_jobs: int = 2
+    libraforge_metadata_timeout: float = 1800.0
+    libraforge_m4b_timeout: float = 7200.0
+    libraforge_organizer_timeout: float = 1800.0
+    # When True, audiobook downloads land in /audiobooks/_unorganized and run LibraForge.
+    libraforge_pipeline_enabled: bool = True
 
     kavita_url: str = "http://localhost:5000"
     kavita_api_key: str = ""

@@ -3,7 +3,7 @@ import logging
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,16 +36,29 @@ class AdminDownloadResponse(BaseModel):
     id: int
     title: str
     author: str | None
+    media_type: str = "audiobook"
     status: str
     status_detail: str | None
     username: str
     is_private: bool = False
+    google_volume_id: str | None = None
+    cover_url: str | None = None
+    size_bytes: int | None = None
+    indexer: str | None = None
     created_at: str
     completed_at: str | None
     progress_percent: float | None = None
     progress_bytes: int | None = None
     progress_total_bytes: int | None = None
     progress_speed_bps: float | None = None
+    staging_path: str | None = None
+    quarantine_reason: str | None = None
+    manual_review_url: str | None = None
+
+
+class RejectRequestBody(BaseModel):
+    reason: str = "Rejected by admin"
+    delete_files: bool = True
 
 
 # --- User Management ---
@@ -114,29 +127,92 @@ async def list_all_downloads(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
+    from app.services import libraforge
+
     result = await db.execute(
         select(DownloadRequest, User.username)
         .join(User, DownloadRequest.user_id == User.id)
         .order_by(DownloadRequest.created_at.desc())
     )
+    review = libraforge.public_manual_review_url() or None
     return [
         AdminDownloadResponse(
             id=req.id,
             title=req.title,
             author=req.author,
+            media_type=req.media_type or "unknown",
             status=req.status,
             status_detail=req.status_detail,
             username=username,
             is_private=bool(req.is_private),
+            google_volume_id=getattr(req, "google_volume_id", None),
+            cover_url=getattr(req, "cover_url", None),
+            size_bytes=req.size_bytes,
+            indexer=req.indexer,
             created_at=req.created_at.isoformat() if req.created_at else "",
             completed_at=req.completed_at.isoformat() if req.completed_at else None,
             progress_percent=req.progress_percent,
             progress_bytes=req.progress_bytes,
             progress_total_bytes=req.progress_total_bytes,
             progress_speed_bps=req.progress_speed_bps,
+            staging_path=getattr(req, "staging_path", None),
+            quarantine_reason=getattr(req, "quarantine_reason", None),
+            manual_review_url=review if req.status == "quarantined" else None,
         )
         for req, username in result.all()
     ]
+
+
+@router.post("/download-requests/{request_id}/reject")
+async def reject_download_request(
+    request_id: int,
+    body: RejectRequestBody = Body(default_factory=RejectRequestBody),
+    _admin: User = Depends(require_admin),
+):
+    """Reject a quarantined (or failed) request — user sees admin-rejected like a failure."""
+    from app.services.forge_pipeline import reject_quarantined_request
+
+    try:
+        req = await reject_quarantined_request(
+            request_id,
+            delete_files=body.delete_files,
+            reason=body.reason or "Rejected by admin",
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "ok": True,
+        "id": req.id,
+        "status": req.status,
+        "status_detail": req.status_detail,
+    }
+
+
+@router.post("/download-requests/{request_id}/continue-forge")
+async def continue_forge_after_review(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """After Manual Review in LibraForge, resume M4B → Folder Forge → ABS."""
+    from app.services.forge_pipeline import continue_after_manual_review
+
+    result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
+    req = result.scalar_one_or_none()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if req.status not in ("quarantined", "metadata_forge"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot continue request in status '{req.status}'",
+        )
+    if not (req.staging_path or "").strip():
+        raise HTTPException(status_code=400, detail="Request has no staging_path")
+
+    asyncio.create_task(continue_after_manual_review(request_id))
+    return {"ok": True, "id": request_id, "message": "Continuing LibraForge pipeline"}
 
 
 @router.post("/download-requests/{request_id}/reorganize")

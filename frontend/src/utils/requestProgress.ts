@@ -18,6 +18,10 @@ export interface DownloadRequestProgress {
   progress_bytes?: number | null;
   progress_total_bytes?: number | null;
   progress_speed_bps?: number | null;
+  staging_path?: string | null;
+  quarantine_reason?: string | null;
+  manual_review_url?: string | null;
+  username?: string;
 }
 
 export function applyRequestWsUpdate(

@@ -28,16 +28,22 @@ function formatDate(iso: string): string {
   });
 }
 
-function hasActiveDownloads(requests: DownloadRequestProgress[] | undefined): boolean {
-  return (
-    requests?.some((r) =>
-      ["downloading_rd", "transferring", "organizing", "sent_to_rd", "pending"].includes(r.status)
-    ) ?? false
-  );
-}
+const ACTIVE = new Set([
+  "pending",
+  "sent_to_rd",
+  "downloading_rd",
+  "transferring",
+  "organizing",
+  "metadata_forge",
+  "m4b_convert",
+  "folder_forge",
+  "finalizing",
+]);
+const RETRYABLE = new Set(["failed", "cancelled", "admin_rejected"]);
 
-const ACTIVE = new Set(["pending", "sent_to_rd", "downloading_rd", "transferring", "organizing"]);
-const RETRYABLE = new Set(["failed", "cancelled"]);
+function hasActiveDownloads(requests: DownloadRequestProgress[] | undefined): boolean {
+  return requests?.some((r) => ACTIVE.has(r.status)) ?? false;
+}
 
 function catalogBookPath(volumeId: string | null | undefined, title: string): string {
   if (volumeId && !volumeId.startsWith("rd:")) {
@@ -85,7 +91,13 @@ export default function RequestsPage() {
         queryClient.setQueryData<DownloadRequestProgress[]>(["my-requests"], (old) =>
           applyRequestWsUpdate(old, msg)
         );
-        if (msg.status === "completed" || msg.status === "failed" || msg.status === "cancelled") {
+        if (
+          msg.status === "completed" ||
+          msg.status === "failed" ||
+          msg.status === "cancelled" ||
+          msg.status === "quarantined" ||
+          msg.status === "admin_rejected"
+        ) {
           queryClient.invalidateQueries({ queryKey: ["my-requests"] });
         }
       } else {
@@ -100,7 +112,7 @@ export default function RequestsPage() {
   const openRequest = useCallback(
     async (req: DownloadRequestProgress) => {
       // Failed / cancelled → Find Downloads (catalog book page) without re-searching when possible
-      if (req.status === "failed" || req.status === "cancelled") {
+      if (req.status === "failed" || req.status === "cancelled" || req.status === "admin_rejected") {
         navigate(catalogBookPath(req.google_volume_id, req.title));
         return;
       }
@@ -238,6 +250,7 @@ export default function RequestsPage() {
               req.status === "completed" ||
               req.status === "failed" ||
               req.status === "cancelled" ||
+              req.status === "admin_rejected" ||
               !!req.google_volume_id;
             return (
               <div

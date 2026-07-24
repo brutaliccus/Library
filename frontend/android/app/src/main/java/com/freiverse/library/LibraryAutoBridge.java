@@ -570,14 +570,14 @@ public final class LibraryAutoBridge {
             .addCustomAction(
                 new PlaybackStateCompat.CustomAction.Builder(
                     CUSTOM_REWIND_15,
-                    "Back 15 seconds",
+                    "-15 seconds",
                     R.drawable.ic_media_rewind_15
                 ).build()
             )
             .addCustomAction(
                 new PlaybackStateCompat.CustomAction.Builder(
                     CUSTOM_FORWARD_15,
-                    "Forward 15 seconds",
+                    "+15 seconds",
                     R.drawable.ic_media_forward_15
                 ).build()
             )

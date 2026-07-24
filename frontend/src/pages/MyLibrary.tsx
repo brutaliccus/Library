@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import api from "../api/client";
@@ -52,6 +52,11 @@ import {
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import SaveOfflineButton from "../components/SaveOfflineButton";
 import ShelfCardMeta from "../components/ShelfCardMeta";
+import {
+  loadLibraryScrollMemory,
+  saveLibraryScrollMemory,
+  type LibraryScrollMemory,
+} from "../utils/libraryScrollMemory";
 
 interface LibraryItem {
   id: number;
@@ -260,16 +265,20 @@ export default function MyLibrary() {
   const online = useOnlineStatus();
   const offline = !online || isLikelyOffline();
 
-  const [tab, setTab] = useState<Tab>("abs");
-  const [absView, setAbsView] = useState<TabView>("all");
-  const [ebookView, setEbookView] = useState<TabView>("all");
-  const [rdView, setRdView] = useState<TabView>("all");
-  const [mediaFilter, setMediaFilter] = useState<MediaFilter>("all");
-  const [filterGenre, setFilterGenre] = useState("");
-  const [filterSeries, setFilterSeries] = useState("");
-  const [filterAuthor, setFilterAuthor] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
+  // Restore tab/filters/scroll after Back from abs/ebook details (route unmounts this page).
+  const savedUiRef = useRef<LibraryScrollMemory | null>(loadLibraryScrollMemory());
+  const savedUi = savedUiRef.current;
+
+  const [tab, setTab] = useState<Tab>(() => savedUi?.tab ?? "abs");
+  const [absView, setAbsView] = useState<TabView>(() => savedUi?.absView ?? "all");
+  const [ebookView, setEbookView] = useState<TabView>(() => savedUi?.ebookView ?? "all");
+  const [rdView, setRdView] = useState<TabView>(() => savedUi?.rdView ?? "all");
+  const [mediaFilter, setMediaFilter] = useState<MediaFilter>(() => savedUi?.mediaFilter ?? "all");
+  const [filterGenre, setFilterGenre] = useState(() => savedUi?.filterGenre ?? "");
+  const [filterSeries, setFilterSeries] = useState(() => savedUi?.filterSeries ?? "");
+  const [filterAuthor, setFilterAuthor] = useState(() => savedUi?.filterAuthor ?? "");
+  const [searchQuery, setSearchQuery] = useState(() => savedUi?.searchQuery ?? "");
+  const [debouncedQuery, setDebouncedQuery] = useState(() => savedUi?.searchQuery ?? "");
   const [resolvingId, setResolvingId] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
   const [cachedAbsIds, setCachedAbsIds] = useState<Set<string>>(new Set());
@@ -284,11 +293,56 @@ export default function MyLibrary() {
     progress: NonNullable<ReturnType<typeof getProgress>>;
   } | null>(null);
 
+  const scrollYRef = useRef(savedUi?.scrollY ?? 0);
+  const scrollRestoredRef = useRef(false);
+
+  const persistLibraryUi = useCallback(
+    (scrollY?: number) => {
+      const y = scrollY ?? (typeof window !== "undefined" ? window.scrollY : scrollYRef.current);
+      scrollYRef.current = y;
+      saveLibraryScrollMemory({
+        tab,
+        absView,
+        ebookView,
+        rdView,
+        mediaFilter,
+        filterGenre,
+        filterSeries,
+        filterAuthor,
+        searchQuery,
+        scrollY: y,
+      });
+    },
+    [
+      tab,
+      absView,
+      ebookView,
+      rdView,
+      mediaFilter,
+      filterGenre,
+      filterSeries,
+      filterAuthor,
+      searchQuery,
+    ]
+  );
+
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
   useEffect(() => {
     debounceRef.current = setTimeout(() => setDebouncedQuery(searchQuery), 300);
     return () => clearTimeout(debounceRef.current);
   }, [searchQuery]);
+
+  // Track document scroll while on My Library (window scrolls on mobile + desktop).
+  useEffect(() => {
+    const onScroll = () => {
+      scrollYRef.current = window.scrollY;
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      persistLibraryUi(scrollYRef.current);
+    };
+  }, [persistLibraryUi]);
 
   const {
     data: absCollection,
@@ -462,12 +516,57 @@ export default function MyLibrary() {
     }
   }, [queryClient, toast]);
 
-  // Reset shelf filters when switching media tabs
+  // Reset shelf filters when switching media tabs (skip mount so restored filters survive).
+  const tabFilterInitRef = useRef(false);
   useEffect(() => {
+    if (!tabFilterInitRef.current) {
+      tabFilterInitRef.current = true;
+      return;
+    }
     setFilterGenre("");
     setFilterSeries("");
     setFilterAuthor("");
   }, [tab]);
+
+  // Restore scrollY after shelf content has enough height (React Query often paints fast).
+  useLayoutEffect(() => {
+    if (scrollRestoredRef.current) return;
+    const targetY = savedUiRef.current?.scrollY ?? 0;
+    if (targetY <= 0) {
+      scrollRestoredRef.current = true;
+      return;
+    }
+
+    let cancelled = false;
+    let attempts = 0;
+    let raf = 0;
+    const tryRestore = () => {
+      if (cancelled || scrollRestoredRef.current) return;
+      attempts += 1;
+      const maxScroll = Math.max(
+        0,
+        document.documentElement.scrollHeight - window.innerHeight
+      );
+      if (maxScroll >= targetY - 8 || attempts >= 48) {
+        window.scrollTo(0, Math.min(targetY, maxScroll));
+        // Only lock once the page is tall enough (or we gave up).
+        if (maxScroll >= targetY - 8 || attempts >= 48) {
+          scrollRestoredRef.current = true;
+        }
+        return;
+      }
+      raf = requestAnimationFrame(tryRestore);
+    };
+    raf = requestAnimationFrame(tryRestore);
+    const t1 = window.setTimeout(tryRestore, 120);
+    const t2 = window.setTimeout(tryRestore, 400);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, [tab, absCollection, kavitaCollection, searchQuery, debouncedQuery]);
 
   const handlePlayABS = useCallback(
     async (itemId: string) => {
@@ -585,31 +684,35 @@ export default function MyLibrary() {
       if (progress) {
         setContinueModal({ chapterId, item, progress });
       } else {
+        persistLibraryUi();
         navigate(`/read/${chapterId}`);
       }
     },
-    [navigate, offline, toast]
+    [navigate, offline, toast, persistLibraryUi]
   );
 
   const handleContinueReading = useCallback(
     (chapterId: number) => {
       setContinueModal(null);
+      persistLibraryUi();
       navigate(`/read/${chapterId}`);
     },
-    [navigate]
+    [navigate, persistLibraryUi]
   );
 
   const handleStartFromBeginning = useCallback(
     (chapterId: number) => {
       clearProgress(chapterId);
       setContinueModal(null);
+      persistLibraryUi();
       navigate(`/read/${chapterId}`);
     },
-    [navigate]
+    [navigate, persistLibraryUi]
   );
 
   const handleNavigateToBook = useCallback(
     async (title: string, author?: string, target?: { ebookChapterId?: number; ebookSeriesId?: number; absItemId?: string }) => {
+      persistLibraryUi();
       if (target?.ebookSeriesId != null) {
         navigate(`/library/ebook/${target.ebookSeriesId}`);
         return;
@@ -644,7 +747,7 @@ export default function MyLibrary() {
         navigate(`/search?q=${encodeURIComponent(title)}`);
       }
     },
-    [navigate]
+    [navigate, persistLibraryUi]
   );
 
   const handleResolveRD = useCallback(
@@ -904,6 +1007,7 @@ export default function MyLibrary() {
 
   const handlePersonalCollectionNavigate = useCallback(
     async (item: LibraryItem) => {
+      persistLibraryUi();
       const vid = item.googleVolumeId || "";
       if (vid && !vid.startsWith("rd:")) {
         navigate(`/book/${encodeURIComponent(vid)}`);
@@ -929,7 +1033,7 @@ export default function MyLibrary() {
       }
       navigate(`/search?q=${encodeURIComponent(item.title)}`);
     },
-    [navigate]
+    [navigate, persistLibraryUi]
   );
 
   const FilterBar = ({
@@ -1151,6 +1255,7 @@ export default function MyLibrary() {
                   key={`${r.source}-${r.itemId || r.libraryItemId || r.seriesId || i}`}
                   onClick={() => {
                     if (r.source === "rd" && r.googleVolumeId) {
+                      persistLibraryUi();
                       navigate(`/book/${encodeURIComponent(r.googleVolumeId)}`);
                     } else if (r.source === "abs") {
                       handleNavigateToBook(r.title, r.author, { absItemId: r.itemId });
@@ -1619,7 +1724,10 @@ export default function MyLibrary() {
                           {item.source === "ebook" ? (
                             <button
                               type="button"
-                              onClick={() => navigate(`/read/${item.chapterId}`)}
+                              onClick={() => {
+                                persistLibraryUi();
+                                navigate(`/read/${item.chapterId}`);
+                              }}
                               className="px-2.5 py-1.5 text-xs font-medium rounded-md bg-amber-600 text-white hover:bg-amber-500"
                             >
                               Read

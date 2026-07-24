@@ -260,7 +260,9 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             );
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_notification)
+            // Headphones — never the notification bell (AA may fall back to smallIcon
+            // when a custom ±15 vector fails to render on some head units).
+            .setSmallIcon(R.drawable.ic_stat_media)
             .setContentTitle(title)
             .setContentText(artist)
             .setLargeIcon(bridge.getArtwork())
@@ -273,7 +275,7 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
         builder.addAction(
             R.drawable.ic_media_rewind_15,
-            "Back 15 seconds",
+            "-15 seconds",
             MediaButtonReceiver.buildMediaButtonPendingIntent(
                 this,
                 PlaybackStateCompat.ACTION_REWIND
@@ -320,7 +322,7 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
         builder.addAction(
             R.drawable.ic_media_forward_15,
-            "Forward 15 seconds",
+            "+15 seconds",
             MediaButtonReceiver.buildMediaButtonPendingIntent(
                 this,
                 PlaybackStateCompat.ACTION_FAST_FORWARD

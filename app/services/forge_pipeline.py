@@ -217,54 +217,86 @@ def seed_staging_metadata_hints(
         logger.warning("Could not seed metadata.json in %s: %s", target_dir, e)
 
 
-def resolve_staging_dir(staging_str: str) -> Path:
-    """Resolve a request staging_path to a real directory under ``.unorganized``.
+def _staging_library_roots() -> list[tuple[Path, tuple[str, ...]]]:
+    """(library_root, staging_dirname_variants) for audiobook + ebook staging."""
+    from app.services.ebook_pipeline import EBOOK_UNORGANIZED_DIRNAME
 
-    Accepts the POSIX Docker-style path stored in the DB (e.g.
-    ``/audiobooks/.unorganized/req_12_Title`` or legacy ``_unorganized``) or a
-    host path. Rejects anything outside the configured audiobook library's
-    staging tree (``.unorganized`` or legacy ``_unorganized``).
+    return [
+        (
+            Path(settings.audiobook_dir).resolve(),
+            (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME),
+        ),
+        (
+            Path(settings.ebook_dir).resolve(),
+            (EBOOK_UNORGANIZED_DIRNAME,),
+        ),
+    ]
+
+
+def all_staging_roots() -> list[Path]:
+    """Resolved staging root dirs (audiobook ``.unorganized`` + ebook ``unorganized``)."""
+    roots: list[Path] = []
+    for lib_root, names in _staging_library_roots():
+        for name in names:
+            roots.append((lib_root / name).resolve())
+    return roots
+
+
+def resolve_staging_dir(staging_str: str) -> Path:
+    """Resolve a request staging_path to a real directory under a staging root.
+
+    Accepts POSIX Docker-style paths stored in the DB, e.g.
+    ``/audiobooks/.unorganized/req_12_Title``, legacy ``_unorganized``, or
+    ``/ebooks/unorganized/req_12_Title`` (and host ``/mnt/...`` remaps).
+    Rejects anything outside configured audiobook/ebook staging trees.
     """
     raw = (staging_str or "").strip()
     if not raw:
         raise FileNotFoundError("Request has no staging_path")
 
-    audiobook_root = Path(settings.audiobook_dir).resolve()
-    staging_roots = [
-        (audiobook_root / name).resolve() for name in (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME)
-    ]
+    from app.services.ebook_pipeline import EBOOK_UNORGANIZED_DIRNAME
+
+    lib_specs = _staging_library_roots()
+    staging_roots = all_staging_roots()
     candidates: list[Path] = [Path(raw)]
 
-    # Normalize Docker / host mount prefixes to paths under audiobook_dir.
+    # Normalize Docker / host mount prefixes to paths under library roots.
     # Path.parts keeps the root as '/' or 'C:\\'; drop that for remapping.
     norm_parts = [x for x in Path(raw.replace("\\", "/")).parts if x not in ("/", "\\")]
     if norm_parts:
         mapped = list(norm_parts)
         if mapped[0].lower() == "mnt" and len(mapped) >= 2:
-            # /mnt/Audiobooks/.unorganized/...
+            # /mnt/Audiobooks/.unorganized/... or /mnt/eBooks/unorganized/...
             mapped = mapped[2:]
-        elif mapped[0].lower() in {"audiobooks", "data"}:
+        elif mapped[0].lower() in {"audiobooks", "ebooks", "data"}:
             mapped = mapped[1:]
         if mapped:
-            candidates.append(audiobook_root.joinpath(*mapped))
-            # Rewrite legacy _unorganized → .unorganized (and vice versa) for migration.
-            for old, new in (
-                (LEGACY_UNORGANIZED_DIRNAME, UNORGANIZED_DIRNAME),
-                (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME),
+            for lib_root, names in lib_specs:
+                candidates.append(lib_root.joinpath(*mapped))
+                # Rewrite audiobook legacy _unorganized ↔ .unorganized.
+                for old, new in (
+                    (LEGACY_UNORGANIZED_DIRNAME, UNORGANIZED_DIRNAME),
+                    (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME),
+                ):
+                    if old in mapped:
+                        remapped = [new if p == old else p for p in mapped]
+                        candidates.append(lib_root.joinpath(*remapped))
+                for name in names:
+                    if name in mapped:
+                        idx = mapped.index(name)
+                        candidates.append(lib_root.joinpath(*mapped[idx:]))
+            # Bare req_* folder name under any staging root
+            for root in staging_roots:
+                candidates.append(root / mapped[-1])
+            # Also try ebook unorganized if path only had audiobook-style parts
+            if EBOOK_UNORGANIZED_DIRNAME in mapped or any(
+                n in mapped for n in UNORGANIZED_DIRNAMES
             ):
-                if old in mapped:
-                    remapped = [new if p == old else p for p in mapped]
-                    candidates.append(audiobook_root.joinpath(*remapped))
-        for name in UNORGANIZED_DIRNAMES:
-            if name in mapped:
-                idx = mapped.index(name)
-                candidates.append(audiobook_root.joinpath(*mapped[idx:]))
-        # Bare req_* folder name under either staging root
-        for root in staging_roots:
-            candidates.append(root / mapped[-1])
+                pass
 
     if not Path(raw).is_absolute():
-        candidates.append(audiobook_root / raw)
+        for lib_root, _names in lib_specs:
+            candidates.append(lib_root / raw)
 
     seen: set[Path] = set()
     for cand in candidates:
@@ -288,7 +320,9 @@ def resolve_staging_dir(staging_str: str) -> Path:
         if resolved.is_dir():
             return resolved
 
-    raise FileNotFoundError(f"Staging folder missing or outside .unorganized: {raw}")
+    raise FileNotFoundError(
+        f"Staging folder missing or outside unorganized staging: {raw}"
+    )
 
 
 def safe_path_under_staging(staging: Path, relative: str) -> Path:
@@ -952,17 +986,14 @@ def delete_request_staging_tree(
     request_id: int,
     staging_str: str | None,
 ) -> list[Path]:
-    """Recursively delete this request's staging dirs under ``.unorganized`` only.
+    """Recursively delete this request's staging dirs under staging roots only.
 
-    Resolves Docker-style ``staging_path`` values via ``resolve_staging_dir``, and
-    also removes any ``req_{id}_*`` leftover folders for the same request id
-    under ``.unorganized`` (and legacy ``_unorganized`` during migration).
+    Covers audiobook ``.unorganized`` / legacy ``_unorganized`` and ebook
+    ``unorganized``. Resolves Docker-style ``staging_path`` via
+    ``resolve_staging_dir``, and also removes any ``req_{id}_*`` leftovers.
     Never deletes outside those staging trees.
     """
-    audiobook_root = Path(settings.audiobook_dir).resolve()
-    staging_roots = [
-        (audiobook_root / name).resolve() for name in (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME)
-    ]
+    staging_roots = all_staging_roots()
     to_delete: dict[Path, None] = {}
 
     raw = (staging_str or "").strip()
@@ -1006,7 +1037,7 @@ def delete_request_staging_tree(
             except ValueError:
                 continue
         if not under_staging:
-            logger.warning("Refusing to delete path outside .unorganized: %s", path)
+            logger.warning("Refusing to delete path outside staging roots: %s", path)
             continue
         if not path.is_dir():
             continue

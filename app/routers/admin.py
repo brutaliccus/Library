@@ -431,7 +431,12 @@ async def list_all_downloads(
             progress_speed_bps=req.progress_speed_bps,
             staging_path=getattr(req, "staging_path", None),
             quarantine_reason=getattr(req, "quarantine_reason", None),
-            manual_review_url=review if req.status == "quarantined" else None,
+            # LibraForge Manual Review is audiobook-only; ebooks use Staging files + Continue.
+            manual_review_url=(
+                review
+                if req.status == "quarantined" and (req.media_type or "") != "ebook"
+                else None
+            ),
         )
         for req, username in result.all()
     ]
@@ -470,8 +475,9 @@ async def continue_forge_after_review(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """After Manual Review in LibraForge, resume M4B → Folder Forge → ABS."""
+    """Resume after quarantine: audiobooks → M4B/Folder Forge; ebooks → organize → Kavita."""
     from app.services.forge_pipeline import continue_after_manual_review
+    from app.services.ebook_pipeline import continue_ebook_after_review
     from app.services.pipeline import _update_status
 
     result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
@@ -486,10 +492,28 @@ async def continue_forge_after_review(
     if not (req.staging_path or "").strip():
         raise HTTPException(status_code=400, detail="Request has no staging_path")
 
+    is_ebook = (req.media_type or "") == "ebook"
+
     # Flip out of quarantined before returning so Admin/My Requests refetch
     # immediately sees progress (background task may take a moment to start).
     req.quarantine_reason = None
     await db.commit()
+
+    if is_ebook:
+        await _update_status(
+            db,
+            request_id,
+            "folder_forge",
+            "Resuming ebook organize after review…",
+        )
+        asyncio.create_task(continue_ebook_after_review(request_id))
+        return {
+            "ok": True,
+            "id": request_id,
+            "status": "folder_forge",
+            "message": "Continuing ebook pipeline",
+        }
+
     await _update_status(
         db,
         request_id,

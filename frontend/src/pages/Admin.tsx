@@ -518,9 +518,9 @@ function AllRequestsTab() {
 
   const continueMutation = useMutation({
     mutationFn: (id: number) => api.post(`/admin/download-requests/${id}/continue-forge`),
-    onSuccess: () => {
+    onSuccess: (res: any) => {
       queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
-      toast("Continuing LibraForge pipeline", "success");
+      toast(res?.data?.message || "Continuing pipeline", "success");
     },
     onError: (err: any) => toast(err.response?.data?.detail || "Continue failed", "error"),
   });
@@ -603,6 +603,7 @@ function AllRequestsTab() {
                   progress_bytes={req.progress_bytes}
                   progress_total_bytes={req.progress_total_bytes}
                   progress_speed_bps={req.progress_speed_bps}
+                  media_type={req.media_type}
                 />
                 {(quarantined || showStagingBrowser) && (
                   <div className="mt-2 flex flex-wrap gap-2">
@@ -618,7 +619,7 @@ function AllRequestsTab() {
                         Staging files
                       </button>
                     )}
-                    {quarantined && req.manual_review_url && (
+                    {quarantined && req.manual_review_url && req.media_type !== "ebook" && (
                       <a
                         href={req.manual_review_url}
                         target="_blank"

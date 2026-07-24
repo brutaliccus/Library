@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     # When True, audiobook downloads land in /audiobooks/.unorganized and run LibraForge.
     libraforge_pipeline_enabled: bool = True
 
+    # DIY ebook organizer (no LibraForge): staging → identify → embed → Author/Series/Title → Kavita.
+    # Staging: /ebooks/unorganized/req_{id}_{slug}/ (Kavita library should exclude ``unorganized``).
+    ebook_pipeline_enabled: bool = True
+    # Auto-organize threshold (same idea as LIBRAFORGE_MIN_SCORE). Below → quarantine.
+    ebook_min_score: float = 0.70
+
     kavita_url: str = "http://localhost:5000"
     kavita_api_key: str = ""
     kavita_library_id: int = 0

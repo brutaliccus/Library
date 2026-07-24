@@ -336,6 +336,7 @@ export default function RequestsPage() {
                       progress_bytes={req.progress_bytes}
                       progress_total_bytes={req.progress_total_bytes}
                       progress_speed_bps={req.progress_speed_bps}
+                      media_type={req.media_type}
                     />
                     {(canCancel || canRetry) && (
                       <div className="flex gap-2 mt-2" onClick={(e) => e.stopPropagation()}>

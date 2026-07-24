@@ -1,4 +1,4 @@
-/** Multi-step progress for LibraForge download pipeline. */
+/** Multi-step progress for download pipelines (audiobook LibraForge / ebook DIY). */
 
 export interface PipelineStepProps {
   status: string;
@@ -7,9 +7,11 @@ export interface PipelineStepProps {
   progress_bytes?: number | null;
   progress_total_bytes?: number | null;
   progress_speed_bps?: number | null;
+  /** When ``ebook``, M4B step is omitted (download → metadata → organize → finalize). */
+  media_type?: string | null;
 }
 
-const STEPS = [
+const AUDIO_STEPS = [
   { id: "download", label: "Download" },
   { id: "metadata", label: "Metadata" },
   { id: "m4b", label: "M4B" },
@@ -17,7 +19,14 @@ const STEPS = [
   { id: "finalize", label: "Finalize" },
 ] as const;
 
-type StepId = (typeof STEPS)[number]["id"];
+const EBOOK_STEPS = [
+  { id: "download", label: "Download" },
+  { id: "metadata", label: "Metadata" },
+  { id: "folder", label: "Organize" },
+  { id: "finalize", label: "Finalize" },
+] as const;
+
+type StepId = "download" | "metadata" | "m4b" | "folder" | "finalize";
 
 const DOWNLOAD_STATUSES = new Set([
   "pending",
@@ -36,7 +45,11 @@ const ACTIVE = new Set([
   "quarantined",
 ]);
 
-function currentStepId(status: string): StepId | "done" | "failed" {
+function stepsFor(mediaType?: string | null) {
+  return mediaType === "ebook" ? EBOOK_STEPS : AUDIO_STEPS;
+}
+
+function currentStepId(status: string, mediaType?: string | null): StepId | "done" | "failed" {
   if (status === "completed") return "done";
   if (status === "failed" || status === "cancelled" || status === "admin_rejected") {
     return "failed";
@@ -45,16 +58,22 @@ function currentStepId(status: string): StepId | "done" | "failed" {
   if (status === "metadata_forge" || status === "organizing" || status === "quarantined") {
     return "metadata";
   }
-  if (status === "m4b_convert") return "m4b";
+  if (status === "m4b_convert") {
+    // Ebooks never use M4B; map legacy/mis-set status to organize.
+    return mediaType === "ebook" ? "folder" : "m4b";
+  }
   if (status === "folder_forge") return "folder";
   if (status === "finalizing") return "finalize";
   return "download";
 }
 
-function stepIndex(id: StepId | "done" | "failed"): number {
-  if (id === "done") return STEPS.length;
+function stepIndex(
+  id: StepId | "done" | "failed",
+  steps: readonly { id: string; label: string }[],
+): number {
+  if (id === "done") return steps.length;
   if (id === "failed") return -1;
-  return STEPS.findIndex((s) => s.id === id);
+  return steps.findIndex((s) => s.id === id);
 }
 
 function formatBytes(bytes: number): string {
@@ -78,13 +97,15 @@ export default function RequestPipelineSteps({
   progress_bytes,
   progress_total_bytes,
   progress_speed_bps,
+  media_type,
 }: PipelineStepProps) {
   if (!ACTIVE.has(status) && status !== "completed") {
     return null;
   }
 
-  const cur = currentStepId(status);
-  const curIdx = stepIndex(cur);
+  const steps = stepsFor(media_type);
+  const cur = currentStepId(status, media_type);
+  const curIdx = stepIndex(cur, steps);
   const quarantined = status === "quarantined";
   const hasPercent = progress_percent != null && progress_percent >= 0;
   const showBar =
@@ -107,7 +128,7 @@ export default function RequestPipelineSteps({
   return (
     <div className="mt-3 space-y-2">
       <div className="flex items-center gap-1">
-        {STEPS.map((step, i) => {
+        {steps.map((step, i) => {
           const done = cur === "done" || (curIdx >= 0 && i < curIdx);
           const active = curIdx === i;
           const warn = quarantined && step.id === "metadata";

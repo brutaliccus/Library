@@ -654,7 +654,9 @@ async def process_download(request_id: int) -> None:
             await _update_status(db, request_id, "transferring", "Downloading to library")
 
             if media_type == "ebook":
-                dest_dir = Path(settings.ebook_dir) / downloader.sanitize_filename(author) / downloader.sanitize_filename(book_title)
+                from app.services.ebook_pipeline import ebook_destination_dir
+                dest_dir = ebook_destination_dir(request_id, author, book_title)
+                dest_dir.mkdir(parents=True, exist_ok=True)
             else:
                 dest_dir = audiobook_destination_dir(request_id, author, book_title)
                 dest_dir.mkdir(parents=True, exist_ok=True)
@@ -754,6 +756,20 @@ async def process_download(request_id: int) -> None:
                     raise RuntimeError(
                         f"Download failed after retries: {last_dl_err}"
                     ) from last_dl_err
+
+            if media_type == "ebook" and settings.ebook_pipeline_enabled:
+                # DIY organizer: identify → embed → Author/Series/Title → Kavita.
+                # Completes / quarantines / notifies inside ebook_pipeline.
+                from app.services.ebook_pipeline import run_ebook_after_download
+                await run_ebook_after_download(
+                    request_id,
+                    staging=dest_dir,
+                    user_id=req.user_id,
+                    title=title,
+                    author=author,
+                    google_volume_id=getattr(req, "google_volume_id", None),
+                )
+                return
 
             if media_type == "ebook":
                 await downloader.convert_ebooks_in_dir(dest_dir)
@@ -895,7 +911,9 @@ async def process_aa_download(request_id: int) -> None:
                 suggested_filename = f"{safe_title}.{file_ext}"
 
             if media_type == "ebook":
-                dest_dir = Path(settings.ebook_dir) / downloader.sanitize_filename(author) / downloader.sanitize_filename(book_title)
+                from app.services.ebook_pipeline import ebook_destination_dir
+                dest_dir = ebook_destination_dir(request_id, author, book_title)
+                dest_dir.mkdir(parents=True, exist_ok=True)
             else:
                 dest_dir = audiobook_destination_dir(request_id, author, book_title)
                 dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1027,6 +1045,18 @@ async def process_aa_download(request_id: int) -> None:
                     "Could not resolve Anna's Archive download to a direct file URL"
                     + (f" (last page: {last_page_url[:120]})" if last_page_url else "")
                 )
+
+            if media_type == "ebook" and settings.ebook_pipeline_enabled:
+                from app.services.ebook_pipeline import run_ebook_after_download
+                await run_ebook_after_download(
+                    request_id,
+                    staging=dest_dir,
+                    user_id=req.user_id,
+                    title=title,
+                    author=author,
+                    google_volume_id=getattr(req, "google_volume_id", None),
+                )
+                return
 
             if media_type == "ebook":
                 await downloader.convert_ebooks_in_dir(dest_dir)
@@ -1165,8 +1195,56 @@ async def resume_interrupted_downloads() -> None:
 
     logger.info(f"Resuming {len(interrupted)} interrupted download(s)")
     for req in interrupted:
+        media_type = req.media_type or "audiobook"
         forge_from = _FORGE_RESUME.get(req.status)
-        if forge_from and settings.libraforge_pipeline_enabled and (req.media_type or "audiobook") == "audiobook":
+
+        # Ebook DIY pipeline resume (no M4B / LibraForge)
+        if (
+            forge_from
+            and forge_from != "m4b"
+            and settings.ebook_pipeline_enabled
+            and media_type == "ebook"
+        ):
+            from app.services.ebook_pipeline import ebook_staging_dir, run_ebook_after_download
+            from app.services.forge_pipeline import resolve_staging_dir
+
+            staging_str = (getattr(req, "staging_path", None) or "").strip()
+            staging = None
+            if staging_str:
+                try:
+                    staging = resolve_staging_dir(staging_str)
+                except FileNotFoundError:
+                    staging = None
+            if staging is None:
+                staging = ebook_staging_dir(req.id, req.title)
+            if staging.is_dir():
+                resume_map = {
+                    "metadata": "metadata",
+                    "folder": "folder",
+                    "finalize": "finalize",
+                }
+                resume_from = resume_map.get(forge_from, "metadata")
+                logger.info(
+                    "  -> #%s '%s' (ebook pipeline resume from %s at %s)",
+                    req.id,
+                    req.title,
+                    resume_from,
+                    staging,
+                )
+                asyncio.create_task(
+                    run_ebook_after_download(
+                        req.id,
+                        staging=staging,
+                        user_id=req.user_id,
+                        title=req.title,
+                        author=req.author,
+                        google_volume_id=getattr(req, "google_volume_id", None),
+                        resume_from=resume_from,
+                    )
+                )
+                continue
+
+        if forge_from and settings.libraforge_pipeline_enabled and media_type == "audiobook":
             staging_str = (getattr(req, "staging_path", None) or "").strip()
             staging = Path(staging_str) if staging_str else audiobook_destination_dir(
                 req.id, req.author or "Unknown", req.title

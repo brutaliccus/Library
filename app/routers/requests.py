@@ -301,7 +301,8 @@ def _to_response(req: DownloadRequest) -> DownloadRequestResponse:
     from app.services import libraforge
 
     review_url = None
-    if req.status == "quarantined":
+    # LibraForge Manual Review is audiobook-only.
+    if req.status == "quarantined" and (req.media_type or "") != "ebook":
         review_url = libraforge.public_manual_review_url() or None
     return DownloadRequestResponse(
         id=req.id,

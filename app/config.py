@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     libraforge_metadata_timeout: float = 1800.0
     libraforge_m4b_timeout: float = 7200.0
     libraforge_organizer_timeout: float = 1800.0
+    # Audible chapter lookup + in-place marker rewrite (usually seconds–minutes).
+    libraforge_chaptering_timeout: float = 900.0
     # When True, audiobook downloads land in /audiobooks/.unorganized and run LibraForge.
     libraforge_pipeline_enabled: bool = True
 

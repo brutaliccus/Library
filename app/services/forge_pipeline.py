@@ -1,4 +1,4 @@
-"""Post-download LibraForge orchestration: metadata → M4B → re-apply → Folder Forge → ABS."""
+"""Post-download LibraForge orchestration: metadata → M4B → re-apply → Chapter Forge → Folder Forge → ABS."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ from app.services import audiobookshelf, downloader, libraforge, push
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Real Audible ASINs (B0… / 10-digit). Ignore scan_cache sentinels like HAS_ASIN.
+_ASIN_RE = re.compile(r"^(?:B[\dA-Z]{9}|\d{10})$", re.IGNORECASE)
+_ASIN_SENTINELS = frozenset({"", "HAS_ASIN", "NOREALASIN", "NONE", "NULL", "N/A"})
 
 # Dot-directory so Audiobookshelf skips staging (ABS indexes `_unorganized`).
 UNORGANIZED_DIRNAME = ".unorganized"
@@ -61,6 +65,7 @@ def _pipeline():
 FORGE_STATUSES = frozenset({
     "metadata_forge",
     "m4b_convert",
+    "chapter_forge",
     "folder_forge",
     "finalizing",
     "organizing",  # legacy alias during transition
@@ -692,6 +697,94 @@ def staging_has_applied_metadata(staging: Path) -> bool:
     return False
 
 
+def normalize_asin(value: Any) -> str:
+    """Return a real Audible ASIN or '' (filters HAS_ASIN / empty sentinels)."""
+    asin = str(value or "").strip().upper()
+    if not asin or asin in _ASIN_SENTINELS:
+        return ""
+    if not _ASIN_RE.match(asin):
+        return ""
+    return asin
+
+
+def _asin_from_sidecar_dict(data: dict[str, Any]) -> str:
+    if "sidecar" in data and isinstance(data["sidecar"], dict):
+        data = data["sidecar"]
+    book = data.get("book") if isinstance(data.get("book"), dict) else {}
+    marker = data.get("marker") if isinstance(data.get("marker"), dict) else {}
+    audible = data.get("audible") if isinstance(data.get("audible"), dict) else {}
+    if not audible:
+        audible = marker.get("audible") if isinstance(marker.get("audible"), dict) else {}
+    backup = data.get("backup") if isinstance(data.get("backup"), dict) else {}
+    applied = backup.get("applied_tags") if isinstance(backup.get("applied_tags"), dict) else {}
+    for candidate in (
+        book.get("asin"),
+        audible.get("asin"),
+        applied.get("asin"),
+        marker.get("asin"),
+        data.get("asin"),
+    ):
+        asin = normalize_asin(candidate)
+        if asin:
+            return asin
+    return ""
+
+
+def extract_asin_from_staging(staging: Path) -> str:
+    """Best-effort ASIN from libraforge.json / metadata.json under staging.
+
+    Preference mirrors LibraForge ``resolve_asin_for_chaptering``: curated
+    ``book.asin`` / marker audible ASIN first, then ABS ``metadata.json``.
+    """
+    if not staging.is_dir():
+        return ""
+    # Prefer sidecars next to audio (shallow first via sorted path length).
+    sidecars = sorted(
+        staging.rglob("libraforge.json"),
+        key=lambda p: (len(p.parts), str(p)),
+    )
+    sidecars.extend(
+        sorted(
+            staging.rglob("*.libraforge.json"),
+            key=lambda p: (len(p.parts), str(p)),
+        )
+    )
+    for path in sidecars:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            asin = _asin_from_sidecar_dict(data)
+            if asin:
+                return asin
+    for meta_path in sorted(
+        list(staging.rglob("metadata.json")) + list(staging.rglob("*.metadata.json")),
+        key=lambda p: (len(p.parts), str(p)),
+    ):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        asin = normalize_asin(meta.get("asin"))
+        if asin:
+            return asin
+    return ""
+
+
+def primary_audio_for_chaptering(staging: Path) -> Path | None:
+    """Prefer a single primary ``.m4b``; else largest audio file under staging."""
+    audio = _collect_audio(staging)
+    if not audio:
+        return None
+    m4bs = [f for f in audio if f.suffix.lower() == ".m4b"]
+    if m4bs:
+        return max(m4bs, key=lambda p: p.stat().st_size if p.is_file() else 0)
+    return max(audio, key=lambda p: p.stat().st_size if p.is_file() else 0)
+
+
 async def _persist_staging(request_id: int, staging: Path, run_id: str | None = None) -> None:
     async with async_session() as db:
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
@@ -767,6 +860,121 @@ async def _forge_progress(
     )
 
 
+async def _run_chapter_forge_step(
+    request_id: int,
+    *,
+    staging: Path,
+    user_id: int,
+    should_abort,
+) -> None:
+    """Apply Audible chapters when ASIN is known. Soft-fail; never quarantine here."""
+    p = _pipeline()
+    asin = extract_asin_from_staging(staging)
+    audio = primary_audio_for_chaptering(staging)
+
+    if not asin:
+        detail = "No ASIN in staging metadata — skipping Chapter Forge (keeping existing chapters)"
+        logger.info("Chapter Forge skipped for request %s: no ASIN", request_id)
+        async with async_session() as db:
+            await p._update_status(db, request_id, "chapter_forge", detail)
+            await p._report_progress(
+                request_id, user_id, "chapter_forge", detail, progress_percent=100.0,
+            )
+        return
+
+    if audio is None:
+        detail = f"ASIN {asin} present but no audio found — skipping Chapter Forge"
+        logger.warning("Chapter Forge skipped for request %s: %s", request_id, detail)
+        async with async_session() as db:
+            await p._update_status(db, request_id, "chapter_forge", detail)
+            await p._report_progress(
+                request_id, user_id, "chapter_forge", detail, progress_percent=100.0,
+            )
+        return
+
+    source_path = staging_path_for_libraforge(audio)
+    async with async_session() as db:
+        await p._update_status(
+            db,
+            request_id,
+            "chapter_forge",
+            f"Applying Audible chapters (ASIN {asin})…",
+        )
+
+    async def _on_chapters(state: dict[str, Any]) -> None:
+        await _forge_progress(request_id, user_id, "chapter_forge", state)
+
+    try:
+        run_id = await libraforge.start_chaptering_run(
+            source_path,
+            asin=asin,
+            backend="audible-chapters",
+        )
+        await _persist_staging(request_id, staging, run_id=run_id)
+        report = await libraforge.wait_for_run(
+            run_id,
+            poll_seconds=2.0,
+            timeout_seconds=settings.libraforge_chaptering_timeout,
+            on_progress=_on_chapters,
+            should_abort=should_abort,
+        )
+        if libraforge.run_failed(report):
+            detail = (
+                report.get("phase_detail")
+                or report.get("error")
+                or report.get("status")
+                or "Chapter Forge failed"
+            )
+            # Soft-fail: keep existing chapters and continue to Folder Forge.
+            logger.warning(
+                "Chapter Forge failed for request %s (ASIN %s) — continuing: %s",
+                request_id,
+                asin,
+                detail,
+            )
+            async with async_session() as db:
+                await p._update_status(
+                    db,
+                    request_id,
+                    "chapter_forge",
+                    f"Chapter Forge failed ({detail}); keeping existing chapters"[:400],
+                )
+            return
+
+        chapters = 0
+        stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
+        try:
+            chapters = int(stats.get("chapters") or 0)
+        except (TypeError, ValueError):
+            chapters = 0
+        detail = (
+            f"Applied Audible chapters (ASIN {asin}"
+            + (f", {chapters} chapters" if chapters else "")
+            + ")"
+        )
+        async with async_session() as db:
+            await p._update_status(db, request_id, "chapter_forge", detail)
+            await p._report_progress(
+                request_id, user_id, "chapter_forge", detail, progress_percent=100.0,
+            )
+    except libraforge.LibraForgeError as e:
+        if "cancelled" in str(e).lower():
+            return
+        logger.warning(
+            "Chapter Forge unavailable for request %s (ASIN %s) — continuing: %s",
+            request_id,
+            asin,
+            e,
+        )
+        async with async_session() as db:
+            await p._update_status(
+                db,
+                request_id,
+                "chapter_forge",
+                f"Chapter Forge skipped (error): {e}"[:400],
+            )
+
+
 async def run_forge_after_download(
     request_id: int,
     *,
@@ -776,13 +984,17 @@ async def run_forge_after_download(
     author: str | None = None,
     resume_from: str | None = None,
 ) -> None:
-    """Run Metadata Forge → M4B → post-M4B Metadata Forge → Folder Forge → ABS.
+    """Run Metadata Forge → M4B → re-apply → Chapter Forge → Folder Forge → ABS.
 
     After a successful M4B convert, Metadata Forge is re-applied (overwrite +
     replace_cover) because m4b-tool re-encode does not preserve embedded covers
     and ``enforce_m4b_output_metadata`` only writes text tags.
 
-    ``resume_from``: None (full), ``m4b``, ``folder``, or ``finalize``.
+    Chapter Forge (Audible ``audible-chapters``) runs when an ASIN is present in
+    staging sidecars. Missing ASIN skips cleanly (keeps existing chapters).
+    Chapter Forge failures soft-continue — do not quarantine the whole book.
+
+    ``resume_from``: None (full), ``m4b``, ``chapters``, ``folder``, or ``finalize``.
     Used after admin Manual Review in LibraForge.
     """
     p = _pipeline()
@@ -971,6 +1183,21 @@ async def run_forge_after_download(
             if not reapplied:
                 return
 
+        start_step = "chapters"
+
+    if await p._is_cancelled(request_id):
+        return
+
+    # --- Chapter Forge (Audible chapters → m4b markers) ---
+    if start_step == "chapters":
+        await _run_chapter_forge_step(
+            request_id,
+            staging=staging,
+            user_id=user_id,
+            should_abort=_abort_if_cancelled,
+        )
+        if await p._is_cancelled(request_id):
+            return
         start_step = "folder"
 
     if await p._is_cancelled(request_id):

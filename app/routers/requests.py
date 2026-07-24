@@ -28,6 +28,7 @@ _ACTIVE_STATUSES = frozenset({
     "organizing",
     "metadata_forge",
     "m4b_convert",
+    "chapter_forge",
     "folder_forge",
     "finalizing",
 })

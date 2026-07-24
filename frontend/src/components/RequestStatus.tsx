@@ -26,6 +26,7 @@ const STATUS_CONFIG: Record<
   matching: { label: "Matching Metadata", color: "text-fuchsia-400 bg-fuchsia-900/30", icon: Search },
   metadata_forge: { label: "Metadata Forge", color: "text-fuchsia-400 bg-fuchsia-900/30", icon: Sparkles },
   m4b_convert: { label: "Converting M4B", color: "text-cyan-400 bg-cyan-900/30", icon: Disc3 },
+  chapter_forge: { label: "Chapter Forge", color: "text-indigo-400 bg-indigo-900/30", icon: Library },
   folder_forge: { label: "Folder Forge", color: "text-teal-400 bg-teal-900/30", icon: FolderSync },
   finalizing: { label: "Finalizing", color: "text-emerald-400 bg-emerald-900/30", icon: Library },
   quarantined: { label: "Needs Admin Review", color: "text-amber-400 bg-amber-900/30", icon: AlertTriangle },

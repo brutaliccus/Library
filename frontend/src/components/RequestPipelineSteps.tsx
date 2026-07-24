@@ -15,6 +15,7 @@ const AUDIO_STEPS = [
   { id: "download", label: "Download" },
   { id: "metadata", label: "Metadata" },
   { id: "m4b", label: "M4B" },
+  { id: "chapters", label: "Chapters" },
   { id: "folder", label: "Folder Forge" },
   { id: "finalize", label: "Finalize" },
 ] as const;
@@ -26,7 +27,7 @@ const EBOOK_STEPS = [
   { id: "finalize", label: "Finalize" },
 ] as const;
 
-type StepId = "download" | "metadata" | "m4b" | "folder" | "finalize";
+type StepId = "download" | "metadata" | "m4b" | "chapters" | "folder" | "finalize";
 
 const DOWNLOAD_STATUSES = new Set([
   "pending",
@@ -40,6 +41,7 @@ const ACTIVE = new Set([
   "organizing",
   "metadata_forge",
   "m4b_convert",
+  "chapter_forge",
   "folder_forge",
   "finalizing",
   "quarantined",
@@ -61,6 +63,9 @@ function currentStepId(status: string, mediaType?: string | null): StepId | "don
   if (status === "m4b_convert") {
     // Ebooks never use M4B; map legacy/mis-set status to organize.
     return mediaType === "ebook" ? "folder" : "m4b";
+  }
+  if (status === "chapter_forge") {
+    return mediaType === "ebook" ? "folder" : "chapters";
   }
   if (status === "folder_forge") return "folder";
   if (status === "finalizing") return "finalize";
@@ -114,6 +119,7 @@ export default function RequestPipelineSteps({
     status === "transferring" ||
     status === "metadata_forge" ||
     status === "m4b_convert" ||
+    status === "chapter_forge" ||
     status === "folder_forge" ||
     status === "finalizing";
 

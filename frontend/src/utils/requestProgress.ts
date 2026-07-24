@@ -44,6 +44,7 @@ export const CANCELLABLE_REQUEST_STATUSES = new Set([
   "organizing",
   "metadata_forge",
   "m4b_convert",
+  "chapter_forge",
   "folder_forge",
   "finalizing",
 ]);

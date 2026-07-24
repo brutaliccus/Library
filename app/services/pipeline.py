@@ -1156,6 +1156,7 @@ RESUMABLE_STATUSES = (
     "organizing",
     "metadata_forge",
     "m4b_convert",
+    "chapter_forge",
     "folder_forge",
     "finalizing",
 )
@@ -1176,6 +1177,7 @@ _FORGE_RESUME = {
     "metadata_forge": "metadata",
     "organizing": "metadata",
     "m4b_convert": "m4b",
+    "chapter_forge": "chapters",
     "folder_forge": "folder",
     "finalizing": "finalize",
 }

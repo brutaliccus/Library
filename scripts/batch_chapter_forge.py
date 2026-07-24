@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+"""Batch-apply Audible chapters (Chapter Forge) across an audiobook library.
+
+Inventories book folders under AUDIOBOOKS_ROOT (default /audiobooks), resolves
+ASIN from libraforge.json / metadata.json, and for each book with a real ASIN
+calls LibraForge ``POST /api/chaptering/runs`` (backend=audible-chapters).
+
+Designed to run on the Pi (or any host that can reach LibraForge + the library
+mount). Concurrency defaults to 1 (Audible-friendly; Chapter Forge is light).
+
+Usage (on Pi, from Library Site or LibraForge reports dir):
+  python3 batch_chapter_forge.py
+  python3 batch_chapter_forge.py --root /audiobooks --concurrency 1 --limit 20
+  python3 batch_chapter_forge.py --dry-run
+
+Environment:
+  LIBRAFORGE_URL          default http://127.0.0.1:5056
+  AUDIOBOOKS_ROOT         default /audiobooks
+  BATCH_CHAPTER_CONCURRENCY  default 1
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".ogg", ".opus", ".flac", ".wav", ".wma", ".aac", ".mp4"}
+SKIP_DIR_NAMES = {
+    ".unorganized",
+    "_unorganized",
+    "unorganized",
+    ".git",
+    "-tmpfiles",
+    "lost+found",
+}
+_ASIN_RE = re.compile(r"^(?:B[\dA-Z]{9}|\d{10})$", re.IGNORECASE)
+_ASIN_SENTINELS = frozenset({"", "HAS_ASIN", "NOREALASIN", "NONE", "NULL", "N/A"})
+
+_print_lock = threading.Lock()
+
+
+def log(msg: str) -> None:
+    with _print_lock:
+        print(f"{datetime.now().isoformat(timespec='seconds')} {msg}", flush=True)
+
+
+def normalize_asin(value: Any) -> str:
+    asin = str(value or "").strip().upper()
+    if not asin or asin in _ASIN_SENTINELS:
+        return ""
+    if not _ASIN_RE.match(asin):
+        return ""
+    return asin
+
+
+def _asin_from_sidecar(data: dict[str, Any]) -> str:
+    if "sidecar" in data and isinstance(data["sidecar"], dict):
+        data = data["sidecar"]
+    book = data.get("book") if isinstance(data.get("book"), dict) else {}
+    marker = data.get("marker") if isinstance(data.get("marker"), dict) else {}
+    audible = data.get("audible") if isinstance(data.get("audible"), dict) else {}
+    if not audible:
+        audible = marker.get("audible") if isinstance(marker.get("audible"), dict) else {}
+    backup = data.get("backup") if isinstance(data.get("backup"), dict) else {}
+    applied = backup.get("applied_tags") if isinstance(backup.get("applied_tags"), dict) else {}
+    for candidate in (
+        book.get("asin"),
+        audible.get("asin"),
+        applied.get("asin"),
+        marker.get("asin"),
+        data.get("asin"),
+    ):
+        asin = normalize_asin(candidate)
+        if asin:
+            return asin
+    return ""
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def extract_asin(folder: Path) -> str:
+    for name in ("libraforge.json",):
+        path = folder / name
+        if path.is_file():
+            asin = _asin_from_sidecar(read_json(path))
+            if asin:
+                return asin
+    for path in sorted(folder.glob("*.libraforge.json")):
+        asin = _asin_from_sidecar(read_json(path))
+        if asin:
+            return asin
+    meta = folder / "metadata.json"
+    if meta.is_file():
+        asin = normalize_asin(read_json(meta).get("asin"))
+        if asin:
+            return asin
+    for path in sorted(folder.glob("*.metadata.json")):
+        asin = normalize_asin(read_json(path).get("asin"))
+        if asin:
+            return asin
+    return ""
+
+
+def collect_audio(folder: Path) -> list[Path]:
+    files: list[Path] = []
+    try:
+        for path in folder.iterdir():
+            if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
+                if "-tmpfiles" in path.parts:
+                    continue
+                files.append(path)
+    except OSError:
+        return []
+    return files
+
+
+def primary_audio(folder: Path) -> Path | None:
+    audio = collect_audio(folder)
+    if not audio:
+        return None
+    m4bs = [f for f in audio if f.suffix.lower() == ".m4b"]
+    pool = m4bs or audio
+    return max(pool, key=lambda p: p.stat().st_size if p.is_file() else 0)
+
+
+def looks_like_book_folder(folder: Path) -> bool:
+    """True when this folder directly contains audiobook audio (not just authors)."""
+    return bool(collect_audio(folder))
+
+
+def inventory_books(root: Path) -> list[Path]:
+    books: list[Path] = []
+    for dirpath, dirnames, _filenames in os.walk(root):
+        # Prune staging / junk while walking
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in SKIP_DIR_NAMES
+            and not d.startswith(".")
+            and "-tmpfiles" not in d
+        ]
+        folder = Path(dirpath)
+        if folder == root:
+            continue
+        if looks_like_book_folder(folder):
+            books.append(folder)
+            # Don't descend into chapter-part trees once we have audio here
+            dirnames[:] = []
+    books.sort(key=lambda p: str(p).lower())
+    return books
+
+
+def http_json(
+    method: str,
+    url: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    data = None
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:800]
+        raise RuntimeError(f"HTTP {e.code} {method} {url}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Unreachable {url}: {e}") from e
+    if not raw:
+        return {}
+    parsed = json.loads(raw.decode("utf-8"))
+    return parsed if isinstance(parsed, dict) else {"data": parsed}
+
+
+def wait_for_run(
+    base_url: str,
+    run_id: str,
+    *,
+    poll_seconds: float = 2.0,
+    timeout_seconds: float = 900.0,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout_seconds
+    terminal = {"completed", "failed", "cancelled", "canceled", "success", "error", "done"}
+    while True:
+        state = http_json("GET", f"{base_url}/api/runs/{run_id}", timeout=60.0)
+        status = str(state.get("status") or "").lower()
+        if state.get("done") is True or status in terminal:
+            return state
+        if time.time() >= deadline:
+            raise RuntimeError(f"run {run_id} timed out after {timeout_seconds}s")
+        time.sleep(poll_seconds)
+
+
+def run_chapter_forge(
+    base_url: str,
+    source_path: str,
+    asin: str,
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    started = http_json(
+        "POST",
+        f"{base_url}/api/chaptering/runs",
+        {
+            "source_path": source_path,
+            "backend": "audible-chapters",
+            "asin": asin,
+            "no_save": False,
+        },
+        timeout=60.0,
+    )
+    run_id = str(started.get("id") or "").strip()
+    if not run_id:
+        raise RuntimeError(f"no run id: {started}")
+    return wait_for_run(base_url, run_id, timeout_seconds=timeout_seconds)
+
+
+def docker_path(host_path: Path, root: Path, docker_root: str) -> str:
+    """Map host library path into LibraForge container path (/audiobooks/...)."""
+    try:
+        rel = host_path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return host_path.as_posix()
+    return f"{docker_root.rstrip('/')}/{rel.as_posix()}"
+
+
+def process_book(
+    folder: Path,
+    *,
+    root: Path,
+    base_url: str,
+    docker_root: str,
+    dry_run: bool,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    asin = extract_asin(folder)
+    audio = primary_audio(folder)
+    row: dict[str, Any] = {
+        "path": str(folder),
+        "audio": str(audio) if audio else "",
+        "asin": asin,
+        "status": "pending",
+        "chapters": 0,
+        "error": "",
+    }
+    if not asin:
+        row["status"] = "skipped_no_asin"
+        return row
+    if audio is None:
+        row["status"] = "skipped_no_audio"
+        row["error"] = "no audio files in folder"
+        return row
+
+    source = docker_path(audio, root, docker_root)
+    row["source_path"] = source
+    if dry_run:
+        row["status"] = "dry_run"
+        return row
+
+    try:
+        report = run_chapter_forge(
+            base_url, source, asin, timeout_seconds=timeout_seconds
+        )
+        status = str(report.get("status") or "").lower()
+        if status in {"failed", "error", "cancelled", "canceled"} or report.get("error"):
+            row["status"] = "failed"
+            row["error"] = str(
+                report.get("error") or report.get("phase_detail") or status
+            )[:500]
+            return row
+        stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
+        try:
+            row["chapters"] = int(stats.get("chapters") or 0)
+        except (TypeError, ValueError):
+            row["chapters"] = 0
+        row["embedded_into"] = stats.get("embedded_into") or ""
+        row["status"] = "success"
+        return row
+    except Exception as e:
+        row["status"] = "failed"
+        row["error"] = str(e)[:500]
+        return row
+
+
+def trigger_abs_scan(base_url: str) -> str:
+    """Best-effort ABS scan via LibraForge if the endpoint exists."""
+    for path in ("/api/abs/scan", "/api/abs/scan-library"):
+        try:
+            http_json("POST", f"{base_url}{path}", {}, timeout=60.0)
+            return path
+        except Exception:
+            continue
+    return ""
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Batch Chapter Forge (Audible chapters)")
+    parser.add_argument(
+        "--root",
+        default=os.environ.get("AUDIOBOOKS_ROOT", "/audiobooks"),
+        help="Library root (host path visible to this script)",
+    )
+    parser.add_argument(
+        "--docker-root",
+        default="/audiobooks",
+        help="Same library as seen by LibraForge container",
+    )
+    parser.add_argument(
+        "--libraforge-url",
+        default=os.environ.get("LIBRAFORGE_URL", "http://127.0.0.1:5056").rstrip("/"),
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=int(os.environ.get("BATCH_CHAPTER_CONCURRENCY", "1")),
+    )
+    parser.add_argument("--limit", type=int, default=0, help="Max books to process (0=all)")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=900.0,
+        help="Per-book Chapter Forge timeout seconds",
+    )
+    parser.add_argument(
+        "--reports-dir",
+        default=os.environ.get("REPORTS_DIR", "/opt/stacks/libraforge/reports"),
+    )
+    parser.add_argument("--skip-abs-scan", action="store_true")
+    args = parser.parse_args()
+
+    root = Path(args.root)
+    if not root.is_dir():
+        log(f"ERROR: root not found: {root}")
+        return 2
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    reports = Path(args.reports_dir)
+    reports.mkdir(parents=True, exist_ok=True)
+    report_path = reports / f"chapter-forge-batch-{stamp}.json"
+    log_path = reports / f"chapter-forge-batch-{stamp}.log"
+
+    class Tee:
+        def __init__(self, *streams):
+            self.streams = streams
+
+        def write(self, data):
+            for s in self.streams:
+                s.write(data)
+                s.flush()
+
+        def flush(self):
+            for s in self.streams:
+                s.flush()
+
+    log_fh = log_path.open("w", encoding="utf-8")
+    sys.stdout = Tee(sys.__stdout__, log_fh)  # type: ignore[assignment]
+    sys.stderr = Tee(sys.__stderr__, log_fh)  # type: ignore[assignment]
+
+    log(f"Inventory under {root} …")
+    books = inventory_books(root)
+    log(f"Found {len(books)} book folder(s) with audio")
+    if args.limit and args.limit > 0:
+        books = books[: args.limit]
+        log(f"Limited to first {len(books)}")
+
+    concurrency = max(1, min(int(args.concurrency or 1), 2))
+    results: list[dict[str, Any]] = []
+    counts = {
+        "success": 0,
+        "failed": 0,
+        "skipped_no_asin": 0,
+        "skipped_no_audio": 0,
+        "dry_run": 0,
+        "other": 0,
+    }
+
+    def _work(folder: Path) -> dict[str, Any]:
+        row = process_book(
+            folder,
+            root=root,
+            base_url=args.libraforge_url,
+            docker_root=args.docker_root,
+            dry_run=args.dry_run,
+            timeout_seconds=args.timeout,
+        )
+        log(
+            f"[{row['status']}] asin={row.get('asin') or '-'} "
+            f"chapters={row.get('chapters', 0)} {row['path']}"
+            + (f" err={row['error']}" if row.get("error") else "")
+        )
+        return row
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {pool.submit(_work, book): book for book in books}
+        for fut in as_completed(futures):
+            row = fut.result()
+            results.append(row)
+            key = row["status"] if row["status"] in counts else "other"
+            counts[key] = counts.get(key, 0) + 1
+
+    results.sort(key=lambda r: r.get("path") or "")
+    abs_scan = ""
+    if not args.dry_run and not args.skip_abs_scan:
+        abs_scan = trigger_abs_scan(args.libraforge_url)
+        if abs_scan:
+            log(f"Triggered ABS scan via LibraForge {abs_scan}")
+        else:
+            log("ABS scan endpoint not available on LibraForge — trigger from Library Admin if needed")
+
+    summary = {
+        "stamp": stamp,
+        "root": str(root),
+        "libraforge_url": args.libraforge_url,
+        "dry_run": args.dry_run,
+        "concurrency": concurrency,
+        "counts": counts,
+        "total": len(results),
+        "abs_scan": abs_scan,
+        "results": results,
+    }
+    report_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    log(
+        f"Done. success={counts['success']} failed={counts['failed']} "
+        f"skipped_no_asin={counts['skipped_no_asin']} "
+        f"skipped_no_audio={counts['skipped_no_audio']} "
+        f"report={report_path}"
+    )
+    return 0 if counts["failed"] == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

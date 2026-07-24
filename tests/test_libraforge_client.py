@@ -20,8 +20,11 @@ from app.services.forge_pipeline import (
     cover_url_from_staging,
     delete_request_staging_tree,
     delete_staging_entry,
+    extract_asin_from_staging,
     m4b_source_dirs,
     needs_m4b_conversion,
+    normalize_asin,
+    primary_audio_for_chaptering,
     resolve_staging_dir,
     safe_path_under_staging,
     seed_staging_metadata_hints,
@@ -240,6 +243,51 @@ def test_staging_has_applied_metadata_asin(tmp_path):
         encoding="utf-8",
     )
     assert staging_has_applied_metadata(staging)
+
+
+def test_normalize_asin_filters_sentinels():
+    assert normalize_asin("b019nnu7xe") == "B019NNU7XE"
+    assert normalize_asin("HAS_ASIN") == ""
+    assert normalize_asin("NOREALASIN") == ""
+    assert normalize_asin("") == ""
+    assert normalize_asin("not-an-asin") == ""
+
+
+def test_extract_asin_from_staging_prefers_book_over_metadata(tmp_path):
+    staging = tmp_path / "req_ch"
+    staging.mkdir()
+    (staging / "book.m4b").write_bytes(b"x")
+    (staging / "libraforge.json").write_text(
+        json.dumps({"book": {"asin": "B0SIDECAR1"}, "scan_cache": {"asin": "HAS_ASIN"}}),
+        encoding="utf-8",
+    )
+    (staging / "metadata.json").write_text(
+        json.dumps({"asin": "B0META0001"}),
+        encoding="utf-8",
+    )
+    assert extract_asin_from_staging(staging) == "B0SIDECAR1"
+
+
+def test_extract_asin_falls_back_to_metadata_json(tmp_path):
+    staging = tmp_path / "req_ch"
+    staging.mkdir()
+    (staging / "libraforge.json").write_text(
+        json.dumps({"scan_cache": {"asin": "HAS_ASIN"}}),
+        encoding="utf-8",
+    )
+    (staging / "metadata.json").write_text(
+        json.dumps({"asin": "B0META0001"}),
+        encoding="utf-8",
+    )
+    assert extract_asin_from_staging(staging) == "B0META0001"
+
+
+def test_primary_audio_for_chaptering_prefers_m4b(tmp_path):
+    staging = tmp_path / "req_ch"
+    staging.mkdir()
+    (staging / "part.mp3").write_bytes(b"a" * 100)
+    (staging / "Book.m4b").write_bytes(b"b" * 50)
+    assert primary_audio_for_chaptering(staging).name == "Book.m4b"
 
 
 def test_resolve_staging_dir_docker_style(tmp_path, monkeypatch):

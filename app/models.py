@@ -82,9 +82,9 @@ class DownloadRequest(Base):
 
     status: Mapped[str] = mapped_column(String(32), default="pending")
     # pending → sent_to_rd → downloading_rd → transferring → metadata_forge →
-    # m4b_convert (audiobook) → folder_forge → finalizing → completed
+    # m4b_convert (audiobook) → chapter_forge → folder_forge → finalizing → completed
     # | quarantined | failed | admin_rejected
-    # Ebooks skip m4b_convert (DIY organizer in ebook_pipeline).
+    # Ebooks skip m4b_convert / chapter_forge (DIY organizer in ebook_pipeline).
     status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     rd_torrent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     aa_file_extension: Mapped[str | None] = mapped_column(String(16), nullable=True)

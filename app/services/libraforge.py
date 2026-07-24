@@ -345,6 +345,36 @@ async def start_m4b_run(
     return run_id
 
 
+async def start_chaptering_run(
+    source_path: str,
+    *,
+    asin: str = "",
+    backend: str = "audible-chapters",
+) -> str:
+    """Start Chapter Forge. Prefer ``audible-chapters`` (ASIN lookup, no ASR)."""
+    body: dict[str, Any] = {
+        "source_path": source_path,
+        "backend": backend or "audible-chapters",
+        "asin": (asin or "").strip().upper(),
+        "no_save": False,
+    }
+    data = await _request("POST", "/api/chaptering/runs", json_body=body, timeout=60.0)
+    run_id = str(data.get("id") or "").strip()
+    if not run_id:
+        raise LibraForgeError(f"Chapter Forge did not return a run id: {data}")
+    return run_id
+
+
+async def chaptering_load(source_path: str) -> dict[str, Any]:
+    """Load Chapter Forge state for a path (includes resolved ASIN when present)."""
+    return await _request(
+        "POST",
+        "/api/chaptering/load",
+        json_body={"source_path": source_path},
+        timeout=120.0,
+    )
+
+
 def _category_map(report: dict[str, Any]) -> dict[str, Any]:
     """LibraForge exposes facets as files_by_category (live) or categories (disk)."""
     cats = report.get("files_by_category")

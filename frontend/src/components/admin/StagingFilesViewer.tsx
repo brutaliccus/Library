@@ -56,7 +56,7 @@ function TreeNode({
 }: {
   entry: StagingEntry;
   depth: number;
-  onDelete: (path: string, name: string) => void;
+  onDelete: (path: string, name: string, isDir: boolean) => void;
   deletingPath: string | null;
 }) {
   const [open, setOpen] = useState(depth < 2);
@@ -112,8 +112,8 @@ function TreeNode({
         )}
         <button
           type="button"
-          title={isDir ? "Delete empty folder" : "Delete file"}
-          onClick={() => onDelete(entry.path, entry.name)}
+          title={isDir ? "Delete folder and contents" : "Delete file"}
+          onClick={() => onDelete(entry.path, entry.name, isDir)}
           disabled={deletingPath === entry.path}
           className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 rounded text-red-400/80 hover:bg-red-900/40 hover:text-red-300 disabled:opacity-40 shrink-0"
         >
@@ -183,12 +183,11 @@ export default function StagingFilesViewer({ requestId, title, open, onClose }: 
     },
   });
 
-  const handleDelete = (path: string, name: string) => {
-    if (
-      !window.confirm(
-        `Delete "${name}" from staging?\n\nThis only removes the file from this request's quarantine/staging folder — not the final library.`,
-      )
-    ) {
+  const handleDelete = (path: string, name: string, isDir: boolean) => {
+    const message = isDir
+      ? `Delete this folder and all contents?\n\n"${name}" will be removed from this request's quarantine/staging folder — not the final library.`
+      : `Delete "${name}" from staging?\n\nThis only removes the file from this request's quarantine/staging folder — not the final library.`;
+    if (!window.confirm(message)) {
       return;
     }
     deleteMutation.mutate(path);

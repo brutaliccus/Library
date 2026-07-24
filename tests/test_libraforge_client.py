@@ -253,12 +253,13 @@ def test_build_staging_tree_and_delete(tmp_path):
     assert not (sub / "Timeline.m4a").exists()
     assert (sub / "Timeline.mp3").exists()
 
-    with pytest.raises(ValueError, match="not empty"):
-        delete_staging_entry(staging, "Audio")
-
-    delete_staging_entry(staging, "Audio/Timeline.mp3")
-    # empty dir prune after file delete
+    # Recursive folder delete (non-empty) is allowed; staging root stays.
+    with pytest.raises(ValueError, match="Path is required"):
+        delete_staging_entry(staging, ".")
+    delete_staging_entry(staging, "Audio")
     assert not sub.exists()
+    assert staging.exists()
+    assert (staging / "metadata.json").exists()
 
 
 def test_cover_url_from_staging(tmp_path):

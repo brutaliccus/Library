@@ -346,25 +346,25 @@ def build_staging_tree(staging: Path, *, max_entries: int = 2000) -> dict[str, A
 
 
 def delete_staging_entry(staging: Path, relative: str) -> dict[str, Any]:
-    """Delete a file or empty directory under staging. Path-traversal safe."""
+    """Delete a file or directory (recursive) under staging. Path-traversal safe.
+
+    The staging root itself cannot be removed — only nested entries — so the
+    request keeps a valid quarantine folder.
+    """
+    staging_res = staging.resolve()
     target = safe_path_under_staging(staging, relative)
-    if target == staging.resolve():
+    if target == staging_res:
         raise ValueError("Cannot delete the staging root")
     if not target.exists():
         raise FileNotFoundError(f"Not found: {relative}")
     if target.is_dir():
-        try:
-            next(target.iterdir())
-            raise ValueError("Directory is not empty — delete files first")
-        except StopIteration:
-            target.rmdir()
-            return {"ok": True, "deleted": relative, "type": "dir"}
+        shutil.rmtree(target)
+        return {"ok": True, "deleted": relative, "type": "dir"}
     if not target.is_file():
         raise ValueError("Not a file or directory")
     target.unlink()
     # Prune empty parent dirs up to (but not including) staging root
     parent = target.parent
-    staging_res = staging.resolve()
     while parent != staging_res and parent.is_relative_to(staging_res):
         try:
             next(parent.iterdir())

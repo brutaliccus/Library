@@ -548,7 +548,10 @@ async def delete_request_staging_file(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete one file (or empty dir) under the request staging tree."""
+    """Delete one file or folder (recursive) under the request staging tree.
+
+    Nested directories may contain files; the staging root cannot be deleted.
+    """
     from app.services.forge_pipeline import delete_staging_entry, resolve_staging_dir
 
     req = await _staging_request_or_404(db, request_id)

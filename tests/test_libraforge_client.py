@@ -18,6 +18,7 @@ from app.services.forge_pipeline import (
     build_staging_tree,
     clean_catalog_title,
     cover_url_from_staging,
+    delete_request_staging_tree,
     delete_staging_entry,
     needs_m4b_conversion,
     resolve_staging_dir,
@@ -221,6 +222,34 @@ def test_resolve_staging_dir_rejects_outside_unorganized(tmp_path, monkeypatch):
     outside.mkdir(parents=True)
     with pytest.raises(FileNotFoundError):
         resolve_staging_dir(str(outside))
+
+
+def test_delete_request_staging_tree_docker_path_and_orphan(tmp_path, monkeypatch):
+    """Reject cleanup must resolve Docker-style paths and wipe req_{id}_* leftovers."""
+    from app.services import forge_pipeline
+
+    monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
+    unorg = tmp_path / "_unorganized"
+    primary = unorg / "req_9_Timeline"
+    orphan = unorg / "req_9_OrphanLeftover"
+    other = unorg / "req_10_Keep"
+    primary.mkdir(parents=True)
+    orphan.mkdir(parents=True)
+    other.mkdir(parents=True)
+    (primary / "a.mp3").write_bytes(b"x")
+    (orphan / "b.mp3").write_bytes(b"y")
+    (other / "c.mp3").write_bytes(b"z")
+    # Library path outside staging must never be touched
+    library_book = tmp_path / "Author" / "Book"
+    library_book.mkdir(parents=True)
+    (library_book / "keep.m4b").write_bytes(b"keep")
+
+    deleted = delete_request_staging_tree(9, "/audiobooks/_unorganized/req_9_Timeline")
+    assert primary.resolve() in {p.resolve() for p in deleted}
+    assert not primary.exists()
+    assert not orphan.exists()
+    assert other.exists()
+    assert (library_book / "keep.m4b").exists()
 
 
 def test_safe_path_under_staging_blocks_traversal(tmp_path):

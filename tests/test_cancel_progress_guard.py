@@ -49,6 +49,31 @@ def test_report_progress_skips_cancelled_request():
     asyncio.run(_run())
 
 
+def test_report_progress_skips_admin_rejected_request():
+    """Admin reject must stay terminal — forge/download progress must not revive it."""
+
+    async def _run():
+        rejected = SimpleNamespace(status="admin_rejected")
+        db, session_cm = _session_returning(rejected)
+
+        with (
+            patch.object(pipeline.ws_manager, "send_to_user", new=AsyncMock()) as send,
+            patch.object(pipeline, "async_session", return_value=session_cm),
+            patch.object(pipeline, "_progress_db_throttle", {}),
+        ):
+            await pipeline._report_progress(
+                42,
+                7,
+                "metadata_forge",
+                "Matching…",
+                progress_percent=40.0,
+            )
+            send.assert_not_awaited()
+            db.commit.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
 def test_report_progress_writes_when_active():
     async def _run():
         active = SimpleNamespace(

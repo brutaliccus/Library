@@ -913,6 +913,65 @@ async def run_forge_after_download(
             logger.warning("Push notification failed (non-fatal): %s", e)
 
 
+def delete_request_staging_tree(
+    request_id: int,
+    staging_str: str | None,
+) -> list[Path]:
+    """Recursively delete this request's staging dirs under ``_unorganized`` only.
+
+    Resolves Docker-style ``staging_path`` values via ``resolve_staging_dir``, and
+    also removes any ``req_{id}_*`` leftover folders for the same request id.
+    Never deletes outside the configured audiobook ``_unorganized`` tree.
+    """
+    unorganized = unorganized_root().resolve()
+    to_delete: dict[Path, None] = {}
+
+    raw = (staging_str or "").strip()
+    if raw:
+        try:
+            resolved = resolve_staging_dir(raw)
+            to_delete[resolved.resolve()] = None
+        except FileNotFoundError:
+            logger.debug(
+                "Reject staging resolve skipped for request %s (%s)",
+                request_id,
+                raw,
+            )
+
+    # Catch orphaned req_{id}_* trees even if staging_path was missing/stale.
+    prefix = f"req_{request_id}_"
+    try:
+        if unorganized.is_dir():
+            for child in unorganized.iterdir():
+                if not child.is_dir():
+                    continue
+                name = child.name
+                if name == f"req_{request_id}" or name.startswith(prefix):
+                    try:
+                        to_delete[child.resolve()] = None
+                    except OSError:
+                        continue
+    except OSError as e:
+        logger.warning("Could not list unorganized root for reject cleanup: %s", e)
+
+    deleted: list[Path] = []
+    for path in to_delete:
+        try:
+            path.relative_to(unorganized)
+        except ValueError:
+            logger.warning("Refusing to delete path outside _unorganized: %s", path)
+            continue
+        if not path.is_dir():
+            continue
+        try:
+            shutil.rmtree(path)
+            deleted.append(path)
+            logger.info("Deleted quarantine staging %s", path)
+        except OSError as e:
+            logger.warning("Could not delete staging %s: %s", path, e)
+    return deleted
+
+
 async def reject_quarantined_request(
     request_id: int,
     *,
@@ -929,6 +988,7 @@ async def reject_quarantined_request(
             raise ValueError(f"Cannot reject request in status '{req.status}'")
 
         staging_str = (req.staging_path or "").strip()
+        forge_run_id = (getattr(req, "libraforge_run_id", None) or "").strip() or None
         title = req.title
         user_id = req.user_id
 
@@ -954,19 +1014,18 @@ async def reject_quarantined_request(
         except Exception:
             logger.warning("User reject push failed", exc_info=True)
 
-    if delete_files and staging_str:
-        staging = Path(staging_str)
-        # Also try under configured audiobook dir if path was relative-ish
-        candidates = [staging]
-        if not staging.is_absolute():
-            candidates.append(Path(settings.audiobook_dir) / staging_str)
-        for path in candidates:
-            if path.is_dir() and UNORGANIZED_DIRNAME in path.parts:
-                try:
-                    shutil.rmtree(path, ignore_errors=True)
-                    logger.info("Deleted quarantine staging %s", path)
-                except OSError as e:
-                    logger.warning("Could not delete staging %s: %s", path, e)
+    if forge_run_id:
+        try:
+            await libraforge.cancel_run(forge_run_id)
+        except Exception:
+            logger.debug(
+                "LibraForge cancel_run for rejected request %s failed",
+                request_id,
+                exc_info=True,
+            )
+
+    if delete_files:
+        delete_request_staging_tree(request_id, staging_str or None)
 
     async with async_session() as db:
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))

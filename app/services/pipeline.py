@@ -64,7 +64,7 @@ async def _report_progress(
     progress_speed_bps: float | None = None,
     persist: bool = True,
 ):
-    # Cancel is terminal. In-flight RD/AA/forge progress must not revive cancelled.
+    # Cancel / admin reject are terminal. In-flight RD/AA/forge progress must not revive them.
     if not persist:
         if await _is_cancelled(request_id):
             return
@@ -92,7 +92,7 @@ async def _report_progress(
             select(DownloadRequest).where(DownloadRequest.id == request_id)
         )
         req = result.scalar_one_or_none()
-        if not req or req.status == "cancelled":
+        if not req or req.status in ("cancelled", "admin_rejected"):
             return
         if not throttled:
             _progress_db_throttle[request_id] = now
@@ -120,12 +120,13 @@ async def _report_progress(
 
 
 async def _is_cancelled(request_id: int) -> bool:
+    """True when the request was stopped by the user or admin (abort in-flight work)."""
     async with async_session() as db:
         result = await db.execute(
             select(DownloadRequest.status).where(DownloadRequest.id == request_id)
         )
         status = result.scalar_one_or_none()
-        return status == "cancelled"
+        return status in ("cancelled", "admin_rejected")
 
 
 async def _update_status(
@@ -146,8 +147,10 @@ async def _update_status(
     if req is None:
         logger.warning("DownloadRequest %s missing during status update → %s", request_id, status)
         return
-    # Never clobber an explicit user cancel with pipeline progress/failure.
+    # Never clobber an explicit user cancel / admin reject with pipeline progress/failure.
     if req.status == "cancelled" and status != "cancelled":
+        return
+    if req.status == "admin_rejected" and status != "admin_rejected":
         return
     req.status = status
     if detail is not None:

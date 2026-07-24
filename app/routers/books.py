@@ -576,16 +576,24 @@ async def build_new_releases_payload() -> dict:
     # Rank by when we matched the torrent (scraper/RSS), not OL publish year.
     # The local OL dump tags almost no modern years and ships garbage like
     # 9999/9881 that permanently froze this shelf on a handful of 2010 titles.
+    from app.services.prowlarr import title_is_mostly_foreign_script
+
     volume_ids, _ = await indexer_cache.list_matched_volume_ids(
-        page=1, page_size=20, order_by="recent", need_total=False,
+        page=1, page_size=80, order_by="recent", need_total=False,
     )
     source = "recent"
     if not volume_ids:
         volume_ids, _ = await indexer_cache.list_matched_volumes_by_year(
-            page=1, page_size=20, min_year=1,
+            page=1, page_size=80, min_year=1,
         )
         source = "pubdate"
-    books = await _fetch_volume_cards(volume_ids)
+    cards = await _fetch_volume_cards(volume_ids)
+    books = [
+        b for b in cards
+        if not title_is_mostly_foreign_script(b.get("title") or "")
+    ][:20]
+    if not books:
+        books = cards[:20]
     return {"books": books, "source": source, "availableOnly": True}
 
 

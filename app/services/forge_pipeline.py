@@ -472,8 +472,36 @@ def _remove_source_audio_after_m4b(staging: Path) -> int:
     return removed
 
 
+def _http_cover_from_mapping(data: Any, *, depth: int = 0) -> str | None:
+    """Find first http(s) cover URL in a nested LibraForge / ABS metadata dict."""
+    if depth > 6 or not isinstance(data, dict):
+        return None
+    for key in ("cover_url", "cover", "image_url"):
+        val = str(data.get(key) or "").strip()
+        if val.startswith("http"):
+            return val
+    # Prefer known LibraForge nests before a blind walk.
+    for nest_key in ("marker", "sidecar", "book", "audible", "backup", "applied_tags"):
+        nested = data.get(nest_key)
+        if isinstance(nested, dict):
+            found = _http_cover_from_mapping(nested, depth=depth + 1)
+            if found:
+                return found
+    for value in data.values():
+        if isinstance(value, dict):
+            found = _http_cover_from_mapping(value, depth=depth + 1)
+            if found:
+                return found
+    return None
+
+
 def cover_url_from_staging(staging: Path) -> str | None:
-    """Best-effort cover URL from metadata.json / libraforge.json for M4B --cover."""
+    """Best-effort cover URL from metadata.json / libraforge.json for M4B --cover.
+
+    Manual Review / Quick Review store the URL under nested paths such as
+    ``marker.audible.cover_url`` and ``sidecar.book.cover_url`` (ABS
+    ``metadata.json`` does not include ``cover_url``).
+    """
     if not staging.is_dir():
         return None
     for meta_path in staging.rglob("metadata.json"):
@@ -481,34 +509,17 @@ def cover_url_from_staging(staging: Path) -> str | None:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(meta, dict):
-            continue
-        for key in ("cover_url", "cover", "image_url"):
-            val = str(meta.get(key) or "").strip()
-            if val.startswith("http"):
-                return val
+        found = _http_cover_from_mapping(meta)
+        if found:
+            return found
     for marker_path in staging.rglob("libraforge.json"):
         try:
             data = json.loads(marker_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(data, dict):
-            continue
-        for block_key in ("marker", "sidecar", "book", "audible", "backup"):
-            block = data.get(block_key)
-            if not isinstance(block, dict):
-                continue
-            for key in ("cover_url", "cover", "image_url"):
-                val = str(block.get(key) or "").strip()
-                if val.startswith("http"):
-                    return val
-            applied = block.get("applied_tags") if isinstance(block.get("applied_tags"), dict) else {}
-            val = str(applied.get("cover_url") or applied.get("cover") or "").strip()
-            if val.startswith("http"):
-                return val
-        val = str(data.get("cover_url") or "").strip()
-        if val.startswith("http"):
-            return val
+        found = _http_cover_from_mapping(data)
+        if found:
+            return found
     return None
 
 

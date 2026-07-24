@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.services.quick_review import (
+    _enrich_selected_for_apply,
     _folder_title_hint,
     _looks_like_junk_title,
     list_staging_targets,
     merge_clues_with_catalog,
+    resolve_apply_edit_mode,
     resolve_target_path,
 )
 
@@ -88,3 +90,35 @@ def test_list_staging_targets_and_resolve(tmp_path):
     local, lf = resolve_target_path(staging, "")
     assert local == staging.resolve()
     assert "req_9_Timeline" in lf.replace("\\", "/")
+
+
+def test_resolve_apply_edit_mode_forces_full_when_replace_cover():
+    selected = {
+        "recommended_edit_mode": "series_only",
+        "allowed_edit_modes": ["full", "series_only"],
+    }
+    assert (
+        resolve_apply_edit_mode(selected, edit_mode="series_only", replace_cover=True)
+        == "full"
+    )
+    assert (
+        resolve_apply_edit_mode(selected, edit_mode="series_only", replace_cover=False)
+        == "series_only"
+    )
+
+
+def test_enrich_selected_injects_top_level_cover_into_full_mode():
+    selected = {
+        "cover_url": "https://images.example/cover.jpg",
+        "chosen_metadata_by_mode": {
+            "full": {"title": "Timeline", "author": "Crichton", "cover_url": ""},
+            "series_only": {"series": "X", "cover_url": ""},
+        },
+    }
+    enriched, override = _enrich_selected_for_apply(
+        selected, edit_mode="full", replace_cover=True
+    )
+    assert enriched["chosen_metadata_by_mode"]["full"]["cover_url"] == (
+        "https://images.example/cover.jpg"
+    )
+    assert override.get("cover_url") == "https://images.example/cover.jpg"

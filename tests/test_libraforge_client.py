@@ -304,6 +304,36 @@ def test_cover_url_from_staging(tmp_path):
     assert cover_url_from_staging(staging) == "https://images.example/cover.jpg"
 
 
+def test_cover_url_from_staging_nested_marker_audible(tmp_path):
+    """Manual Review stores cover under marker.audible / sidecar.book, not top-level."""
+    staging = tmp_path / "req_2"
+    staging.mkdir()
+    (staging / "metadata.json").write_text(
+        json.dumps({"title": "Timeline", "asin": "B00TEST"}),
+        encoding="utf-8",
+    )
+    (staging / "libraforge.json").write_text(
+        json.dumps(
+            {
+                "marker": {
+                    "audible": {
+                        "title": "Timeline",
+                        "cover_url": "https://images.example/nested-cover.jpg",
+                    }
+                },
+                "sidecar": {
+                    "book": {
+                        "title": "Timeline",
+                        "cover_url": "https://images.example/sidecar-cover.jpg",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert cover_url_from_staging(staging) == "https://images.example/nested-cover.jpg"
+
+
 def test_remove_source_audio_after_m4b(tmp_path):
     staging = tmp_path / "req_1"
     staging.mkdir()

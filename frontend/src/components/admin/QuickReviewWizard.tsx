@@ -53,6 +53,24 @@ type QuickReviewLoad = {
   already_applied: boolean;
 };
 
+type ChosenMeta = {
+  title?: string;
+  subtitle?: string;
+  author?: string;
+  narrator?: string;
+  series?: string;
+  sequence?: string;
+  year?: string;
+  asin?: string;
+  isbn?: string;
+  publisher?: string;
+  genre?: string;
+  language?: string;
+  summary?: string;
+  cover_url?: string;
+  [key: string]: unknown;
+};
+
 type SearchResult = {
   asin?: string;
   title?: string;
@@ -64,8 +82,20 @@ type SearchResult = {
   score?: number | null;
   cover_url?: string;
   year?: string;
+  publisher?: string;
+  language?: string;
+  duration_minutes?: number | null;
+  summary?: string;
   recommended_edit_mode?: string;
   allowed_edit_modes?: string[];
+  chosen_metadata?: ChosenMeta;
+  chosen_metadata_by_mode?: Record<string, ChosenMeta>;
+  duration?: {
+    status?: string;
+    diff_percent?: number | null;
+    local_minutes?: number | null;
+    audible_minutes?: number | null;
+  };
   [key: string]: unknown;
 };
 
@@ -73,6 +103,22 @@ const STEPS: { id: WizardStep; label: string; icon: typeof Files }[] = [
   { id: "files", label: "Files", icon: Files },
   { id: "metadata", label: "Metadata", icon: Tags },
   { id: "pipeline", label: "Run pipeline", icon: Play },
+];
+
+/** Mirror LibraForge Manual Review compare table fields. */
+const COMPARE_FIELDS: { label: string; key: string }[] = [
+  { label: "Title", key: "title" },
+  { label: "Subtitle", key: "subtitle" },
+  { label: "Author", key: "author" },
+  { label: "Narrator", key: "narrator" },
+  { label: "Series", key: "series" },
+  { label: "Sequence", key: "sequence" },
+  { label: "Year", key: "year" },
+  { label: "ASIN", key: "asin" },
+  { label: "ISBN", key: "isbn" },
+  { label: "Publisher", key: "publisher" },
+  { label: "Language", key: "language" },
+  { label: "Genre", key: "genre" },
 ];
 
 function scoreLabel(score: number | null | undefined): string {
@@ -87,6 +133,57 @@ function authorLine(r: SearchResult): string {
 
 function narratorLine(r: SearchResult): string {
   if (Array.isArray(r.narrators) && r.narrators.length) return r.narrators.join(", ");
+  return "";
+}
+
+function chosenFor(result: SearchResult, mode?: string): ChosenMeta {
+  const preferred = mode || result.recommended_edit_mode || "full";
+  const byMode = result.chosen_metadata_by_mode?.[preferred];
+  if (byMode && typeof byMode === "object") return byMode;
+  if (result.chosen_metadata && typeof result.chosen_metadata === "object") {
+    return result.chosen_metadata;
+  }
+  return {
+    title: result.title || "",
+    subtitle: result.subtitle || "",
+    author: authorLine(result),
+    narrator: narratorLine(result),
+    series: result.series || "",
+    sequence: result.sequence != null ? String(result.sequence) : "",
+    year: result.year || "",
+    asin: result.asin || "",
+    publisher: result.publisher || "",
+    language: result.language || "",
+    summary: result.summary || "",
+    cover_url: result.cover_url || "",
+  };
+}
+
+function fieldStr(value: unknown): string {
+  if (value == null) return "";
+  if (Array.isArray(value)) return value.map(String).filter(Boolean).join(", ");
+  return String(value).trim();
+}
+
+function formatMinutes(v: unknown): string {
+  if (v == null || v === "") return "";
+  const n = Number(v);
+  if (Number.isNaN(n)) return "";
+  return `${n.toFixed(1)} min`;
+}
+
+function localField(
+  metadata: Record<string, unknown> | undefined,
+  clues: Clues | undefined,
+  key: string,
+): string {
+  const fromMeta = fieldStr(metadata?.[key]);
+  if (fromMeta) return fromMeta;
+  if (key === "author") return fieldStr(clues?.author);
+  if (key === "title") return fieldStr(clues?.title);
+  if (key === "narrator") return fieldStr(clues?.narrator);
+  if (key === "series") return fieldStr(clues?.series);
+  if (key === "sequence") return fieldStr(clues?.sequence);
   return "";
 }
 
@@ -196,7 +293,8 @@ export default function QuickReviewWizard({
         {
           relative_path: relativePath,
           selected_result: selected,
-          edit_mode: selected.recommended_edit_mode || "full",
+          // Prefer full so LibraForge can embed cover (writers gate on edit_mode==full).
+          edit_mode: "full",
           replace_cover: true,
         },
         { timeout: 320_000 },
@@ -225,6 +323,9 @@ export default function QuickReviewWizard({
   const forgeUrl = review?.manual_review_url || manualReviewUrl || null;
   const selected = results.find((r) => (r.asin || r.title) === selectedAsin) || null;
   const stepIndex = STEPS.findIndex((s) => s.id === step);
+  const currentCover = fieldStr(
+    review?.metadata?.cover_url || (review?.clues as { cover_url?: string } | undefined)?.cover_url,
+  );
 
   return (
     <Modal title={`Quick review — ${title}`} show={open} onClose={onClose} size="xl">
@@ -414,64 +515,225 @@ export default function QuickReviewWizard({
                 </div>
 
                 {results.length > 0 && (
-                  <ul className="space-y-2 max-h-[36vh] overflow-y-auto">
+                  <ul className="space-y-3 max-h-[48vh] overflow-y-auto pr-0.5">
                     {results.map((r, idx) => {
                       const key = r.asin || r.title || `r-${idx}`;
                       const active = selectedAsin === key;
+                      const mode = r.recommended_edit_mode || "full";
+                      const chosen = chosenFor(r, mode);
+                      const dur = r.duration || {};
+                      const localDur = formatMinutes(
+                        review.metadata?.local_duration_minutes ?? dur.local_minutes,
+                      );
+                      const audibleDurRaw = r.duration_minutes ?? dur.audible_minutes;
+                      let audibleDur = formatMinutes(audibleDurRaw);
+                      if (audibleDur && dur.status) {
+                        const pct =
+                          dur.diff_percent || dur.diff_percent === 0
+                            ? ` · ${dur.diff_percent}%`
+                            : "";
+                        audibleDur += ` (${dur.status}${pct})`;
+                      }
+                      const summary = fieldStr(chosen.summary || r.summary);
+                      const matchCover = fieldStr(chosen.cover_url || r.cover_url);
+                      const changedRows = COMPARE_FIELDS.map(({ label, key: fieldKey }) => {
+                        const current = localField(review.metadata, review.clues, fieldKey);
+                        let willWrite = fieldStr(chosen[fieldKey]);
+                        if (!willWrite && fieldKey === "author") willWrite = authorLine(r);
+                        if (!willWrite && fieldKey === "narrator") willWrite = narratorLine(r);
+                        if (!willWrite && fieldKey === "title") willWrite = fieldStr(r.title);
+                        if (!willWrite && fieldKey === "subtitle") willWrite = fieldStr(r.subtitle);
+                        if (!willWrite && fieldKey === "series") willWrite = fieldStr(r.series);
+                        if (!willWrite && fieldKey === "sequence") {
+                          willWrite = r.sequence != null ? String(r.sequence) : "";
+                        }
+                        if (!willWrite && fieldKey === "year") willWrite = fieldStr(r.year);
+                        if (!willWrite && fieldKey === "asin") willWrite = fieldStr(r.asin);
+                        if (!willWrite && fieldKey === "publisher") willWrite = fieldStr(r.publisher);
+                        if (!willWrite && fieldKey === "language") willWrite = fieldStr(r.language);
+                        const changed = Boolean(willWrite && willWrite !== current);
+                        return { label, current, willWrite, changed };
+                      }).filter((row) => row.current || row.willWrite);
+
                       return (
                         <li key={key}>
                           <button
                             type="button"
                             onClick={() => setSelectedAsin(key)}
-                            className={`w-full text-left flex gap-3 p-2.5 rounded-xl border transition-colors ${
+                            className={`w-full text-left p-3 rounded-xl border transition-colors ${
                               active
                                 ? "border-teal-600/70 bg-teal-900/25"
                                 : "border-gray-700 bg-gray-900/40 hover:border-gray-600"
                             }`}
                           >
-                            <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-lg overflow-hidden bg-gray-800 shrink-0 border border-gray-700">
-                              {r.cover_url ? (
-                                <img
-                                  src={r.cover_url}
-                                  alt=""
-                                  className="w-full h-full object-cover"
-                                  loading="lazy"
-                                />
-                              ) : (
-                                <div className="w-full h-full flex items-center justify-center text-gray-600 text-[10px]">
-                                  —
-                                </div>
-                              )}
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-start justify-between gap-2">
-                                <p className="text-sm font-medium text-gray-100 truncate">
-                                  {r.title || "Untitled"}
-                                </p>
-                                <span className="text-[11px] tabular-nums text-teal-300/90 shrink-0">
-                                  {scoreLabel(r.score)}
-                                </span>
+                            <div className="flex gap-3">
+                              <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg overflow-hidden bg-gray-800 shrink-0 border border-gray-700">
+                                {matchCover ? (
+                                  <img
+                                    src={matchCover}
+                                    alt=""
+                                    className="w-full h-full object-cover"
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center text-gray-600 text-[10px]">
+                                    —
+                                  </div>
+                                )}
                               </div>
-                              {authorLine(r) && (
-                                <p className="text-xs text-gray-400 truncate mt-0.5">{authorLine(r)}</p>
-                              )}
-                              {narratorLine(r) && (
-                                <p className="text-[11px] text-gray-500 truncate">
-                                  Narrated by {narratorLine(r)}
-                                </p>
-                              )}
-                              {(r.series || r.asin) && (
-                                <p className="text-[11px] text-gray-600 truncate mt-0.5">
-                                  {[
-                                    r.series &&
-                                      `Series: ${r.series}${r.sequence ? ` #${r.sequence}` : ""}`,
-                                    r.asin,
-                                  ]
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-medium text-gray-100 truncate">
+                                      {r.title || chosen.title || "Untitled"}
+                                    </p>
+                                    {fieldStr(r.subtitle || chosen.subtitle) && (
+                                      <p className="text-[11px] text-gray-500 truncate">
+                                        {fieldStr(r.subtitle || chosen.subtitle)}
+                                      </p>
+                                    )}
+                                  </div>
+                                  <span className="text-[11px] tabular-nums text-teal-300/90 shrink-0">
+                                    {scoreLabel(r.score)}
+                                  </span>
+                                </div>
+                                <div className="mt-1.5 flex flex-wrap gap-1.5 text-[10px] text-gray-400">
+                                  {mode && (
+                                    <span className="px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700">
+                                      {mode === "full" ? "Full metadata" : "Series only"}
+                                    </span>
+                                  )}
+                                  {r.asin && (
+                                    <span className="px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 font-mono">
+                                      {r.asin}
+                                    </span>
+                                  )}
+                                  {(r.series || chosen.series) && (
+                                    <span className="px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 truncate max-w-[12rem]">
+                                      {r.series || chosen.series}
+                                      {(r.sequence ?? chosen.sequence)
+                                        ? ` #${r.sequence ?? chosen.sequence}`
+                                        : ""}
+                                    </span>
+                                  )}
+                                  {audibleDur && (
+                                    <span className="px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700">
+                                      {audibleDur}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-gray-400 truncate mt-1">
+                                  {[authorLine(r) || chosen.author, narratorLine(r) || chosen.narrator]
                                     .filter(Boolean)
                                     .join(" · ")}
                                 </p>
-                              )}
+                              </div>
                             </div>
+
+                            {(currentCover || matchCover) && (
+                              <div className="mt-2.5 grid grid-cols-2 gap-2">
+                                <div className="rounded-lg border border-gray-700/80 bg-gray-950/40 p-1.5">
+                                  <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
+                                    Current
+                                  </p>
+                                  <div className="aspect-square max-h-20 mx-auto rounded overflow-hidden bg-gray-800">
+                                    {currentCover ? (
+                                      <img
+                                        src={currentCover}
+                                        alt=""
+                                        className="w-full h-full object-cover"
+                                        loading="lazy"
+                                      />
+                                    ) : (
+                                      <div className="w-full h-full flex items-center justify-center text-[10px] text-gray-600">
+                                        No cover
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-gray-700/80 bg-gray-950/40 p-1.5">
+                                  <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
+                                    Match
+                                  </p>
+                                  <div className="aspect-square max-h-20 mx-auto rounded overflow-hidden bg-gray-800">
+                                    {matchCover ? (
+                                      <img
+                                        src={matchCover}
+                                        alt=""
+                                        className="w-full h-full object-cover"
+                                        loading="lazy"
+                                      />
+                                    ) : (
+                                      <div className="w-full h-full flex items-center justify-center text-[10px] text-gray-600">
+                                        No cover
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {changedRows.length > 0 && (
+                              <div className="mt-2.5 overflow-x-auto rounded-lg border border-gray-700/70">
+                                <table className="w-full text-[11px] text-left">
+                                  <thead>
+                                    <tr className="text-gray-500 border-b border-gray-700/70">
+                                      <th className="px-2 py-1.5 font-medium">Field</th>
+                                      <th className="px-2 py-1.5 font-medium">Current</th>
+                                      <th className="px-2 py-1.5 font-medium">Will write</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {changedRows.map((row) => (
+                                      <tr
+                                        key={row.label}
+                                        className={
+                                          row.changed
+                                            ? "bg-teal-950/20 text-gray-200"
+                                            : "text-gray-400"
+                                        }
+                                      >
+                                        <th className="px-2 py-1 font-medium text-gray-500 whitespace-nowrap">
+                                          {row.label}
+                                        </th>
+                                        <td className="px-2 py-1 max-w-[8rem] truncate" title={row.current}>
+                                          {row.current || "—"}
+                                        </td>
+                                        <td
+                                          className="px-2 py-1 max-w-[8rem] truncate"
+                                          title={row.willWrite}
+                                        >
+                                          {row.willWrite || "—"}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                    {(localDur || audibleDur) && (
+                                      <tr className="text-gray-400 border-t border-gray-800">
+                                        <th className="px-2 py-1 font-medium text-gray-500">
+                                          Duration
+                                        </th>
+                                        <td className="px-2 py-1">{localDur || "—"}</td>
+                                        <td className="px-2 py-1">{audibleDur || "—"}</td>
+                                      </tr>
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+
+                            {summary && (
+                              <details
+                                className="mt-2 text-[11px] text-gray-500"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <summary className="cursor-pointer text-gray-400 hover:text-gray-300">
+                                  Summary
+                                </summary>
+                                <p className="mt-1 leading-relaxed text-gray-400 whitespace-pre-wrap">
+                                  {summary}
+                                </p>
+                              </details>
+                            )}
                           </button>
                         </li>
                       );

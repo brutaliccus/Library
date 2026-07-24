@@ -6,6 +6,7 @@ folder titles over junk chapter filenames (e.g. Timeline over Tape1).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -307,6 +308,102 @@ async def search_quick_review(
     }
 
 
+def _cover_url_from_candidate(selected: dict[str, Any], edit_mode: str = "full") -> str:
+    """Resolve cover URL from a Manual Review / search candidate payload."""
+    by_mode = selected.get("chosen_metadata_by_mode") or {}
+    for source in (
+        (by_mode.get(edit_mode) or {}) if isinstance(by_mode, dict) else {},
+        selected.get("chosen_metadata") or {},
+        selected,
+    ):
+        if not isinstance(source, dict):
+            continue
+        val = str(source.get("cover_url") or source.get("cover") or "").strip()
+        if val.startswith("http"):
+            return val
+    # Fall back to full-mode preview even when applying another mode for tags.
+    if isinstance(by_mode, dict):
+        full = by_mode.get("full") or {}
+        if isinstance(full, dict):
+            val = str(full.get("cover_url") or full.get("cover") or "").strip()
+            if val.startswith("http"):
+                return val
+    return ""
+
+
+def _enrich_selected_for_apply(
+    selected_result: dict[str, Any],
+    *,
+    edit_mode: str,
+    replace_cover: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Ensure chosen metadata carries cover_url (and top-level URL) for LibraForge.
+
+    LibraForge only embeds covers when ``edit_mode == "full"`` and
+    ``replace_cover`` / ``cover_if_missing`` with a non-empty ``cover_url``
+    on the chosen metadata blob — not the top-level candidate field alone.
+    """
+    selected = dict(selected_result)
+    by_mode_raw = selected.get("chosen_metadata_by_mode") or {}
+    by_mode: dict[str, Any] = dict(by_mode_raw) if isinstance(by_mode_raw, dict) else {}
+    cover = _cover_url_from_candidate(selected, edit_mode)
+
+    for mode_key in ("full", edit_mode):
+        if mode_key not in {"full", "series_only"}:
+            continue
+        base = by_mode.get(mode_key) or selected.get("chosen_metadata") or {}
+        if not isinstance(base, dict):
+            base = {}
+        entry = dict(base)
+        if cover and mode_key == "full":
+            entry["cover_url"] = cover
+        elif mode_key == "series_only":
+            # series_only never embeds covers in LibraForge writers
+            entry.setdefault("cover_url", "")
+        by_mode[mode_key] = entry
+
+    if cover:
+        selected["cover_url"] = cover
+    selected["chosen_metadata_by_mode"] = by_mode
+    full = by_mode.get("full") if isinstance(by_mode.get("full"), dict) else {}
+    chosen = by_mode.get(edit_mode) if isinstance(by_mode.get(edit_mode), dict) else full
+    if chosen:
+        selected["chosen_metadata"] = dict(chosen)
+
+    override: dict[str, Any] = {}
+    if replace_cover and edit_mode == "full" and cover:
+        override["cover_url"] = cover
+    return selected, override
+
+
+def resolve_apply_edit_mode(
+    selected_result: dict[str, Any],
+    *,
+    edit_mode: str = "full",
+    replace_cover: bool = True,
+) -> str:
+    """Pick apply edit_mode. Cover replace requires LibraForge ``full`` mode."""
+    mode = (edit_mode or "full").strip()
+    if mode not in {"full", "series_only"}:
+        mode = "full"
+    allowed_raw = selected_result.get("allowed_edit_modes") or []
+    allowed = [str(m) for m in allowed_raw] if isinstance(allowed_raw, list) else []
+
+    # Quick Review always requests replace_cover; LibraForge writers gate cover
+    # embeds on edit_mode == "full". Prefer full whenever cover replace is on.
+    if replace_cover and (not allowed or "full" in allowed):
+        return "full"
+
+    recommended = str(selected_result.get("recommended_edit_mode") or "").strip()
+    if recommended in {"full", "series_only"} and (
+        not allowed or recommended in allowed
+    ):
+        return recommended
+    if allowed and mode not in allowed:
+        return "full" if "full" in allowed else str(allowed[0])
+    return mode
+
+
 async def apply_quick_review(
     req: DownloadRequest,
     *,
@@ -336,27 +433,29 @@ async def apply_quick_review(
 
     _target_local, lf_path = resolve_target_path(staging, chosen_rel or None)
 
-    mode = (edit_mode or "full").strip()
-    if mode not in {"full", "series_only"}:
-        mode = "full"
-    recommended = str(selected_result.get("recommended_edit_mode") or "").strip()
-    allowed = selected_result.get("allowed_edit_modes") or []
-    if recommended in {"full", "series_only"} and (
-        not allowed or recommended in allowed
-    ):
-        mode = recommended
-    elif allowed and mode not in allowed:
-        mode = "full" if "full" in allowed else str(allowed[0])
+    mode = resolve_apply_edit_mode(
+        selected_result, edit_mode=edit_mode, replace_cover=replace_cover
+    )
+    enriched, metadata_override = _enrich_selected_for_apply(
+        selected_result, edit_mode=mode, replace_cover=replace_cover
+    )
+    cover = _cover_url_from_candidate(enriched, mode)
+    if replace_cover and mode == "full" and not cover:
+        logger.warning(
+            "Quick Review apply for request %s: replace_cover set but candidate has no cover_url",
+            req.id,
+        )
 
     try:
         result = await libraforge.manual_review_apply(
             path=lf_path,
-            selected_result=selected_result,
+            selected_result=enriched,
             edit_mode=mode,
             write_policy="overwrite",
             replace_cover=replace_cover,
             cover_if_missing=False,
             backup=False,
+            metadata_override=metadata_override or None,
         )
     except libraforge.LibraForgeError as e:
         raise QuickReviewError(str(e)) from e
@@ -373,6 +472,20 @@ async def apply_quick_review(
             req.id,
         )
 
+    # Persist cover_url where Continue→M4B can recover it (ABS metadata.json
+    # omits cover_url; nested libraforge paths are handled by cover_url_from_staging).
+    preview = result.get("metadata_preview") if isinstance(result.get("metadata_preview"), dict) else {}
+    applied_cover = str(
+        (preview or {}).get("cover_url") or cover or ""
+    ).strip()
+    if applied_cover.startswith("http"):
+        try:
+            _stamp_cover_url_on_staging(staging, applied_cover)
+        except OSError as e:
+            logger.warning(
+                "Could not stamp cover_url into staging for request %s: %s", req.id, e
+            )
+
     return {
         "ok": True,
         "request_id": req.id,
@@ -386,6 +499,63 @@ async def apply_quick_review(
         "edit_mode": result.get("edit_mode") or mode,
         "write_policy": result.get("write_policy") or "overwrite",
         "metadata_preview": result.get("metadata_preview") or {},
+        "cover_url": applied_cover or None,
         "warning": result.get("warning"),
         "manual_review_url": libraforge.public_manual_review_url() or None,
     }
+
+
+def _stamp_cover_url_on_staging(staging: Path, cover_url: str) -> None:
+    """Merge cover_url into existing metadata.json / libraforge.json for M4B handoff."""
+    stamped = False
+    for meta_path in staging.rglob("metadata.json"):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        if str(meta.get("cover_url") or "").strip() == cover_url:
+            stamped = True
+            continue
+        meta["cover_url"] = cover_url
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        stamped = True
+    for lf_path in staging.rglob("libraforge.json"):
+        try:
+            data = json.loads(lf_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        changed = False
+        marker = data.get("marker")
+        if isinstance(marker, dict):
+            audible = marker.get("audible")
+            if isinstance(audible, dict) and not str(audible.get("cover_url") or "").strip():
+                audible["cover_url"] = cover_url
+                changed = True
+            elif not isinstance(audible, dict) and not str(marker.get("cover_url") or "").strip():
+                marker["cover_url"] = cover_url
+                changed = True
+        sidecar = data.get("sidecar")
+        if isinstance(sidecar, dict):
+            book = sidecar.get("book")
+            if isinstance(book, dict) and not str(book.get("cover_url") or "").strip():
+                book["cover_url"] = cover_url
+                changed = True
+        if changed:
+            lf_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            stamped = True
+    if not stamped:
+        # No sidecar yet — write a minimal companion next to staging root.
+        target = staging / "metadata.json"
+        payload = {"cover_url": cover_url}
+        if target.is_file():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    payload = {**existing, "cover_url": cover_url}
+            except (OSError, json.JSONDecodeError):
+                pass
+        target.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

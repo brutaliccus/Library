@@ -517,13 +517,115 @@ def delete_staging_entry(staging: Path, relative: str) -> dict[str, Any]:
     return {"ok": True, "deleted": relative, "type": "file"}
 
 
+def _cleanup_forge_temps(root: Path) -> int:
+    """Remove m4b-tool / Chapter Forge temp dirs and obvious partial files.
+
+    Safe to call after soft-fail: never deletes real source audio or ``.m4b``.
+    """
+    if not root.is_dir():
+        return 0
+    removed = 0
+    for d in list(root.rglob("*-tmpfiles")):
+        if not d.is_dir():
+            continue
+        try:
+            shutil.rmtree(d)
+            removed += 1
+            logger.info("Removed leftover tmpfiles: %s", d)
+        except OSError as e:
+            logger.warning("Could not remove tmpfiles %s: %s", d, e)
+    # Partial / temp files from m4b-tool and interrupted merges.
+    patterns = ("*.tmp", "*.m4b.part", "*.m4b.tmp", "*.mp3.part", "*.m4a.part")
+    for pattern in patterns:
+        for path in list(root.rglob(pattern)):
+            if not path.is_file():
+                continue
+            try:
+                path.unlink()
+                removed += 1
+                logger.info("Removed forge temp file: %s", path)
+            except OSError as e:
+                logger.warning("Could not remove temp file %s: %s", path, e)
+    return removed
+
+
+def _prune_empty_dirs(root: Path, *, stop_at: Path | None = None) -> int:
+    """Remove empty directories under ``root`` (deepest first). Keeps ``root`` itself."""
+    if not root.is_dir():
+        return 0
+    root_res = root.resolve()
+    stop = (stop_at or root).resolve()
+    removed = 0
+    try:
+        dirs = sorted(
+            (d for d in root.rglob("*") if d.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        )
+    except OSError:
+        return 0
+    for d in dirs:
+        try:
+            d_res = d.resolve()
+            if d_res == stop or d_res == root_res:
+                continue
+            if not d.is_dir():
+                continue
+            try:
+                next(d.iterdir())
+                continue
+            except StopIteration:
+                pass
+            d.rmdir()
+            removed += 1
+            logger.info("Pruned empty directory: %s", d)
+        except OSError:
+            continue
+    return removed
+
+
+def _cleanup_staging_after_folder_forge(staging: Path) -> bool:
+    """After a successful Folder Forge move, wipe empty/junk ``req_*`` staging.
+
+    Removes temps, then — when no audio remains — deletes the whole staging
+    tree (leftover covers/nfo/empty format dirs). Returns True if staging is gone.
+    """
+    if not staging.is_dir():
+        return True
+    _cleanup_forge_temps(staging)
+    leftover = _collect_audio(staging)
+    if leftover:
+        _prune_empty_dirs(staging)
+        logger.warning(
+            "Staging still has %d audio file(s) after Folder Forge: %s",
+            len(leftover),
+            staging,
+        )
+        return False
+    try:
+        shutil.rmtree(staging)
+        logger.info("Removed empty staging after Folder Forge: %s", staging)
+        return True
+    except OSError as e:
+        logger.warning("Could not remove staging %s: %s", staging, e)
+        _prune_empty_dirs(staging)
+        try:
+            if staging.is_dir() and not any(staging.iterdir()):
+                staging.rmdir()
+                return True
+        except OSError:
+            pass
+        return not staging.exists()
+
+
 def _remove_source_audio_after_m4b(scope: Path) -> int:
     """After a successful M4B merge, remove non-.m4b audio under ``scope``.
 
     Only runs when at least one ``.m4b`` exists in ``scope``. Call with the
     converted book folder for multi-book packs, or the whole staging tree after
     converting one of several format-variant folders (so leftover ``mp3/`` /
-    ``AAC/`` parts are dropped). Does not touch files outside ``scope``.
+    ``AAC/`` parts are dropped). Keeps ``.m4b``, covers, and useful sidecars
+    (``metadata.json`` / applied markers). Soft-fail callers must not invoke this.
     """
     audio = _collect_audio(scope)
     m4bs = [f for f in audio if f.suffix.lower() == ".m4b"]
@@ -539,6 +641,9 @@ def _remove_source_audio_after_m4b(scope: Path) -> int:
             logger.info("Removed source audio after M4B: %s", path)
         except OSError as e:
             logger.warning("Could not remove source audio %s: %s", path, e)
+    # Drop conversion temps and empty format / Tape / Part trees left behind.
+    removed += _cleanup_forge_temps(scope)
+    _prune_empty_dirs(scope)
     return removed
 
 
@@ -1230,6 +1335,9 @@ async def run_forge_after_download(
                         "m4b_convert",
                         f"M4B skipped (Pi error): {e}"[:400],
                     )
+            # Soft-fail must keep source audio; temps from failed merges are still safe to drop.
+            if not m4b_produced_new_file:
+                _cleanup_forge_temps(staging)
         else:
             async with async_session() as db:
                 await p._update_status(db, request_id, "m4b_convert", "Already a single M4B — skipping convert")
@@ -1237,6 +1345,7 @@ async def run_forge_after_download(
                     request_id, user_id, "m4b_convert", "Already a single M4B — skipping convert",
                     progress_percent=100.0,
                 )
+            _cleanup_forge_temps(staging)
 
         # M4B re-encode drops embedded covers / can leave stale tags on the new
         # file. Re-apply Metadata Forge (overwrite + replace_cover) onto the
@@ -1270,6 +1379,8 @@ async def run_forge_after_download(
             user_id=user_id,
             should_abort=_abort_if_cancelled,
         )
+        # Chapter Forge / m4b-tool may leave *-tmpfiles; never deletes source audio.
+        _cleanup_forge_temps(staging)
         if await p._is_cancelled(request_id):
             return
         start_step = "folder"
@@ -1330,12 +1441,9 @@ async def run_forge_after_download(
             )
             return
 
-        # Clean empty staging dir if Folder Forge left it
-        try:
-            if staging.is_dir() and not any(staging.iterdir()):
-                staging.rmdir()
-        except OSError:
-            pass
+        # Wipe empty/junk req_* staging (temps, empty format dirs, leftover covers).
+        # Soft-fail / quarantine paths above return before this runs.
+        _cleanup_staging_after_folder_forge(staging)
         start_step = "finalize"
 
     if await p._is_cancelled(request_id):

@@ -29,6 +29,8 @@ from app.services.forge_pipeline import (
     safe_path_under_staging,
     seed_staging_metadata_hints,
     staging_has_applied_metadata,
+    _cleanup_forge_temps,
+    _cleanup_staging_after_folder_forge,
     _remove_source_audio_after_m4b,
 )
 
@@ -450,3 +452,74 @@ def test_remove_source_audio_after_m4b(tmp_path):
     assert (staging / "Timeline.m4b").exists()
     assert not (staging / "Timeline.mp3").exists()
     assert not (staging / "Timeline.m4a").exists()
+
+
+def test_remove_source_audio_keeps_sidecars_and_prunes_empty_format_dirs(tmp_path):
+    staging = tmp_path / "req_2"
+    mp3 = staging / "mp3"
+    aac = staging / "AAC"
+    mp3.mkdir(parents=True)
+    aac.mkdir(parents=True)
+    (mp3 / "01.mp3").write_bytes(b"mp3")
+    (aac / "01.m4a").write_bytes(b"m4a")
+    (aac / "Book.m4b").write_bytes(b"m4b")
+    (aac / "cover.jpg").write_bytes(b"jpg")
+    (aac / "metadata.json").write_text("{}", encoding="utf-8")
+    (staging / "libraforge.json").write_text("{}", encoding="utf-8")
+
+    removed = _remove_source_audio_after_m4b(staging)
+    assert removed >= 2
+    assert (aac / "Book.m4b").exists()
+    assert (aac / "cover.jpg").exists()
+    assert (aac / "metadata.json").exists()
+    assert (staging / "libraforge.json").exists()
+    assert not (mp3 / "01.mp3").exists()
+    assert not (aac / "01.m4a").exists()
+    assert not mp3.exists()  # empty unused format tree pruned
+
+
+def test_remove_source_audio_without_m4b_is_noop(tmp_path):
+    """Soft-fail safety: never delete sources unless a .m4b is present."""
+    staging = tmp_path / "req_softfail"
+    staging.mkdir()
+    (staging / "01.mp3").write_bytes(b"a")
+    (staging / "02.mp3").write_bytes(b"b")
+    assert _remove_source_audio_after_m4b(staging) == 0
+    assert (staging / "01.mp3").exists()
+    assert (staging / "02.mp3").exists()
+
+
+def test_cleanup_forge_temps_removes_tmpfiles_not_sources(tmp_path):
+    staging = tmp_path / "req_3"
+    tmp = staging / "Book-tmpfiles"
+    tmp.mkdir(parents=True)
+    (tmp / "chunk.bin").write_bytes(b"x")
+    (staging / "Book.m4b").write_bytes(b"m4b")
+    (staging / "Book.m4b.part").write_bytes(b"part")
+    (staging / "01.mp3").write_bytes(b"src")
+
+    removed = _cleanup_forge_temps(staging)
+    assert removed >= 2
+    assert not tmp.exists()
+    assert not (staging / "Book.m4b.part").exists()
+    assert (staging / "Book.m4b").exists()
+    assert (staging / "01.mp3").exists()
+
+
+def test_cleanup_staging_after_folder_forge_wipes_when_no_audio(tmp_path):
+    staging = tmp_path / "req_4_Book"
+    (staging / "mp3").mkdir(parents=True)
+    (staging / "cover.jpg").write_bytes(b"jpg")
+    (staging / "metadata.json").write_text("{}", encoding="utf-8")
+
+    assert _cleanup_staging_after_folder_forge(staging) is True
+    assert not staging.exists()
+
+
+def test_cleanup_staging_after_folder_forge_keeps_leftover_audio(tmp_path):
+    staging = tmp_path / "req_5_Book"
+    staging.mkdir()
+    (staging / "leftover.mp3").write_bytes(b"still here")
+
+    assert _cleanup_staging_after_folder_forge(staging) is False
+    assert (staging / "leftover.mp3").exists()

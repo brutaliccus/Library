@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -130,6 +130,29 @@ class StagingFileDeleteBody(BaseModel):
     path: str
 
 
+class QuickReviewLoadBody(BaseModel):
+    """Optional relative path under staging (book folder). Empty = first target."""
+    relative_path: str = ""
+
+
+class QuickReviewSearchBody(BaseModel):
+    query: str = ""
+    title: str = ""
+    author: str = ""
+    series: str = ""
+    sequence: str = ""
+    narrator: str = ""
+    limit: int = 10
+
+
+class QuickReviewApplyBody(BaseModel):
+    relative_path: str = ""
+    selected_result: dict
+    edit_mode: str = "full"
+    replace_cover: bool = True
+
+
+
 # --- User Management ---
 
 async def _get_user_or_404(db: AsyncSession, user_id: int) -> User:
@@ -211,7 +234,7 @@ async def list_users(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List accounts with per-user activity stats (aggregated — no N+1)."""
+    """List accounts with per-user activity stats (aggregated â€” no N+1)."""
     rows = (
         await db.execute(
             select(User, LibraryGroup.name)
@@ -448,7 +471,7 @@ async def reject_download_request(
     body: RejectRequestBody = Body(default_factory=RejectRequestBody),
     _admin: User = Depends(require_admin),
 ):
-    """Reject a quarantined (or failed) request — user sees admin-rejected like a failure."""
+    """Reject a quarantined (or failed) request â€” user sees admin-rejected like a failure."""
     from app.services.forge_pipeline import reject_quarantined_request
 
     try:
@@ -475,7 +498,7 @@ async def continue_forge_after_review(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Resume after quarantine: audiobooks → M4B/Folder Forge; ebooks → organize → Kavita."""
+    """Resume after quarantine: audiobooks â†’ M4B/Folder Forge; ebooks â†’ organize â†’ Kavita."""
     from app.services.forge_pipeline import continue_after_manual_review
     from app.services.ebook_pipeline import continue_ebook_after_review
     from app.services.pipeline import _update_status
@@ -504,7 +527,7 @@ async def continue_forge_after_review(
             db,
             request_id,
             "folder_forge",
-            "Resuming ebook organize after review…",
+            "Resuming ebook organize after reviewâ€¦",
         )
         asyncio.create_task(continue_ebook_after_review(request_id))
         return {
@@ -518,7 +541,7 @@ async def continue_forge_after_review(
         db,
         request_id,
         "m4b_convert",
-        "Resuming after manual review…",
+        "Resuming after manual reviewâ€¦",
     )
 
     asyncio.create_task(continue_after_manual_review(request_id))
@@ -598,6 +621,109 @@ async def delete_request_staging_file(
     return result
 
 
+
+@router.get("/requests/{request_id}/quick-review")
+@router.get("/download-requests/{request_id}/quick-review")
+async def get_quick_review(
+    request_id: int,
+    relative_path: str = "",
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Load Quick Admin Review clues (Files → Metadata wizard)."""
+    from app.services.quick_review import QuickReviewError, load_quick_review
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        return await load_quick_review(req, relative_path=relative_path or None)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except QuickReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/requests/{request_id}/quick-review/load")
+@router.post("/download-requests/{request_id}/quick-review/load")
+async def post_quick_review_load(
+    request_id: int,
+    body: QuickReviewLoadBody = Body(default_factory=QuickReviewLoadBody),
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reload clues for a chosen staging target path."""
+    from app.services.quick_review import QuickReviewError, load_quick_review
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        return await load_quick_review(req, relative_path=body.relative_path or None)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except QuickReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/requests/{request_id}/quick-review/search")
+@router.post("/download-requests/{request_id}/quick-review/search")
+async def post_quick_review_search(
+    request_id: int,
+    body: QuickReviewSearchBody,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Search Audible metadata candidates via LibraForge (admin proxy)."""
+    from app.services.quick_review import QuickReviewError, search_quick_review
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        return await search_quick_review(
+            req,
+            query=body.query,
+            title=body.title,
+            author=body.author,
+            series=body.series,
+            sequence=body.sequence,
+            narrator=body.narrator,
+            limit=body.limit,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except QuickReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/requests/{request_id}/quick-review/apply")
+@router.post("/download-requests/{request_id}/quick-review/apply")
+async def post_quick_review_apply(
+    request_id: int,
+    body: QuickReviewApplyBody,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Apply selected metadata to staging (overwrite tags + replace cover)."""
+    from app.services.quick_review import QuickReviewError, apply_quick_review
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        result = await apply_quick_review(
+            req,
+            relative_path=body.relative_path or None,
+            selected_result=body.selected_result,
+            edit_mode=body.edit_mode,
+            replace_cover=body.replace_cover,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except QuickReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    logger.info(
+        "Admin %s applied Quick Review metadata for request %s (mode=%s)",
+        _admin.username,
+        request_id,
+        result.get("edit_mode"),
+    )
+    return result
+
+
 @router.post("/download-requests/{request_id}/reorganize")
 async def reorganize_audiobook_download(
     request_id: int,
@@ -626,7 +752,7 @@ async def reorganize_audiobook_download(
     series_override = None
     if _is_collection_title(book_title):
         first_book = re.sub(
-            r"\s*(?:Books?|Vol(?:ume)?s?)\s*1\s*[-–]\s*\d+\s*$", "", book_title, flags=re.IGNORECASE
+            r"\s*(?:Books?|Vol(?:ume)?s?)\s*1\s*[-â€“]\s*\d+\s*$", "", book_title, flags=re.IGNORECASE
         ).strip()
         if first_book:
             try:
@@ -900,7 +1026,7 @@ _MULLVAD_ENV_PATH = Path("/app/data/mullvad.env")
 
 
 def _normalize_mullvad_account(raw: str) -> str:
-    """Strip spaces/dashes — Mullvad account numbers are 16 digits."""
+    """Strip spaces/dashes â€” Mullvad account numbers are 16 digits."""
     return re.sub(r"\D", "", (raw or "").strip())
 
 
@@ -918,7 +1044,7 @@ def _write_mullvad_env_file(account: str, *, private_key: str = "", addresses: s
                 account=account,
             )
         elif account:
-            # Account alone is not enough for WireGuard — keys required.
+            # Account alone is not enough for WireGuard â€” keys required.
             _MULLVAD_ENV_PATH.write_text(
                 f"MULLVAD_ACCOUNT_NUMBER={account}\n", encoding="utf-8"
             )
@@ -975,9 +1101,9 @@ async def _integrations_payload() -> dict:
             "hint": _mask(mullvad_eff),
             "wireguardReady": bool(wg_key and wg_addr),
             "wireguardHint": _mask(wg_addr) if wg_addr else "",
-            "note": "Only ABB traffic uses Mullvad (FlareSolverr → gluetun:8888). "
+            "note": "Only ABB traffic uses Mullvad (FlareSolverr â†’ gluetun:8888). "
                     "Jackett/Knaben/Prowlarr stay on your LAN. Saving an account "
-                    "auto-registers WireGuard keys into data/mullvad.env — then "
+                    "auto-registers WireGuard keys into data/mullvad.env â€” then "
                     "restart: docker compose up -d gluetun",
         },
     }
@@ -1034,7 +1160,7 @@ async def update_integrations(
 
 
 class ConfigUpdate(BaseModel):
-    """Partial map of setting key → value. Empty string clears a DB override."""
+    """Partial map of setting key â†’ value. Empty string clears a DB override."""
     settings: dict[str, str | None]
 
 

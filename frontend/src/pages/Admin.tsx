@@ -20,11 +20,13 @@ import {
   CheckCircle,
   Circle,
   FolderTree,
+  Sparkles,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import ScraperTab from "../components/admin/ScraperTab";
 import ConfigTab from "../components/admin/ConfigTab";
 import StagingFilesViewer from "../components/admin/StagingFilesViewer";
+import QuickReviewWizard from "../components/admin/QuickReviewWizard";
 import { usePushNotifications } from "../hooks/usePushNotifications";
 import { Link, useSearchParams } from "react-router-dom";
 import RequestStatusBadge from "../components/RequestStatus";
@@ -476,6 +478,11 @@ function AllRequestsTab() {
     id: number;
     title: string;
   } | null>(null);
+  const [quickReview, setQuickReview] = useState<{
+    id: number;
+    title: string;
+    manual_review_url?: string | null;
+  } | null>(null);
   const { data: requests, isLoading } = useQuery({
     queryKey: ["admin-downloads"],
     queryFn: async () => {
@@ -607,6 +614,22 @@ function AllRequestsTab() {
                 />
                 {(quarantined || showStagingBrowser) && (
                   <div className="mt-2 flex flex-wrap gap-2">
+                    {quarantined && req.media_type !== "ebook" && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setQuickReview({
+                            id: req.id,
+                            title: req.title || "Request",
+                            manual_review_url: req.manual_review_url,
+                          })
+                        }
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
+                      >
+                        <Sparkles size={12} />
+                        Quick review
+                      </button>
+                    )}
                     {showStagingBrowser && (
                       <button
                         type="button"
@@ -627,7 +650,7 @@ function AllRequestsTab() {
                         className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-amber-700/50 text-amber-300 hover:bg-amber-900/30"
                       >
                         <ExternalLink size={12} />
-                        Manual Review
+                        LibraForge
                       </a>
                     )}
                     {quarantined && (
@@ -673,6 +696,15 @@ function AllRequestsTab() {
           title={stagingViewer.title}
           open={!!stagingViewer}
           onClose={() => setStagingViewer(null)}
+        />
+      )}
+      {quickReview && (
+        <QuickReviewWizard
+          requestId={quickReview.id}
+          title={quickReview.title}
+          open={!!quickReview}
+          onClose={() => setQuickReview(null)}
+          manualReviewUrl={quickReview.manual_review_url}
         />
       )}
     </div>

@@ -1,6 +1,6 @@
-"""HTTP client for the sibling LibraForge stack (Metadata / M4B / Folder Forge).
+﻿"""HTTP client for the sibling LibraForge stack (Metadata / M4B / Folder Forge).
 
-LibraForge is AGPL — we only call its HTTP API; we never import its code.
+LibraForge is AGPL â€” we only call its HTTP API; we never import its code.
 There is no API key; access relies on Docker/LAN network controls.
 """
 
@@ -58,7 +58,7 @@ async def _request(
         raise LibraForgeError(f"LibraForge unreachable ({path}): {e}") from e
     if resp.status_code >= 400:
         detail = (resp.text or "")[:800]
-        raise LibraForgeError(f"LibraForge {method} {path} → HTTP {resp.status_code}: {detail}")
+        raise LibraForgeError(f"LibraForge {method} {path} â†’ HTTP {resp.status_code}: {detail}")
     if not resp.content:
         return {}
     data = resp.json()
@@ -125,7 +125,7 @@ async def wait_for_run(
     if timeout_seconds is not None and timeout_seconds > 0:
         deadline = asyncio.get_event_loop().time() + timeout_seconds
 
-    # Only treat run *status* as terminal — phase labels like "complete" appear
+    # Only treat run *status* as terminal â€” phase labels like "complete" appear
     # while work is still flushing and must not short-circuit the poll loop.
     terminal = {"completed", "failed", "cancelled", "canceled", "success", "error", "done"}
     while True:
@@ -179,7 +179,7 @@ async def _finalize_run_report(run_id: str, state: dict[str, Any]) -> dict[str, 
         best = disk
         if _has_write_signal(disk):
             return disk
-        # No match either — nothing to wait for (skip/fail path).
+        # No match either â€” nothing to wait for (skip/fail path).
         cats = _category_map(disk)
         if _has_category_items(cats, "status:skipped", "write:write_skipped", "mode:none"):
             return disk
@@ -209,7 +209,7 @@ async def start_metadata_run(
         "apply": apply,
         "backup": False,
         # Maps to Metadata Forge CLI: --apply --write-mode overwrite --replace-cover
-        # (not --cover-if-missing / smart — those leave torrent tags/covers in place).
+        # (not --cover-if-missing / smart â€” those leave torrent tags/covers in place).
         "cover_if_missing": cover_if_missing,
         "replace_cover": replace_cover,
         "min_score": min_score if min_score is not None else settings.libraforge_min_score,
@@ -254,6 +254,69 @@ async def start_organizer_run(
 
 async def m4b_load(path: str) -> dict[str, Any]:
     return await _request("POST", "/api/m4b/metadata/load", json_body={"path": path}, timeout=120.0)
+
+async def manual_review_load(
+    path: str,
+    *,
+    script_name: str | None = None,
+    use_backup_tags: bool = False,
+) -> dict[str, Any]:
+    """Load Manual Review clues for a staging file/folder (LibraForge)."""
+    fixer, _ = await resolve_script_names()
+    body: dict[str, Any] = {
+        "path": path,
+        "script_name": script_name or fixer,
+        "use_backup_tags": use_backup_tags,
+    }
+    return await _request("POST", "/api/manual-review/load", json_body=body, timeout=120.0)
+
+
+async def manual_review_search(
+    *,
+    query: str = "",
+    metadata: dict[str, Any] | None = None,
+    limit: int = 10,
+    script_name: str | None = None,
+) -> dict[str, Any]:
+    """Search Audible candidates via LibraForge Manual Review / M4B search."""
+    fixer, _ = await resolve_script_names()
+    body: dict[str, Any] = {
+        "query": query or "",
+        "metadata": metadata or {},
+        "limit": max(1, min(int(limit or 10), 25)),
+        "script_name": script_name or fixer,
+        "auth_file": "/auth/audible-metadata.json",
+    }
+    return await _request("POST", "/api/m4b/search", json_body=body, timeout=120.0)
+
+
+async def manual_review_apply(
+    *,
+    path: str,
+    selected_result: dict[str, Any],
+    edit_mode: str = "full",
+    write_policy: str = "overwrite",
+    replace_cover: bool = True,
+    cover_if_missing: bool = False,
+    backup: bool = False,
+    metadata_override: dict[str, Any] | None = None,
+    script_name: str | None = None,
+) -> dict[str, Any]:
+    """Apply a Manual Review match to staging (overwrite tags + optional cover)."""
+    fixer, _ = await resolve_script_names()
+    body: dict[str, Any] = {
+        "path": path,
+        "script_name": script_name or fixer,
+        "selected_result": selected_result,
+        "edit_mode": edit_mode or "full",
+        "backup": backup,
+        "cover_if_missing": cover_if_missing,
+        "replace_cover": replace_cover,
+        "writer": "auto",
+        "metadata_override": metadata_override or {},
+        "write_policy": write_policy or "overwrite",
+    }
+    return await _request("POST", "/api/manual-review/apply", json_body=body, timeout=300.0)
 
 
 async def start_m4b_run(
@@ -331,7 +394,7 @@ def metadata_auto_applied(report: dict[str, Any]) -> bool:
                 return True
             if item.get("was_manually_applied"):
                 return True
-        # Explicit per-item report with zero writes → not applied (even if
+        # Explicit per-item report with zero writes â†’ not applied (even if
         # mode:full / score 1.0). Dry-run "would_write" also lands here.
         return False
 
@@ -339,7 +402,7 @@ def metadata_auto_applied(report: dict[str, Any]) -> bool:
     if not isinstance(stats, dict):
         return False
 
-    # Legacy counters only — never trust mode_breakdown.full alone.
+    # Legacy counters only â€” never trust mode_breakdown.full alone.
     for key in ("updated", "applied", "edited", "written"):
         if int(stats.get(key) or 0) > 0:
             return True
@@ -427,7 +490,7 @@ def quarantine_reason_from_report(report: dict[str, Any]) -> str:
     if isinstance(stats, dict):
         skip_reasons = stats.get("skip_reasons") or {}
         if isinstance(skip_reasons, dict) and skip_reasons:
-            parts = [f"{k} ×{v}" for k, v in list(skip_reasons.items())[:4]]
+            parts = [f"{k} Ã—{v}" for k, v in list(skip_reasons.items())[:4]]
             return "Metadata Forge did not auto-apply: " + "; ".join(parts)[:400]
 
     report_items = report.get("report_items") or []

@@ -13,7 +13,7 @@ import api from "../../api/client";
 import Modal from "../Modal";
 import { useToast } from "../../contexts/ToastContext";
 
-type StagingEntry = {
+export type StagingEntry = {
   name: string;
   path: string;
   type: "file" | "dir";
@@ -22,7 +22,7 @@ type StagingEntry = {
   children: StagingEntry[] | null;
 };
 
-type StagingTreeResponse = {
+export type StagingTreeResponse = {
   request_id: number;
   title: string;
   status: string;
@@ -115,7 +115,7 @@ function TreeNode({
           title={isDir ? "Delete folder and contents" : "Delete file"}
           onClick={() => onDelete(entry.path, entry.name, isDir)}
           disabled={deletingPath === entry.path}
-          className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 rounded text-red-400/80 hover:bg-red-900/40 hover:text-red-300 disabled:opacity-40 shrink-0"
+          className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 p-1 rounded text-red-400/80 hover:bg-red-900/40 hover:text-red-300 disabled:opacity-40 shrink-0"
         >
           <Trash2 size={13} />
         </button>
@@ -145,14 +145,13 @@ function TreeNode({
   );
 }
 
-type Props = {
+type PanelProps = {
   requestId: number;
-  title: string;
-  open: boolean;
-  onClose: () => void;
+  compact?: boolean;
 };
 
-export default function StagingFilesViewer({ requestId, title, open, onClose }: Props) {
+/** Staging tree + delete — reusable in standalone modal and Quick Review wizard. */
+export function StagingFilesPanel({ requestId, compact = false }: PanelProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => ["admin-staging-files", requestId] as const, [requestId]);
@@ -163,7 +162,7 @@ export default function StagingFilesViewer({ requestId, title, open, onClose }: 
       const { data: body } = await api.get(`/admin/requests/${requestId}/staging-files`);
       return body as StagingTreeResponse;
     },
-    enabled: open && requestId > 0,
+    enabled: requestId > 0,
     refetchOnWindowFocus: false,
   });
 
@@ -194,61 +193,85 @@ export default function StagingFilesViewer({ requestId, title, open, onClose }: 
   };
 
   return (
-    <Modal title={`Staging files — ${title}`} show={open} onClose={onClose} size="lg">
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs text-gray-500 min-w-0 truncate" title={data?.staging_path}>
-            {data?.staging_path || "Loading staging path…"}
-          </p>
-          <button
-            type="button"
-            onClick={() => void refetch()}
-            disabled={isFetching}
-            className="text-xs px-2 py-1 rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/60 disabled:opacity-50"
-          >
-            Refresh
-          </button>
-        </div>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-gray-500 min-w-0 truncate" title={data?.staging_path}>
+          {data?.staging_path || "Loading staging path…"}
+        </p>
+        <button
+          type="button"
+          onClick={() => void refetch()}
+          disabled={isFetching}
+          className="text-xs px-2 py-1 rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/60 disabled:opacity-50"
+        >
+          Refresh
+        </button>
+      </div>
+      {!compact && (
         <p className="text-xs text-gray-400">
           Remove redundant audio (e.g. keep mp3, delete m4a) before Manual Review or Continue
           pipeline. Deletes stay inside this request&apos;s staging folder only.
         </p>
+      )}
+      {compact && (
+        <p className="text-xs text-gray-400">
+          Prune redundant or unwanted files here, then continue to metadata matching.
+        </p>
+      )}
 
-        {isLoading && <p className="text-sm text-gray-500 py-6 text-center">Loading files…</p>}
-        {error && (
-          <p className="text-sm text-red-400 py-4 text-center">
-            {(error as any)?.response?.data?.detail || "Could not load staging files"}
-          </p>
-        )}
-        {data && !isLoading && (
-          <>
-            {data.truncated && (
-              <p className="text-xs text-amber-400/90">
-                Listing truncated at {data.entry_count} entries.
-              </p>
-            )}
-            {data.entries.length === 0 ? (
-              <p className="text-sm text-gray-500 py-6 text-center">Staging folder is empty</p>
-            ) : (
-              <div className="border border-gray-700 rounded-xl bg-gray-900/50 max-h-[55vh] overflow-y-auto py-1">
-                {data.entries.map((entry) => (
-                  <TreeNode
-                    key={entry.path}
-                    entry={entry}
-                    depth={0}
-                    onDelete={handleDelete}
-                    deletingPath={deleteMutation.isPending ? deleteMutation.variables ?? null : null}
-                  />
-                ))}
-              </div>
-            )}
-            <p className="text-[11px] text-gray-600">
-              {data.entry_count} item{data.entry_count === 1 ? "" : "s"}
-              {data.root_name ? ` · ${data.root_name}` : ""}
+      {isLoading && <p className="text-sm text-gray-500 py-6 text-center">Loading files…</p>}
+      {error && (
+        <p className="text-sm text-red-400 py-4 text-center">
+          {(error as any)?.response?.data?.detail || "Could not load staging files"}
+        </p>
+      )}
+      {data && !isLoading && (
+        <>
+          {data.truncated && (
+            <p className="text-xs text-amber-400/90">
+              Listing truncated at {data.entry_count} entries.
             </p>
-          </>
-        )}
-      </div>
+          )}
+          {data.entries.length === 0 ? (
+            <p className="text-sm text-gray-500 py-6 text-center">Staging folder is empty</p>
+          ) : (
+            <div
+              className={`border border-gray-700 rounded-xl bg-gray-900/50 overflow-y-auto py-1 ${
+                compact ? "max-h-[40vh]" : "max-h-[55vh]"
+              }`}
+            >
+              {data.entries.map((entry) => (
+                <TreeNode
+                  key={entry.path}
+                  entry={entry}
+                  depth={0}
+                  onDelete={handleDelete}
+                  deletingPath={deleteMutation.isPending ? deleteMutation.variables ?? null : null}
+                />
+              ))}
+            </div>
+          )}
+          <p className="text-[11px] text-gray-600">
+            {data.entry_count} item{data.entry_count === 1 ? "" : "s"}
+            {data.root_name ? ` · ${data.root_name}` : ""}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+type Props = {
+  requestId: number;
+  title: string;
+  open: boolean;
+  onClose: () => void;
+};
+
+export default function StagingFilesViewer({ requestId, title, open, onClose }: Props) {
+  return (
+    <Modal title={`Staging files — ${title}`} show={open} onClose={onClose} size="lg">
+      {open && <StagingFilesPanel requestId={requestId} />}
     </Modal>
   );
 }

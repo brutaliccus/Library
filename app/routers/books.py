@@ -1059,13 +1059,22 @@ async def home_curated_shelves(
     booksPerShelf: int = Query(12, ge=1, le=20),
     _user: User = Depends(get_current_user),
 ):
-    """Paginated curated recommendation shelves for the main store (not plain genres)."""
-    all_entries = list(hardcover.HOME_CURATED_SHELVES)
+    """Paginated curated recommendation shelves for the main store (not plain genres).
+
+    Shelf order rotates once per UTC day via a seeded shuffle so every user sees
+    the same rotation that day, then a new order the next day.
+    """
+    from urllib.parse import urlparse
+
+    day = hardcover.home_shelves_rotation_day()
+    salt = (urlparse(settings.app_url or "").hostname or "").lower()
+    all_entries = hardcover.rotated_home_curated_shelves(day=day, salt=salt)
     total = len(all_entries)
     start = (page - 1) * pageSize
     end = start + pageSize
     page_entries = all_entries[start:end]
-    cache_key = f"home-shelves:v2:{page}:{pageSize}:{booksPerShelf}"
+    # Date in key so midnight UTC picks up the new shuffle even if TTL remains.
+    cache_key = f"home-shelves:v3:{day}:{page}:{pageSize}:{booksPerShelf}"
     cached = _shelf_get(cache_key)
     if cached is not None:
         return cached
@@ -1097,6 +1106,7 @@ async def home_curated_shelves(
             "pageSize": pageSize,
             "totalShelves": total,
             "hasMore": end < total,
+            "rotationDay": day,
         }
         if any(s.get("books") for s in shelves):
             _shelf_put(cache_key, payload)

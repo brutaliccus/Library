@@ -253,7 +253,8 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ["home-shelves"],
+    // UTC day in key so persisted cache picks up the daily shelf rotation.
+    queryKey: ["home-shelves", new Date().toISOString().slice(0, 10)],
     queryFn: async ({ pageParam }) => {
       try {
         const params = new URLSearchParams({
@@ -267,6 +268,7 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
           hasMore?: boolean;
           totalShelves?: number;
           page: number;
+          rotationDay?: string;
         };
       } catch {
         return { shelves: [] as HomeShelf[], hasMore: false, page: pageParam as number };

@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -192,6 +194,28 @@ HOME_CURATED_SHELVES: list[dict[str, Any]] = [
 def curated_shelf_slugs() -> set[str]:
     """Slugs that should load via /books/curated rather than plain genre browse."""
     return {s["slug"] for s in HOME_CURATED_SHELVES} | set(GENRE_LIST_QUERIES.keys())
+
+
+def home_shelves_rotation_day() -> str:
+    """UTC calendar day used as the home-shelf shuffle seed."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def rotated_home_curated_shelves(
+    *,
+    day: str | None = None,
+    salt: str = "",
+) -> list[dict[str, Any]]:
+    """Deterministic once-per-UTC-day shuffle of HOME_CURATED_SHELVES.
+
+    Same seed ⇒ same order for every user that day. Optional ``salt`` (e.g. library
+    host) lets separate instances diverge without storing rotation state.
+    """
+    day = day or home_shelves_rotation_day()
+    seed = f"{day}:{salt}" if salt else day
+    entries = list(HOME_CURATED_SHELVES)
+    random.Random(seed).shuffle(entries)
+    return entries
 
 
 def _home_shelf_by_slug(slug: str) -> dict[str, Any] | None:

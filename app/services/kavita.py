@@ -342,3 +342,47 @@ async def get_book_resources(chapter_id: int, file_path: str) -> bytes | None:
     except Exception as e:
         logger.warning("Failed to fetch Kavita resource %s: %s", file_path, e)
         return None
+async def delete_series(series_id: int) -> bool:
+    """Delete a series from Kavita."""
+    url, key, _ = await _conn()
+    if not key:
+        return False
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.delete(
+                f"{url}/api/Series/{series_id}",
+                headers=_headers(key),
+                timeout=30,
+            )
+            if resp.status_code in (200, 204):
+                invalidate_cache()
+                return True
+            logger.warning(
+                "Kavita delete series %s failed: HTTP %s",
+                series_id,
+                resp.status_code,
+            )
+            return False
+    except Exception as e:
+        logger.warning("Kavita delete series %s failed: %s", series_id, e)
+        return False
+
+
+async def get_series_local_file_paths(series_id: int) -> list[Path]:
+    """Resolve all on-disk ebook files for a Kavita series."""
+    volumes = await get_series_volumes(series_id)
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for vol in volumes:
+        for ch in vol.get("chapters") or []:
+            for f in ch.get("files") or []:
+                kavita_path = f.get("filePath") or ""
+                local = _kavita_path_to_local(kavita_path)
+                if not local:
+                    continue
+                key = str(local.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                paths.append(local)
+    return paths

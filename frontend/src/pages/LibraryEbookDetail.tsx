@@ -2,11 +2,10 @@ import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import api from "../api/client";
-import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import {
-  ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store, Trash2,
+  ArrowLeft, BookOpen, Headphones, Loader2, Store, Trash2,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
@@ -14,84 +13,40 @@ import Modal from "../components/Modal";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { purgeLibraryCollectionQueries } from "../utils/shelfQueryCache";
 
-interface ABSItemDetail {
-  itemId: string;
+interface EbookItemDetail {
+  seriesId: number;
   title: string;
-  subtitle: string;
   author: string;
-  narrator: string;
   description: string;
-  publisher: string;
-  publishedYear: string;
   genres: string[];
-  series: Array<{ id: string; name: string; sequence: string }>;
-  duration: number;
-  numTracks: number;
+  series: Array<{ name: string; sequence: string }>;
+  chapterId: number | null;
   coverUrl: string;
+  absItemId?: string | null;
 }
 
-function formatDuration(secs: number): string {
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
-}
-
-export default function LibraryBookDetail() {
-  const { itemId: rawItemId } = useParams<{ itemId: string }>();
-  const itemId = rawItemId ? decodeURIComponent(rawItemId) : undefined;
+export default function LibraryEbookDetail() {
+  const { seriesId: rawId } = useParams<{ seriesId: string }>();
+  const seriesId = rawId ? Number(rawId) : NaN;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { playABS } = usePlayer();
   const { toast } = useToast();
   const { user } = useAuth();
   const online = useOnlineStatus();
   const isAdmin = user?.role === "admin";
-  const [playLoading, setPlayLoading] = useState(false);
   const [storeLoading, setStoreLoading] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   const { data: item, isLoading, error } = useQuery({
-    queryKey: ["abs-item-detail", itemId],
+    queryKey: ["kavita-item-detail", seriesId],
     queryFn: async () => {
-      const { data } = await api.get(`/library/abs/item/${encodeURIComponent(itemId!)}`);
-      return data as ABSItemDetail;
+      const { data } = await api.get(`/library/kavita/item/${seriesId}`);
+      return data as EbookItemDetail;
     },
-    enabled: !!itemId,
+    enabled: Number.isFinite(seriesId),
     staleTime: 5 * 60 * 1000,
   });
-
-  const { data: ebookMatch } = useQuery({
-    queryKey: ["ebook-match-lib", item?.title, item?.author],
-    queryFn: async () => {
-      const params = new URLSearchParams({ title: item!.title });
-      if (item!.author) params.set("author", item!.author);
-      const s = item!.series?.[0];
-      if (s?.name) params.set("seriesName", s.name);
-      if (s?.sequence) params.set("seriesIndex", s.sequence);
-      const { data } = await api.get(`/library/ebook-match?${params}`);
-      return data as { chapterId: number | null };
-    },
-    enabled: !!item?.title,
-    staleTime: 5 * 60 * 1000,
-  });
-
-  const handlePlay = async () => {
-    if (!item) return;
-    setPlayLoading(true);
-    try {
-      await playABS(item.itemId);
-    } catch (err) {
-      const msg =
-        err instanceof Error && err.message.startsWith("Offline")
-          ? err.message
-          : "Failed to start playback";
-      toast(msg, "error");
-    } finally {
-      setPlayLoading(false);
-    }
-  };
 
   const handleViewInStore = async () => {
     if (!item) return;
@@ -121,19 +76,19 @@ export default function LibraryBookDetail() {
   };
 
   const handleDelete = async () => {
-    if (!itemId) return;
+    if (!Number.isFinite(seriesId)) return;
     setDeleting(true);
     try {
-      await api.delete(`/admin/library/abs/${encodeURIComponent(itemId)}`);
+      await api.delete(`/admin/library/ebook/${seriesId}`);
       await purgeLibraryCollectionQueries(queryClient, { refetch: true });
-      toast("Audiobook deleted from library", "success");
+      toast("Ebook deleted from library", "success");
       setShowDelete(false);
       navigate("/my-library", { replace: true });
     } catch (err: unknown) {
       const detail =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        "Failed to delete audiobook";
-      toast(typeof detail === "string" ? detail : "Failed to delete audiobook", "error");
+        "Failed to delete ebook";
+      toast(typeof detail === "string" ? detail : "Failed to delete ebook", "error");
     } finally {
       setDeleting(false);
     }
@@ -149,7 +104,6 @@ export default function LibraryBookDetail() {
             <div className="flex-1 space-y-4">
               <div className="h-8 bg-gray-800 rounded w-3/4" />
               <div className="h-5 bg-gray-800 rounded w-1/2" />
-              <div className="h-32 bg-gray-800 rounded w-full mt-6" />
             </div>
           </div>
         </div>
@@ -160,7 +114,7 @@ export default function LibraryBookDetail() {
   if (error || !item) {
     return (
       <div className="max-w-5xl mx-auto px-4 py-16 text-center">
-        <p className="text-gray-400">Book not found in your library</p>
+        <p className="text-gray-400">Ebook not found in your library</p>
         <Link to="/my-library" className="text-brand-400 hover:text-brand-300 mt-4 inline-block">
           Back to My Library
         </Link>
@@ -168,7 +122,7 @@ export default function LibraryBookDetail() {
     );
   }
 
-  const seriesLine = item.series
+  const seriesLine = (item.series || [])
     .filter((s) => s.name)
     .map((s) => (s.sequence ? `${s.name} #${s.sequence}` : s.name))
     .join(" · ");
@@ -177,32 +131,44 @@ export default function LibraryBookDetail() {
     <CoverImage src={item.coverUrl} alt={item.title} className="w-full rounded-xl shadow-2xl shadow-black/40" />
   ) : (
     <div className="w-full aspect-[2/3] bg-gray-800 rounded-xl flex items-center justify-center text-gray-700">
-      <Headphones size={48} />
+      <BookOpen size={48} />
     </div>
   );
 
   const actions = (
     <>
-      <button
-        type="button"
-        onClick={handlePlay}
-        disabled={playLoading}
-        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
-      >
-        {playLoading ? <Loader2 size={16} className="animate-spin" /> : <Headphones size={16} />}
-        Listen
-      </button>
-      {ebookMatch?.chapterId ? (
+      {item.chapterId != null && (
         <button
           type="button"
-          onClick={() => navigate(`/read/${ebookMatch.chapterId}`)}
+          onClick={() => navigate(`/read/${item.chapterId}`)}
           className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-amber-600 text-white hover:bg-amber-500 transition-colors"
         >
           <BookOpen size={16} />
           Read
         </button>
-      ) : null}
-      {itemId && <SaveOfflineButton target={{ kind: "abs", itemId }} />}
+      )}
+      {item.absItemId && (
+        <button
+          type="button"
+          onClick={() => navigate(`/library/abs/${encodeURIComponent(item.absItemId!)}`)}
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
+        >
+          <Headphones size={16} />
+          Listen
+        </button>
+      )}
+      {item.chapterId != null && (
+        <SaveOfflineButton
+          target={{
+            kind: "ebook",
+            chapterId: item.chapterId,
+            title: item.title,
+            author: item.author,
+            coverUrl: item.coverUrl,
+            isPdf: true,
+          }}
+        />
+      )}
       <button
         type="button"
         onClick={handleViewInStore}
@@ -248,7 +214,6 @@ export default function LibraryBookDetail() {
         <div className="hidden md:block w-64 shrink-0">{cover}</div>
         <div className="flex-1 min-w-0">
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{item.title}</h1>
-          {item.subtitle && <p className="text-base sm:text-lg text-gray-400 mt-1">{item.subtitle}</p>}
           {item.author && (
             <p className="text-gray-300 mt-2 sm:mt-3">
               by <span className="text-gray-100 font-medium">{item.author}</span>
@@ -256,21 +221,7 @@ export default function LibraryBookDetail() {
           )}
           {seriesLine && <p className="text-sm text-brand-400 mt-1">{seriesLine}</p>}
 
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-xs text-gray-400">
-            {item.narrator && (
-              <span className="inline-flex items-center gap-1">
-                <Mic size={12} /> {item.narrator}
-              </span>
-            )}
-            {item.duration > 0 && (
-              <span className="inline-flex items-center gap-1">
-                <Clock size={12} /> {formatDuration(item.duration)}
-              </span>
-            )}
-            {item.publishedYear && <span>{item.publishedYear}</span>}
-          </div>
-
-          {item.genres.length > 0 && (
+          {(item.genres || []).length > 0 && (
             <div className="flex flex-wrap gap-1.5 mt-3">
               {item.genres.map((g) => (
                 <span key={g} className="px-2 py-0.5 text-[10px] bg-gray-800 text-gray-300 rounded-full border border-gray-700">
@@ -294,10 +245,10 @@ export default function LibraryBookDetail() {
         </div>
       </div>
 
-      <Modal title="Delete audiobook" show={showDelete} onClose={() => !deleting && setShowDelete(false)}>
+      <Modal title="Delete ebook" show={showDelete} onClose={() => !deleting && setShowDelete(false)}>
         <p className="text-sm text-gray-400 mb-4">
           Permanently delete <span className="text-gray-200">{item.title}</span> from the library?
-          Audiobook files on disk and the Audiobookshelf entry will be removed. This cannot be undone.
+          Ebook files on disk and the Kavita entry will be removed. This cannot be undone.
         </p>
         <div className="flex gap-2 justify-end">
           <button

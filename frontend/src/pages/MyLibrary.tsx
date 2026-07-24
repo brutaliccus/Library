@@ -136,7 +136,7 @@ type TabView = "all" | "genre" | "series" | "author";
 export type NavigateToBook = (
   title: string,
   author?: string,
-  target?: { ebookChapterId?: number; absItemId?: string }
+  target?: { ebookChapterId?: number; ebookSeriesId?: number; absItemId?: string }
 ) => void;
 
 /** Series label from local item metadata (no Hardcover). */
@@ -609,7 +609,11 @@ export default function MyLibrary() {
   );
 
   const handleNavigateToBook = useCallback(
-    async (title: string, author?: string, target?: { ebookChapterId?: number; absItemId?: string }) => {
+    async (title: string, author?: string, target?: { ebookChapterId?: number; ebookSeriesId?: number; absItemId?: string }) => {
+      if (target?.ebookSeriesId != null) {
+        navigate(`/library/ebook/${target.ebookSeriesId}`);
+        return;
+      }
       if (target?.ebookChapterId != null) {
         navigate(`/read/${target.ebookChapterId}`);
         return;
@@ -1151,7 +1155,10 @@ export default function MyLibrary() {
                     } else if (r.source === "abs") {
                       handleNavigateToBook(r.title, r.author, { absItemId: r.itemId });
                     } else if (r.source === "kavita") {
-                      handleNavigateToBook(r.title, r.author, { ebookChapterId: r.chapterId ?? undefined });
+                      handleNavigateToBook(r.title, r.author, {
+                        ebookSeriesId: r.seriesId ?? undefined,
+                        ebookChapterId: r.seriesId == null ? r.chapterId ?? undefined : undefined,
+                      });
                     }
                   }}
                   className="w-full flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-800/60 transition-colors text-left group"
@@ -1269,7 +1276,6 @@ export default function MyLibrary() {
                           coverUrl={item.coverUrl}
                           duration={item.duration}
                           progress={item.progress}
-                          onPlay={handlePlayABS}
                           onNavigate={handleNavigateToBook}
                           hasEbook={formatMatches?.[item.title]?.hasEbook}
                           cached={cachedAbsIds.has(item.itemId)}
@@ -1296,7 +1302,6 @@ export default function MyLibrary() {
                           key={genre}
                           genre={genre}
                           items={items}
-                          onPlay={handlePlayABS}
                           onNavigate={handleNavigateToBook}
                           formatMatches={formatMatches}
                           cachedIds={cachedAbsIds}
@@ -1321,7 +1326,6 @@ export default function MyLibrary() {
                         key={author}
                         genre={author}
                         items={items}
-                        onPlay={handlePlayABS}
                         onNavigate={handleNavigateToBook}
                         formatMatches={formatMatches}
                         cachedIds={cachedAbsIds}
@@ -1338,7 +1342,9 @@ export default function MyLibrary() {
                 ) : absSeriesLocal.length > 0 ? (
                   <SeriesDrilldown
                     series={absSeriesLocal}
-                    onPlay={handlePlayABS}
+                    onOpen={(itemId, title, author) =>
+                      handleNavigateToBook(title, author, { absItemId: itemId })
+                    }
                     cachedIds={cachedAbsIds}
                     offline={offline}
                   />
@@ -1374,11 +1380,6 @@ export default function MyLibrary() {
                           key={item.seriesId}
                           item={item}
                           onNavigateToBook={handleNavigateToBook}
-                          onRead={
-                            item.chapterId != null
-                              ? () => void handleReadEbook(item.chapterId!, item)
-                              : undefined
-                          }
                           hasAudio={formatMatches?.[item.title]?.hasAudio}
                           cached={item.chapterId != null && cachedEbookIds.has(item.chapterId)}
                           unavailable={
@@ -1729,7 +1730,6 @@ function EbookGenreRow({
 function ABSGenreRow({
   genre,
   items,
-  onPlay,
   onNavigate,
   formatMatches,
   cachedIds,
@@ -1737,7 +1737,6 @@ function ABSGenreRow({
 }: {
   genre: string;
   items: ABSItem[];
-  onPlay: (id: string) => void;
   onNavigate?: NavigateToBook;
   formatMatches?: Record<string, { hasEbook: boolean; hasAudio: boolean }>;
   cachedIds?: Set<string>;
@@ -1773,7 +1772,6 @@ function ABSGenreRow({
             coverUrl={item.coverUrl}
             duration={item.duration}
             progress={item.progress}
-            onPlay={onPlay}
             onNavigate={onNavigate}
             hasEbook={formatMatches?.[item.title]?.hasEbook}
             cached={cachedIds?.has(item.itemId)}
@@ -1790,56 +1788,35 @@ function ABSGenreRow({
 function EbookCard({
   item,
   onNavigateToBook,
-  onRead,
   hasAudio,
   cached,
   unavailable,
 }: {
   item: KavitaItem;
   onNavigateToBook: NavigateToBook;
-  onRead?: () => void;
   hasAudio?: boolean;
   cached?: boolean;
   unavailable?: boolean;
 }) {
   const [imgError, setImgError] = useState(false);
-  const [isVisible, setIsVisible] = useState(false);
-  const cardRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const el = cardRef.current;
-    if (!el || !item.coverUrl) return;
-    const io = new IntersectionObserver(
-      ([entry]) => {
-        if (entry?.isIntersecting) setIsVisible(true);
-      },
-      { rootMargin: "100px", threshold: 0.01 }
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [item.coverUrl]);
+    setImgError(false);
+  }, [item.coverUrl, item.seriesId]);
 
   const handleClick = () => {
-    if (onRead) {
-      onRead();
-      return;
-    }
-    if (item.chapterId) {
-      onNavigateToBook(item.title, item.author, { ebookChapterId: item.chapterId });
-    } else {
-      onNavigateToBook(item.title, item.author);
-    }
+    onNavigateToBook(item.title, item.author, { ebookSeriesId: item.seriesId });
   };
 
   const fallback = (
-    <div className="w-full h-full flex items-center justify-center text-gray-600">
+    <div className="absolute inset-0 flex items-center justify-center text-gray-600">
       <BookOpen size={24} />
     </div>
   );
-  const showCover = item.coverUrl && !imgError && isVisible;
+  const showCover = Boolean(item.coverUrl) && !imgError;
+
   return (
     <div
-      ref={cardRef}
       className={`group flex flex-col relative ${
         unavailable ? "opacity-45 grayscale-[0.35]" : ""
       }`}
@@ -1852,14 +1829,14 @@ function EbookCard({
           <CoverImage
             src={item.coverUrl}
             alt={item.title}
-            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+            className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
             loading="lazy"
             onError={() => setImgError(true)}
           />
         ) : (
           fallback
         )}
-        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center">
+        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center pointer-events-none">
           <BookOpen size={24} className="text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg" />
         </div>
         {cached && (
@@ -1879,23 +1856,7 @@ function EbookCard({
         sequence={localSeriesSequence(item)}
         titleClassName="hover:text-amber-400 transition-colors"
         onTitleClick={handleClick}
-      >
-        {item.chapterId != null && (
-          <div className="mt-0.5" onClick={(e) => e.stopPropagation()}>
-            <SaveOfflineButton
-              size="sm"
-              target={{
-                kind: "ebook",
-                chapterId: item.chapterId,
-                title: item.title,
-                author: item.author,
-                coverUrl: item.coverUrl,
-                isPdf: true,
-              }}
-            />
-          </div>
-        )}
-      </ShelfCardMeta>
+      />
     </div>
   );
 }

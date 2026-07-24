@@ -940,6 +940,75 @@ async def kavita_collection(
     return {"items": items, "totalItems": len(items)}
 
 
+@router.get("/kavita/item/{series_id}")
+async def kavita_item_detail(
+    series_id: int,
+    _user: User = Depends(get_current_user),
+):
+    """Full metadata for one Kavita ebook series — library ebook detail page."""
+    series_list = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS)
+    series = next((s for s in series_list if s.get("id") == series_id), None)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    name = series.get("name") or series.get("localizedName") or series.get("originalName") or ""
+    volumes, meta = await asyncio.gather(
+        kavita.get_series_volumes(series_id),
+        kavita.get_series_metadata(series_id),
+    )
+    meta = meta or {}
+    book_num = kavita_ebook_match._book_number_from_text(name)
+    chapter_id = kavita_ebook_match._pick_chapter_id(volumes, book_num)
+    volume_id: int | None = None
+    for vol in volumes:
+        chapters = vol.get("chapters", [])
+        if chapters and chapters[0].get("id") == chapter_id:
+            volume_id = vol.get("id")
+            break
+        if chapter_id is None and chapters:
+            chapter_id = chapters[0].get("id")
+            volume_id = vol.get("id")
+            break
+    cover_url = f"/api/library/reader/cover/ebook?seriesId={series_id}"
+    if volume_id:
+        cover_url += f"&volumeId={volume_id}"
+    if chapter_id:
+        cover_url += f"&chapterId={chapter_id}"
+    writers = meta.get("writers") or series.get("authors") or []
+    author = ""
+    if writers:
+        author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
+    genres = _normalize_item_genres(meta.get("genres") or [])
+    description = (meta.get("summary") or meta.get("description") or "").strip()
+    inferred = library_series_from_title(name)
+    sname, seq = "", ""
+    if inferred and not is_junk_series_hint(inferred[0]):
+        sname, seq = inferred[0], str(inferred[1] or "")
+    series_out = [{"name": sname, "sequence": seq}] if sname else []
+
+    abs_item_id = ""
+    try:
+        for item in await audiobookshelf.get_all_items():
+            abs_title = (item.get("title") or "").strip()
+            if abs_title and _title_matches(name, abs_title):
+                abs_item_id = item.get("itemId") or ""
+                break
+    except Exception:
+        logger.debug("ABS match for Kavita series %s failed", series_id, exc_info=True)
+
+    return {
+        "seriesId": series_id,
+        "title": name,
+        "author": author,
+        "description": description,
+        "genres": genres,
+        "chapterId": chapter_id,
+        "coverUrl": cover_url,
+        "series": series_out,
+        "absItemId": abs_item_id or None,
+    }
+
+
+
 @router.get("/search")
 async def search_library_unified(
     q: str = Query("", min_length=1),
@@ -1118,18 +1187,19 @@ async def proxy_kavita_ebook_cover(
 ):
     """Try volume, then chapter, then series cover. Returns first successful image."""
     import httpx
-    from app.config import get_settings
-    cfg = get_settings()
+
+    kavita_url, kavita_key, _ = await kavita._conn()
+    if not kavita_url:
+        raise HTTPException(status_code=502, detail="Kavita not configured")
     urls_to_try: list[tuple[str, str]] = []
     if volume_id:
-        urls_to_try.append((f"{cfg.kavita_url}/api/Image/volume-cover?volumeId={volume_id}", "volume"))
+        urls_to_try.append((f"{kavita_url}/api/Image/volume-cover?volumeId={volume_id}", "volume"))
     if chapter_id:
-        urls_to_try.append((f"{cfg.kavita_url}/api/Image/chapter-cover?chapterId={chapter_id}", "chapter"))
-    urls_to_try.append((f"{cfg.kavita_url}/api/Image/series-cover?seriesId={series_id}", "series"))
+        urls_to_try.append((f"{kavita_url}/api/Image/chapter-cover?chapterId={chapter_id}", "chapter"))
+    urls_to_try.append((f"{kavita_url}/api/Image/series-cover?seriesId={series_id}", "series"))
 
-    headers = {"x-api-key": cfg.kavita_api_key}
-    # Image API may require apiKey as query param; append if we have a key
-    api_key_param = f"&apiKey={cfg.kavita_api_key}" if cfg.kavita_api_key else ""
+    headers = {"x-api-key": kavita_key} if kavita_key else {}
+    api_key_param = f"&apiKey={kavita_key}" if kavita_key else ""
     async with httpx.AsyncClient() as client:
         for url, label in urls_to_try:
             try:

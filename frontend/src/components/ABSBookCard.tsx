@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Headphones, Play, BookOpen, Info, RefreshCw } from "lucide-react";
+import { Headphones, Info, BookOpen, RefreshCw } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import api from "../api/client";
 import { useToast } from "../contexts/ToastContext";
@@ -15,16 +15,14 @@ interface Props {
   coverUrl: string;
   duration: number;
   progress: number;
-  onPlay: (itemId: string) => void;
+  /** Opens full library details (primary card action). */
   onNavigate?: (
     title: string,
     author?: string,
-    target?: { ebookChapterId?: number; absItemId?: string }
+    target?: { ebookChapterId?: number; ebookSeriesId?: number; absItemId?: string }
   ) => void;
   hasEbook?: boolean;
-  /** Fully cached for offline play */
   cached?: boolean;
-  /** Greyed / non-playable (e.g. offline + not cached) */
   unavailable?: boolean;
   seriesName?: string;
   sequence?: string;
@@ -44,7 +42,6 @@ export default function ABSBookCard({
   coverUrl,
   duration,
   progress,
-  onPlay,
   onNavigate,
   hasEbook,
   cached,
@@ -71,14 +68,14 @@ export default function ABSBookCard({
     }
   };
 
-  const handleInfoClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const openDetails = () => {
     if (onNavigate) onNavigate(title, author, { absItemId: itemId });
   };
 
   return (
     <button
-      onClick={() => onPlay(itemId)}
+      type="button"
+      onClick={openDetails}
       className={`group text-left flex flex-col relative ${
         unavailable ? "opacity-45 grayscale-[0.35]" : ""
       }`}
@@ -87,7 +84,7 @@ export default function ABSBookCard({
         <CoverImage
           src={coverUrl}
           alt={title}
-          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+          className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
           loading="lazy"
           fallback={
             <div className="w-full h-full flex items-center justify-center text-gray-700">
@@ -96,7 +93,7 @@ export default function ABSBookCard({
           }
         />
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center">
-          <Play size={24} className="text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg" />
+          <Info size={24} className="text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg" />
         </div>
         {cached && (
           <span className="absolute top-1 left-1 px-1 py-0.5 rounded bg-black/65 text-[8px] font-semibold text-emerald-300">
@@ -116,15 +113,6 @@ export default function ABSBookCard({
               title="Re-match metadata"
             >
               <RefreshCw size={10} className={`text-emerald-400 ${rematching ? "animate-spin" : ""}`} />
-            </span>
-          )}
-          {onNavigate && (
-            <span
-              onClick={handleInfoClick}
-              className="p-1 bg-black/60 rounded hover:bg-black/80 transition-colors cursor-pointer"
-              title="View book details"
-            >
-              <Info size={10} className="text-sky-400" />
             </span>
           )}
         </div>

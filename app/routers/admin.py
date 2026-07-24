@@ -799,6 +799,70 @@ async def rematch_abs_item(
     return {"updated": result.get("updated", False)}
 
 
+@router.delete("/library/abs/{item_id}")
+async def delete_abs_library_media(
+    item_id: str,
+    _admin: User = Depends(require_admin),
+):
+    """Delete on-disk audiobook folder and soft-remove the ABS library item."""
+    from app.config import get_settings
+    from app.services.library_media_delete import (
+        ABS_FORBIDDEN_DIRNAMES,
+        delete_tree_under_library,
+        resolve_abs_book_dir,
+    )
+
+    settings = get_settings()
+    item = await audiobookshelf.get_library_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    audiobook_dir = Path(settings.audiobook_dir)
+    try:
+        book_dir = resolve_abs_book_dir(audiobook_dir, item)
+        delete_tree_under_library(book_dir, audiobook_dir, ABS_FORBIDDEN_DIRNAMES)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    deleted = await audiobookshelf.delete_library_item(item_id, hard=False)
+    if not deleted:
+        raise HTTPException(status_code=502, detail="Failed to remove item from Audiobookshelf")
+    return {"deleted": True, "itemId": item_id}
+
+
+@router.delete("/library/ebook/{series_id}")
+async def delete_ebook_library_media(
+    series_id: int,
+    _admin: User = Depends(require_admin),
+):
+    """Delete on-disk ebook files/dirs and remove the Kavita series."""
+    from app.config import get_settings
+    from app.services.library_media_delete import (
+        EBOOK_FORBIDDEN_DIRNAMES,
+        delete_tree_under_library,
+        resolve_ebook_book_dirs,
+    )
+
+    settings = get_settings()
+    file_paths = await kavita.get_series_local_file_paths(series_id)
+    ebook_dir = Path(settings.ebook_dir)
+    try:
+        for book_dir in resolve_ebook_book_dirs(ebook_dir, file_paths):
+            delete_tree_under_library(book_dir, ebook_dir, EBOOK_FORBIDDEN_DIRNAMES)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    deleted = await kavita.delete_series(series_id)
+    if not deleted:
+        try:
+            await kavita.scan_library()
+        except Exception:
+            logger.exception("Kavita scan after failed series delete")
+        raise HTTPException(status_code=502, detail="Failed to remove series from Kavita")
+    try:
+        await kavita.scan_library()
+    except Exception:
+        logger.debug("Kavita scan after ebook delete failed", exc_info=True)
+    return {"deleted": True, "seriesId": series_id}
+
+
 # --- System Health ---
 
 @router.get("/health")

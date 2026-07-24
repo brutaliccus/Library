@@ -315,6 +315,35 @@ async def get_library_item(item_id: str) -> dict | None:
         return None
 
 
+async def delete_library_item(item_id: str, *, hard: bool = False) -> bool:
+    """Remove a library item from Audiobookshelf (soft delete by default)."""
+    try:
+        params: dict[str, str] = {}
+        if hard:
+            params["hard"] = "1"
+        async with httpx.AsyncClient() as client:
+            resp = await client.delete(
+                f"{settings.abs_url}/api/items/{item_id}",
+                params=params or None,
+                headers=_headers(),
+                timeout=30,
+            )
+            if resp.status_code in (200, 204):
+                invalidate_cache()
+                return True
+            logger.warning(
+                "ABS delete item %s failed: HTTP %s",
+                item_id,
+                resp.status_code,
+            )
+            return False
+    except Exception as e:
+        logger.warning("ABS delete item %s failed: %s", item_id, e)
+        return False
+
+
+
+
 def chapters_from_library_item(lib_item: dict | None) -> list[dict]:
     """Chapter markers from ABS library item media (times are seconds from book start)."""
     if not lib_item:

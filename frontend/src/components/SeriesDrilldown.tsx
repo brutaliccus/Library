@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Play, Clock, Headphones } from "lucide-react";
+import { ChevronDown, ChevronUp, Info, Clock, Headphones } from "lucide-react";
 import { useMemo, useState } from "react";
 import CoverImage from "./CoverImage";
 
@@ -23,10 +23,8 @@ interface Series {
 
 interface Props {
   series: Series[];
-  onPlay: (itemId: string) => void;
-  /** Item ids fully cached for offline play */
+  onOpen: (itemId: string, title: string, author: string) => void;
   cachedIds?: Set<string>;
-  /** When true, uncached books are greyed out */
   offline?: boolean;
 }
 
@@ -48,14 +46,14 @@ function SeriesCard({
   series,
   isExpanded,
   onToggle,
-  onPlay,
+  onOpen,
   cachedIds,
   offline,
 }: {
   series: Series;
   isExpanded: boolean;
   onToggle: () => void;
-  onPlay: (itemId: string) => void;
+  onOpen: (itemId: string, title: string, author: string) => void;
   cachedIds?: Set<string>;
   offline?: boolean;
 }) {
@@ -73,6 +71,7 @@ function SeriesCard({
   return (
     <div className="border border-gray-800 rounded-lg overflow-hidden bg-gray-800/30">
       <button
+        type="button"
         onClick={onToggle}
         className="w-full flex items-center gap-3 p-3 hover:bg-gray-800/60 transition-colors text-left"
       >
@@ -106,8 +105,9 @@ function SeriesCard({
             const unavailable = offline && !cached;
             return (
               <button
+                type="button"
                 key={book.itemId}
-                onClick={() => onPlay(book.itemId)}
+                onClick={() => onOpen(book.itemId, book.title, book.author)}
                 className={`w-full flex items-center gap-3 px-3 py-2 hover:bg-gray-800/60 transition-colors text-left group ${
                   unavailable ? "opacity-45 grayscale-[0.35]" : ""
                 }`}
@@ -141,7 +141,7 @@ function SeriesCard({
                       {formatDuration(book.duration)}
                     </span>
                   )}
-                  <Play size={14} className="text-gray-600 group-hover:text-emerald-400 transition-colors" />
+                  <Info size={14} className="text-gray-600 group-hover:text-sky-400 transition-colors" />
                 </div>
               </button>
             );
@@ -152,7 +152,7 @@ function SeriesCard({
   );
 }
 
-export default function SeriesDrilldown({ series, onPlay, cachedIds, offline }: Props) {
+export default function SeriesDrilldown({ series, onOpen, cachedIds, offline }: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const ordered = useMemo(() => {
@@ -178,7 +178,7 @@ export default function SeriesDrilldown({ series, onPlay, cachedIds, offline }: 
           series={s}
           isExpanded={expandedId === s.id}
           onToggle={() => setExpandedId(expandedId === s.id ? null : s.id)}
-          onPlay={onPlay}
+          onOpen={onOpen}
           cachedIds={cachedIds}
           offline={offline}
         />

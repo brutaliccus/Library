@@ -23,6 +23,7 @@ import AdminPage from "./pages/Admin";
 import InstanceSetup from "./pages/InstanceSetup";
 import MyLibrary from "./pages/MyLibrary";
 import LibraryBookDetail from "./pages/LibraryBookDetail";
+import LibraryEbookDetail from "./pages/LibraryEbookDetail";
 import Ereader from "./pages/Ereader";
 import Settings from "./pages/Settings";
 import Onboarding from "./pages/Onboarding";
@@ -256,6 +257,14 @@ export default function App() {
           element={
             <ProtectedRoute>
               <LibraryBookDetail />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/library/ebook/:seriesId"
+          element={
+            <ProtectedRoute>
+              <LibraryEbookDetail />
             </ProtectedRoute>
           }
         />

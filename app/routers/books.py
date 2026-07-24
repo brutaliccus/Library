@@ -579,12 +579,12 @@ async def build_new_releases_payload() -> dict:
     from app.services.prowlarr import title_is_mostly_foreign_script
 
     volume_ids, _ = await indexer_cache.list_matched_volume_ids(
-        page=1, page_size=80, order_by="recent", need_total=False,
+        page=1, page_size=40, order_by="recent", need_total=False,
     )
     source = "recent"
     if not volume_ids:
         volume_ids, _ = await indexer_cache.list_matched_volumes_by_year(
-            page=1, page_size=80, min_year=1,
+            page=1, page_size=40, min_year=1,
         )
         source = "pubdate"
     cards = await _fetch_volume_cards(volume_ids)

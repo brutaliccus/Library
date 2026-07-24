@@ -771,7 +771,11 @@ _subjects_lock = asyncio.Lock()
 
 
 async def _scrub_insane_publish_years(db) -> int:
-    """Zero out OL dump garbage years (9999, 9881, …) so they cannot float to the top."""
+    """Zero out OL dump garbage years (9999, 9881, …) so they cannot float to the top.
+
+    Only touches truly insane values — not ``0`` (already unknown) — so restarts
+    don't rewrite tens of thousands of rows every boot.
+    """
     from datetime import datetime, timezone
 
     from app.services.ol_catalog import _MIN_PUBLISH_YEAR
@@ -781,7 +785,8 @@ async def _scrub_insane_publish_years(db) -> int:
         result = await db.execute(
             text(
                 "UPDATE volume_subjects SET year = 0 "
-                "WHERE year IS NOT NULL AND (year < :miny OR year > :maxy)"
+                "WHERE year IS NOT NULL AND year != 0 "
+                "AND (year < :miny OR year > :maxy)"
             ),
             {"miny": _MIN_PUBLISH_YEAR, "maxy": max_year},
         )

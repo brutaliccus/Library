@@ -20,6 +20,7 @@ from app.services.forge_pipeline import (
     cover_url_from_staging,
     delete_request_staging_tree,
     delete_staging_entry,
+    m4b_source_dirs,
     needs_m4b_conversion,
     resolve_staging_dir,
     safe_path_under_staging,
@@ -144,6 +145,43 @@ def test_needs_m4b_multipart_mp3(tmp_path):
     (book / "01.mp3").write_bytes(b"a")
     (book / "02.mp3").write_bytes(b"b")
     assert needs_m4b_conversion(book) is True
+
+
+def test_needs_m4b_nested_multipart(tmp_path):
+    """Timeline-style: parts live under mp3/, not staging root."""
+    staging = tmp_path / "req_152"
+    mp3 = staging / "mp3"
+    mp3.mkdir(parents=True)
+    (mp3 / "Tape1.mp3").write_bytes(b"a")
+    (mp3 / "Tape2.mp3").write_bytes(b"b")
+    assert needs_m4b_conversion(staging) is True
+    assert m4b_source_dirs(staging) == [mp3]
+
+
+def test_m4b_source_dirs_prefers_aac_over_mp3(tmp_path):
+    staging = tmp_path / "req_152"
+    mp3 = staging / "mp3"
+    aac = staging / "AAC"
+    mp3.mkdir(parents=True)
+    aac.mkdir(parents=True)
+    (mp3 / "Tape1.mp3").write_bytes(b"a")
+    (mp3 / "Tape2.mp3").write_bytes(b"b")
+    (aac / "Tape1.m4a").write_bytes(b"c")
+    (aac / "Tape2.m4a").write_bytes(b"d")
+    assert m4b_source_dirs(staging) == [aac]
+
+
+def test_m4b_source_dirs_multi_book_parents(tmp_path):
+    staging = tmp_path / "req_pack"
+    b1 = staging / "Book One"
+    b2 = staging / "Book Two"
+    b1.mkdir(parents=True)
+    b2.mkdir(parents=True)
+    (b1 / "01.mp3").write_bytes(b"a")
+    (b1 / "02.mp3").write_bytes(b"b")
+    (b2 / "01.mp3").write_bytes(b"c")
+    (b2 / "02.mp3").write_bytes(b"d")
+    assert m4b_source_dirs(staging) == [b1, b2]
 
 
 def test_clean_catalog_title_strips_pack_noise():

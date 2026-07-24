@@ -115,12 +115,14 @@ When `LIBRAFORGE_PIPELINE_ENABLED=true` (default), audiobook requests:
 
 1. Land in `/audiobooks/.unorganized/req_{id}_{slug}/` (host: `/mnt/Audiobooks/.unorganized/…`).
 2. **Metadata Forge** (`POST /api/runs`, `apply=true`, `write_mode=overwrite`, `replace_cover=true`, `min_score` from `LIBRAFORGE_MIN_SCORE`). Above-threshold matches always force-write all tags and replace the embedded cover — score means match identity is trusted, not that the download’s existing tags/cover were correct. Continues only when write evidence exists (`write:written` / applied markers); otherwise quarantines.
-3. **M4B** on Pi (`POST /api/m4b/runs`) if not already a single `.m4b`.
+3. **M4B** on Pi (`POST /api/m4b/runs`) if not already a single `.m4b`. LibraForge only merges **immediate** children of `input_path` (or sidecar `chapter_files`), so the pipeline points at the folder that actually holds the parts (e.g. `…/mp3` or `…/AAC`), not an empty staging root. Dual-format torrents (`mp3/` + `AAC/`) convert the preferred encode once; source parts are deleted only after a successful convert.
 4. **Folder Forge** (`POST /api/organizer/runs`) with template  
    `{author}/{series} [{edition}]/{title}/{filename}` → `/audiobooks`.
 5. ABS scan / finalize.
 
 If metadata score is below auto-apply threshold (or LibraForge is down), the request becomes **`quarantined`**: files stay in `.unorganized`, admins are notified, and Admin → Requests offers **Manual Review** (LibraForge), **Continue pipeline**, or **Reject / delete**.
+
+**Re-queue M4B for a book already in the library** (staging empty / request `completed`): do **not** hit Continue on the old request. In LibraForge M4B Tool, load `/audiobooks/{Author}/{Title}` (flat multi-file folder) and Create M4B. After success, delete leftover source parts manually if desired, then Scan ABS.
 
 ### ABS exclusion for `.unorganized`
 

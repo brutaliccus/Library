@@ -70,9 +70,14 @@ try {
         ) {
           continue; // force network fetch for broken shelf snapshots
         }
-        // Collection shelves: paint instantly from disk, but mark stale so a
-        // background refetch always replaces the full list (drops orphans).
-        const updatedAt = LIBRARY_COLLECTION_SET.has(first) ? 0 : saved.t;
+        // Collection shelves + daily home shelves: paint instantly from disk,
+        // but mark stale so a background refetch always replaces the snapshot.
+        const updatedAt =
+          LIBRARY_COLLECTION_SET.has(first) ||
+          first === "trending-books" ||
+          first === "new-releases"
+            ? 0
+            : saved.t;
         queryClient.setQueryData(key as readonly unknown[], data, { updatedAt });
       }
     }

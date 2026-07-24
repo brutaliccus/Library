@@ -60,7 +60,15 @@ async def _load_daily_shelf(name: str) -> dict | None:
     """Memory → same-UTC-day snapshot → None (caller rebuilds)."""
     cached = _shelf_get(name)
     if cached is not None:
-        return cached
+        # Hot cache must not outlive the UTC day — otherwise overnight traffic
+        # keeps serving yesterday until the 30‑min TTL happens to expire.
+        refreshed = cached.get("refreshedAt") if isinstance(cached, dict) else None
+        if refreshed and shelf_snapshots.same_utc_day({"refreshedAt": refreshed}):
+            return cached
+        if refreshed:
+            _shelf_cache.pop(name, None)
+        else:
+            return cached
     snap = await shelf_snapshots.get_snapshot(name)
     if snap and shelf_snapshots.same_utc_day(snap):
         payload = snap.get("payload")
@@ -539,25 +547,44 @@ async def search_books(
 async def build_trending_payload() -> dict:
     books = await _nyt_trending_available_cards(limit=20)
     source = "nyt"
-    if not books:
+    if len(books) < 20:
+        # Pad (or fully fall back) with recently matched torrents so the shelf
+        # keeps moving when NYT titles aren't in our indexer cache yet.
+        have = {
+            (b.get("id") or b.get("volumeId") or "")
+            for b in books
+            if (b.get("id") or b.get("volumeId"))
+        }
+        need = 20 - len(books)
         volume_ids, _ = await indexer_cache.list_matched_volume_ids(
-            page=1, page_size=20, order_by="score", need_total=False,
+            page=1, page_size=max(40, need * 3), order_by="recent", need_total=False,
         )
-        books = await _fetch_volume_cards(volume_ids)
-        source = "cache"
+        pad_ids = [vid for vid in volume_ids if vid not in have][:need]
+        if pad_ids:
+            books = books + await _fetch_volume_cards(pad_ids)
+            source = "nyt+recent" if books and source == "nyt" and have else "cache"
+        elif not books:
+            volume_ids, _ = await indexer_cache.list_matched_volume_ids(
+                page=1, page_size=20, order_by="score", need_total=False,
+            )
+            books = await _fetch_volume_cards(volume_ids)
+            source = "cache"
     return {"books": books, "source": source, "availableOnly": True}
 
 
 async def build_new_releases_payload() -> dict:
-    volume_ids, _ = await indexer_cache.list_matched_volumes_by_year(
-        page=1, page_size=20, min_year=1,
+    # Rank by when we matched the torrent (scraper/RSS), not OL publish year.
+    # The local OL dump tags almost no modern years and ships garbage like
+    # 9999/9881 that permanently froze this shelf on a handful of 2010 titles.
+    volume_ids, _ = await indexer_cache.list_matched_volume_ids(
+        page=1, page_size=20, order_by="recent", need_total=False,
     )
-    source = "pubdate"
+    source = "recent"
     if not volume_ids:
-        volume_ids, _ = await indexer_cache.list_matched_volume_ids(
-            page=1, page_size=20, order_by="recent", need_total=False,
+        volume_ids, _ = await indexer_cache.list_matched_volumes_by_year(
+            page=1, page_size=20, min_year=1,
         )
-        source = "cache"
+        source = "pubdate"
     books = await _fetch_volume_cards(volume_ids)
     return {"books": books, "source": source, "availableOnly": True}
 

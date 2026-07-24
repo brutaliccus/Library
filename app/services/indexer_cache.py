@@ -770,6 +770,27 @@ async def refresh_matched_volumes(force: bool = False) -> int:
 _subjects_lock = asyncio.Lock()
 
 
+async def _scrub_insane_publish_years(db) -> int:
+    """Zero out OL dump garbage years (9999, 9881, …) so they cannot float to the top."""
+    from datetime import datetime, timezone
+
+    from app.services.ol_catalog import _MIN_PUBLISH_YEAR
+
+    max_year = datetime.now(timezone.utc).year + 1
+    try:
+        result = await db.execute(
+            text(
+                "UPDATE volume_subjects SET year = 0 "
+                "WHERE year IS NOT NULL AND (year < :miny OR year > :maxy)"
+            ),
+            {"miny": _MIN_PUBLISH_YEAR, "maxy": max_year},
+        )
+        return int(result.rowcount or 0)
+    except Exception as e:  # pragma: no cover
+        logger.debug("volume_subjects year scrub failed: %s", e)
+        return 0
+
+
 async def refresh_volume_subjects(limit: int | None = None) -> int:
     """Populate subjects + publish year for matched volumes.
 
@@ -783,8 +804,20 @@ async def refresh_volume_subjects(limit: int | None = None) -> int:
     """
     from app.services import ol_catalog
 
+    # Hygiene does not need the OL catalog — dump garbage years poison shelves.
+    scrubbed = 0
+    try:
+        async with async_session() as db:
+            await _ensure_summary_schema(db)
+            scrubbed = await _scrub_insane_publish_years(db)
+            if scrubbed:
+                await db.commit()
+                logger.info("volume_subjects: scrubbed %s insane publish years", scrubbed)
+    except Exception as e:
+        logger.warning("volume_subjects year scrub failed: %s", e)
+
     if not ol_catalog.catalog_ready():
-        return 0
+        return scrubbed
 
     async with _subjects_lock:
         cap = int(limit) if limit else 5000
@@ -809,7 +842,7 @@ async def refresh_volume_subjects(limit: int | None = None) -> int:
             year_ids = [r[0] for r in year_rows if r[0]]
 
         if not new_ids and not year_ids:
-            return 0
+            return scrubbed
 
         # OL lookups on a private read-only connection (never blocks app writes).
         all_ids = list({*new_ids, *year_ids})
@@ -835,6 +868,7 @@ async def refresh_volume_subjects(limit: int | None = None) -> int:
                 await _ensure_summary_schema(db)
                 for vid in batch:
                     subj, year = meta.get(vid, ("", 0))
+                    year = ol_catalog.sane_publish_year(year)
                     if vid in new_set:
                         await db.execute(
                             text(
@@ -866,7 +900,7 @@ async def refresh_volume_subjects(limit: int | None = None) -> int:
             "volume_subjects: %s new + %s year-backfill volumes tagged",
             len(new_ids), len(year_ids),
         )
-        return touched
+        return touched + scrubbed
 
 
 async def list_matched_volumes_by_year(
@@ -874,11 +908,16 @@ async def list_matched_volumes_by_year(
 ) -> tuple[list[str], int]:
     """Matched volume ids ordered by REAL publication year (newest first).
 
-    Powers reality-based "new releases": the books we have torrents for, ranked
-    by their actual Open Library publish year (tagged into volume_subjects), not
-    by when our scraper happened to match them.
+    Secondary sort is ``latest_updated`` so ties within a year rotate as the
+    scraper matches new torrents. Insane OL dump years are excluded.
     """
+    from datetime import datetime, timezone
+
+    from app.services.ol_catalog import _MIN_PUBLISH_YEAR
+
     start = (page - 1) * page_size
+    max_year = datetime.now(timezone.utc).year + 1
+    floor = max(int(min_year or 0), _MIN_PUBLISH_YEAR)
     async with async_session() as db:
         await _ensure_summary_schema(db)
         try:
@@ -886,10 +925,16 @@ async def list_matched_volumes_by_year(
                 text(
                     "SELECT v.google_volume_id FROM volume_subjects v "
                     "JOIN matched_volumes m ON m.google_volume_id = v.google_volume_id "
-                    "WHERE v.year IS NOT NULL AND v.year >= :minyear "
-                    "ORDER BY v.year DESC, m.best_score DESC LIMIT :lim OFFSET :off"
+                    "WHERE v.year IS NOT NULL AND v.year >= :minyear AND v.year <= :maxyear "
+                    "ORDER BY v.year DESC, m.latest_updated DESC, m.best_score DESC "
+                    "LIMIT :lim OFFSET :off"
                 ),
-                {"minyear": min_year, "lim": page_size, "off": start},
+                {
+                    "minyear": floor,
+                    "maxyear": max_year,
+                    "lim": page_size,
+                    "off": start,
+                },
             )).all()
         except Exception as e:
             logger.warning("by-year matched query failed: %s", e)

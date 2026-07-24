@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
@@ -27,6 +28,20 @@ settings = get_settings()
 _conn: aiosqlite.Connection | None = None
 _conn_path: str | None = None
 _STOPWORDS = {"the", "a", "an", "of", "and", "or", "to", "in", "for"}
+# OL dumps occasionally ship nonsense years (9999, 9881, …). Clamp hard.
+_MIN_PUBLISH_YEAR = 1000
+
+
+def sane_publish_year(raw: Any) -> int:
+    """Return a plausible Gregorian year, or 0 when unknown/garbage."""
+    try:
+        year = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    max_year = datetime.now(timezone.utc).year + 1
+    if year < _MIN_PUBLISH_YEAR or year > max_year:
+        return 0
+    return year
 
 
 def catalog_ready() -> bool:
@@ -341,10 +356,7 @@ async def subjects_for_works(
                     subjects = [s for s in json.loads(row["subjects"]) if isinstance(s, str)]
                 except Exception:
                     subjects = []
-            try:
-                year = int(row["publish_year"]) if row["publish_year"] else 0
-            except (ValueError, TypeError):
-                year = 0
+            year = sane_publish_year(row["publish_year"]) if row["publish_year"] else 0
             out[orig] = (" ".join(subjects).lower(), year)
     return out
 
@@ -354,14 +366,15 @@ async def recent_works(*, limit: int = 20, offset: int = 0, min_year: int = 2015
     conn = await _get_conn()
     if conn is None:
         return {"books": [], "totalItems": 0}
+    max_year = datetime.now(timezone.utc).year + 1
     sql = (
         "SELECT key, title, subtitle, author_keys, subjects, description, "
         "cover_id, publish_year FROM works "
-        "WHERE publish_year >= ? AND cover_id IS NOT NULL "
+        "WHERE publish_year >= ? AND publish_year <= ? AND cover_id IS NOT NULL "
         "ORDER BY publish_year DESC LIMIT ? OFFSET ?"
     )
     try:
-        async with conn.execute(sql, (min_year, limit, max(0, offset))) as cur:
+        async with conn.execute(sql, (min_year, max_year, limit, max(0, offset))) as cur:
             rows = await cur.fetchall()
     except Exception as e:
         logger.debug("ol_catalog recent_works failed: %s", e)

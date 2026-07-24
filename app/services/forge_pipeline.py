@@ -22,6 +22,14 @@ settings = get_settings()
 # Real Audible ASINs (B0… / 10-digit). Ignore scan_cache sentinels like HAS_ASIN.
 _ASIN_RE = re.compile(r"^(?:B[\dA-Z]{9}|\d{10})$", re.IGNORECASE)
 _ASIN_SENTINELS = frozenset({"", "HAS_ASIN", "NOREALASIN", "NONE", "NULL", "N/A"})
+# Same filename token LibraForge ``_FILENAME_ASIN_RE`` uses for owned-ASIN scans.
+_FILENAME_ASIN_RE = re.compile(r"\[(?:ASIN\.)?([Bb]0[A-Z0-9]{8})\]", re.IGNORECASE)
+# MP4 freeform keys LibraForge ``_ASIN_TAG_KEYS`` / ``_read_asin_from_audio`` probe.
+_ASIN_TAG_KEYS = (
+    "----:com.apple.iTunes:asin",
+    "----:com.pilabor.tone:AUDIBLE_ASIN",
+    "----:com.apple.iTunes:ASIN",
+)
 
 # Dot-directory so Audiobookshelf skips staging (ABS indexes `_unorganized`).
 UNORGANIZED_DIRNAME = ".unorganized"
@@ -708,6 +716,12 @@ def normalize_asin(value: Any) -> str:
 
 
 def _asin_from_sidecar_dict(data: dict[str, Any]) -> str:
+    """Resolve ASIN from a libraforge.json dict.
+
+    Mirrors LibraForge ownership for chaptering + scan inventory:
+    curated ``book.asin``, then ``scan_cache.asin`` (embedded-tag cache from
+    LF library scan), then fixer audible / applied tags, then top-level.
+    """
     if "sidecar" in data and isinstance(data["sidecar"], dict):
         data = data["sidecar"]
     book = data.get("book") if isinstance(data.get("book"), dict) else {}
@@ -717,8 +731,10 @@ def _asin_from_sidecar_dict(data: dict[str, Any]) -> str:
         audible = marker.get("audible") if isinstance(marker.get("audible"), dict) else {}
     backup = data.get("backup") if isinstance(data.get("backup"), dict) else {}
     applied = backup.get("applied_tags") if isinstance(backup.get("applied_tags"), dict) else {}
+    scan_cache = data.get("scan_cache") if isinstance(data.get("scan_cache"), dict) else {}
     for candidate in (
         book.get("asin"),
+        scan_cache.get("asin"),
         audible.get("asin"),
         applied.get("asin"),
         marker.get("asin"),
@@ -730,14 +746,68 @@ def _asin_from_sidecar_dict(data: dict[str, Any]) -> str:
     return ""
 
 
-def extract_asin_from_staging(staging: Path) -> str:
-    """Best-effort ASIN from libraforge.json / metadata.json under staging.
+def _asin_from_filename(path: Path) -> str:
+    match = _FILENAME_ASIN_RE.search(path.name)
+    return normalize_asin(match.group(1)) if match else ""
 
-    Preference mirrors LibraForge ``resolve_asin_for_chaptering``: curated
-    ``book.asin`` / marker audible ASIN first, then ABS ``metadata.json``.
+
+def _asin_from_embedded_audio(audio_file: Path) -> str:
+    """Best-effort embedded ASIN via mutagen (optional dependency)."""
+    try:
+        from mutagen.id3 import ID3  # type: ignore[import-untyped]
+        from mutagen.mp4 import MP4, MP4FreeForm  # type: ignore[import-untyped]
+    except ImportError:
+        return ""
+    try:
+        suffix = audio_file.suffix.lower()
+        if suffix in {".m4b", ".m4a", ".mp4"}:
+            tags = MP4(str(audio_file)).tags or {}
+            for key in _ASIN_TAG_KEYS:
+                raw = tags.get(key, [])
+                if not raw:
+                    continue
+                val = raw[0]
+                text = (
+                    bytes(val).decode("utf-8", errors="ignore")
+                    if isinstance(val, (bytes, bytearray, MP4FreeForm))
+                    else str(val)
+                ).strip()
+                asin = normalize_asin(text)
+                if asin:
+                    return asin
+        elif suffix == ".mp3":
+            tags = ID3(str(audio_file))
+            for key in tags.keys():
+                if "asin" not in key.lower():
+                    continue
+                frame = tags.get(key)
+                text = "".join(getattr(frame, "text", []) or []) if frame else ""
+                asin = normalize_asin(text)
+                if asin:
+                    return asin
+    except Exception:
+        return ""
+    return ""
+
+
+def extract_asin_from_staging(staging: Path) -> str:
+    """Best-effort ASIN using the same sources LibraForge inventory uses.
+
+    Order: filename ``[B0…]`` token → libraforge.json (book / scan_cache /
+    audible / applied) → ABS ``metadata.json`` → embedded mutagen tags.
+    ``scan_cache.asin`` is critical: LF's "complete metadata" count is based
+    on embedded tags cached there, not only curated ``book.asin``.
     """
     if not staging.is_dir():
         return ""
+    audio_files = sorted(
+        (p for p in staging.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS),
+        key=lambda p: (len(p.parts), str(p)),
+    )
+    for audio in audio_files:
+        asin = _asin_from_filename(audio)
+        if asin:
+            return asin
     # Prefer sidecars next to audio (shallow first via sorted path length).
     sidecars = sorted(
         staging.rglob("libraforge.json"),
@@ -769,6 +839,10 @@ def extract_asin_from_staging(staging: Path) -> str:
         if not isinstance(meta, dict):
             continue
         asin = normalize_asin(meta.get("asin"))
+        if asin:
+            return asin
+    for audio in audio_files:
+        asin = _asin_from_embedded_audio(audio)
         if asin:
             return asin
     return ""

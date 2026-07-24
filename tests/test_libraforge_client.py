@@ -268,6 +268,25 @@ def test_extract_asin_from_staging_prefers_book_over_metadata(tmp_path):
     assert extract_asin_from_staging(staging) == "B0SIDECAR1"
 
 
+def test_extract_asin_uses_scan_cache_when_book_asin_absent(tmp_path):
+    """LibraForge complete-metadata ASIN lives in scan_cache (embedded-tag cache)."""
+    staging = tmp_path / "req_ch"
+    staging.mkdir()
+    (staging / "book.m4b").write_bytes(b"x")
+    (staging / "libraforge.json").write_text(
+        json.dumps({"scan_cache": {"asin": "B0SCANCACH"}}),
+        encoding="utf-8",
+    )
+    assert extract_asin_from_staging(staging) == "B0SCANCACH"
+
+
+def test_extract_asin_from_filename_token(tmp_path):
+    staging = tmp_path / "req_ch"
+    staging.mkdir()
+    (staging / "Book Title [B0FILENAME].m4b").write_bytes(b"x")
+    assert extract_asin_from_staging(staging) == "B0FILENAME"
+
+
 def test_extract_asin_falls_back_to_metadata_json(tmp_path):
     staging = tmp_path / "req_ch"
     staging.mkdir()

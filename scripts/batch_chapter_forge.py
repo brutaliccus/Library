@@ -45,6 +45,13 @@ SKIP_DIR_NAMES = {
 }
 _ASIN_RE = re.compile(r"^(?:B[\dA-Z]{9}|\d{10})$", re.IGNORECASE)
 _ASIN_SENTINELS = frozenset({"", "HAS_ASIN", "NOREALASIN", "NONE", "NULL", "N/A"})
+# LibraForge ``_FILENAME_ASIN_RE`` / ``_ASIN_TAG_KEYS`` — same ownership sources.
+_FILENAME_ASIN_RE = re.compile(r"\[(?:ASIN\.)?([Bb]0[A-Z0-9]{8})\]", re.IGNORECASE)
+_ASIN_TAG_KEYS = (
+    "----:com.apple.iTunes:asin",
+    "----:com.pilabor.tone:AUDIBLE_ASIN",
+    "----:com.apple.iTunes:ASIN",
+)
 
 _print_lock = threading.Lock()
 
@@ -73,8 +80,10 @@ def _asin_from_sidecar(data: dict[str, Any]) -> str:
         audible = marker.get("audible") if isinstance(marker.get("audible"), dict) else {}
     backup = data.get("backup") if isinstance(data.get("backup"), dict) else {}
     applied = backup.get("applied_tags") if isinstance(backup.get("applied_tags"), dict) else {}
+    scan_cache = data.get("scan_cache") if isinstance(data.get("scan_cache"), dict) else {}
     for candidate in (
         book.get("asin"),
+        scan_cache.get("asin"),  # LF complete-metadata source (embedded-tag cache)
         audible.get("asin"),
         applied.get("asin"),
         marker.get("asin"),
@@ -94,7 +103,61 @@ def read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _asin_from_filename(path: Path) -> str:
+    match = _FILENAME_ASIN_RE.search(path.name)
+    return normalize_asin(match.group(1)) if match else ""
+
+
+def _asin_from_embedded_audio(audio_file: Path) -> str:
+    """Embedded ASIN via mutagen when available (same keys as LibraForge)."""
+    try:
+        from mutagen.id3 import ID3  # type: ignore
+        from mutagen.mp4 import MP4, MP4FreeForm  # type: ignore
+    except ImportError:
+        return ""
+    try:
+        suffix = audio_file.suffix.lower()
+        if suffix in {".m4b", ".m4a", ".mp4"}:
+            tags = MP4(str(audio_file)).tags or {}
+            for key in _ASIN_TAG_KEYS:
+                raw = tags.get(key, [])
+                if not raw:
+                    continue
+                val = raw[0]
+                text = (
+                    bytes(val).decode("utf-8", errors="ignore")
+                    if isinstance(val, (bytes, bytearray, MP4FreeForm))
+                    else str(val)
+                ).strip()
+                asin = normalize_asin(text)
+                if asin:
+                    return asin
+        elif suffix == ".mp3":
+            tags = ID3(str(audio_file))
+            for key in tags.keys():
+                if "asin" not in key.lower():
+                    continue
+                frame = tags.get(key)
+                text = "".join(getattr(frame, "text", []) or []) if frame else ""
+                asin = normalize_asin(text)
+                if asin:
+                    return asin
+    except Exception:
+        return ""
+    return ""
+
+
 def extract_asin(folder: Path) -> str:
+    """Resolve ASIN the way LibraForge inventory does.
+
+    filename ``[B0…]`` → libraforge.json (book / **scan_cache** / audible) →
+    metadata.json → embedded mutagen tags.
+    """
+    audio_files = collect_audio(folder)
+    for audio in audio_files:
+        asin = _asin_from_filename(audio)
+        if asin:
+            return asin
     for name in ("libraforge.json",):
         path = folder / name
         if path.is_file():
@@ -112,6 +175,10 @@ def extract_asin(folder: Path) -> str:
             return asin
     for path in sorted(folder.glob("*.metadata.json")):
         asin = normalize_asin(read_json(path).get("asin"))
+        if asin:
+            return asin
+    for audio in audio_files:
+        asin = _asin_from_embedded_audio(audio)
         if asin:
             return asin
     return ""
@@ -245,6 +312,35 @@ def docker_path(host_path: Path, root: Path, docker_root: str) -> str:
     return f"{docker_root.rstrip('/')}/{rel.as_posix()}"
 
 
+def _norm_lib_path(path: str | Path) -> str:
+    text = str(path).replace("\\", "/")
+    for prefix in ("/mnt/Audiobooks", "/audiobooks"):
+        if text.startswith(prefix):
+            text = "/audiobooks" + text[len(prefix) :]
+            break
+    return text.rstrip("/").lower()
+
+
+def load_prior_success_paths(report_path: Path) -> set[str]:
+    """Paths already chapterized successfully in a prior batch report."""
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return set()
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return set()
+    out: set[str] = set()
+    for row in results:
+        if not isinstance(row, dict) or row.get("status") != "success":
+            continue
+        for key in ("path", "audio", "source_path", "embedded_into"):
+            val = row.get(key)
+            if val:
+                out.add(_norm_lib_path(val))
+    return out
+
+
 def process_book(
     folder: Path,
     *,
@@ -253,6 +349,7 @@ def process_book(
     docker_root: str,
     dry_run: bool,
     timeout_seconds: float,
+    skip_paths: set[str] | None = None,
 ) -> dict[str, Any]:
     asin = extract_asin(folder)
     audio = primary_audio(folder)
@@ -264,6 +361,13 @@ def process_book(
         "chapters": 0,
         "error": "",
     }
+    skip_paths = skip_paths or set()
+    if (
+        _norm_lib_path(folder) in skip_paths
+        or (audio and _norm_lib_path(audio) in skip_paths)
+    ):
+        row["status"] = "skipped_already_done"
+        return row
     if not asin:
         row["status"] = "skipped_no_asin"
         return row
@@ -348,12 +452,28 @@ def main() -> int:
         default=os.environ.get("REPORTS_DIR", "/opt/stacks/libraforge/reports"),
     )
     parser.add_argument("--skip-abs-scan", action="store_true")
+    parser.add_argument(
+        "--skip-success-from",
+        default="",
+        help="Prior batch report JSON; skip paths that already succeeded",
+    )
+    parser.add_argument(
+        "--only-with-asin",
+        action="store_true",
+        help="Inventory all folders but only process those with a resolvable ASIN",
+    )
     args = parser.parse_args()
 
     root = Path(args.root)
     if not root.is_dir():
         log(f"ERROR: root not found: {root}")
         return 2
+
+    skip_paths: set[str] = set()
+    if args.skip_success_from:
+        prior = Path(args.skip_success_from)
+        skip_paths = load_prior_success_paths(prior)
+        log(f"Skipping {len(skip_paths)} path key(s) from prior success report {prior}")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     reports = Path(args.reports_dir)
@@ -381,6 +501,21 @@ def main() -> int:
     log(f"Inventory under {root} …")
     books = inventory_books(root)
     log(f"Found {len(books)} book folder(s) with audio")
+    if args.only_with_asin:
+        with_asin = [b for b in books if extract_asin(b)]
+        log(f"With resolvable ASIN: {len(with_asin)} (of {len(books)})")
+        books = with_asin
+    if skip_paths:
+        before = len(books)
+        books = [
+            b
+            for b in books
+            if _norm_lib_path(b) not in skip_paths
+            and not (
+                (audio := primary_audio(b)) and _norm_lib_path(audio) in skip_paths
+            )
+        ]
+        log(f"After skipping prior successes: {len(books)} (removed {before - len(books)})")
     if args.limit and args.limit > 0:
         books = books[: args.limit]
         log(f"Limited to first {len(books)}")
@@ -392,6 +527,7 @@ def main() -> int:
         "failed": 0,
         "skipped_no_asin": 0,
         "skipped_no_audio": 0,
+        "skipped_already_done": 0,
         "dry_run": 0,
         "other": 0,
     }
@@ -404,6 +540,7 @@ def main() -> int:
             docker_root=args.docker_root,
             dry_run=args.dry_run,
             timeout_seconds=args.timeout,
+            skip_paths=skip_paths,
         )
         log(
             f"[{row['status']}] asin={row.get('asin') or '-'} "
@@ -435,19 +572,30 @@ def main() -> int:
         "libraforge_url": args.libraforge_url,
         "dry_run": args.dry_run,
         "concurrency": concurrency,
+        "skip_success_from": args.skip_success_from or "",
         "counts": counts,
         "total": len(results),
         "abs_scan": abs_scan,
         "results": results,
     }
     report_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    # Mirror into Library Site reports/ when running on Pi under libraforge reports
+    mirror = Path("/opt/stacks/Library Site/reports") / report_path.name
+    try:
+        if mirror.parent.is_dir() and mirror.resolve() != report_path.resolve():
+            mirror.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            log(f"Mirrored report to {mirror}")
+    except OSError:
+        pass
     log(
         f"Done. success={counts['success']} failed={counts['failed']} "
         f"skipped_no_asin={counts['skipped_no_asin']} "
+        f"skipped_already_done={counts['skipped_already_done']} "
         f"skipped_no_audio={counts['skipped_no_audio']} "
         f"report={report_path}"
     )
-    return 0 if counts["failed"] == 0 else 1
+    # Soft-continue: non-zero only on total catastrophe (no results). Failures are OK.
+    return 0 if results else 1
 
 
 if __name__ == "__main__":

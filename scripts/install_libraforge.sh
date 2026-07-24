@@ -98,9 +98,23 @@ mkdir -p "${STACK_DIR}/audible-auth"
 mkdir -p "${STACK_DIR}/reports"
 
 # Staging folder for messy imports (Metadata/Folder Forge source).
+# Dot-directory so Audiobookshelf skips it; keep .ignore as a belt-and-suspenders marker.
 if [[ -d "${AUDIOBOOKS_HOST}" ]]; then
-  mkdir -p "${AUDIOBOOKS_HOST}/_unorganized"
-  echo "==> Staging folder: ${AUDIOBOOKS_HOST}/_unorganized"
+  mkdir -p "${AUDIOBOOKS_HOST}/.unorganized"
+  touch "${AUDIOBOOKS_HOST}/.unorganized/.ignore"
+  # One-time migrate legacy _unorganized/req_* into .unorganized/
+  if [[ -d "${AUDIOBOOKS_HOST}/_unorganized" ]]; then
+    shopt -s nullglob
+    for d in "${AUDIOBOOKS_HOST}/_unorganized"/req_*; do
+      base="$(basename "$d")"
+      if [[ ! -e "${AUDIOBOOKS_HOST}/.unorganized/${base}" ]]; then
+        mv "$d" "${AUDIOBOOKS_HOST}/.unorganized/${base}"
+        echo "==> Migrated staging ${base} → .unorganized/"
+      fi
+    done
+    shopt -u nullglob
+  fi
+  echo "==> Staging folder: ${AUDIOBOOKS_HOST}/.unorganized"
 else
   echo "WARN: ${AUDIOBOOKS_HOST} not found — create it before using LibraForge." >&2
 fi
@@ -119,5 +133,5 @@ echo "  2. Expose via Nginx Proxy Manager: forge.library.freiverse.com -> http:/
 echo "     (from NPM container use 172.17.0.1, not 127.0.0.1 / LAN IP — see docs/libraforge.md)"
 echo "     Restrict access (VPN / IP allowlist / access list) — LibraForge can modify files."
 echo "  3. Set Library Site .env: LIBRAFORGE_URL + LIBRAFORGE_INTERNAL_URL, then redeploy Library."
-echo "  4. In LibraForge UI, set source to /audiobooks/_unorganized and dest to /audiobooks"
+echo "  4. In LibraForge UI, set source to /audiobooks/.unorganized and dest to /audiobooks"
 echo "  5. Always dry-run before Apply; then trigger ABS library scan from Library Admin → Health."

@@ -45,7 +45,7 @@ ssh pihole@192.168.68.76 "bash /tmp/install_libraforge.sh"
 
 UI (localhost + Docker bridge): `http://127.0.0.1:5056` (also bound on `172.17.0.1:5056` so the Library container can health-probe it). The install script writes `docker-compose.override.yml` for that second bind.
 
-The install script creates `/mnt/Audiobooks/_unorganized` for messy imports.
+The install script creates `/mnt/Audiobooks/.unorganized` for messy imports (dot-directory so Audiobookshelf skips it).
 
 ## Expose safely (Nginx Proxy Manager)
 
@@ -113,26 +113,24 @@ The auth directory is mounted into the container at `/auth`. Encrypted auth file
 
 When `LIBRAFORGE_PIPELINE_ENABLED=true` (default), audiobook requests:
 
-1. Land in `/audiobooks/_unorganized/req_{id}_{slug}/` (host: `/mnt/Audiobooks/_unorganized/…`).
+1. Land in `/audiobooks/.unorganized/req_{id}_{slug}/` (host: `/mnt/Audiobooks/.unorganized/…`).
 2. **Metadata Forge** (`POST /api/runs`, `apply=true`, `write_mode=overwrite`, `replace_cover=true`, `min_score` from `LIBRAFORGE_MIN_SCORE`). Above-threshold matches always force-write all tags and replace the embedded cover — score means match identity is trusted, not that the download’s existing tags/cover were correct. Continues only when write evidence exists (`write:written` / applied markers); otherwise quarantines.
 3. **M4B** on Pi (`POST /api/m4b/runs`) if not already a single `.m4b`.
 4. **Folder Forge** (`POST /api/organizer/runs`) with template  
    `{author}/{series} [{edition}]/{title}/{filename}` → `/audiobooks`.
 5. ABS scan / finalize.
 
-If metadata score is below auto-apply threshold (or LibraForge is down), the request becomes **`quarantined`**: files stay in `_unorganized`, admins are notified, and Admin → Requests offers **Manual Review** (LibraForge), **Continue pipeline**, or **Reject / delete**.
+If metadata score is below auto-apply threshold (or LibraForge is down), the request becomes **`quarantined`**: files stay in `.unorganized`, admins are notified, and Admin → Requests offers **Manual Review** (LibraForge), **Continue pipeline**, or **Reject / delete**.
 
-### ABS exclusion for `_unorganized` (required)
+### ABS exclusion for `.unorganized`
 
-`_unorganized` lives **inside** the shared `/mnt/Audiobooks` mount (LibraForge convention). Audiobookshelf does **not** treat `_` as hidden — it will index staging folders unless excluded.
+Staging lives **inside** the shared `/mnt/Audiobooks` mount as a **dot-directory** (`.unorganized`). Audiobookshelf ignores hidden/dot folders by default, so quarantined books should not appear in the library. A `.ignore` file is also created inside the staging root as a belt-and-suspenders marker.
 
-**Decision:** keep `_unorganized` under `/mnt/Audiobooks` for LibraForge defaults, and configure ABS **Folders to Ignore** to include `_unorganized` (library settings). Quarantined books can sit there indefinitely; without this ignore, ABS will show ghost/incomplete items.
-
-Fallback if ABS cannot ignore folders: move staging to a sibling host path outside the ABS library root (e.g. `/mnt/m4b-source-quarantine`) and mount it into Library + LibraForge only — not into ABS.
+Legacy `_unorganized` folders are migrated into `.unorganized` on install/deploy. Prefer updating LibraForge’s source path to `/audiobooks/.unorganized` if it still points at the old name.
 
 ### Manual / legacy workflow
 
-1. **Messy / legacy books** — drop into `/mnt/Audiobooks/_unorganized/`.
+1. **Messy / legacy books** — drop into `/mnt/Audiobooks/.unorganized/`.
 2. **LibraForge Metadata Forge** — Admin → Health → **Open LibraForge**; dry-run, then apply.
 3. **Folder Forge** (`/organizer`) — dry-run then apply into `/audiobooks`.
 4. **Audiobookshelf** — **Scan ABS & fix metadata** from Library Admin → Health.

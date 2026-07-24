@@ -523,7 +523,7 @@ async def list_request_staging_files(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List the request's `_unorganized` staging tree (admin file browser)."""
+    """List the request's ``.unorganized`` staging tree (admin file browser)."""
     from app.services.forge_pipeline import build_staging_tree, resolve_staging_dir
 
     req = await _staging_request_or_404(db, request_id)

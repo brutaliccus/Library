@@ -19,7 +19,10 @@ from app.services import audiobookshelf, downloader, libraforge, push
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-UNORGANIZED_DIRNAME = "_unorganized"
+# Dot-directory so Audiobookshelf skips staging (ABS indexes `_unorganized`).
+UNORGANIZED_DIRNAME = ".unorganized"
+LEGACY_UNORGANIZED_DIRNAME = "_unorganized"
+UNORGANIZED_DIRNAMES = frozenset({UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME})
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".ogg", ".opus", ".flac", ".wav", ".wma", ".aac", ".mp4"}
 # Torrent / catalog noise that hurts Audible search when used as a title hint.
 _TITLE_JUNK_RE = re.compile(
@@ -60,10 +63,23 @@ def unorganized_root() -> Path:
     return Path(settings.audiobook_dir) / UNORGANIZED_DIRNAME
 
 
+def ensure_unorganized_root() -> Path:
+    """Create ``.unorganized`` (and a sibling ``.ignore``) for ABS-safe staging."""
+    root = unorganized_root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        ignore = root / ".ignore"
+        if not ignore.exists():
+            ignore.write_text("", encoding="utf-8")
+    except OSError as e:
+        logger.warning("Could not ensure unorganized staging root %s: %s", root, e)
+    return root
+
+
 def audiobook_staging_dir(request_id: int, title: str) -> Path:
-    """Per-request landing folder under `_unorganized` (not final library layout)."""
+    """Per-request landing folder under ``.unorganized`` (not final library layout)."""
     slug = downloader.sanitize_filename(title or "book")[:80] or "book"
-    return unorganized_root() / f"req_{request_id}_{slug}"
+    return ensure_unorganized_root() / f"req_{request_id}_{slug}"
 
 
 def staging_path_for_libraforge(staging: Path) -> str:
@@ -202,18 +218,21 @@ def seed_staging_metadata_hints(
 
 
 def resolve_staging_dir(staging_str: str) -> Path:
-    """Resolve a request staging_path to a real directory under `_unorganized`.
+    """Resolve a request staging_path to a real directory under ``.unorganized``.
 
     Accepts the POSIX Docker-style path stored in the DB (e.g.
-    ``/audiobooks/_unorganized/req_12_Title``) or a host path. Rejects anything
-    outside the configured audiobook library's ``_unorganized`` tree.
+    ``/audiobooks/.unorganized/req_12_Title`` or legacy ``_unorganized``) or a
+    host path. Rejects anything outside the configured audiobook library's
+    staging tree (``.unorganized`` or legacy ``_unorganized``).
     """
     raw = (staging_str or "").strip()
     if not raw:
         raise FileNotFoundError("Request has no staging_path")
 
     audiobook_root = Path(settings.audiobook_dir).resolve()
-    unorganized = (audiobook_root / UNORGANIZED_DIRNAME).resolve()
+    staging_roots = [
+        (audiobook_root / name).resolve() for name in (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME)
+    ]
     candidates: list[Path] = [Path(raw)]
 
     # Normalize Docker / host mount prefixes to paths under audiobook_dir.
@@ -222,17 +241,27 @@ def resolve_staging_dir(staging_str: str) -> Path:
     if norm_parts:
         mapped = list(norm_parts)
         if mapped[0].lower() == "mnt" and len(mapped) >= 2:
-            # /mnt/Audiobooks/_unorganized/...
+            # /mnt/Audiobooks/.unorganized/...
             mapped = mapped[2:]
         elif mapped[0].lower() in {"audiobooks", "data"}:
             mapped = mapped[1:]
         if mapped:
             candidates.append(audiobook_root.joinpath(*mapped))
-        if UNORGANIZED_DIRNAME in mapped:
-            idx = mapped.index(UNORGANIZED_DIRNAME)
-            candidates.append(audiobook_root.joinpath(*mapped[idx:]))
-        # Bare req_* folder name
-        candidates.append(unorganized / mapped[-1])
+            # Rewrite legacy _unorganized → .unorganized (and vice versa) for migration.
+            for old, new in (
+                (LEGACY_UNORGANIZED_DIRNAME, UNORGANIZED_DIRNAME),
+                (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME),
+            ):
+                if old in mapped:
+                    remapped = [new if p == old else p for p in mapped]
+                    candidates.append(audiobook_root.joinpath(*remapped))
+        for name in UNORGANIZED_DIRNAMES:
+            if name in mapped:
+                idx = mapped.index(name)
+                candidates.append(audiobook_root.joinpath(*mapped[idx:]))
+        # Bare req_* folder name under either staging root
+        for root in staging_roots:
+            candidates.append(root / mapped[-1])
 
     if not Path(raw).is_absolute():
         candidates.append(audiobook_root / raw)
@@ -246,14 +275,20 @@ def resolve_staging_dir(staging_str: str) -> Path:
         if resolved in seen:
             continue
         seen.add(resolved)
-        try:
-            resolved.relative_to(unorganized)
-        except ValueError:
+        under_staging = False
+        for root in staging_roots:
+            try:
+                resolved.relative_to(root)
+                under_staging = True
+                break
+            except ValueError:
+                continue
+        if not under_staging:
             continue
         if resolved.is_dir():
             return resolved
 
-    raise FileNotFoundError(f"Staging folder missing or outside _unorganized: {raw}")
+    raise FileNotFoundError(f"Staging folder missing or outside .unorganized: {raw}")
 
 
 def safe_path_under_staging(staging: Path, relative: str) -> Path:
@@ -917,13 +952,17 @@ def delete_request_staging_tree(
     request_id: int,
     staging_str: str | None,
 ) -> list[Path]:
-    """Recursively delete this request's staging dirs under ``_unorganized`` only.
+    """Recursively delete this request's staging dirs under ``.unorganized`` only.
 
     Resolves Docker-style ``staging_path`` values via ``resolve_staging_dir``, and
-    also removes any ``req_{id}_*`` leftover folders for the same request id.
-    Never deletes outside the configured audiobook ``_unorganized`` tree.
+    also removes any ``req_{id}_*`` leftover folders for the same request id
+    under ``.unorganized`` (and legacy ``_unorganized`` during migration).
+    Never deletes outside those staging trees.
     """
-    unorganized = unorganized_root().resolve()
+    audiobook_root = Path(settings.audiobook_dir).resolve()
+    staging_roots = [
+        (audiobook_root / name).resolve() for name in (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME)
+    ]
     to_delete: dict[Path, None] = {}
 
     raw = (staging_str or "").strip()
@@ -940,8 +979,10 @@ def delete_request_staging_tree(
 
     # Catch orphaned req_{id}_* trees even if staging_path was missing/stale.
     prefix = f"req_{request_id}_"
-    try:
-        if unorganized.is_dir():
+    for unorganized in staging_roots:
+        try:
+            if not unorganized.is_dir():
+                continue
             for child in unorganized.iterdir():
                 if not child.is_dir():
                     continue
@@ -951,15 +992,21 @@ def delete_request_staging_tree(
                         to_delete[child.resolve()] = None
                     except OSError:
                         continue
-    except OSError as e:
-        logger.warning("Could not list unorganized root for reject cleanup: %s", e)
+        except OSError as e:
+            logger.warning("Could not list unorganized root for reject cleanup: %s", e)
 
     deleted: list[Path] = []
     for path in to_delete:
-        try:
-            path.relative_to(unorganized)
-        except ValueError:
-            logger.warning("Refusing to delete path outside _unorganized: %s", path)
+        under_staging = False
+        for root in staging_roots:
+            try:
+                path.relative_to(root)
+                under_staging = True
+                break
+            except ValueError:
+                continue
+        if not under_staging:
+            logger.warning("Refusing to delete path outside .unorganized: %s", path)
             continue
         if not path.is_dir():
             continue

@@ -93,7 +93,7 @@ class DownloadRequest(Base):
     progress_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     progress_total_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     progress_speed_bps: Mapped[float | None] = mapped_column(nullable=True)
-    # LibraForge staging: /audiobooks/_unorganized/req_{id}_…
+    # LibraForge staging: /audiobooks/.unorganized/req_{id}_…
     staging_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     libraforge_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     quarantine_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

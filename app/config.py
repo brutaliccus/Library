@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     libraforge_metadata_timeout: float = 1800.0
     libraforge_m4b_timeout: float = 7200.0
     libraforge_organizer_timeout: float = 1800.0
-    # When True, audiobook downloads land in /audiobooks/_unorganized and run LibraForge.
+    # When True, audiobook downloads land in /audiobooks/.unorganized and run LibraForge.
     libraforge_pipeline_enabled: bool = True
 
     kavita_url: str = "http://localhost:5000"

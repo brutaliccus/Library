@@ -126,8 +126,9 @@ def test_staging_dir_under_unorganized(tmp_path, monkeypatch):
 
     monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
     path = audiobook_staging_dir(42, "Some Book: Title")
-    assert path.parent.name == "_unorganized"
+    assert path.parent.name == ".unorganized"
     assert path.name.startswith("req_42_")
+    assert (tmp_path / ".unorganized" / ".ignore").is_file()
 
 
 def test_needs_m4b_single_m4b(tmp_path):
@@ -207,11 +208,13 @@ def test_resolve_staging_dir_docker_style(tmp_path, monkeypatch):
     from app.services import forge_pipeline
 
     monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
-    staging = tmp_path / "_unorganized" / "req_9_Timeline"
+    staging = tmp_path / ".unorganized" / "req_9_Timeline"
     staging.mkdir(parents=True)
     (staging / "a.mp3").write_bytes(b"x")
-    resolved = resolve_staging_dir("/audiobooks/_unorganized/req_9_Timeline")
+    resolved = resolve_staging_dir("/audiobooks/.unorganized/req_9_Timeline")
     assert resolved == staging.resolve()
+    # Legacy DB paths still resolve after rename / rewrite.
+    assert resolve_staging_dir("/audiobooks/_unorganized/req_9_Timeline") == staging.resolve()
 
 
 def test_resolve_staging_dir_rejects_outside_unorganized(tmp_path, monkeypatch):
@@ -229,7 +232,7 @@ def test_delete_request_staging_tree_docker_path_and_orphan(tmp_path, monkeypatc
     from app.services import forge_pipeline
 
     monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
-    unorg = tmp_path / "_unorganized"
+    unorg = tmp_path / ".unorganized"
     primary = unorg / "req_9_Timeline"
     orphan = unorg / "req_9_OrphanLeftover"
     other = unorg / "req_10_Keep"
@@ -244,7 +247,7 @@ def test_delete_request_staging_tree_docker_path_and_orphan(tmp_path, monkeypatc
     library_book.mkdir(parents=True)
     (library_book / "keep.m4b").write_bytes(b"keep")
 
-    deleted = delete_request_staging_tree(9, "/audiobooks/_unorganized/req_9_Timeline")
+    deleted = delete_request_staging_tree(9, "/audiobooks/.unorganized/req_9_Timeline")
     assert primary.resolve() in {p.resolve() for p in deleted}
     assert not primary.exists()
     assert not orphan.exists()
@@ -253,7 +256,7 @@ def test_delete_request_staging_tree_docker_path_and_orphan(tmp_path, monkeypatc
 
 
 def test_safe_path_under_staging_blocks_traversal(tmp_path):
-    staging = tmp_path / "_unorganized" / "req_1"
+    staging = tmp_path / ".unorganized" / "req_1"
     staging.mkdir(parents=True)
     (staging / "keep.mp3").write_bytes(b"x")
     with pytest.raises(ValueError):

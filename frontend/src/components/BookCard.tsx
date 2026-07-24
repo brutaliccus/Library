@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { BookOpen, Check, Download, HelpCircle } from "lucide-react";
 import type { BookSummary } from "../types/book";
 import CoverImage from "./CoverImage";
+import ShelfCardMeta from "./ShelfCardMeta";
 
 interface Props {
   book: BookSummary;
@@ -25,9 +26,9 @@ export default function BookCard({ book }: Props) {
   return (
     <button
       onClick={() => navigate(`/book/${encodeURIComponent(book.id)}`)}
-      className="group text-left flex flex-col bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-gray-600 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-black/20 hover:-translate-y-0.5 h-full"
+      className="group text-left flex flex-col rounded-lg border border-gray-800 bg-gray-800/50 hover:border-gray-600 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-black/20 hover:-translate-y-0.5"
     >
-      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
+      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-t-lg">
         {showCover ? (
           <CoverImage
             src={coverUrl}
@@ -65,16 +66,12 @@ export default function BookCard({ book }: Props) {
           </span>
         ) : null}
       </div>
-      <div className="p-1.5 flex flex-col gap-0.5 h-14">
-        <h3 className="text-[10px] font-semibold text-gray-100 line-clamp-2 leading-tight">
-          {book.title}
-        </h3>
-        {book.authors.length > 0 && (
-          <p className="text-[9px] text-gray-400 line-clamp-1">
-            {book.authors.join(", ")}
-          </p>
-        )}
-      </div>
+      <ShelfCardMeta
+        title={book.title}
+        author={book.authors.length > 0 ? book.authors.join(", ") : undefined}
+        seriesName={book.seriesName}
+        sequence={book.seriesBookNumber}
+      />
     </button>
   );
 }

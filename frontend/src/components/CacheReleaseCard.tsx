@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { BookOpen, Download, HardDrive } from "lucide-react";
 import CoverImage from "./CoverImage";
+import ShelfCardMeta from "./ShelfCardMeta";
 
 export interface CacheReleaseCardData {
   id: string;
@@ -24,9 +25,9 @@ export default function CacheReleaseCard({ release }: Props) {
   return (
     <button
       onClick={() => navigate(`/book/${encodeURIComponent(release.id)}`)}
-      className="group text-left flex flex-col bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-amber-700/60 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-black/20 hover:-translate-y-0.5 h-full"
+      className="group text-left flex flex-col rounded-lg border border-gray-800 bg-gray-800/50 hover:border-amber-700/60 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-black/20 hover:-translate-y-0.5"
     >
-      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
+      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-t-lg">
         <CoverImage
           src={release.coverUrl}
           alt={release.title}
@@ -54,18 +55,16 @@ export default function CacheReleaseCard({ release }: Props) {
           </span>
         )}
       </div>
-      <div className="p-1.5 flex flex-col gap-0.5 h-14">
-        <h3 className="text-[10px] font-semibold text-gray-100 line-clamp-2 leading-tight">
-          {release.title}
-        </h3>
-        {release.authors.length > 0 ? (
-          <p className="text-[9px] text-gray-400 line-clamp-1">{release.authors.join(", ")}</p>
-        ) : (
-          <p className="text-[9px] text-amber-600/80 line-clamp-1">
-            {release.mediaType === "ebook" ? "Ebook release" : "Audiobook release"}
-          </p>
-        )}
-      </div>
+      <ShelfCardMeta
+        title={release.title}
+        author={
+          release.authors.length > 0
+            ? release.authors.join(", ")
+            : release.mediaType === "ebook"
+              ? "Ebook release"
+              : "Audiobook release"
+        }
+      />
     </button>
   );
 }

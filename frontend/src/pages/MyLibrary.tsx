@@ -51,6 +51,7 @@ import {
 } from "../utils/shelfQueryCache";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import SaveOfflineButton from "../components/SaveOfflineButton";
+import ShelfCardMeta from "../components/ShelfCardMeta";
 
 interface LibraryItem {
   id: number;
@@ -148,6 +149,31 @@ function localSeriesName(item: {
   for (const s of item.series || []) {
     const n = (s?.name || "").trim();
     if (n) return n;
+  }
+  return "";
+}
+
+
+/** Series index / sequence for Calibre-style "Series Name (1)" labels. */
+function localSeriesSequence(item: {
+  sequence?: string;
+  seriesName?: string;
+  series?: Array<{ name?: string; sequence?: string }>;
+}): string {
+  const direct = String(item.sequence || "").replace(/^#/, "").trim();
+  if (direct) return direct;
+  const name = localSeriesName(item);
+  if (name) {
+    for (const s of item.series || []) {
+      if ((s?.name || "").trim() === name) {
+        const seq = String(s?.sequence || "").replace(/^#/, "").trim();
+        if (seq) return seq;
+      }
+    }
+  }
+  for (const s of item.series || []) {
+    const seq = String(s?.sequence || "").replace(/^#/, "").trim();
+    if (seq) return seq;
   }
   return "";
 }
@@ -1248,6 +1274,8 @@ export default function MyLibrary() {
                           hasEbook={formatMatches?.[item.title]?.hasEbook}
                           cached={cachedAbsIds.has(item.itemId)}
                           unavailable={offline && !cachedAbsIds.has(item.itemId)}
+                          seriesName={localSeriesName(item)}
+                          sequence={localSeriesSequence(item)}
                         />
                       ))}
                     </div>
@@ -1750,6 +1778,8 @@ function ABSGenreRow({
             hasEbook={formatMatches?.[item.title]?.hasEbook}
             cached={cachedIds?.has(item.itemId)}
             unavailable={offline && !cachedIds?.has(item.itemId)}
+            seriesName={localSeriesName(item)}
+            sequence={localSeriesSequence(item)}
           />
         ))}
       </div>
@@ -1810,11 +1840,11 @@ function EbookCard({
   return (
     <div
       ref={cardRef}
-      className={`group bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-amber-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-amber-900/10 hover:-translate-y-0.5 h-full relative ${
+      className={`group rounded-lg border border-gray-800 bg-gray-800/50 hover:border-amber-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-amber-900/10 hover:-translate-y-0.5 relative ${
         unavailable ? "opacity-45 grayscale-[0.35]" : ""
       }`}
     >
-      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden cursor-pointer" onClick={handleClick}>
+      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-t-lg cursor-pointer" onClick={handleClick}>
         {showCover ? (
           <CoverImage
             src={item.coverUrl}
@@ -1839,11 +1869,16 @@ function EbookCard({
           {hasAudio && <Headphones size={10} className="text-emerald-400 drop-shadow" />}
         </div>
       </div>
-      <div className="p-1.5">
-        <h3 className="text-[10px] font-semibold text-gray-100 line-clamp-2 leading-tight cursor-pointer hover:text-amber-400 transition-colors" onClick={handleClick}>{item.title}</h3>
-        {item.author && <p className="text-[9px] text-gray-400 line-clamp-1">{item.author}</p>}
+      <ShelfCardMeta
+        title={item.title}
+        author={item.author}
+        seriesName={localSeriesName(item)}
+        sequence={localSeriesSequence(item)}
+        titleClassName="hover:text-amber-400 transition-colors"
+        onTitleClick={handleClick}
+      >
         {item.chapterId != null && (
-          <div className="mt-1" onClick={(e) => e.stopPropagation()}>
+          <div className="mt-0.5" onClick={(e) => e.stopPropagation()}>
             <SaveOfflineButton
               size="sm"
               target={{
@@ -1857,7 +1892,7 @@ function EbookCard({
             />
           </div>
         )}
-      </div>
+      </ShelfCardMeta>
     </div>
   );
 }
@@ -1874,8 +1909,8 @@ function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate, un
 }) {
   const canPlay = item.streamStatus === "ready" && item.tracks.length > 0;
   return (
-    <div className={`group bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-gray-700 transition-colors relative ${unavailable ? "opacity-45 grayscale-[0.35]" : ""}`}>
-      <div className="relative aspect-[2/3] bg-gray-900 cursor-pointer" onClick={onNavigate}>
+    <div className={`group rounded-lg border border-gray-800 bg-gray-800/50 hover:border-gray-700 transition-colors relative ${unavailable ? "opacity-45 grayscale-[0.35]" : ""}`}>
+      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-t-lg cursor-pointer" onClick={onNavigate}>
         <CoverImage
           src={item.coverUrl}
           alt={item.title}
@@ -1892,15 +1927,21 @@ function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate, un
         )}
         {item.totalSeconds > 0 && item.progressSeconds > 0 && (
           <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-gray-700">
-            <div className="h-full bg-purple-500" style={{ width: `${Math.round((item.progressSeconds / item.totalSeconds) * 100)}%` }} />
+            <div className="h-full bg-brand-500" style={{ width: `${Math.round((item.progressSeconds / item.totalSeconds) * 100)}%` }} />
           </div>
         )}
       </div>
-      <div className="p-1.5">
-        <h3 className="text-[10px] font-semibold text-gray-100 line-clamp-2 leading-tight cursor-pointer hover:text-brand-400 transition-colors" onClick={onNavigate}>{item.title}</h3>
-        <div className="flex gap-1 mt-1">
+      <ShelfCardMeta
+        title={item.title}
+        author={item.author}
+        seriesName={localSeriesName(item)}
+        sequence={localSeriesSequence(item)}
+        titleClassName="hover:text-brand-400 transition-colors"
+        onTitleClick={onNavigate}
+      >
+        <div className="flex gap-1 mt-0.5">
           {canPlay ? (
-            <button onClick={onPlay} className="flex-1 flex items-center justify-center gap-0.5 py-1 bg-purple-600 text-white text-[9px] font-medium rounded hover:bg-purple-500 transition-colors">
+            <button onClick={onPlay} className="flex-1 flex items-center justify-center gap-0.5 py-1 bg-brand-600 text-white text-[9px] font-medium rounded hover:bg-brand-500 transition-colors">
               <Play size={8} /> Play
             </button>
           ) : item.magnetLink ? (
@@ -1913,7 +1954,7 @@ function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate, un
             <Trash2 size={10} />
           </button>
         </div>
-      </div>
+      </ShelfCardMeta>
     </div>
   );
 }

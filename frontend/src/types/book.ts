@@ -17,6 +17,8 @@ export interface BookSummary {
   isbn13: string;
   previewLink: string;
   infoLink: string;
+  seriesName?: string;
+  seriesBookNumber?: string;
   availability?: {
     available: boolean;
     matchTier?: "exact" | "likely" | "weak";

@@ -6,6 +6,7 @@ import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import { purgeLibraryCollectionQueries } from "../utils/shelfQueryCache";
 import CoverImage from "./CoverImage";
+import ShelfCardMeta from "./ShelfCardMeta";
 
 interface Props {
   itemId: string;
@@ -25,6 +26,8 @@ interface Props {
   cached?: boolean;
   /** Greyed / non-playable (e.g. offline + not cached) */
   unavailable?: boolean;
+  seriesName?: string;
+  sequence?: string;
 }
 
 function formatDuration(secs: number): string {
@@ -46,6 +49,8 @@ export default function ABSBookCard({
   hasEbook,
   cached,
   unavailable,
+  seriesName,
+  sequence,
 }: Props) {
   const { toast } = useToast();
   const { user } = useAuth();
@@ -74,11 +79,11 @@ export default function ABSBookCard({
   return (
     <button
       onClick={() => onPlay(itemId)}
-      className={`group text-left flex flex-col bg-gray-800/50 rounded-lg overflow-hidden border border-gray-800 hover:border-emerald-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-emerald-900/10 hover:-translate-y-0.5 h-full relative ${
+      className={`group text-left flex flex-col rounded-lg border border-gray-800 bg-gray-800/50 hover:border-emerald-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-emerald-900/10 hover:-translate-y-0.5 relative ${
         unavailable ? "opacity-45 grayscale-[0.35]" : ""
       }`}
     >
-      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
+      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-t-lg">
         <CoverImage
           src={coverUrl}
           alt={title}
@@ -110,7 +115,7 @@ export default function ABSBookCard({
               className="p-1 bg-black/60 rounded hover:bg-black/80 transition-colors cursor-pointer"
               title="Re-match metadata"
             >
-              <RefreshCw size={10} className={`text-purple-400 ${rematching ? "animate-spin" : ""}`} />
+              <RefreshCw size={10} className={`text-emerald-400 ${rematching ? "animate-spin" : ""}`} />
             </span>
           )}
           {onNavigate && (
@@ -119,7 +124,7 @@ export default function ABSBookCard({
               className="p-1 bg-black/60 rounded hover:bg-black/80 transition-colors cursor-pointer"
               title="View book details"
             >
-              <Info size={10} className="text-blue-400" />
+              <Info size={10} className="text-sky-400" />
             </span>
           )}
         </div>
@@ -128,13 +133,16 @@ export default function ABSBookCard({
           <Headphones size={10} className="text-emerald-400 drop-shadow" />
         </div>
       </div>
-      <div className="p-1.5 flex flex-col gap-0.5 h-14">
-        <h3 className="text-[10px] font-semibold text-gray-100 line-clamp-2 leading-tight">{title}</h3>
-        {author && <p className="text-[9px] text-gray-400 line-clamp-1">{author}</p>}
+      <ShelfCardMeta
+        title={title}
+        author={author}
+        seriesName={seriesName}
+        sequence={sequence}
+      >
         {duration > 0 && (
-          <p className="text-[8px] text-gray-500 mt-auto">{formatDuration(duration)}</p>
+          <p className="text-[9px] text-gray-500">{formatDuration(duration)}</p>
         )}
-      </div>
+      </ShelfCardMeta>
     </button>
   );
 }

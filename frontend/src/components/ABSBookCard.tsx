@@ -79,11 +79,11 @@ export default function ABSBookCard({
   return (
     <button
       onClick={() => onPlay(itemId)}
-      className={`group text-left flex flex-col rounded-lg border border-gray-800 bg-gray-800/50 hover:border-emerald-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-emerald-900/10 hover:-translate-y-0.5 relative ${
+      className={`group text-left flex flex-col relative ${
         unavailable ? "opacity-45 grayscale-[0.35]" : ""
       }`}
     >
-      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-t-lg">
+      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-lg border border-gray-800 group-hover:border-emerald-600/50 transition-all duration-200 group-hover:shadow-lg group-hover:shadow-emerald-900/10 group-hover:-translate-y-0.5">
         <CoverImage
           src={coverUrl}
           alt={title}

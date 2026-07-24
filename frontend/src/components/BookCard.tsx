@@ -26,9 +26,9 @@ export default function BookCard({ book }: Props) {
   return (
     <button
       onClick={() => navigate(`/book/${encodeURIComponent(book.id)}`)}
-      className="group text-left flex flex-col rounded-lg border border-gray-800 bg-gray-800/50 hover:border-gray-600 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-black/20 hover:-translate-y-0.5"
+      className="group text-left flex flex-col"
     >
-      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-t-lg">
+      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-lg border border-gray-800 group-hover:border-gray-600 transition-all duration-200 group-hover:shadow-lg group-hover:shadow-black/20 group-hover:-translate-y-0.5">
         {showCover ? (
           <CoverImage
             src={coverUrl}

@@ -674,13 +674,15 @@ export default function BookDetailPage() {
                 onClick={() => {
                   if (sb.id !== volumeId) navigate(`/book/${encodeURIComponent(sb.id)}`);
                 }}
-                className={`group text-left flex flex-col rounded-lg overflow-hidden border transition-all duration-200 hover:-translate-y-0.5 h-full ${
-                  sb.id === volumeId
-                    ? "border-brand-500 bg-brand-900/20 ring-1 ring-brand-500/30"
-                    : "border-gray-800 bg-gray-800/50 hover:border-gray-600"
-                }`}
+                className="group text-left flex flex-col h-full"
               >
-                <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden">
+                <div
+                  className={`relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-lg border transition-all duration-200 group-hover:-translate-y-0.5 ${
+                    sb.id === volumeId
+                      ? "border-brand-500 ring-1 ring-brand-500/30"
+                      : "border-gray-800 group-hover:border-gray-600 group-hover:shadow-lg group-hover:shadow-black/20"
+                  }`}
+                >
                   {sb.coverUrl ? (
                     <CoverImage src={sb.coverUrl} alt={sb.title} className="w-full h-full object-cover" loading="lazy" />
                   ) : (
@@ -694,8 +696,8 @@ export default function BookDetailPage() {
                     </span>
                   )}
                 </div>
-                <div className="p-1.5 flex flex-col gap-0.5 h-12">
-                  <h3 className="text-[9px] font-semibold text-gray-100 line-clamp-2 leading-tight">{sb.title}</h3>
+                <div className="pt-1.5 px-0.5 pb-0.5 flex flex-col gap-0.5">
+                  <h3 className="text-[11px] font-bold text-gray-100 line-clamp-2 leading-snug">{sb.title}</h3>
                 </div>
               </button>
             ))}

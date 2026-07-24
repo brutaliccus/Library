@@ -1840,11 +1840,14 @@ function EbookCard({
   return (
     <div
       ref={cardRef}
-      className={`group rounded-lg border border-gray-800 bg-gray-800/50 hover:border-amber-600/50 hover:bg-gray-800 transition-all duration-200 hover:shadow-lg hover:shadow-amber-900/10 hover:-translate-y-0.5 relative ${
+      className={`group flex flex-col relative ${
         unavailable ? "opacity-45 grayscale-[0.35]" : ""
       }`}
     >
-      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-t-lg cursor-pointer" onClick={handleClick}>
+      <div
+        className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-lg border border-gray-800 group-hover:border-amber-600/50 transition-all duration-200 group-hover:shadow-lg group-hover:shadow-amber-900/10 group-hover:-translate-y-0.5 cursor-pointer"
+        onClick={handleClick}
+      >
         {showCover ? (
           <CoverImage
             src={item.coverUrl}
@@ -1909,8 +1912,11 @@ function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate, un
 }) {
   const canPlay = item.streamStatus === "ready" && item.tracks.length > 0;
   return (
-    <div className={`group rounded-lg border border-gray-800 bg-gray-800/50 hover:border-gray-700 transition-colors relative ${unavailable ? "opacity-45 grayscale-[0.35]" : ""}`}>
-      <div className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-t-lg cursor-pointer" onClick={onNavigate}>
+    <div className={`group flex flex-col relative ${unavailable ? "opacity-45 grayscale-[0.35]" : ""}`}>
+      <div
+        className="relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-lg border border-gray-800 group-hover:border-gray-600 transition-all duration-200 group-hover:shadow-lg group-hover:shadow-black/20 group-hover:-translate-y-0.5 cursor-pointer"
+        onClick={onNavigate}
+      >
         <CoverImage
           src={item.coverUrl}
           alt={item.title}

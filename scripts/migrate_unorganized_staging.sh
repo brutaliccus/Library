@@ -30,12 +30,16 @@ if [[ -d "${OLD}" ]]; then
     moved=$((moved + 1))
   done
   shopt -u nullglob
-  # Remove empty legacy root (leave non-empty leftovers for manual review)
-  if [[ -z "$(ls -A "${OLD}" 2>/dev/null || true)" ]]; then
-    rmdir "${OLD}" 2>/dev/null || true
-    echo "==> Removed empty legacy ${OLD}"
-  else
-    echo "==> Left non-empty legacy ${OLD} (inspect manually)"
+  # Remove empty legacy root (or root that only has a leftover .ignore)
+  if [[ -d "${OLD}" ]]; then
+    leftover="$(find "${OLD}" -mindepth 1 -maxdepth 1 ! -name '.ignore' 2>/dev/null | head -1 || true)"
+    if [[ -z "${leftover}" ]]; then
+      rm -f "${OLD}/.ignore" 2>/dev/null || true
+      rmdir "${OLD}" 2>/dev/null || true
+      echo "==> Removed empty legacy ${OLD}"
+    else
+      echo "==> Left non-empty legacy ${OLD} (inspect manually)"
+    fi
   fi
   echo "==> Migrated ${moved} staging folder(s)"
 else

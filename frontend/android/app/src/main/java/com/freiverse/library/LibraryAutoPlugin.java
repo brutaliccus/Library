@@ -274,7 +274,9 @@ public class LibraryAutoPlugin extends Plugin
         boolean needsWake =
             "play".equals(action)
                 || "playmedia".equals(action)
-                || "seekto".equals(action);
+                || "seekto".equals(action)
+                || "seekforward".equals(action)
+                || "seekbackward".equals(action);
 
         if (needsWake) {
             bringActivityToForeground();

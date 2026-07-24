@@ -1,7 +1,7 @@
 import { Capacitor } from "@capacitor/core";
 import type { MediaActionHandlers, NowPlayingLike } from "./capacitorMediaSession";
 import { playbackScope } from "../utils/playerNav";
-import { toAbsoluteArtworkUrl } from "./playerMediaSession";
+import { MEDIA_SKIP_SECONDS, toAbsoluteArtworkUrl } from "./playerMediaSession";
 import { LibraryAuto, type LibraryAutoAction } from "./libraryAutoPlugin";
 import {
   handlePlayMediaId,
@@ -56,7 +56,7 @@ export async function registerAndroidAutoHandlers(
 
     if (autoHandlersRegistered) return;
 
-    const SKIP = 15;
+    const SKIP = MEDIA_SKIP_SECONDS;
     const actions: Array<{
       action: LibraryAutoAction;
       fn: (details?: {
@@ -79,6 +79,7 @@ export async function registerAndroidAutoHandlers(
         },
       },
       { action: "stop", fn: () => handlers.dismissPlayer() },
+      // Native MediaSession onRewind / onFastForward / custom ±15 → same in-app seek.
       { action: "seekbackward", fn: () => handlers.seekRelative(-SKIP) },
       { action: "seekforward", fn: () => handlers.seekRelative(SKIP) },
       { action: "previoustrack", fn: () => handlers.skipChapterPrev() },

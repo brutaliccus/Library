@@ -87,12 +87,27 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
             @Override
             public void onFastForward() {
-                LibraryAutoBridge.getInstance().dispatch("seekforward", null);
+                LibraryAutoBridge.getInstance().seekRelativeAndDispatch(
+                    LibraryAutoBridge.SKIP_MS,
+                    "seekforward"
+                );
             }
 
             @Override
             public void onRewind() {
-                LibraryAutoBridge.getInstance().dispatch("seekbackward", null);
+                LibraryAutoBridge.getInstance().seekRelativeAndDispatch(
+                    -LibraryAutoBridge.SKIP_MS,
+                    "seekbackward"
+                );
+            }
+
+            @Override
+            public void onCustomAction(String action, Bundle extras) {
+                if (LibraryAutoBridge.CUSTOM_REWIND_15.equals(action)) {
+                    onRewind();
+                } else if (LibraryAutoBridge.CUSTOM_FORWARD_15.equals(action)) {
+                    onFastForward();
+                }
             }
 
             @Override
@@ -232,9 +247,10 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
         PendingIntent contentIntent = LibraryAutoBridge.sessionActivityIntent(this);
 
+        // Compact: −15 | play/pause | +15 (audiobook-first). Expanded also has chapter skip.
         MediaStyle style = new MediaStyle()
             .setMediaSession(mediaSession.getSessionToken())
-            .setShowActionsInCompactView(0, 1, 2)
+            .setShowActionsInCompactView(0, 2, 4)
             .setShowCancelButton(true)
             .setCancelButtonIntent(
                 MediaButtonReceiver.buildMediaButtonPendingIntent(
@@ -256,8 +272,17 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             .setShowWhen(false);
 
         builder.addAction(
-            R.drawable.ic_stat_notification,
-            "Previous",
+            R.drawable.ic_media_rewind_15,
+            "Back 15 seconds",
+            MediaButtonReceiver.buildMediaButtonPendingIntent(
+                this,
+                PlaybackStateCompat.ACTION_REWIND
+            )
+        );
+
+        builder.addAction(
+            R.drawable.ic_media_skip_prev,
+            "Previous chapter",
             MediaButtonReceiver.buildMediaButtonPendingIntent(
                 this,
                 PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
@@ -266,7 +291,7 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
         if (bridge.isPlaying()) {
             builder.addAction(
-                R.drawable.ic_stat_notification,
+                R.drawable.ic_media_pause,
                 "Pause",
                 MediaButtonReceiver.buildMediaButtonPendingIntent(
                     this,
@@ -275,7 +300,7 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             );
         } else {
             builder.addAction(
-                R.drawable.ic_stat_notification,
+                R.drawable.ic_media_play,
                 "Play",
                 MediaButtonReceiver.buildMediaButtonPendingIntent(
                     this,
@@ -285,11 +310,20 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
         }
 
         builder.addAction(
-            R.drawable.ic_stat_notification,
-            "Next",
+            R.drawable.ic_media_skip_next,
+            "Next chapter",
             MediaButtonReceiver.buildMediaButtonPendingIntent(
                 this,
                 PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+            )
+        );
+
+        builder.addAction(
+            R.drawable.ic_media_forward_15,
+            "Forward 15 seconds",
+            MediaButtonReceiver.buildMediaButtonPendingIntent(
+                this,
+                PlaybackStateCompat.ACTION_FAST_FORWARD
             )
         );
 

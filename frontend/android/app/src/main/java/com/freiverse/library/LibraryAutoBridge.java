@@ -37,6 +37,12 @@ public final class LibraryAutoBridge {
     public static final String LIBRARY_ID = "library";
     public static final String NOW_PLAYING_ID = "now_playing";
 
+    /** Custom MediaSession actions — visible on Android Auto with ±15 icons. */
+    public static final String CUSTOM_REWIND_15 = "seek_back_15";
+    public static final String CUSTOM_FORWARD_15 = "seek_forward_15";
+    /** Keep in sync with JS MEDIA_SKIP_SECONDS / in-app transport. */
+    public static final long SKIP_MS = 15_000;
+
     private static final String TAG = "LibraryAutoBridge";
     private static final String PREFS = "library_auto_session";
     private static final long BROWSE_TIMEOUT_MS = 12_000;
@@ -260,6 +266,21 @@ public final class LibraryAutoBridge {
         for (ActionListener listener : new ArrayList<>(listeners)) {
             listener.onAction(action, extras);
         }
+    }
+
+    /**
+     * ±15s from AA / lock screen. Updates session position immediately so the
+     * scrubber moves before the WebView seek round-trip confirms.
+     */
+    public void seekRelativeAndDispatch(long deltaMs, String action) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post(() -> seekRelativeAndDispatch(deltaMs, action));
+            return;
+        }
+        long max = durationMs > 0 ? durationMs : Long.MAX_VALUE;
+        positionMs = Math.max(0, Math.min(max, positionMs + deltaMs));
+        refreshSession(false);
+        dispatch(action, null);
     }
 
     /** Request audio focus before resuming; returns false if focus was denied. */
@@ -539,11 +560,27 @@ public final class LibraryAutoBridge {
             ? PlaybackStateCompat.STATE_PLAYING
             : (active ? PlaybackStateCompat.STATE_PAUSED : PlaybackStateCompat.STATE_NONE);
 
+        // Custom ±15 actions: AA often reserves side slots for chapter skip when
+        // SKIP_TO_PREVIOUS/NEXT are set; custom actions keep seek buttons visible.
         PlaybackStateCompat playbackState = new PlaybackStateCompat.Builder()
             .setActions(actions)
             // Explicit updateTime so AA keeps extrapolating position across
             // chapter metadata swaps (without it, some head units freeze the timer).
             .setState(state, positionMs, playbackSpeed, SystemClock.elapsedRealtime())
+            .addCustomAction(
+                new PlaybackStateCompat.CustomAction.Builder(
+                    CUSTOM_REWIND_15,
+                    "Back 15 seconds",
+                    R.drawable.ic_media_rewind_15
+                ).build()
+            )
+            .addCustomAction(
+                new PlaybackStateCompat.CustomAction.Builder(
+                    CUSTOM_FORWARD_15,
+                    "Forward 15 seconds",
+                    R.drawable.ic_media_forward_15
+                ).build()
+            )
             .build();
         session.setPlaybackState(playbackState);
 

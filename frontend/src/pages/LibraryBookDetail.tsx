@@ -12,7 +12,7 @@ import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
 import Modal from "../components/Modal";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
-import { purgeLibraryCollectionQueries } from "../utils/shelfQueryCache";
+import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
 
 interface ABSItemDetail {
   itemId: string;
@@ -125,7 +125,27 @@ export default function LibraryBookDetail() {
     setDeleting(true);
     try {
       await api.delete(`/admin/library/abs/${encodeURIComponent(itemId)}`);
-      await purgeLibraryCollectionQueries(queryClient, { refetch: true });
+      // Optimistic local remove, then soft-refresh (keep shelf visible).
+      queryClient.setQueryData(["abs-collection"], (prev: unknown) => {
+        if (!prev || typeof prev !== "object") return prev;
+        const data = prev as {
+          genres?: Record<string, Array<{ itemId?: string }>>;
+          ungrouped?: Array<{ itemId?: string }>;
+          totalItems?: number;
+        };
+        const drop = (arr: Array<{ itemId?: string }> | undefined) =>
+          (arr || []).filter((it) => (it?.itemId || "").trim() !== itemId);
+        const genres: Record<string, Array<{ itemId?: string }>> = {};
+        for (const [g, bucket] of Object.entries(data.genres || {})) {
+          const next = drop(bucket);
+          if (next.length) genres[g] = next;
+        }
+        const ungrouped = drop(data.ungrouped);
+        const totalItems =
+          Object.values(genres).reduce((n, b) => n + b.length, 0) + ungrouped.length;
+        return { ...data, genres, ungrouped, totalItems };
+      });
+      void softRefreshLibraryCollectionQueries(queryClient);
       toast("Audiobook deleted from library", "success");
       setShowDelete(false);
       navigate("/my-library", { replace: true });

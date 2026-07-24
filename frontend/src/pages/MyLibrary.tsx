@@ -46,7 +46,11 @@ import {
 } from "../utils/downloadOffline";
 import {
   absCollectionHasOrphans,
-  purgeLibraryCollectionQueries,
+  mergeAbsCollection,
+  mergeKavitaCollection,
+  mergeStreamingLibrary,
+  shouldBustLibraryCollectionCache,
+  softRefreshLibraryCollectionQueries,
   stripCollectionEntriesFromPersist,
 } from "../utils/shelfQueryCache";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
@@ -351,34 +355,39 @@ export default function MyLibrary() {
   } = useQuery({
     queryKey: ["abs-collection"],
     queryFn: async ({ client }) => {
-      const { data } = await api.get("/library/abs/collection");
+      const { data } = await api.get("/library/abs/collection", {
+        params: shouldBustLibraryCollectionCache() ? { refresh: true } : undefined,
+      });
       const fresh = data as {
         genres: Record<string, ABSItem[]>;
         ungrouped: ABSItem[];
         totalItems: number;
       };
-      // Authoritative replace: if persist/memory still holds itemIds ABS dropped
-      // (old ASIN folders), wipe disk rows so the next persist cannot resurrect them.
       const prev = client.getQueryData<typeof fresh>(["abs-collection"]);
+      // Full snapshot: merge-by-id with prune (add/update/drop deleted).
+      const merged = mergeAbsCollection(prev, fresh, { pruneMissing: true });
       if (absCollectionHasOrphans(prev, fresh)) {
-        // Persist only — in-memory is replaced by this return value.
+        // Persist only — in-memory uses merged return value.
         stripCollectionEntriesFromPersist();
       }
-      return fresh;
+      return merged ?? fresh;
     },
     staleTime: 30 * 60 * 1000,
     gcTime: 24 * 60 * 60 * 1000,
     refetchOnWindowFocus: false,
-    // Full list replace — never structural-share nested genre arrays across fetches.
+    // Replace nested genre arrays when data changes (no structural share of stale buckets).
     structuralSharing: false,
     enabled: !!user && sessionReady,
   });
 
   const { data: rdLibrary, isLoading: rdLoading, isFetching: rdFetching } = useQuery({
     queryKey: ["streaming-library"],
-    queryFn: async () => {
+    queryFn: async ({ client }) => {
       const { data } = await api.get("/library");
-      return data as { items: LibraryItem[] };
+      const fresh = data as { items: LibraryItem[] };
+      const prev = client.getQueryData<typeof fresh>(["streaming-library"]);
+      const merged = mergeStreamingLibrary(prev, fresh, { pruneMissing: true });
+      return merged ?? fresh;
     },
     staleTime: 10 * 60 * 1000,
     gcTime: 24 * 60 * 60 * 1000,
@@ -395,9 +404,14 @@ export default function MyLibrary() {
     refetch: refetchKavita,
   } = useQuery({
     queryKey: ["kavita-collection"],
-    queryFn: async () => {
-      const { data } = await api.get("/library/kavita/collection");
-      return data as { items: KavitaItem[]; totalItems: number };
+    queryFn: async ({ client }) => {
+      const { data } = await api.get("/library/kavita/collection", {
+        params: shouldBustLibraryCollectionCache() ? { refresh: true } : undefined,
+      });
+      const fresh = data as { items: KavitaItem[]; totalItems: number };
+      const prev = client.getQueryData<typeof fresh>(["kavita-collection"]);
+      const merged = mergeKavitaCollection(prev, fresh, { pruneMissing: true });
+      return merged ?? fresh;
     },
     staleTime: 30 * 60 * 1000,
     gcTime: 24 * 60 * 60 * 1000,
@@ -486,29 +500,40 @@ export default function MyLibrary() {
   const handleRefreshLibrary = useCallback(async () => {
     setScanning(true);
     try {
+      // Fire-and-forget ABS wait: do not block UI on scan_library_and_wait (~30–240s).
+      // Backend still scans + cleans orphans in the background when wait=false.
       const [absResult] = await Promise.allSettled([
-        api.post("/library/abs/scan", null, { timeout: 600_000 }),
-        api.post("/library/kavita/scan"),
+        api.post("/library/abs/scan", null, {
+          params: { wait: false },
+          timeout: 60_000,
+        }),
+        api.post("/library/kavita/scan", null, { timeout: 60_000 }),
       ]);
-      const absTimedOut =
+      const deferred =
         absResult.status === "fulfilled" &&
-        Boolean((absResult.value.data as { timed_out?: boolean } | undefined)?.timed_out);
+        Boolean((absResult.value.data as { deferred?: boolean } | undefined)?.deferred);
 
-      // Drop memory + persist first so soft-poll cannot merge with ASIN orphans.
-      await purgeLibraryCollectionQueries(queryClient);
+      // Keep cached shelf visible; soft-refresh (invalidate + refetch) once immediately.
+      await softRefreshLibraryCollectionQueries(queryClient);
 
-      // Soft-poll while ABS may still be indexing (or after a timed-out wait).
-      const pollRounds = absTimedOut ? 5 : 3;
-      for (let i = 0; i < pollRounds; i++) {
-        await purgeLibraryCollectionQueries(queryClient, { refetch: true });
-        if (i < pollRounds - 1) await new Promise((r) => setTimeout(r, 2500));
-      }
       toast(
-        absTimedOut
-          ? "Library refresh started — ABS was still scanning; count may catch up shortly"
+        deferred
+          ? "Library updating — scan running in background; new books will appear shortly"
           : "Library refreshed — ABS + Kavita scanned",
-        absTimedOut ? "info" : "success",
+        deferred ? "info" : "success",
       );
+
+      // Background soft-poll while ABS indexes — never purge (stale-while-revalidate).
+      void (async () => {
+        for (let i = 0; i < 5; i++) {
+          await new Promise((r) => setTimeout(r, i < 2 ? 2500 : 5000));
+          try {
+            await softRefreshLibraryCollectionQueries(queryClient);
+          } catch {
+            // ignore background poll errors
+          }
+        }
+      })();
     } catch {
       toast("Library scan failed", "error");
     } finally {

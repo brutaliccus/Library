@@ -112,6 +112,12 @@ export default function RequestsPage() {
           // Full refetch for terminal / quarantine (extra fields like completed_at).
           // Step progress uses setQueryData above so bars update without a round-trip.
           queryClient.invalidateQueries({ queryKey: ["my-requests"] });
+          if (msg.status === "completed") {
+            // Soft-invalidate shelves so My Library picks up the new book without a purge.
+            void queryClient.invalidateQueries({ queryKey: ["abs-collection"] });
+            void queryClient.invalidateQueries({ queryKey: ["kavita-collection"] });
+            void queryClient.invalidateQueries({ queryKey: ["streaming-library"] });
+          }
         }
       } else {
         queryClient.invalidateQueries({ queryKey: ["my-requests"] });

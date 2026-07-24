@@ -34,7 +34,7 @@ import RequestProgress from "../components/RequestProgress";
 import Modal from "../components/Modal";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
-import { purgeLibraryCollectionQueries } from "../utils/shelfQueryCache";
+import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
 import {
   hasLiveRequests,
   requestListRefetchInterval,
@@ -742,8 +742,8 @@ function HealthTab() {
     onSuccess: async (data) => {
       const softPollAbs = async () => {
         for (let i = 0; i < 4; i++) {
-          // Hard replace: removeQueries + strip persist, then refetch active views.
-          await purgeLibraryCollectionQueries(queryClient, { refetch: true });
+          // Stale-while-revalidate: keep shelf visible while ABS finishes indexing.
+          await softRefreshLibraryCollectionQueries(queryClient);
           if (i < 3) await new Promise((r) => setTimeout(r, 2500));
         }
       };

@@ -19,6 +19,7 @@ from app.models import User, StreamingLibraryItem, DownloadRequest
 from app.utils.auth import get_current_user
 from app.services import debrid, debrid_tokens, audiobookshelf, kavita, google_books, hardcover
 from app.services import kavita_ebook_match
+from app.services import library_collection_cache
 from app.services.google_books import GENRE_TAXONOMY
 from app.utils.book_series import (
     is_junk_library_label,
@@ -705,11 +706,21 @@ async def play_library_item(
 async def abs_collection(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    refresh: bool = Query(
+        False,
+        description="Bypass short-TTL collection + ABS item caches (use after scans).",
+    ),
 ):
     """Return all ABS library items grouped by store top-level genres."""
+    cache_key = f"abs_coll:{user.id}"
+    if not refresh:
+        cached = library_collection_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
     hidden_titles = await _get_private_titles_for_others(user.id, db)
     raw_items = [
-        it for it in await audiobookshelf.get_all_items()
+        it for it in await audiobookshelf.get_all_items(force_refresh=refresh)
         if not _is_hidden(it.get("title", ""), hidden_titles)
     ]
     # Drop ABS junk series labels; stamp seriesName from local metadata for filters.
@@ -745,11 +756,13 @@ async def abs_collection(
     for bucket in sorted_genres.values():
         bucket.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
     ungrouped.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
-    return {
+    payload = {
         "genres": sorted_genres,
         "ungrouped": ungrouped,
         "totalItems": visible,
     }
+    library_collection_cache.set(cache_key, payload)
+    return payload
 
 
 @router.get("/abs/series")
@@ -854,10 +867,20 @@ async def abs_item_detail(
 async def kavita_collection(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    refresh: bool = Query(
+        False,
+        description="Bypass short-TTL collection + Kavita series caches (use after scans).",
+    ),
 ):
     """Return all Kavita ebook series (EPUB/PDF) for the library view."""
+    cache_key = f"kavita_coll:{user.id}"
+    if not refresh:
+        cached = library_collection_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
     hidden_titles = await _get_private_titles_for_others(user.id, db)
-    series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS)
+    series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS, force_refresh=refresh)
     # Fetch volumes + metadata in parallel (limit 10 concurrent) to avoid 504 timeout
     sem = asyncio.Semaphore(10)
 
@@ -937,7 +960,9 @@ async def kavita_collection(
     items = await _enrich_items_via_hardcover(items)
     # Newest first by default for the All shelf
     items.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
-    return {"items": items, "totalItems": len(items)}
+    payload = {"items": items, "totalItems": len(items)}
+    library_collection_cache.set(cache_key, payload)
+    return payload
 
 
 @router.get("/kavita/item/{series_id}")
@@ -1142,10 +1167,41 @@ def _get_tracks(item: StreamingLibraryItem) -> list:
         return []
 
 
-@router.post("/abs/scan")
-async def trigger_abs_scan(user: User = Depends(get_current_user)):
-    """Trigger an ABS library scan, wait for completion, then clean orphaned items."""
+async def _abs_scan_wait_and_cleanup() -> None:
+    """Background: wait for ABS scan, remove orphans, invalidate caches."""
     try:
+        await audiobookshelf.scan_library_and_wait()
+        await audiobookshelf.remove_items_with_issues()
+        audiobookshelf.invalidate_cache()
+    except Exception:
+        logger.exception("Background ABS scan/cleanup failed")
+
+
+@router.post("/abs/scan")
+async def trigger_abs_scan(
+    wait: bool = Query(
+        True,
+        description="If false, kick ABS scan and return immediately (cleanup runs in background).",
+    ),
+    user: User = Depends(get_current_user),
+):
+    """Trigger an ABS library scan; optionally wait for completion and clean orphans."""
+    try:
+        if not wait:
+            # Single scan path in background — avoid double POST /scan.
+            audiobookshelf.invalidate_cache()
+            asyncio.create_task(_abs_scan_wait_and_cleanup())
+            return {
+                "ok": True,
+                "message": "Library scan started; cleanup continues in background",
+                "scan_ran": True,
+                "scan_complete": False,
+                "timed_out": False,
+                "deferred": True,
+                "waited_seconds": 0,
+                "items_total": None,
+            }
+
         scan_status = await audiobookshelf.scan_library_and_wait()
         await audiobookshelf.remove_items_with_issues()
         audiobookshelf.invalidate_cache()
@@ -1161,6 +1217,7 @@ async def trigger_abs_scan(user: User = Depends(get_current_user)):
             "timed_out": bool(scan_status.get("timed_out")),
             "waited_seconds": scan_status.get("waited_seconds"),
             "items_total": scan_status.get("items_total"),
+            "deferred": False,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

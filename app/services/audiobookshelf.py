@@ -254,6 +254,12 @@ async def remove_items_with_issues(library_id: str | None = None) -> bool:
 def invalidate_cache() -> None:
     """Clear all ABS caches so next request fetches fresh data."""
     _cache.clear()
+    try:
+        from app.services import library_collection_cache
+
+        library_collection_cache.invalidate()
+    except Exception:
+        pass
 
 
 async def get_libraries() -> list[dict]:
@@ -739,15 +745,20 @@ async def _fetch_library_items_all_pages(library_id: str) -> list[dict]:
     return all_results
 
 
-async def get_all_items(library_id: str | None = None) -> list[dict]:
+async def get_all_items(
+    library_id: str | None = None,
+    *,
+    force_refresh: bool = False,
+) -> list[dict]:
     """Fetch all items from ABS library with metadata (cached)."""
     lid = library_id or settings.abs_library_id
     if not lid or not settings.abs_api_key:
         return []
     cache_key = f"abs_all_items:{lid}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
     try:
         results = await _fetch_library_items_all_pages(lid)
     except Exception:

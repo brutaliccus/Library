@@ -11,7 +11,7 @@ import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
 import Modal from "../components/Modal";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
-import { purgeLibraryCollectionQueries } from "../utils/shelfQueryCache";
+import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
 
 interface EbookItemDetail {
   seriesId: number;
@@ -80,7 +80,16 @@ export default function LibraryEbookDetail() {
     setDeleting(true);
     try {
       await api.delete(`/admin/library/ebook/${seriesId}`);
-      await purgeLibraryCollectionQueries(queryClient, { refetch: true });
+      queryClient.setQueryData(["kavita-collection"], (prev: unknown) => {
+        if (!prev || typeof prev !== "object") return prev;
+        const data = prev as {
+          items?: Array<{ seriesId?: number }>;
+          totalItems?: number;
+        };
+        const items = (data.items || []).filter((it) => it?.seriesId !== seriesId);
+        return { ...data, items, totalItems: items.length };
+      });
+      void softRefreshLibraryCollectionQueries(queryClient);
       toast("Ebook deleted from library", "success");
       setShowDelete(false);
       navigate("/my-library", { replace: true });

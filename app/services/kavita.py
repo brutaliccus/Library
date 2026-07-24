@@ -47,6 +47,12 @@ def _cache_set(key: str, data: Any) -> None:
 
 def invalidate_cache() -> None:
     _cache.clear()
+    try:
+        from app.services import library_collection_cache
+
+        library_collection_cache.invalidate()
+    except Exception:
+        pass
 
 
 async def scan_all_libraries() -> None:
@@ -133,16 +139,22 @@ async def health_check() -> bool:
         return False
 
 
-async def get_all_series(library_id: int | None = None, formats: list[int] | None = None) -> list[dict]:
+async def get_all_series(
+    library_id: int | None = None,
+    formats: list[int] | None = None,
+    *,
+    force_refresh: bool = False,
+) -> list[dict]:
     """Fetch all series from Kavita; optionally filter by format (e.g. EBOOK_FORMATS for ebooks)."""
     url, key, default_lid = await _conn()
     if not key:
         return []
     lid = library_id or default_lid
     cache_key = f"kavita_series:{lid}:{','.join(map(str, formats or []))}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(

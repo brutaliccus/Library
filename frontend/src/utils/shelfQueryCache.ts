@@ -1,9 +1,10 @@
 /**
  * My Library collection cache helpers.
  *
- * Persisted react-query shelves must REPLACE on fetch (never merge item lists).
- * After ABS/Kavita scans, drop in-memory + localStorage collection rows so phones
- * cannot keep orphan ASIN titles alongside newly fixed items.
+ * Stale-while-revalidate: keep showing the persisted/memory shelf while a
+ * background fetch runs. Fresh full snapshots REPLACE by id (add/update/prune).
+ * Soft-refresh (invalidate) is the default after scans/adds so phones never
+ * blank the shelf for 30s. Hard purge remains for rare ASIN orphan wipes.
  *
  * Persist blobs are origin-scoped (v5) so multi-library devices never mix catalogs.
  */
@@ -31,14 +32,27 @@ export const LIBRARY_COLLECTION_PREFIXES = [
   "streaming-library",
 ] as const;
 
+export type AbsCollectionItem = {
+  itemId?: string;
+  title?: string;
+  genres?: string[];
+  addedAt?: number;
+};
+
 export type AbsCollectionData = {
-  genres?: Record<string, Array<{ itemId?: string; title?: string }>>;
-  ungrouped?: Array<{ itemId?: string; title?: string }>;
+  genres?: Record<string, AbsCollectionItem[]>;
+  ungrouped?: AbsCollectionItem[];
   totalItems?: number;
 };
 
+export type KavitaCollectionItem = {
+  seriesId?: number;
+  title?: string;
+  addedAt?: number;
+};
+
 export type KavitaCollectionData = {
-  items?: Array<{ seriesId?: number; title?: string }>;
+  items?: KavitaCollectionItem[];
   totalItems?: number;
 };
 
@@ -71,7 +85,7 @@ export function absCollectionSignature(data: AbsCollectionData | null | undefine
 
 /**
  * True when the cached snapshot still contains itemIds the server no longer returns.
- * Fresh data always wins wholesale — callers should replace, not merge.
+ * Fresh full snapshots should prune those ids (merge with pruneMissing).
  */
 export function absCollectionHasOrphans(
   cached: AbsCollectionData | null | undefined,
@@ -83,7 +97,173 @@ export function absCollectionHasOrphans(
   return absCollectionItemIds(cached).some((id) => !freshIds.has(id));
 }
 
-/** Drop library collection queries so the next fetch rewrites persist from scratch. */
+function _flattenAbsItems(data: AbsCollectionData): AbsCollectionItem[] {
+  const byId = new Map<string, AbsCollectionItem>();
+  for (const bucket of Object.values(data.genres || {})) {
+    for (const item of bucket || []) {
+      const id = (item?.itemId || "").trim();
+      if (id) byId.set(id, item);
+    }
+  }
+  for (const item of data.ungrouped || []) {
+    const id = (item?.itemId || "").trim();
+    if (id) byId.set(id, item);
+  }
+  return Array.from(byId.values());
+}
+
+function _regroupAbsItems(items: AbsCollectionItem[]): AbsCollectionData {
+  const genres: Record<string, AbsCollectionItem[]> = {};
+  const ungrouped: AbsCollectionItem[] = [];
+  const seenInGenre: Record<string, Set<string>> = {};
+  for (const item of items) {
+    const id = (item?.itemId || "").trim();
+    if (!id) continue;
+    const mapped = (item.genres as string[] | undefined) || [];
+    if (!mapped.length) {
+      ungrouped.push(item);
+      continue;
+    }
+    for (const top of mapped) {
+      const key = String(top);
+      seenInGenre[key] ??= new Set();
+      if (seenInGenre[key].has(id)) continue;
+      seenInGenre[key].add(id);
+      (genres[key] ??= []).push(item);
+    }
+  }
+  const sortedGenres = Object.fromEntries(
+    Object.entries(genres).sort(([a], [b]) => a.localeCompare(b)),
+  );
+  const byAdded = (a: AbsCollectionItem, b: AbsCollectionItem) =>
+    (Number(b.addedAt) || 0) - (Number(a.addedAt) || 0);
+  for (const bucket of Object.values(sortedGenres)) bucket.sort(byAdded);
+  ungrouped.sort(byAdded);
+  const totalItems =
+    Object.values(sortedGenres).reduce((n, b) => n + b.length, 0) + ungrouped.length;
+  return { genres: sortedGenres, ungrouped, totalItems };
+}
+
+/**
+ * Merge ABS collection snapshots by itemId.
+ * - Always upserts fresh items over cached.
+ * - When pruneMissing, drops cached ids absent from fresh (full-snapshot replace).
+ * - When not pruning (incomplete soft-poll), keeps cached-only ids so the shelf
+ *   does not shrink while ABS is still indexing.
+ */
+export function mergeAbsCollection<T extends AbsCollectionData>(
+  cached: T | null | undefined,
+  fresh: T | null | undefined,
+  opts?: { pruneMissing?: boolean },
+): T | null | undefined {
+  if (!fresh) return cached;
+  if (!cached) return fresh;
+  const prune = opts?.pruneMissing !== false;
+  const map = new Map<string, AbsCollectionItem>();
+  if (!prune) {
+    for (const item of _flattenAbsItems(cached)) {
+      const id = (item?.itemId || "").trim();
+      if (id) map.set(id, item);
+    }
+  }
+  for (const item of _flattenAbsItems(fresh)) {
+    const id = (item?.itemId || "").trim();
+    if (id) map.set(id, item);
+  }
+  return _regroupAbsItems(Array.from(map.values())) as T;
+}
+
+/**
+ * Merge Kavita collection snapshots by seriesId.
+ * Same prune semantics as {@link mergeAbsCollection}.
+ */
+export function mergeKavitaCollection<T extends KavitaCollectionData>(
+  cached: T | null | undefined,
+  fresh: T | null | undefined,
+  opts?: { pruneMissing?: boolean },
+): T | null | undefined {
+  if (!fresh) return cached;
+  if (!cached) return fresh;
+  const prune = opts?.pruneMissing !== false;
+  const map = new Map<number, KavitaCollectionItem>();
+  if (!prune) {
+    for (const item of cached.items || []) {
+      const id = item?.seriesId;
+      if (id != null && Number.isFinite(id)) map.set(Number(id), item);
+    }
+  }
+  for (const item of fresh.items || []) {
+    const id = item?.seriesId;
+    if (id != null && Number.isFinite(id)) map.set(Number(id), item);
+  }
+  const items = Array.from(map.values()).sort(
+    (a, b) => (Number(b.addedAt) || 0) - (Number(a.addedAt) || 0),
+  );
+  return { ...fresh, items, totalItems: items.length };
+}
+
+/**
+ * Merge streaming/personal library by numeric id.
+ */
+export function mergeStreamingLibrary<T extends StreamingLibraryData>(
+  cached: T | null | undefined,
+  fresh: T | null | undefined,
+  opts?: { pruneMissing?: boolean },
+): T | null | undefined {
+  if (!fresh) return cached;
+  if (!cached) return fresh;
+  const prune = opts?.pruneMissing !== false;
+  const map = new Map<number, NonNullable<StreamingLibraryData["items"]>[number]>();
+  if (!prune) {
+    for (const item of cached.items || []) {
+      const id = item?.id;
+      if (id != null && Number.isFinite(id)) map.set(Number(id), item);
+    }
+  }
+  for (const item of fresh.items || []) {
+    const id = item?.id;
+    if (id != null && Number.isFinite(id)) map.set(Number(id), item);
+  }
+  return { ...fresh, items: Array.from(map.values()) as T["items"] };
+}
+
+/**
+ * Soft refresh: mark collection queries stale and refetch active views.
+ * Keeps in-memory + persist data visible (stale-while-revalidate).
+ * During the bust window, collection queryFns pass refresh=true to skip
+ * short-TTL server caches so soft-polls see newly indexed books.
+ */
+let _collectionBustUntil = 0;
+
+/** True while My Library soft-refresh / post-scan polls should bypass server caches. */
+export function shouldBustLibraryCollectionCache(): boolean {
+  return Date.now() < _collectionBustUntil;
+}
+
+/** Open a short window where collection fetches request refresh=true. */
+export function markLibraryCollectionCacheBust(ms = 35_000): void {
+  _collectionBustUntil = Math.max(_collectionBustUntil, Date.now() + ms);
+}
+
+export async function softRefreshLibraryCollectionQueries(
+  queryClient: QueryClient,
+  opts?: { refetch?: boolean; bustMs?: number },
+): Promise<void> {
+  markLibraryCollectionCacheBust(opts?.bustMs ?? 35_000);
+  const keys = LIBRARY_COLLECTION_PREFIXES.map((p) => [p] as const);
+  await Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
+  queryClient.invalidateQueries({ queryKey: ["abs-series"] });
+  if (opts?.refetch !== false) {
+    await Promise.all(
+      keys.map((queryKey) => queryClient.refetchQueries({ queryKey, type: "active" })),
+    );
+  }
+}
+
+/**
+ * Hard drop library collection queries so the next fetch rewrites persist from scratch.
+ * Prefer {@link softRefreshLibraryCollectionQueries} for normal refresh/scan paths.
+ */
 export async function purgeLibraryCollectionQueries(
   queryClient: QueryClient,
   opts?: { refetch?: boolean },

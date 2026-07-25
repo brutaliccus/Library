@@ -21,11 +21,13 @@ from app.services.forge_pipeline import (
     cover_url_from_staging,
     delete_request_staging_tree,
     delete_staging_entry,
+    detect_pipeline_state,
     extract_asin_from_staging,
     m4b_source_dirs,
     needs_m4b_conversion,
     normalize_asin,
     primary_audio_for_chaptering,
+    resolve_resume_from,
     resolve_staging_dir,
     safe_path_under_staging,
     seed_staging_metadata_hints,
@@ -334,6 +336,36 @@ def test_primary_audio_for_chaptering_requires_m4b(tmp_path):
     (staging / "1.mp3").write_bytes(b"a" * 100)
     (staging / "2.mp3").write_bytes(b"b" * 200)
     assert primary_audio_for_chaptering(staging) is None
+
+
+def test_resolve_resume_from_wizard_hints(tmp_path):
+    staging = tmp_path / "req_resume"
+    staging.mkdir()
+    (staging / "1.mp3").write_bytes(b"a")
+    (staging / "2.mp3").write_bytes(b"b")
+    assert resolve_resume_from(staging) == "m4b"
+    assert resolve_resume_from(staging, m4b_done=True) == "chapters"
+    assert resolve_resume_from(staging, chapters_done=True) == "folder"
+    assert resolve_resume_from(staging, resume_from="folder") == "folder"
+    state = detect_pipeline_state(staging)
+    assert state["needs_m4b"] is True
+    assert state["suggested_resume"] == "m4b"
+
+
+def test_detect_pipeline_state_single_m4b(tmp_path):
+    staging = tmp_path / "req_m4b"
+    staging.mkdir()
+    (staging / "Book.m4b").write_bytes(b"x" * 20)
+    (staging / "metadata.json").write_text(
+        json.dumps({"asin": "B0TESTASI1", "title": "Book"}),
+        encoding="utf-8",
+    )
+    state = detect_pipeline_state(staging)
+    assert state["needs_m4b"] is False
+    assert state["has_m4b"] is True
+    assert state["asin"] == "B0TESTASI1"
+    assert state["suggested_resume"] == "chapters"
+    assert resolve_resume_from(staging) == "chapters"
 
 
 def test_resolve_staging_dir_docker_style(tmp_path, monkeypatch):

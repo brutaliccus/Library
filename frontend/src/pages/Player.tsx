@@ -75,11 +75,19 @@ export default function PlayerPage() {
     }
   }, [nowPlaying, navigate]);
 
+  const hasAbsChapters = (nowPlaying?.absChapters?.length ?? 0) > 0;
+  const activeChapterIdx =
+    nowPlaying && hasAbsChapters
+      ? indexOfChapterAtTime(nowPlaying.absChapters!, currentTime)
+      : -1;
+
+  // Scroll to active chapter only when the drawer opens or the chapter/track
+  // boundary changes — not on every progress tick (that fought user scroll).
   useEffect(() => {
     if (chaptersMenuOpen && activeRowRef.current) {
       activeRowRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
-  }, [chaptersMenuOpen, currentTime, currentTrackIndex, nowPlaying?.absChapters?.length]);
+  }, [chaptersMenuOpen, activeChapterIdx, currentTrackIndex, nowPlaying?.absChapters?.length]);
 
   if (!nowPlaying) return null;
 
@@ -94,11 +102,7 @@ export default function PlayerPage() {
   );
 
   const chLabel = currentChapterLabel(nowPlaying, currentTime);
-  const hasAbsChapters = (nowPlaying.absChapters?.length ?? 0) > 0;
   const showTrackLine = nowPlaying.tracks.length > 1;
-  const activeChapterIdx = hasAbsChapters
-    ? indexOfChapterAtTime(nowPlaying.absChapters!, currentTime)
-    : -1;
   const drawerHasList = hasAbsChapters || nowPlaying.tracks.length > 1;
 
   const handleScrubFraction = (fraction: number) => {
@@ -276,7 +280,7 @@ export default function PlayerPage() {
             onClick={() => setChaptersMenuOpen(false)}
           />
           <aside
-            className="fixed top-0 right-0 bottom-0 z-[120] w-full max-w-md bg-gray-950 border-l border-gray-800 shadow-2xl flex flex-col"
+            className="fixed inset-y-0 left-0 z-[120] w-full max-w-md bg-gray-950 border-r border-gray-800 shadow-2xl flex flex-col pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] pl-[env(safe-area-inset-left,0px)]"
             aria-labelledby="chapters-drawer-title"
           >
             <div className="flex items-center justify-between px-4 py-4 border-b border-gray-800 shrink-0">
@@ -293,7 +297,7 @@ export default function PlayerPage() {
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-3 py-3 pb-[env(safe-area-inset-bottom,0px)]">
+            <div className="flex-1 overflow-y-auto px-3 py-3">
               {!drawerHasList && (
                 <p className="text-sm text-gray-500 px-2 py-6 text-center">
                   No chapter list is available for this title. Use the outer skip buttons when there are

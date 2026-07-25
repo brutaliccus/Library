@@ -3,8 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
   ChevronRight,
+  Disc3,
   ExternalLink,
   Files,
+  ListMusic,
   Loader2,
   Play,
   Search,
@@ -15,7 +17,7 @@ import Modal from "../Modal";
 import { useToast } from "../../contexts/ToastContext";
 import { StagingFilesPanel } from "./StagingFilesViewer";
 
-type WizardStep = "files" | "metadata" | "pipeline";
+type WizardStep = "files" | "metadata" | "m4b" | "chapters" | "pipeline";
 
 type Clues = {
   query: string;
@@ -51,6 +53,26 @@ type QuickReviewLoad = {
   metadata: Record<string, unknown>;
   provider_hint: string | null;
   already_applied: boolean;
+};
+
+type PipelineState = {
+  has_metadata: boolean;
+  needs_m4b: boolean;
+  has_m4b: boolean;
+  m4b_path: string | null;
+  asin: string;
+  suggested_resume: string;
+  m4b_url?: string | null;
+  chaptering_url?: string | null;
+  manual_review_url?: string | null;
+  status?: string;
+  status_detail?: string | null;
+};
+
+type ChapterRow = {
+  index: number;
+  title: string;
+  start: number;
 };
 
 type ChosenMeta = {
@@ -102,7 +124,9 @@ type SearchResult = {
 const STEPS: { id: WizardStep; label: string; icon: typeof Files }[] = [
   { id: "files", label: "Files", icon: Files },
   { id: "metadata", label: "Metadata", icon: Tags },
-  { id: "pipeline", label: "Run pipeline", icon: Play },
+  { id: "m4b", label: "M4B", icon: Disc3 },
+  { id: "chapters", label: "Chapters", icon: ListMusic },
+  { id: "pipeline", label: "Continue", icon: Play },
 ];
 
 /** Mirror LibraForge Manual Review compare table fields. */
@@ -172,6 +196,15 @@ function formatMinutes(v: unknown): string {
   return `${n.toFixed(1)} min`;
 }
 
+function formatChapterTime(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return "—";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 function localField(
   metadata: Record<string, unknown> | undefined,
   clues: Clues | undefined,
@@ -217,10 +250,19 @@ export default function QuickReviewWizard({
   const [results, setResults] = useState<SearchResult[]>([]);
   const [selectedAsin, setSelectedAsin] = useState<string | null>(null);
   const [metadataApplied, setMetadataApplied] = useState(false);
+  const [m4bDone, setM4bDone] = useState(false);
+  const [chaptersDone, setChaptersDone] = useState(false);
+  const [chapterAsin, setChapterAsin] = useState("");
+  const [previewChapters, setPreviewChapters] = useState<ChapterRow[]>([]);
+  const [currentChapters, setCurrentChapters] = useState<ChapterRow[]>([]);
 
   const loadKey = useMemo(
     () => ["admin-quick-review", requestId, relativePath] as const,
     [requestId, relativePath],
+  );
+  const pipelineKey = useMemo(
+    () => ["admin-quick-review-pipeline", requestId] as const,
+    [requestId],
   );
 
   const {
@@ -239,6 +281,26 @@ export default function QuickReviewWizard({
     refetchOnWindowFocus: false,
   });
 
+  const {
+    data: pipeline,
+    refetch: refetchPipeline,
+    isFetching: pipelineFetching,
+  } = useQuery({
+    queryKey: pipelineKey,
+    queryFn: async () => {
+      const { data } = await api.get(
+        `/admin/requests/${requestId}/quick-review/pipeline-state`,
+      );
+      return data as PipelineState;
+    },
+    enabled: open && requestId > 0 && (step === "m4b" || step === "chapters" || step === "pipeline"),
+    refetchInterval: (q) => {
+      const st = (q.state.data as PipelineState | undefined)?.status;
+      return st === "m4b_convert" || st === "chapter_forge" ? 2500 : false;
+    },
+    refetchOnWindowFocus: true,
+  });
+
   useEffect(() => {
     if (!open) {
       setStep("files");
@@ -246,6 +308,11 @@ export default function QuickReviewWizard({
       setResults([]);
       setSelectedAsin(null);
       setMetadataApplied(false);
+      setM4bDone(false);
+      setChaptersDone(false);
+      setChapterAsin("");
+      setPreviewChapters([]);
+      setCurrentChapters([]);
     }
   }, [open]);
 
@@ -263,7 +330,15 @@ export default function QuickReviewWizard({
     if (!relativePath && review.selected_relative_path) {
       setRelativePath(review.selected_relative_path);
     }
-  }, [review, relativePath]);
+    const metaAsin = fieldStr(review.metadata?.asin);
+    if (metaAsin && !chapterAsin) setChapterAsin(metaAsin);
+  }, [review, relativePath, chapterAsin]);
+
+  useEffect(() => {
+    if (!pipeline) return;
+    if (!pipeline.needs_m4b) setM4bDone(true);
+    if (pipeline.asin && !chapterAsin) setChapterAsin(pipeline.asin);
+  }, [pipeline, chapterAsin]);
 
   const searchMutation = useMutation({
     mutationFn: async () => {
@@ -293,7 +368,6 @@ export default function QuickReviewWizard({
         {
           relative_path: relativePath,
           selected_result: selected,
-          // Prefer full so LibraForge can embed cover (writers gate on edit_mode==full).
           edit_mode: "full",
           replace_cover: true,
         },
@@ -301,17 +375,114 @@ export default function QuickReviewWizard({
       );
       return data;
     },
-    onSuccess: () => {
+    onSuccess: (_data, selected) => {
       setMetadataApplied(true);
+      const asin = fieldStr(selected.asin || selected.chosen_metadata?.asin);
+      if (asin) setChapterAsin(asin);
       toast("Metadata applied to staging", "success");
       void queryClient.invalidateQueries({ queryKey: loadKey });
+      void queryClient.invalidateQueries({ queryKey: pipelineKey });
       void refetchReview();
     },
     onError: (err: any) => toast(err.response?.data?.detail || "Apply failed", "error"),
   });
 
+  const m4bMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post(
+        `/admin/requests/${requestId}/quick-review/m4b`,
+        null,
+        { timeout: 30_000 },
+      );
+      return data as {
+        ok: boolean;
+        skipped?: boolean;
+        message?: string;
+        pipeline?: PipelineState;
+      };
+    },
+    onSuccess: (res) => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      void queryClient.invalidateQueries({ queryKey: pipelineKey });
+      if (res.skipped) {
+        setM4bDone(true);
+        toast(res.message || "Already M4B", "success");
+        return;
+      }
+      toast(res.message || "M4B conversion started", "success");
+      void refetchPipeline();
+    },
+    onError: (err: any) => toast(err.response?.data?.detail || "M4B failed", "error"),
+  });
+
+  useEffect(() => {
+    if (!pipeline) return;
+    if (pipeline.status === "quarantined" && !pipeline.needs_m4b && step === "m4b") {
+      setM4bDone(true);
+    }
+  }, [pipeline, step]);
+
+  const previewMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post(
+        `/admin/requests/${requestId}/quick-review/chapters/preview`,
+        { asin: chapterAsin },
+        { timeout: 320_000 },
+      );
+      return data as {
+        chapters: ChapterRow[];
+        current_chapters: ChapterRow[];
+        chapter_count: number;
+        asin: string;
+      };
+    },
+    onSuccess: (data) => {
+      setPreviewChapters(data.chapters || []);
+      setCurrentChapters(data.current_chapters || []);
+      if (data.asin) setChapterAsin(data.asin);
+      toast(
+        data.chapter_count
+          ? `Fetched ${data.chapter_count} Audible chapters — confirm to embed`
+          : "Preview returned no chapters",
+        data.chapter_count ? "success" : "info",
+      );
+      void queryClient.invalidateQueries({ queryKey: pipelineKey });
+      void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+    },
+    onError: (err: any) => toast(err.response?.data?.detail || "Chapter preview failed", "error"),
+  });
+
+  const applyChaptersMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post(
+        `/admin/requests/${requestId}/quick-review/chapters/apply`,
+        { asin: chapterAsin },
+        { timeout: 320_000 },
+      );
+      return data as { ok: boolean; embedded?: boolean; status_detail?: string };
+    },
+    onSuccess: (data) => {
+      setChaptersDone(true);
+      toast(
+        data.embedded
+          ? "Audible chapters embedded into M4B"
+          : data.status_detail || "Chapter Forge finished",
+        data.embedded ? "success" : "info",
+      );
+      void queryClient.invalidateQueries({ queryKey: pipelineKey });
+      void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+    },
+    onError: (err: any) => toast(err.response?.data?.detail || "Chapter apply failed", "error"),
+  });
+
   const continueMutation = useMutation({
-    mutationFn: () => api.post(`/admin/download-requests/${requestId}/continue-forge`),
+    mutationFn: () =>
+      api.post(`/admin/download-requests/${requestId}/continue-forge`, {
+        resume_from: "auto",
+        m4b_done: m4bDone || (pipeline ? !pipeline.needs_m4b : false),
+        chapters_done: chaptersDone,
+        asin: chapterAsin || undefined,
+      }),
     onSuccess: (res: any) => {
       void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
       toast(res?.data?.message || "Continuing pipeline", "success");
@@ -320,27 +491,56 @@ export default function QuickReviewWizard({
     onError: (err: any) => toast(err.response?.data?.detail || "Continue failed", "error"),
   });
 
-  const forgeUrl = review?.manual_review_url || manualReviewUrl || null;
+  const forgeUrl =
+    step === "m4b"
+      ? pipeline?.m4b_url || null
+      : step === "chapters"
+        ? pipeline?.chaptering_url || null
+        : review?.manual_review_url || manualReviewUrl || pipeline?.manual_review_url || null;
   const selected = results.find((r) => (r.asin || r.title) === selectedAsin) || null;
   const stepIndex = STEPS.findIndex((s) => s.id === step);
   const currentCover = fieldStr(
     review?.metadata?.cover_url || (review?.clues as { cover_url?: string } | undefined)?.cover_url,
   );
+  const m4bBusy = pipeline?.status === "m4b_convert" || m4bMutation.isPending;
+  const continueHint = chaptersDone
+    ? "Folder Forge → finalize"
+    : m4bDone || (pipeline && !pipeline.needs_m4b)
+      ? chaptersDone
+        ? "Folder Forge → finalize"
+        : "Chapter Forge (if needed) → Folder Forge → finalize"
+      : "M4B → Chapter Forge → Folder Forge → finalize";
+
+  const canJumpTo = (target: WizardStep, index: number) => {
+    if (index <= stepIndex) return true;
+    if (target === "metadata" && step !== "files") return true;
+    if (target === "m4b" && (metadataApplied || stepIndex >= 1)) return true;
+    if (target === "chapters" && (m4bDone || stepIndex >= 2)) return true;
+    if (target === "pipeline" && stepIndex >= 2) return true;
+    return false;
+  };
 
   return (
     <Modal title={`Quick review — ${title}`} show={open} onClose={onClose} size="xl">
       <div className="space-y-4">
-        <nav aria-label="Quick review steps" className="flex flex-wrap items-center gap-1 sm:gap-2">
+        <nav
+          aria-label="Quick review steps"
+          className="flex flex-wrap items-center gap-1 sm:gap-2"
+        >
           {STEPS.map((s, i) => {
             const Icon = s.icon;
             const active = s.id === step;
-            const done = i < stepIndex;
+            const done =
+              i < stepIndex ||
+              (s.id === "metadata" && metadataApplied) ||
+              (s.id === "m4b" && m4bDone) ||
+              (s.id === "chapters" && chaptersDone);
             return (
               <button
                 key={s.id}
                 type="button"
                 onClick={() => {
-                  if (i <= stepIndex || (s.id === "metadata" && step === "pipeline")) setStep(s.id);
+                  if (canJumpTo(s.id, i)) setStep(s.id);
                 }}
                 className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                   active
@@ -350,7 +550,7 @@ export default function QuickReviewWizard({
                       : "border-gray-700 text-gray-500"
                 }`}
               >
-                {done ? <Check size={12} /> : <Icon size={12} />}
+                {done && !active ? <Check size={12} /> : <Icon size={12} />}
                 <span>
                   {i + 1}. {s.label}
                 </span>
@@ -515,7 +715,7 @@ export default function QuickReviewWizard({
                 </div>
 
                 {results.length > 0 && (
-                  <ul className="space-y-3 max-h-[48vh] overflow-y-auto pr-0.5">
+                  <ul className="space-y-3 max-h-[40vh] overflow-y-auto pr-0.5">
                     {results.map((r, idx) => {
                       const key = r.asin || r.title || `r-${idx}`;
                       const active = selectedAsin === key;
@@ -754,18 +954,18 @@ export default function QuickReviewWizard({
               <div className="flex flex-col-reverse sm:flex-row gap-2">
                 <button
                   type="button"
-                  onClick={() => setStep("pipeline")}
+                  onClick={() => setStep("m4b")}
                   className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
                 >
-                  {metadataApplied ? "Next" : "Skip — metadata already good"}
+                  {metadataApplied ? "Next — M4B" : "Skip — metadata already good"}
                 </button>
                 {metadataApplied && (
                   <button
                     type="button"
-                    onClick={() => setStep("pipeline")}
+                    onClick={() => setStep("m4b")}
                     className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
                   >
-                    Continue to pipeline
+                    Continue to M4B
                     <ChevronRight size={14} />
                   </button>
                 )}
@@ -774,22 +974,37 @@ export default function QuickReviewWizard({
           </div>
         )}
 
-        {step === "pipeline" && (
+        {step === "m4b" && (
           <div className="space-y-4">
-            <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4 space-y-2">
-              <p className="text-sm text-gray-200">
-                Resume the existing pipeline from M4B convert → Folder Forge → finalize.
-              </p>
+            <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4 space-y-3">
+              <p className="text-sm text-gray-200">Convert this book to a single M4B?</p>
               <p className="text-xs text-gray-500">
-                Same path as Admin &quot;Continue pipeline&quot;. Progress appears on the request card.
+                Uses the same LibraForge M4B path as the automated pipeline. Progress shows on the
+                request card. Open LibraForge for advanced options.
               </p>
-              {metadataApplied ? (
-                <p className="text-xs text-teal-300/90 inline-flex items-center gap-1">
-                  <Check size={12} /> Metadata write evidence present (or just applied).
+              {pipelineFetching && !pipeline && (
+                <p className="text-xs text-gray-500 inline-flex items-center gap-1.5">
+                  <Loader2 size={12} className="animate-spin" /> Checking staging…
                 </p>
-              ) : (
-                <p className="text-xs text-amber-300/90">
-                  Metadata was skipped — only continue if tags/cover are already correct in staging.
+              )}
+              {pipeline && (
+                <div className="text-xs space-y-1">
+                  {pipeline.needs_m4b ? (
+                    <p className="text-amber-300/90">Multi-file / non-M4B audio — conversion needed.</p>
+                  ) : (
+                    <p className="text-teal-300/90 inline-flex items-center gap-1">
+                      <Check size={12} /> Already a single M4B
+                      {pipeline.m4b_path ? ` (${pipeline.m4b_path.split("/").pop()})` : ""}
+                    </p>
+                  )}
+                  {pipeline.status_detail && pipeline.status === "m4b_convert" && (
+                    <p className="text-gray-400">{pipeline.status_detail}</p>
+                  )}
+                </div>
+              )}
+              {m4bDone && (
+                <p className="text-xs text-teal-300/90 inline-flex items-center gap-1">
+                  <Check size={12} /> M4B step ready
                 </p>
               )}
             </div>
@@ -797,6 +1012,191 @@ export default function QuickReviewWizard({
               <button
                 type="button"
                 onClick={() => setStep("metadata")}
+                className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
+              >
+                Back
+              </button>
+              <div className="flex flex-col-reverse sm:flex-row gap-2">
+                {pipeline?.needs_m4b && !m4bDone && (
+                  <button
+                    type="button"
+                    onClick={() => m4bMutation.mutate()}
+                    disabled={m4bBusy}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600 disabled:opacity-50"
+                  >
+                    {m4bBusy ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Disc3 size={14} />
+                    )}
+                    {m4bBusy ? "Converting…" : "Yes — convert to M4B"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (pipeline && !pipeline.needs_m4b) setM4bDone(true);
+                    setStep("chapters");
+                  }}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-teal-600/60 text-teal-200 hover:bg-teal-900/30"
+                >
+                  {m4bDone || (pipeline && !pipeline.needs_m4b) ? "Next — Chapters" : "Skip M4B"}
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {step === "chapters" && (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4 space-y-3">
+              <p className="text-sm text-gray-200">Chapter Forge — Audible chapters</p>
+              <p className="text-xs text-gray-500">
+                Import ASIN from applied metadata, fetch chapters for a visual check, then confirm
+                embed into the .m4b. Embed requires LibraForge ``embedded_into`` (not sidecar-only).
+              </p>
+              <label className="block text-xs text-gray-400">
+                ASIN
+                <input
+                  type="text"
+                  value={chapterAsin}
+                  onChange={(e) => setChapterAsin(e.target.value.trim().toUpperCase())}
+                  placeholder="B0XXXXXXXX"
+                  className="mt-1 w-full bg-gray-900 border border-gray-600 rounded-lg px-2.5 py-2 text-sm text-gray-100 font-mono tracking-wide"
+                />
+              </label>
+              {pipeline && !pipeline.has_m4b && (
+                <p className="text-xs text-amber-300/90">
+                  No .m4b in staging yet — finish M4B first, or Open LibraForge.
+                </p>
+              )}
+              {chaptersDone && (
+                <p className="text-xs text-teal-300/90 inline-flex items-center gap-1">
+                  <Check size={12} /> Chapters step marked done
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => previewMutation.mutate()}
+                disabled={
+                  previewMutation.isPending ||
+                  !chapterAsin.trim() ||
+                  (pipeline != null && !pipeline.has_m4b)
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600 disabled:opacity-50"
+              >
+                {previewMutation.isPending ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Search size={14} />
+                )}
+                Fetch / compare chapters
+              </button>
+              {previewChapters.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => applyChaptersMutation.mutate()}
+                  disabled={applyChaptersMutation.isPending}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-teal-600/60 text-teal-200 hover:bg-teal-900/30 disabled:opacity-50"
+                >
+                  {applyChaptersMutation.isPending ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : (
+                    <Check size={14} />
+                  )}
+                  Confirm & embed
+                </button>
+              )}
+            </div>
+
+            {(previewChapters.length > 0 || currentChapters.length > 0) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[36vh] overflow-hidden">
+                <div className="rounded-lg border border-gray-700 overflow-hidden flex flex-col min-h-0">
+                  <p className="text-[10px] uppercase tracking-wide text-gray-500 px-2.5 py-1.5 border-b border-gray-700 bg-gray-900/60 shrink-0">
+                    Current ({currentChapters.length})
+                  </p>
+                  <ul className="overflow-y-auto text-xs text-gray-400 px-2 py-1.5 space-y-1 flex-1">
+                    {currentChapters.length === 0 && (
+                      <li className="text-gray-600 py-2">No markers loaded</li>
+                    )}
+                    {currentChapters.slice(0, 80).map((ch) => (
+                      <li key={`c-${ch.index}`} className="flex gap-2">
+                        <span className="tabular-nums text-gray-600 shrink-0 w-10">
+                          {formatChapterTime(ch.start)}
+                        </span>
+                        <span className="truncate">{ch.title}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="rounded-lg border border-teal-800/50 overflow-hidden flex flex-col min-h-0">
+                  <p className="text-[10px] uppercase tracking-wide text-teal-400/80 px-2.5 py-1.5 border-b border-teal-900/40 bg-teal-950/30 shrink-0">
+                    Audible ({previewChapters.length})
+                  </p>
+                  <ul className="overflow-y-auto text-xs text-gray-300 px-2 py-1.5 space-y-1 flex-1">
+                    {previewChapters.slice(0, 80).map((ch) => (
+                      <li key={`a-${ch.index}`} className="flex gap-2">
+                        <span className="tabular-nums text-gray-500 shrink-0 w-10">
+                          {formatChapterTime(ch.start)}
+                        </span>
+                        <span className="truncate">{ch.title}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-col-reverse sm:flex-row sm:justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setStep("m4b")}
+                className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                onClick={() => setStep("pipeline")}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
+              >
+                {chaptersDone ? "Next — Continue" : "Skip / Continue pipeline"}
+                <ChevronRight size={14} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === "pipeline" && (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4 space-y-2">
+              <p className="text-sm text-gray-200">
+                Continue pipeline from here: {continueHint}.
+              </p>
+              <p className="text-xs text-gray-500">
+                Skips steps already done in this wizard. Remaining work runs in the background;
+                progress appears on the request card.
+              </p>
+              <ul className="text-xs text-gray-400 space-y-1 list-disc pl-4">
+                <li>
+                  Metadata:{" "}
+                  {metadataApplied || pipeline?.has_metadata ? "done / present" : "skipped or unknown"}
+                </li>
+                <li>
+                  M4B:{" "}
+                  {m4bDone || (pipeline && !pipeline.needs_m4b) ? "done / single M4B" : "still needed"}
+                </li>
+                <li>Chapters: {chaptersDone ? "done this session" : "will run if ASIN + M4B"}</li>
+              </ul>
+            </div>
+            <div className="flex flex-col-reverse sm:flex-row sm:justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setStep("chapters")}
                 className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
               >
                 Back
@@ -812,7 +1212,7 @@ export default function QuickReviewWizard({
                 ) : (
                   <Play size={14} />
                 )}
-                Run pipeline
+                Continue pipeline
               </button>
             </div>
           </div>

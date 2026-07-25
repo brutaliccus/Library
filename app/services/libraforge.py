@@ -43,6 +43,20 @@ def public_manual_review_url() -> str:
     return f"{public}/forge#manual-review"
 
 
+def public_m4b_url() -> str:
+    public = (settings.libraforge_url or "").strip().rstrip("/")
+    if not public:
+        return ""
+    return f"{public}/forge#m4b"
+
+
+def public_chaptering_url() -> str:
+    public = (settings.libraforge_url or "").strip().rstrip("/")
+    if not public:
+        return ""
+    return f"{public}/forge#chaptering"
+
+
 async def _request(
     method: str,
     path: str,
@@ -350,13 +364,19 @@ async def start_chaptering_run(
     *,
     asin: str = "",
     backend: str = "audible-chapters",
+    no_save: bool = False,
 ) -> str:
-    """Start Chapter Forge. Prefer ``audible-chapters`` (ASIN lookup, no ASR)."""
+    """Start Chapter Forge. Prefer ``audible-chapters`` (ASIN lookup, no ASR).
+
+    ``no_save=True`` fetches/compares Audible chapters without embedding into the
+    ``.m4b`` (preview / dry-run). Embed still requires ``no_save=False`` and a
+    non-empty ``stats.embedded_into`` on success.
+    """
     body: dict[str, Any] = {
         "source_path": source_path,
         "backend": backend or "audible-chapters",
         "asin": (asin or "").strip().upper(),
-        "no_save": False,
+        "no_save": bool(no_save),
     }
     data = await _request("POST", "/api/chaptering/runs", json_body=body, timeout=60.0)
     run_id = str(data.get("id") or "").strip()

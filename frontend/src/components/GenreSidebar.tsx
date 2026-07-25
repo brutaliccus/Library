@@ -224,7 +224,7 @@ export default function GenreSidebar({
             className="absolute inset-0 bg-black/60"
             onClick={closeMobile}
           />
-          <div className="absolute left-0 top-0 bottom-0 w-72 bg-gray-900 border-r border-gray-800 overflow-y-auto p-4">
+          <div className="absolute left-0 top-0 bottom-0 w-72 max-w-[85vw] bg-gray-900 border-r border-gray-800 overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))]">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-semibold text-gray-200">Genres</h3>
               <button

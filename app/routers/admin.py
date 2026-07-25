@@ -152,6 +152,17 @@ class QuickReviewApplyBody(BaseModel):
     replace_cover: bool = True
 
 
+class ContinueForgeBody(BaseModel):
+    """Optional resume point for Continue / Quick Review Continue pipeline."""
+    resume_from: str | None = None  # auto|m4b|chapters|folder|finalize|metadata
+    m4b_done: bool | None = None
+    chapters_done: bool | None = None
+    asin: str | None = None
+
+
+class QuickReviewAsinBody(BaseModel):
+    asin: str = ""
+
 
 # --- User Management ---
 
@@ -495,11 +506,21 @@ async def reject_download_request(
 @router.post("/download-requests/{request_id}/continue-forge")
 async def continue_forge_after_review(
     request_id: int,
+    body: ContinueForgeBody = Body(default_factory=ContinueForgeBody),
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Resume after quarantine: audiobooks â†’ M4B/Folder Forge; ebooks â†’ organize â†’ Kavita."""
-    from app.services.forge_pipeline import continue_after_manual_review
+    """Resume after quarantine: audiobooks → forge steps; ebooks → organize → Kavita.
+
+    Accepts optional ``resume_from`` / done hints so Quick Review can continue
+    from M4B, chapters, or Folder Forge depending on what was already done.
+    """
+    from app.services.forge_pipeline import (
+        continue_after_manual_review,
+        detect_pipeline_state,
+        resolve_resume_from,
+        resolve_staging_dir,
+    )
     from app.services.ebook_pipeline import continue_ebook_after_review
     from app.services.pipeline import _update_status
 
@@ -507,7 +528,14 @@ async def continue_forge_after_review(
     req = result.scalar_one_or_none()
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-    if req.status not in ("quarantined", "metadata_forge"):
+    allowed = (
+        "quarantined",
+        "metadata_forge",
+        "m4b_convert",
+        "chapter_forge",
+        "folder_forge",
+    )
+    if req.status not in allowed:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot continue request in status '{req.status}'",
@@ -527,7 +555,7 @@ async def continue_forge_after_review(
             db,
             request_id,
             "folder_forge",
-            "Resuming ebook organize after reviewâ€¦",
+            "Resuming ebook organize after review…",
         )
         asyncio.create_task(continue_ebook_after_review(request_id))
         return {
@@ -537,20 +565,73 @@ async def continue_forge_after_review(
             "message": "Continuing ebook pipeline",
         }
 
+    try:
+        staging = resolve_staging_dir(req.staging_path or "")
+        step = resolve_resume_from(
+            staging,
+            resume_from=body.resume_from,
+            m4b_done=body.m4b_done,
+            chapters_done=body.chapters_done,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    status_map = {
+        "metadata": "metadata_forge",
+        "m4b": "m4b_convert",
+        "chapters": "chapter_forge",
+        "folder": "folder_forge",
+        "finalize": "finalizing",
+    }
+    next_status = status_map.get(step, "m4b_convert")
     await _update_status(
         db,
         request_id,
-        "m4b_convert",
-        "Resuming after manual reviewâ€¦",
+        next_status,
+        f"Resuming after manual review from {step}…",
     )
 
-    asyncio.create_task(continue_after_manual_review(request_id))
+    asyncio.create_task(
+        continue_after_manual_review(
+            request_id,
+            resume_from=step,
+            m4b_done=body.m4b_done,
+            chapters_done=body.chapters_done,
+            asin_override=body.asin,
+        )
+    )
+    state = detect_pipeline_state(staging)
     return {
         "ok": True,
         "id": request_id,
-        "status": "m4b_convert",
-        "message": "Continuing LibraForge pipeline",
+        "status": next_status,
+        "resume_from": step,
+        "pipeline": state,
+        "message": f"Continuing LibraForge pipeline from {step}",
     }
+
+
+@router.post("/download-requests/{request_id}/rerun-pipeline")
+async def rerun_pipeline(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-stage a finished audiobook into Quick Review (metadata → M4B → chapters → folder).
+
+    Copies from the library folder when staging is gone. Quarantines via
+    ``_set_quarantine`` so admin-review notifications still fire.
+    """
+    from app.services.forge_pipeline import prepare_pipeline_rerun
+
+    # Touch db session so dependency stays consistent with other admin routes.
+    _ = db
+    try:
+        return await prepare_pipeline_rerun(request_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 async def _staging_request_or_404(db: AsyncSession, request_id: int) -> DownloadRequest:
@@ -722,6 +803,136 @@ async def post_quick_review_apply(
         result.get("edit_mode"),
     )
     return result
+
+
+@router.get("/requests/{request_id}/quick-review/pipeline-state")
+@router.get("/download-requests/{request_id}/quick-review/pipeline-state")
+async def get_quick_review_pipeline_state(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Detect M4B / ASIN / metadata readiness for Quick Review steps."""
+    from app.services.forge_pipeline import detect_pipeline_state, resolve_staging_dir
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        staging = resolve_staging_dir(req.staging_path or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {
+        "request_id": request_id,
+        "status": req.status,
+        "status_detail": req.status_detail,
+        **detect_pipeline_state(staging),
+    }
+
+
+@router.post("/requests/{request_id}/quick-review/m4b")
+@router.post("/download-requests/{request_id}/quick-review/m4b")
+async def post_quick_review_m4b(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run M4B convert only for this staging request (then return to Quick Review)."""
+    from app.services.forge_pipeline import (
+        detect_pipeline_state,
+        resolve_staging_dir,
+        run_forge_after_download,
+    )
+    from app.services.pipeline import _update_status
+
+    req = await _staging_request_or_404(db, request_id)
+    if (req.media_type or "") == "ebook":
+        raise HTTPException(status_code=400, detail="M4B is audiobook-only")
+    try:
+        staging = resolve_staging_dir(req.staging_path or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    state = detect_pipeline_state(staging)
+    if not state["needs_m4b"]:
+        return {
+            "ok": True,
+            "skipped": True,
+            "message": "Already a single M4B — nothing to convert",
+            "pipeline": state,
+        }
+
+    req.quarantine_reason = None
+    await db.commit()
+    await _update_status(db, request_id, "m4b_convert", "Quick Review: converting to M4B…")
+    user_id = req.user_id
+    title = req.title
+    author = req.author
+
+    async def _run() -> None:
+        await run_forge_after_download(
+            request_id,
+            staging=staging,
+            user_id=user_id,
+            title=title,
+            author=author,
+            resume_from="m4b",
+            stop_after="m4b",
+        )
+
+    asyncio.create_task(_run())
+    return {
+        "ok": True,
+        "id": request_id,
+        "status": "m4b_convert",
+        "message": "M4B conversion started — progress on the request card",
+        "pipeline": state,
+        "m4b_url": state.get("m4b_url"),
+    }
+
+
+@router.post("/requests/{request_id}/quick-review/chapters/preview")
+@router.post("/download-requests/{request_id}/quick-review/chapters/preview")
+async def post_quick_review_chapters_preview(
+    request_id: int,
+    body: QuickReviewAsinBody = Body(default_factory=QuickReviewAsinBody),
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch Audible chapters for ASIN (no embed) for visual confirm."""
+    from app.services import libraforge as lf
+    from app.services.forge_pipeline import preview_audible_chapters
+
+    await _staging_request_or_404(db, request_id)
+    try:
+        return await preview_audible_chapters(request_id, asin=body.asin or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except lf.LibraForgeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@router.post("/requests/{request_id}/quick-review/chapters/apply")
+@router.post("/download-requests/{request_id}/quick-review/chapters/apply")
+async def post_quick_review_chapters_apply(
+    request_id: int,
+    body: QuickReviewAsinBody = Body(default_factory=QuickReviewAsinBody),
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Embed Audible chapters into staging .m4b after admin confirm."""
+    from app.services import libraforge as lf
+    from app.services.forge_pipeline import apply_audible_chapters
+
+    await _staging_request_or_404(db, request_id)
+    try:
+        return await apply_audible_chapters(request_id, asin=body.asin or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except lf.LibraForgeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 @router.post("/download-requests/{request_id}/reorganize")

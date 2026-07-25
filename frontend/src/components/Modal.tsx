@@ -27,7 +27,7 @@ export default function Modal({ title, children, onClose, show, size = "md" }: M
 
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-center justify-center p-2 sm:p-4"
+      className="fixed inset-0 z-[200] flex items-end sm:items-center justify-center p-2 sm:p-4 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] px-[max(0.5rem,env(safe-area-inset-left,0px))] sm:pr-[max(1rem,env(safe-area-inset-right,0px))]"
       role="dialog"
       aria-modal="true"
       aria-labelledby="modal-title"
@@ -38,7 +38,7 @@ export default function Modal({ title, children, onClose, show, size = "md" }: M
         aria-hidden="true"
       />
       <div
-        className={`relative bg-gray-800 border border-gray-700 rounded-xl shadow-xl w-full max-h-[92vh] flex flex-col ${maxWidth}`}
+        className={`relative bg-gray-800 border border-gray-700 rounded-xl shadow-xl w-full max-h-[min(92vh,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)-1rem))] flex flex-col ${maxWidth}`}
       >
         <div className="flex items-center justify-between p-4 border-b border-gray-700 shrink-0">
           <h2 id="modal-title" className="text-lg font-semibold text-gray-100 pr-2">

@@ -1050,10 +1050,13 @@ async def _run_chapter_forge_step(
     staging: Path,
     user_id: int,
     should_abort,
+    asin_override: str | None = None,
 ) -> None:
     """Apply Audible chapters when ASIN + primary .m4b exist. Soft-fail only."""
     p = _pipeline()
-    asin = extract_asin_from_staging(staging)
+    asin = normalize_asin(asin_override) if asin_override else ""
+    if not asin:
+        asin = extract_asin_from_staging(staging)
     audio = primary_audio_for_chaptering(staging)
 
     if not asin:
@@ -1202,6 +1205,8 @@ async def run_forge_after_download(
     title: str,
     author: str | None = None,
     resume_from: str | None = None,
+    stop_after: str | None = None,
+    asin_override: str | None = None,
 ) -> None:
     """Run Metadata Forge → M4B → re-apply → Chapter Forge → Folder Forge → ABS.
 
@@ -1215,6 +1220,9 @@ async def run_forge_after_download(
 
     ``resume_from``: None (full), ``m4b``, ``chapters``, ``folder``, or ``finalize``.
     Used after admin Manual Review in LibraForge.
+
+    ``stop_after``: optional step id (``m4b`` / ``chapters`` / ``folder``) — return
+    after that step completes so Quick Review can run steps interactively.
     """
     p = _pipeline()
     staging.mkdir(parents=True, exist_ok=True)
@@ -1222,11 +1230,15 @@ async def run_forge_after_download(
     await _persist_staging(request_id, staging)
 
     start_step = resume_from or "metadata"
+    stop_at = (stop_after or "").strip().lower() or None
     if await p._is_cancelled(request_id):
         return
 
     async def _abort_if_cancelled() -> bool:
         return await p._is_cancelled(request_id)
+
+    def _should_stop(step: str) -> bool:
+        return stop_at == step
 
     # --- Metadata Forge ---
     if start_step == "metadata":
@@ -1406,6 +1418,23 @@ async def run_forge_after_download(
             if not reapplied:
                 return
 
+        if _should_stop("m4b"):
+            async with async_session() as db:
+                await p._update_status(
+                    db,
+                    request_id,
+                    "quarantined",
+                    "M4B step finished — continue Quick Review or pipeline when ready",
+                )
+                result = await db.execute(
+                    select(DownloadRequest).where(DownloadRequest.id == request_id)
+                )
+                req_row = result.scalar_one_or_none()
+                if req_row:
+                    req_row.quarantine_reason = "Quick Review: M4B done — next Chapter Forge or Continue"
+                    await db.commit()
+            return
+
         start_step = "chapters"
 
     if await p._is_cancelled(request_id):
@@ -1418,10 +1447,29 @@ async def run_forge_after_download(
             staging=staging,
             user_id=user_id,
             should_abort=_abort_if_cancelled,
+            asin_override=asin_override,
         )
         # Chapter Forge / m4b-tool may leave *-tmpfiles; never deletes source audio.
         _cleanup_forge_temps(staging)
         if await p._is_cancelled(request_id):
+            return
+        if _should_stop("chapters"):
+            async with async_session() as db:
+                await p._update_status(
+                    db,
+                    request_id,
+                    "quarantined",
+                    "Chapter Forge step finished — continue Quick Review or pipeline when ready",
+                )
+                result = await db.execute(
+                    select(DownloadRequest).where(DownloadRequest.id == request_id)
+                )
+                req_row = result.scalar_one_or_none()
+                if req_row:
+                    req_row.quarantine_reason = (
+                        "Quick Review: chapters done — Continue for Folder Forge / finalize"
+                    )
+                    await db.commit()
             return
         start_step = "folder"
 
@@ -1677,12 +1725,385 @@ async def reject_quarantined_request(
         return result.scalar_one()
 
 
-async def continue_after_manual_review(request_id: int) -> None:
+def detect_pipeline_state(staging: Path) -> dict[str, Any]:
+    """Filesystem-based progress for Quick Review (no DB flags required)."""
+    has_metadata = staging_has_applied_metadata(staging)
+    needs_m4b = needs_m4b_conversion(staging)
+    audio = primary_audio_for_chaptering(staging)
+    has_m4b = audio is not None
+    asin = extract_asin_from_staging(staging)
+    # Suggest next automated resume point.
+    if needs_m4b:
+        suggested = "m4b"
+    elif has_m4b:
+        suggested = "chapters"
+    else:
+        suggested = "folder"
+    return {
+        "has_metadata": has_metadata,
+        "needs_m4b": needs_m4b,
+        "has_m4b": has_m4b,
+        "m4b_path": staging_path_for_libraforge(audio) if audio else None,
+        "asin": asin,
+        "suggested_resume": suggested,
+        "m4b_url": libraforge.public_m4b_url() or None,
+        "chaptering_url": libraforge.public_chaptering_url() or None,
+        "manual_review_url": libraforge.public_manual_review_url() or None,
+    }
+
+
+def resolve_resume_from(
+    staging: Path,
+    *,
+    resume_from: str | None = None,
+    m4b_done: bool | None = None,
+    chapters_done: bool | None = None,
+) -> str:
+    """Pick pipeline resume step from explicit value or wizard done-hints."""
+    explicit = (resume_from or "").strip().lower()
+    if explicit and explicit not in ("", "auto"):
+        if explicit not in ("metadata", "m4b", "chapters", "folder", "finalize"):
+            raise ValueError(f"Invalid resume_from '{resume_from}'")
+        return explicit
+    if chapters_done:
+        return "folder"
+    if m4b_done or not needs_m4b_conversion(staging):
+        return "chapters"
+    return "m4b"
+
+
+def _extract_chapters_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize chapter list from a LibraForge chaptering run report."""
+    out: list[dict[str, Any]] = []
+    stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
+    raw_lists = [
+        report.get("chapters"),
+        report.get("audible_chapters"),
+        stats.get("chapters_list"),
+        stats.get("chapters"),
+        report.get("preview_chapters"),
+    ]
+    for raw in raw_lists:
+        if not isinstance(raw, list) or not raw:
+            continue
+        for i, ch in enumerate(raw):
+            if isinstance(ch, dict):
+                title = str(ch.get("title") or ch.get("name") or f"Chapter {i + 1}")
+                start = ch.get("start")
+                if start is None:
+                    start = ch.get("start_sec") or ch.get("startSeconds") or 0
+                try:
+                    start_f = float(start)
+                except (TypeError, ValueError):
+                    start_f = 0.0
+                out.append({"index": i, "title": title, "start": start_f})
+            elif isinstance(ch, str) and ch.strip():
+                out.append({"index": i, "title": ch.strip(), "start": 0.0})
+        if out:
+            return out
+    # Fallback: titles only from stats
+    titles = stats.get("chapter_titles") if isinstance(stats, dict) else None
+    if isinstance(titles, list):
+        for i, title in enumerate(titles):
+            out.append({"index": i, "title": str(title or f"Chapter {i + 1}"), "start": 0.0})
+    return out
+
+
+async def preview_audible_chapters(
+    request_id: int,
+    *,
+    asin: str,
+) -> dict[str, Any]:
+    """Fetch Audible chapters for visual confirm (no embed / no_save=True)."""
+    p = _pipeline()
+    async with async_session() as db:
+        result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
+        req = result.scalar_one_or_none()
+        if not req:
+            raise FileNotFoundError(f"Request {request_id} not found")
+        staging_str = (req.staging_path or "").strip()
+        if not staging_str:
+            raise ValueError("Request has no staging_path")
+        user_id = req.user_id
+
+    staging = resolve_staging_dir(staging_str)
+    asin_n = normalize_asin(asin) or extract_asin_from_staging(staging)
+    if not asin_n:
+        raise ValueError("ASIN is required to preview Audible chapters")
+    audio = primary_audio_for_chaptering(staging)
+    if audio is None:
+        raise ValueError("No .m4b found — run M4B convert before Chapter Forge")
+
+    source_path = staging_path_for_libraforge(audio)
+    # Existing markers for compare UI (best-effort via LibraForge load).
+    current_chapters: list[dict[str, Any]] = []
+    try:
+        loaded = await libraforge.chaptering_load(source_path)
+        current_chapters = _extract_chapters_from_report(loaded)
+    except libraforge.LibraForgeError:
+        logger.debug("chaptering_load failed for preview (non-fatal)", exc_info=True)
+
+    async with async_session() as db:
+        await p._update_status(
+            db,
+            request_id,
+            "chapter_forge",
+            f"Previewing Audible chapters (ASIN {asin_n})…",
+        )
+
+    run_id = await libraforge.start_chaptering_run(
+        source_path,
+        asin=asin_n,
+        backend="audible-chapters",
+        no_save=True,
+    )
+    await _persist_staging(request_id, staging, run_id=run_id)
+    report = await libraforge.wait_for_run(
+        run_id,
+        poll_seconds=2.0,
+        timeout_seconds=min(settings.libraforge_chaptering_timeout, 300.0),
+    )
+    if libraforge.run_failed(report):
+        detail = (
+            report.get("phase_detail")
+            or report.get("error")
+            or report.get("status")
+            or "Chapter preview failed"
+        )
+        raise libraforge.LibraForgeError(str(detail))
+
+    audible = _extract_chapters_from_report(report)
+    stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
+    chapters_n = 0
+    try:
+        chapters_n = int(stats.get("chapters") or len(audible) or 0)
+    except (TypeError, ValueError):
+        chapters_n = len(audible)
+
+    # Return to quarantine so Continue / wizard remain available (no re-notify —
+    # admin is already in Quick Review).
+    async with async_session() as db:
+        await p._update_status(
+            db,
+            request_id,
+            "quarantined",
+            f"Chapter preview ready (ASIN {asin_n}, {chapters_n} chapters)",
+        )
+        result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
+        req_row = result.scalar_one_or_none()
+        if req_row:
+            req_row.quarantine_reason = "Quick Review: confirm Audible chapters then apply"
+            await db.commit()
+
+    return {
+        "ok": True,
+        "asin": asin_n,
+        "source_path": source_path,
+        "chapters": audible,
+        "chapter_count": chapters_n or len(audible),
+        "current_chapters": current_chapters,
+        "embedded_into": str(stats.get("embedded_into") or "").strip(),
+        "status_detail": f"Preview ASIN {asin_n}: {chapters_n or len(audible)} chapters",
+        "user_id": user_id,
+    }
+
+
+async def apply_audible_chapters(
+    request_id: int,
+    *,
+    asin: str,
+) -> dict[str, Any]:
+    """Embed Audible chapters into staging .m4b (requires embedded_into on success)."""
+    p = _pipeline()
+    async with async_session() as db:
+        result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
+        req = result.scalar_one_or_none()
+        if not req:
+            raise FileNotFoundError(f"Request {request_id} not found")
+        staging_str = (req.staging_path or "").strip()
+        if not staging_str:
+            raise ValueError("Request has no staging_path")
+        user_id = req.user_id
+        if req.quarantine_reason is not None:
+            req.quarantine_reason = None
+            await db.commit()
+
+    staging = resolve_staging_dir(staging_str)
+    asin_n = normalize_asin(asin) or extract_asin_from_staging(staging)
+    if not asin_n:
+        raise ValueError("ASIN is required to apply Chapter Forge")
+
+    async def _abort() -> bool:
+        return await p._is_cancelled(request_id)
+
+    await _run_chapter_forge_step(
+        request_id,
+        staging=staging,
+        user_id=user_id,
+        should_abort=_abort,
+        asin_override=asin_n,
+    )
+    _cleanup_forge_temps(staging)
+
+    async with async_session() as db:
+        result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
+        req_row = result.scalar_one_or_none()
+        detail = (req_row.status_detail if req_row else "") or ""
+        # Keep wizard interactive — quarantine without re-push (admin present).
+        await p._update_status(
+            db,
+            request_id,
+            "quarantined",
+            detail or "Chapter Forge finished — Continue for Folder Forge / finalize",
+        )
+        result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
+        req_row = result.scalar_one_or_none()
+        if req_row:
+            req_row.quarantine_reason = "Quick Review: chapters applied — Continue remaining pipeline"
+            await db.commit()
+        embedded = "Embedded Audible chapters" in (detail or "")
+        return {
+            "ok": True,
+            "asin": asin_n,
+            "embedded": embedded,
+            "status_detail": detail,
+        }
+
+
+def find_library_book_dir(title: str, author: str | None = None) -> Path | None:
+    """Best-effort locate a finished book under the audiobook library root."""
+    root = Path(settings.audiobook_dir)
+    if not root.is_dir():
+        return None
+    title_slug = downloader.sanitize_filename(title or "").lower()
+    author_slug = downloader.sanitize_filename(author or "").lower()
+    if not title_slug:
+        return None
+    candidates: list[tuple[int, Path]] = []
+    try:
+        for path in root.rglob("*"):
+            if not path.is_dir():
+                continue
+            parts = set(path.parts)
+            if parts & UNORGANIZED_DIRNAMES:
+                continue
+            if path.name in {"lost+found", ".git"} or path.name.startswith("."):
+                continue
+            name_l = path.name.lower()
+            if title_slug not in name_l and name_l not in title_slug:
+                continue
+            if not _collect_audio(path):
+                continue
+            score = 0
+            if name_l == title_slug:
+                score += 3
+            elif title_slug in name_l:
+                score += 2
+            if author_slug and author_slug in str(path).lower():
+                score += 2
+            candidates.append((score, path))
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: (-t[0], len(str(t[1]))))
+    return candidates[0][1]
+
+
+async def prepare_pipeline_rerun(request_id: int) -> dict[str, Any]:
+    """Re-stage a completed (or finished) audiobook for Quick Review / forge re-run.
+
+    Behavior:
+    - If staging still exists with audio → reuse it (reset to quarantined).
+    - Else copy the library book folder into ``.unorganized/req_{id}_rerun_*``.
+      The live library copy is left in place until Folder Forge moves/replaces.
+    - Does **not** auto-start the pipeline; opens for Quick Review from metadata.
+    - Uses ``_set_quarantine`` so admin-review push notifications still fire.
+    """
+    async with async_session() as db:
+        result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
+        req = result.scalar_one_or_none()
+        if not req:
+            raise FileNotFoundError(f"Request {request_id} not found")
+        if (req.media_type or "audiobook") == "ebook":
+            raise ValueError("Ebook re-run is not supported here")
+        if req.status not in (
+            "completed",
+            "failed",
+            "admin_rejected",
+            "quarantined",
+            "cancelled",
+        ):
+            raise ValueError(
+                f"Cannot re-run request in status '{req.status}' "
+                "(wait for current forge step to finish)"
+            )
+        title = req.title
+        author = req.author
+        staging_str = (req.staging_path or "").strip()
+
+    staging: Path | None = None
+    source = "existing_staging"
+    if staging_str:
+        try:
+            existing = resolve_staging_dir(staging_str)
+            if existing.is_dir() and _collect_audio(existing):
+                staging = existing
+        except FileNotFoundError:
+            staging = None
+
+    if staging is None:
+        lib_dir = find_library_book_dir(title, author)
+        if lib_dir is None:
+            raise FileNotFoundError(
+                f"Could not find library folder for '{title}'"
+                + (f" by {author}" if author else "")
+                + " — re-stage manually or open LibraForge on the library path"
+            )
+        staging = ensure_unorganized_root() / (
+            f"req_{request_id}_rerun_{downloader.sanitize_filename(title or 'book')[:60]}"
+        )
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        shutil.copytree(lib_dir, staging, dirs_exist_ok=False)
+        source = f"copied_from:{lib_dir}"
+
+    await _persist_staging(request_id, staging)
+    await _set_quarantine(
+        request_id,
+        (
+            "Pipeline re-run — review metadata in Quick Review, then M4B / "
+            "Chapter Forge / Continue. Library original left in place until "
+            "Folder Forge moves the re-staged copy."
+        ),
+        staging,
+    )
+    state = detect_pipeline_state(staging)
+    return {
+        "ok": True,
+        "id": request_id,
+        "status": "quarantined",
+        "staging_path": staging_path_for_libraforge(staging),
+        "source": source,
+        "pipeline": state,
+        "message": "Re-staged for Quick Review — start from Metadata or Continue",
+        "manual_review_url": state.get("manual_review_url"),
+    }
+
+
+async def continue_after_manual_review(
+    request_id: int,
+    *,
+    resume_from: str | None = None,
+    m4b_done: bool | None = None,
+    chapters_done: bool | None = None,
+    asin_override: str | None = None,
+) -> None:
     """Resume forge pipeline after admin applied metadata in LibraForge Manual Review.
 
-    The admin continue endpoint normally flips status to ``m4b_convert`` (and
+    The admin continue endpoint normally flips status to the resume step (and
     clears quarantine) before scheduling this task so UIs update immediately.
-    ``m4b_convert`` is therefore an accepted starting status here.
+    ``m4b_convert`` / ``chapter_forge`` / ``folder_forge`` are accepted starts.
     """
     p = _pipeline()
     async with async_session() as db:
@@ -1690,33 +2111,55 @@ async def continue_after_manual_review(request_id: int) -> None:
         req = result.scalar_one_or_none()
         if not req:
             raise FileNotFoundError(f"Request {request_id} not found")
-        if req.status not in ("quarantined", "metadata_forge", "m4b_convert"):
+        allowed = (
+            "quarantined",
+            "metadata_forge",
+            "m4b_convert",
+            "chapter_forge",
+            "folder_forge",
+        )
+        if req.status not in allowed:
             raise ValueError(f"Cannot continue request in status '{req.status}'")
         staging_str = (req.staging_path or "").strip()
         if not staging_str:
             raise ValueError("Request has no staging_path")
-        staging = Path(staging_str)
-        if not staging.is_dir():
-            # try resolving under audiobook_dir
-            alt = Path(settings.audiobook_dir) / Path(staging_str).name
-            if alt.is_dir():
-                staging = alt
-            else:
-                raise FileNotFoundError(f"Staging folder missing: {staging_str}")
+        try:
+            staging = resolve_staging_dir(staging_str)
+        except FileNotFoundError:
+            staging = Path(staging_str)
+            if not staging.is_dir():
+                alt = Path(settings.audiobook_dir) / Path(staging_str).name
+                if alt.is_dir():
+                    staging = alt
+                else:
+                    raise FileNotFoundError(f"Staging folder missing: {staging_str}") from None
         user_id = req.user_id
         title = req.title
         author = req.author
         if req.quarantine_reason is not None:
             req.quarantine_reason = None
             await db.commit()
-        # If the HTTP handler did not already leave quarantine, do it now (WS).
-        if req.status in ("quarantined", "metadata_forge"):
-            await p._update_status(
-                db,
-                request_id,
-                "m4b_convert",
-                "Resuming after manual review…",
-            )
+
+    step = resolve_resume_from(
+        staging,
+        resume_from=resume_from,
+        m4b_done=m4b_done,
+        chapters_done=chapters_done,
+    )
+    status_map = {
+        "metadata": "metadata_forge",
+        "m4b": "m4b_convert",
+        "chapters": "chapter_forge",
+        "folder": "folder_forge",
+        "finalize": "finalizing",
+    }
+    async with async_session() as db:
+        await p._update_status(
+            db,
+            request_id,
+            status_map.get(step, "m4b_convert"),
+            f"Resuming pipeline from {step}…",
+        )
 
     await run_forge_after_download(
         request_id,
@@ -1724,5 +2167,6 @@ async def continue_after_manual_review(request_id: int) -> None:
         user_id=user_id,
         title=title,
         author=author,
-        resume_from="m4b",
+        resume_from=step,
+        asin_override=asin_override,
     )

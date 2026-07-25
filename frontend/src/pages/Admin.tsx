@@ -532,6 +532,25 @@ function AllRequestsTab() {
     onError: (err: any) => toast(err.response?.data?.detail || "Continue failed", "error"),
   });
 
+  const rerunMutation = useMutation({
+    mutationFn: (id: number) =>
+      api.post(`/admin/download-requests/${id}/rerun-pipeline`, null, { timeout: 180_000 }),
+    onSuccess: (res: any) => {
+      queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      toast(res?.data?.message || "Re-staged for Quick Review", "success");
+      const id = res?.data?.id as number | undefined;
+      const title = requests?.find((r: any) => r.id === id)?.title || "Request";
+      if (id) {
+        setQuickReview({
+          id,
+          title,
+          manual_review_url: res?.data?.manual_review_url,
+        });
+      }
+    },
+    onError: (err: any) => toast(err.response?.data?.detail || "Re-run failed", "error"),
+  });
+
   if (isLoading) return <div className="text-gray-500">Loading...</div>;
 
   if (!requests?.length) {
@@ -613,7 +632,9 @@ function AllRequestsTab() {
                   progress_speed_bps={req.progress_speed_bps}
                   media_type={req.media_type}
                 />
-                {(quarantined || showStagingBrowser) && (
+                {(quarantined ||
+                  showStagingBrowser ||
+                  (req.status === "completed" && req.media_type !== "ebook")) && (
                   <div className="mt-2 flex flex-wrap gap-2">
                     {quarantined && req.media_type !== "ebook" && (
                       <button
@@ -674,6 +695,18 @@ function AllRequestsTab() {
                       >
                         <Ban size={12} />
                         Reject / delete
+                      </button>
+                    )}
+                    {req.status === "completed" && req.media_type !== "ebook" && (
+                      <button
+                        type="button"
+                        onClick={() => rerunMutation.mutate(req.id)}
+                        disabled={rerunMutation.isPending}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-sky-700/50 text-sky-300 hover:bg-sky-900/30 disabled:opacity-50"
+                        title="Copy library folder back to staging and open Quick Review"
+                      >
+                        <RefreshCw size={12} />
+                        Re-run pipeline
                       </button>
                     )}
                     {req.staging_path && (

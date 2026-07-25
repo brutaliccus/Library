@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import subprocess
 import threading
 import time
 import urllib.error
@@ -43,7 +44,7 @@ SKIP_DIR_NAMES = {
     "-tmpfiles",
     "lost+found",
 }
-_ASIN_RE = re.compile(r"^(?:B[\dA-Z]{9}|\d{10})$", re.IGNORECASE)
+_ASIN_RE = re.compile(r"^(?:B[\dA-Z]{9}|\d{9}[\dX])$", re.IGNORECASE)
 _ASIN_SENTINELS = frozenset({"", "HAS_ASIN", "NOREALASIN", "NONE", "NULL", "N/A"})
 # LibraForge ``_FILENAME_ASIN_RE`` / ``_ASIN_TAG_KEYS`` — same ownership sources.
 _FILENAME_ASIN_RE = re.compile(r"\[(?:ASIN\.)?([Bb]0[A-Z0-9]{8})\]", re.IGNORECASE)
@@ -279,6 +280,71 @@ def wait_for_run(
         time.sleep(poll_seconds)
 
 
+
+def _ffprobe_cmd() -> list[str]:
+    """Prefer host ffprobe; fall back to LibraForge container."""
+    import shutil
+    if shutil.which("ffprobe"):
+        return ["ffprobe"]
+    # Common on Pi: ffprobe only inside libraforge
+    return ["docker", "exec", "libraforge", "ffprobe"]
+
+
+def probe_embedded_chapters(audio: Path | None, *, root: Path, docker_root: str) -> dict[str, Any]:
+    """Return embedded chapter count + title samples via ffprobe (stream metadata only)."""
+    empty: dict[str, Any] = {"count": 0, "titles_head": [], "numeric_like": 0, "error": ""}
+    if audio is None or not audio.is_file():
+        empty["error"] = "no audio"
+        return empty
+    probe_path = str(audio)
+    cmd_prefix = _ffprobe_cmd()
+    if cmd_prefix[0] == "docker":
+        probe_path = docker_path(audio, root, docker_root)
+    try:
+        out = subprocess.check_output(
+            cmd_prefix
+            + ["-v", "error", "-show_chapters", "-print_format", "json", probe_path],
+            text=True,
+            timeout=180,
+            stderr=subprocess.STDOUT,
+        )
+        data = json.loads(out)
+    except Exception as e:
+        empty["error"] = str(e)[:300]
+        return empty
+    chapters = data.get("chapters") if isinstance(data, dict) else None
+    if not isinstance(chapters, list):
+        return empty
+    titles: list[str] = []
+    for ch in chapters:
+        tags = ch.get("tags") if isinstance(ch, dict) else None
+        title = ""
+        if isinstance(tags, dict):
+            title = str(tags.get("title") or "")
+        titles.append(title)
+    numeric = 0
+    for i, t in enumerate(titles, 1):
+        ts = t.strip()
+        if re.fullmatch(r"\d+", ts) or ts == str(i) or re.fullmatch(rf"Chapter\s*{i}", ts, re.I):
+            numeric += 1
+    return {
+        "count": len(titles),
+        "titles_head": titles[:8],
+        "numeric_like": numeric,
+        "error": "",
+    }
+
+
+def is_no_audible_chapters_error(msg: str) -> bool:
+    lower = (msg or "").lower()
+    return (
+        "audible has no verified chapter" in lower
+        or "no verified chapter data" in lower
+        or "no chapter data" in lower
+        or "chapters not found" in lower
+    )
+
+
 def run_chapter_forge(
     base_url: str,
     source_path: str,
@@ -359,6 +425,12 @@ def process_book(
         "asin": asin,
         "status": "pending",
         "chapters": 0,
+        "chapters_before": 0,
+        "chapters_after": 0,
+        "titles_before_head": [],
+        "titles_after_head": [],
+        "numeric_before": 0,
+        "numeric_after": 0,
         "error": "",
     }
     skip_paths = skip_paths or set()
@@ -378,6 +450,10 @@ def process_book(
 
     source = docker_path(audio, root, docker_root)
     row["source_path"] = source
+    before = probe_embedded_chapters(audio, root=root, docker_root=docker_root)
+    row["chapters_before"] = int(before.get("count") or 0)
+    row["titles_before_head"] = before.get("titles_head") or []
+    row["numeric_before"] = int(before.get("numeric_like") or 0)
     if dry_run:
         row["status"] = "dry_run"
         return row
@@ -387,11 +463,17 @@ def process_book(
             base_url, source, asin, timeout_seconds=timeout_seconds
         )
         status = str(report.get("status") or "").lower()
+        err = str(report.get("error") or report.get("phase_detail") or status)
         if status in {"failed", "error", "cancelled", "canceled"} or report.get("error"):
-            row["status"] = "failed"
-            row["error"] = str(
-                report.get("error") or report.get("phase_detail") or status
-            )[:500]
+            if is_no_audible_chapters_error(err):
+                row["status"] = "skipped_no_audible_chapters"
+            else:
+                row["status"] = "failed"
+            row["error"] = err[:500]
+            after = probe_embedded_chapters(audio, root=root, docker_root=docker_root)
+            row["chapters_after"] = int(after.get("count") or 0)
+            row["titles_after_head"] = after.get("titles_head") or []
+            row["numeric_after"] = int(after.get("numeric_like") or 0)
             return row
         stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
         try:
@@ -399,22 +481,61 @@ def process_book(
         except (TypeError, ValueError):
             row["chapters"] = 0
         row["embedded_into"] = stats.get("embedded_into") or ""
+        after = probe_embedded_chapters(audio, root=root, docker_root=docker_root)
+        row["chapters_after"] = int(after.get("count") or 0)
+        row["titles_after_head"] = after.get("titles_head") or []
+        row["numeric_after"] = int(after.get("numeric_like") or 0)
+        if not row["chapters"] and row["chapters_after"]:
+            row["chapters"] = row["chapters_after"]
         row["status"] = "success"
         return row
     except Exception as e:
-        row["status"] = "failed"
-        row["error"] = str(e)[:500]
+        err = str(e)
+        if is_no_audible_chapters_error(err):
+            row["status"] = "skipped_no_audible_chapters"
+        else:
+            row["status"] = "failed"
+        row["error"] = err[:500]
+        after = probe_embedded_chapters(audio, root=root, docker_root=docker_root)
+        row["chapters_after"] = int(after.get("count") or 0)
+        row["titles_after_head"] = after.get("titles_head") or []
+        row["numeric_after"] = int(after.get("numeric_like") or 0)
         return row
 
 
 def trigger_abs_scan(base_url: str) -> str:
-    """Best-effort ABS scan via LibraForge if the endpoint exists."""
+    """Best-effort ABS library scan (direct ABS API, then LibraForge/Library Site)."""
+    abs_url = (os.environ.get("ABS_URL") or "").rstrip("/")
+    abs_key = (os.environ.get("ABS_API_KEY") or "").strip()
+    abs_lib = (os.environ.get("ABS_LIBRARY_ID") or "").strip()
+    if abs_url and abs_key and abs_lib:
+        try:
+            req = urllib.request.Request(
+                f"{abs_url}/api/libraries/{abs_lib}/scan",
+                data=b"",
+                headers={
+                    "Authorization": f"Bearer {abs_key}",
+                    "Accept": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60.0) as resp:
+                resp.read()
+            return f"ABS {abs_url}/api/libraries/{abs_lib}/scan"
+        except Exception as e:
+            log(f"Direct ABS scan failed: {e}")
     for path in ("/api/abs/scan", "/api/abs/scan-library"):
         try:
             http_json("POST", f"{base_url}{path}", {}, timeout=60.0)
-            return path
+            return f"libraforge:{path}"
         except Exception:
             continue
+    site = (os.environ.get("LIBRARY_SITE_URL") or "http://127.0.0.1:8000").rstrip("/")
+    try:
+        http_json("POST", f"{site}/api/library/abs/scan?wait=false", {}, timeout=60.0)
+        return f"library-site:{site}/api/library/abs/scan"
+    except Exception as e:
+        log(f"Library Site ABS scan failed: {e}")
     return ""
 
 
@@ -528,6 +649,7 @@ def main() -> int:
         "skipped_no_asin": 0,
         "skipped_no_audio": 0,
         "skipped_already_done": 0,
+        "skipped_no_audible_chapters": 0,
         "dry_run": 0,
         "other": 0,
     }
@@ -544,7 +666,8 @@ def main() -> int:
         )
         log(
             f"[{row['status']}] asin={row.get('asin') or '-'} "
-            f"chapters={row.get('chapters', 0)} {row['path']}"
+            f"chapters={row.get('chapters_before', 0)}->{row.get('chapters_after') or row.get('chapters', 0)} "
+            f"{row['path']}"
             + (f" err={row['error']}" if row.get("error") else "")
         )
         return row
@@ -572,6 +695,8 @@ def main() -> int:
         "libraforge_url": args.libraforge_url,
         "dry_run": args.dry_run,
         "concurrency": concurrency,
+        "force_reembed": not bool(args.skip_success_from),
+        "backend": "audible-chapters",
         "skip_success_from": args.skip_success_from or "",
         "counts": counts,
         "total": len(results),
@@ -590,6 +715,7 @@ def main() -> int:
     log(
         f"Done. success={counts['success']} failed={counts['failed']} "
         f"skipped_no_asin={counts['skipped_no_asin']} "
+        f"skipped_no_audible_chapters={counts.get('skipped_no_audible_chapters', 0)} "
         f"skipped_already_done={counts['skipped_already_done']} "
         f"skipped_no_audio={counts['skipped_no_audio']} "
         f"report={report_path}"

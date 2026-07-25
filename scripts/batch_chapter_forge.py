@@ -14,8 +14,9 @@ Usage (on Pi, from Library Site or LibraForge reports dir):
   python3 batch_chapter_forge.py --dry-run
 
 Environment:
-  LIBRAFORGE_URL          default http://127.0.0.1:5056
-  AUDIOBOOKS_ROOT         default /audiobooks
+  LIBRAFORGE_INTERNAL_URL  preferred base (e.g. http://172.17.0.1:5056)
+  LIBRAFORGE_URL           fallback if INTERNAL unset (avoid public DNS on Pi)
+  AUDIOBOOKS_ROOT          default /audiobooks
   BATCH_CHAPTER_CONCURRENCY  default 1
 """
 from __future__ import annotations
@@ -55,6 +56,21 @@ _ASIN_TAG_KEYS = (
 )
 
 _print_lock = threading.Lock()
+
+
+
+def default_libraforge_url() -> str:
+    """Prefer internal LibraForge URL so Pi batches skip public DNS."""
+    for key in ("LIBRAFORGE_INTERNAL_URL", "LIBRAFORGE_URL"):
+        val = (os.environ.get(key) or "").strip().rstrip("/")
+        if not val:
+            continue
+        # Public hostname is fragile from the Pi (DNS blips); prefer loopback/docker bridge.
+        host = val.split("://", 1)[-1].split("/", 1)[0].lower()
+        if key == "LIBRAFORGE_URL" and host.startswith("forge.library.freiverse.com"):
+            continue
+        return val
+    return "http://127.0.0.1:5056"
 
 
 def log(msg: str) -> None:
@@ -553,7 +569,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--libraforge-url",
-        default=os.environ.get("LIBRAFORGE_URL", "http://127.0.0.1:5056").rstrip("/"),
+        default=default_libraforge_url(),
+        help="LibraForge API base (default: LIBRAFORGE_INTERNAL_URL, else loopback)",
     )
     parser.add_argument(
         "--concurrency",

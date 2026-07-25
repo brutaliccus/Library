@@ -49,6 +49,8 @@ interface WSMessage {
   status?: string;
   detail?: string;
   title?: string;
+  url?: string;
+  alert_type?: string;
 }
 
 /**
@@ -70,18 +72,45 @@ export function useNativeNotifications(enabled: boolean) {
   const onMessage = useCallback((msg: WSMessage) => {
     if (!Capacitor.isNativePlatform()) return;
 
-    if (
-      msg.type === "status_update" &&
-      msg.status === "completed"
-    ) {
-      const key = `dl-${msg.request_id ?? ""}`;
-      if (seen.current.has(key)) return;
-      seen.current.add(key);
-      void showNativeNotification(
-        "Download ready",
-        msg.detail || "Your book is available in the library",
-        { url: "/my-library" }
-      );
+    if (msg.type === "status_update" && msg.request_id != null && msg.status) {
+      const status = msg.status;
+      if (status === "completed") {
+        const key = `dl-${msg.request_id}`;
+        if (seen.current.has(key)) return;
+        seen.current.add(key);
+        void showNativeNotification(
+          "Download ready",
+          msg.detail || "Your book is available in the library",
+          { url: "/my-library" }
+        );
+        return;
+      }
+      if (status === "quarantined") {
+        // status_update is sent to the requesting user only; admins get
+        // admin_alert from notify_admins (see push.py).
+        const key = `q-${msg.request_id}`;
+        if (seen.current.has(key)) return;
+        seen.current.add(key);
+        void showNativeNotification(
+          "Waiting for review",
+          msg.detail || "An admin will review your request",
+          { url: "/requests" }
+        );
+        return;
+      }
+      if (status === "failed" || status === "admin_rejected") {
+        const key = `fail-${msg.request_id}-${status}`;
+        if (seen.current.has(key)) return;
+        seen.current.add(key);
+        const title =
+          status === "admin_rejected" ? "Request rejected" : "Download failed";
+        void showNativeNotification(
+          title,
+          msg.detail || "Open My Requests for details",
+          { url: "/requests" }
+        );
+        return;
+      }
     }
 
     if (msg.type === "download_complete") {
@@ -92,16 +121,26 @@ export function useNativeNotifications(enabled: boolean) {
       const title = msg.title ? `${msg.title} is ready` : "Download ready";
       const body = msg.detail || "Available in your library";
       void showNativeNotification(title, body, { url: "/my-library" });
+      return;
     }
 
-    if (msg.type === "invite_signup" || msg.type === "admin_alert") {
-      const key = `admin-${msg.type}-${msg.request_id ?? Date.now()}`;
+    if (
+      msg.type === "invite_signup" ||
+      msg.type === "admin_alert" ||
+      msg.type === "download_quarantined"
+    ) {
+      const key = `admin-${msg.type}-${msg.alert_type ?? ""}-${msg.request_id ?? msg.title ?? Date.now()}`;
       if (seen.current.has(key)) return;
       seen.current.add(key);
+      const url =
+        msg.url ||
+        (msg.type === "download_quarantined" || msg.alert_type === "download_quarantined"
+          ? "/admin?tab=requests"
+          : "/admin");
       void showNativeNotification(
         msg.title || "Library",
         msg.detail || "You have a new notification",
-        { url: "/admin" }
+        { url }
       );
     }
   }, []);

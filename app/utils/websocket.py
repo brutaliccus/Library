@@ -17,16 +17,20 @@ class ConnectionManager:
 
     async def send_to_user(self, user_id: int, data: dict[str, Any]):
         message = json.dumps(data)
-        for ws in self._connections.get(user_id, []):
+        for ws in list(self._connections.get(user_id, [])):
             try:
                 await ws.send_text(message)
             except Exception:
                 self.disconnect(ws, user_id)
 
+    async def send_to_users(self, user_ids: list[int], data: dict[str, Any]):
+        for user_id in user_ids:
+            await self.send_to_user(user_id, data)
+
     async def broadcast(self, data: dict[str, Any]):
         message = json.dumps(data)
-        for conns in self._connections.values():
-            for ws in conns:
+        for conns in list(self._connections.values()):
+            for ws in list(conns):
                 try:
                     await ws.send_text(message)
                 except Exception:

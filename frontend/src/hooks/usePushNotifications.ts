@@ -112,6 +112,23 @@ export function usePushNotifications() {
       }
 
       const reg = await navigator.serviceWorker.ready;
+      // Drop any local subscription first. FCM/Apple can mark endpoints 410
+      // while the browser still returns the dead PushSubscription — reusing it
+      // leaves push silently broken after the server deletes expired rows.
+      const existing = await reg.pushManager.getSubscription();
+      if (existing) {
+        try {
+          await api.delete("/push/subscribe", { params: { endpoint: existing.endpoint } });
+        } catch {
+          /* server may already have removed it */
+        }
+        try {
+          await existing.unsubscribe();
+        } catch {
+          /* ignore */
+        }
+      }
+
       const sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(vapidKey) as BufferSource,

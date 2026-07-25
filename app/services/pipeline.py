@@ -1003,14 +1003,15 @@ async def process_download(request_id: int) -> None:
                     user_result = await err_db.execute(select(User).where(User.id == failed_req.user_id))
                     user = user_result.scalar_one_or_none()
                     username = user.username if user else "Unknown"
-                    await push.notify_admins(err_db, {
-                        "type": "download_failed",
-                        "title": "Download Failed",
-                        "body": f"{title} (requested by {username}): {err_msg[:200]}",
-                        "url": "/admin?tab=requests",
-                    })
+                    await push.notify_request_failed(
+                        err_db,
+                        user_id=failed_req.user_id,
+                        title=title,
+                        detail=err_msg,
+                        username=username,
+                    )
                 except Exception:
-                    logger.warning("Failed to send admin push notification")
+                    logger.warning("Failed to send failure push notification", exc_info=True)
 
 
 async def process_aa_download(request_id: int) -> None:
@@ -1280,14 +1281,15 @@ async def process_aa_download(request_id: int) -> None:
                     user_result = await err_db.execute(select(User).where(User.id == failed_req.user_id))
                     user = user_result.scalar_one_or_none()
                     username = user.username if user else "Unknown"
-                    await push.notify_admins(err_db, {
-                        "type": "download_failed",
-                        "title": "Download Failed",
-                        "body": f"{title} (requested by {username}): {err_msg[:200]}",
-                        "url": "/admin?tab=requests",
-                    })
+                    await push.notify_request_failed(
+                        err_db,
+                        user_id=failed_req.user_id,
+                        title=title,
+                        detail=err_msg,
+                        username=username,
+                    )
                 except Exception:
-                    logger.warning("Failed to send admin push notification")
+                    logger.warning("Failed to send failure push notification", exc_info=True)
 
 
 RESUMABLE_STATUSES = (

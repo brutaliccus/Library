@@ -134,17 +134,31 @@ export default function AdminPage() {
       )}
 
       {pushState === "subscribed" && (
-        <div className="mb-6 p-3 bg-emerald-900/20 border border-emerald-800/50 rounded-xl flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-sm text-emerald-400">
-            <Bell size={16} />
-            Push notifications enabled for admin alerts
+        <div className="mb-6 p-3 bg-emerald-900/20 border border-emerald-800/50 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-sm text-emerald-400">
+              <Bell size={16} />
+              Push notifications enabled for admin alerts
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              Browser only (not the Android APK). If quarantine alerts stop, Disable then Enable to refresh the subscription.
+            </p>
           </div>
-          <button
-            onClick={disablePush}
-            className="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 border border-gray-600 rounded-lg hover:border-gray-500 transition-colors"
-          >
-            Disable
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => void enablePush()}
+              disabled={pushState === "subscribing"}
+              className="px-3 py-1.5 text-xs text-emerald-300 hover:text-emerald-100 border border-emerald-800/60 rounded-lg hover:border-emerald-600 transition-colors disabled:opacity-50"
+            >
+              Refresh
+            </button>
+            <button
+              onClick={disablePush}
+              className="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 border border-gray-600 rounded-lg hover:border-gray-500 transition-colors"
+            >
+              Disable
+            </button>
+          </div>
         </div>
       )}
 

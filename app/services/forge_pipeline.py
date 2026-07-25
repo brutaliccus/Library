@@ -954,14 +954,19 @@ def extract_asin_from_staging(staging: Path) -> str:
 
 
 def primary_audio_for_chaptering(staging: Path) -> Path | None:
-    """Prefer a single primary ``.m4b``; else largest audio file under staging."""
+    """Primary ``.m4b`` for Chapter Forge, or None if none exists yet.
+
+    Audible chapter markers must be embedded into an MP4-family file. Never
+    point Chapter Forge at multipart ``.mp3`` folders (that path only writes
+    sidecars / can leave m4b-tool's numeric 1–N markers in place).
+    """
     audio = _collect_audio(staging)
     if not audio:
         return None
     m4bs = [f for f in audio if f.suffix.lower() == ".m4b"]
-    if m4bs:
-        return max(m4bs, key=lambda p: p.stat().st_size if p.is_file() else 0)
-    return max(audio, key=lambda p: p.stat().st_size if p.is_file() else 0)
+    if not m4bs:
+        return None
+    return max(m4bs, key=lambda p: p.stat().st_size if p.is_file() else 0)
 
 
 async def _persist_staging(request_id: int, staging: Path, run_id: str | None = None) -> None:
@@ -1046,7 +1051,7 @@ async def _run_chapter_forge_step(
     user_id: int,
     should_abort,
 ) -> None:
-    """Apply Audible chapters when ASIN is known. Soft-fail; never quarantine here."""
+    """Apply Audible chapters when ASIN + primary .m4b exist. Soft-fail only."""
     p = _pipeline()
     asin = extract_asin_from_staging(staging)
     audio = primary_audio_for_chaptering(staging)
@@ -1062,7 +1067,14 @@ async def _run_chapter_forge_step(
         return
 
     if audio is None:
-        detail = f"ASIN {asin} present but no audio found — skipping Chapter Forge"
+        # Multipart sources without an .m4b: wait for M4B convert; never rename parts.
+        if needs_m4b_conversion(staging):
+            detail = (
+                f"ASIN {asin} present but no .m4b yet — skipping Chapter Forge "
+                "(run after M4B convert)"
+            )
+        else:
+            detail = f"ASIN {asin} present but no .m4b found — skipping Chapter Forge"
         logger.warning("Chapter Forge skipped for request %s: %s", request_id, detail)
         async with async_session() as db:
             await p._update_status(db, request_id, "chapter_forge", detail)
@@ -1077,13 +1089,19 @@ async def _run_chapter_forge_step(
             db,
             request_id,
             "chapter_forge",
-            f"Applying Audible chapters (ASIN {asin})…",
+            f"Embedding Audible chapters into {audio.name} (ASIN {asin})…",
         )
 
     async def _on_chapters(state: dict[str, Any]) -> None:
         await _forge_progress(request_id, user_id, "chapter_forge", state)
 
     try:
+        logger.info(
+            "Chapter Forge request %s: source=%s asin=%s backend=audible-chapters",
+            request_id,
+            source_path,
+            asin,
+        )
         run_id = await libraforge.start_chaptering_run(
             source_path,
             asin=asin,
@@ -1105,6 +1123,7 @@ async def _run_chapter_forge_step(
                 or "Chapter Forge failed"
             )
             # Soft-fail: keep existing chapters and continue to Folder Forge.
+            # Never fall back to rename/restructure of source parts.
             logger.warning(
                 "Chapter Forge failed for request %s (ASIN %s) — continuing: %s",
                 request_id,
@@ -1126,11 +1145,32 @@ async def _run_chapter_forge_step(
             chapters = int(stats.get("chapters") or 0)
         except (TypeError, ValueError):
             chapters = 0
+        embedded_into = str(stats.get("embedded_into") or "").strip()
+        if chapters <= 0:
+            detail = (
+                f"Audible returned no chapters for ASIN {asin}; "
+                "keeping existing chapter markers"
+            )
+            logger.warning("Chapter Forge soft-fail for request %s: %s", request_id, detail)
+            async with async_session() as db:
+                await p._update_status(db, request_id, "chapter_forge", detail[:400])
+            return
+        if not embedded_into:
+            # Older LibraForge only wrote cue/JSON sidecars — treat as soft-fail so
+            # we do not claim Audible markers were applied when m4b still has 1–N.
+            detail = (
+                f"Chapter Forge saved Audible chapter data (ASIN {asin}, {chapters} chapters) "
+                "but did not embed markers into the .m4b; keeping existing chapters"
+            )
+            logger.warning("Chapter Forge soft-fail for request %s: %s", request_id, detail)
+            async with async_session() as db:
+                await p._update_status(db, request_id, "chapter_forge", detail[:400])
+            return
+
         detail = (
-            f"Applied Audible chapters (ASIN {asin}"
-            + (f", {chapters} chapters" if chapters else "")
-            + ")"
+            f"Embedded Audible chapters into {audio.name} (ASIN {asin}, {chapters} chapters)"
         )
+        logger.info("Chapter Forge success for request %s: %s", request_id, detail)
         async with async_session() as db:
             await p._update_status(db, request_id, "chapter_forge", detail)
             await p._report_progress(

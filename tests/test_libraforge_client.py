@@ -327,6 +327,15 @@ def test_primary_audio_for_chaptering_prefers_m4b(tmp_path):
     assert primary_audio_for_chaptering(staging).name == "Book.m4b"
 
 
+def test_primary_audio_for_chaptering_requires_m4b(tmp_path):
+    """Multipart mp3-only staging must not be sent to Chapter Forge."""
+    staging = tmp_path / "req_ch"
+    staging.mkdir()
+    (staging / "1.mp3").write_bytes(b"a" * 100)
+    (staging / "2.mp3").write_bytes(b"b" * 200)
+    assert primary_audio_for_chaptering(staging) is None
+
+
 def test_resolve_staging_dir_docker_style(tmp_path, monkeypatch):
     from app.services import forge_pipeline
 

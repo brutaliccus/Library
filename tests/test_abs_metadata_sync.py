@@ -42,6 +42,29 @@ def test_metadata_payload_from_libraforge_sidecar(tmp_path: Path):
     assert cover == "https://example.com/cover.jpg"
 
 
+def test_metadata_payload_uses_summary_and_skips_title_series(tmp_path: Path):
+    (tmp_path / "libraforge.json").write_text(
+        json.dumps(
+            {
+                "marker": {
+                    "audible": {
+                        "title": "Timeline",
+                        "author": "Michael Crichton",
+                        "narrator": "John Bedford Lloyd",
+                        "series": "Timeline",
+                        "asin": "B002VA96S4",
+                        "summary": "A long description from Audible.",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload, _cover = abs_svc._metadata_payload_from_book_dir(tmp_path)
+    assert payload["description"] == "A long description from Audible."
+    assert "series" not in payload
+
+
 def test_sync_book_dir_pushes_metadata_without_match(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(abs_svc.settings, "audiobook_dir", str(tmp_path))
     book = tmp_path / "Author" / "Book"
@@ -60,6 +83,7 @@ def test_sync_book_dir_pushes_metadata_without_match(tmp_path: Path, monkeypatch
             ),
             patch.object(abs_svc, "update_item_metadata", new=AsyncMock(return_value=True)) as upd,
             patch.object(abs_svc, "set_item_cover_from_url", new=AsyncMock(return_value=False)),
+            patch.object(abs_svc, "update_item_chapters", new=AsyncMock(return_value=False)),
             patch.object(abs_svc, "invalidate_cache"),
             patch.object(abs_svc, "match_item", new=AsyncMock()) as match,
         ):
@@ -72,5 +96,30 @@ def test_sync_book_dir_pushes_metadata_without_match(tmp_path: Path, monkeypatch
         assert meta["title"] == "Book Title"
         assert meta["asin"] == "B012345678"
         match.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
+def test_match_item_skips_when_asin_present():
+    async def _run():
+        with (
+            patch.object(
+                abs_svc,
+                "get_library_item",
+                new=AsyncMock(
+                    return_value={"media": {"metadata": {"asin": "B002VA96S4", "title": "Timeline"}}}
+                ),
+            ),
+            patch.object(abs_svc.httpx, "AsyncClient") as client_cls,
+        ):
+            out = await abs_svc.match_item("item-1", override_defaults=False)
+
+        assert out == {
+            "skipped": True,
+            "reason": "asin_present",
+            "asin": "B002VA96S4",
+            "updated": False,
+        }
+        client_cls.assert_not_called()
 
     asyncio.run(_run())

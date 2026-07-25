@@ -140,19 +140,24 @@ Legacy `_unorganized` folders are migrated into `.unorganized` on install/deploy
 
 ### ABS settings (preserve LibraForge tags)
 
-Library Site finalize does **not** call ABS Match / Match-all. Overwrites came from our old “fix metadata” title→folder rewrite and from manual Quick Match.
+Library Site finalize does **not** call ABS Match / Match-all. Admin **Scan ABS & clean orphans** is scan + orphan cleanup only (never Match, never title→folder). Overwrites historically came from our old title→folder rewrite and from manual Quick Match / Match-all.
 
-On the Freibooks library, verify:
+On startup and on every admin scan, Library Site re-applies hardening via the ABS API:
 
-| Setting | Recommended |
-|---------|-------------|
-| Metadata precedence | Default (folderStructure lowest … **absMetadata highest**) |
-| Prefer overwriting metadata with matched data (server Quick Match) | **Off** |
-| Skip matching media that already has an ASIN | **On** (Library Site sets this via API when deploying this fix) |
-| Periodic / auto Match jobs | **None** — matching is manual only |
-| File watcher | OK (triggers scan, not online match) |
+| Setting | Recommended | Applied by API |
+|---------|-------------|----------------|
+| Metadata precedence | Default (folderStructure lowest … **absMetadata highest**) | Yes |
+| Prefer overwriting metadata with matched data (`scannerPreferMatchedMetadata`) | **Off** | Yes |
+| Skip matching media that already has an ASIN | **On** | Yes |
+| Skip matching media that already has an ISBN | **On** | Yes |
+| Periodic / auto Match jobs | **None** — matching is manual only | Check in ABS UI |
+| File watcher | OK (triggers scan, not online match) | — |
 
-LibraForge writes **embedded** tags plus `libraforge.json` / often `metadata.json` sidecars. Folder Forge moves those with the book (`acknowledge_no_sidecars` only skips the preflight warning).
+**UI checklist (ABS → Settings / library):** confirm the table above, and that no scheduled “Match Books” job exists. Card **Quick Match** is skipped when the item already has an ASIN.
+
+**Chapters:** ABS reloads chapter markers from the audio file / absMetadata on scan. Edit chapters in LibraForge Chapter Forge (embed into the `.m4b`) or they will not stick after a rescan. Forge finalize also pushes Chapter Forge sidecar markers into ABS when present.
+
+LibraForge writes **embedded** tags plus `libraforge.json` / often `metadata.json` sidecars. Folder Forge moves those with the book (`acknowledge_no_sidecars` only skips the preflight warning). Sidecar → ABS sync patches **only non-empty** fields (and skips Audible pseudo-series where series name equals the title).
 
 5. **M4B Tool** — optional; heavy converts may use Windows LibraForge `:5057` manually.
 

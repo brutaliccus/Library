@@ -93,6 +93,11 @@ def test_fix_metadata_waits_for_scan_before_fetching_items():
 
         with (
             patch.object(abs_svc, "settings") as settings,
+            patch.object(
+                abs_svc,
+                "ensure_metadata_hardening",
+                new=AsyncMock(return_value={"library_ok": True, "server_ok": True}),
+            ) as harden,
             patch.object(abs_svc, "scan_library_and_wait", side_effect=wait_scan),
             patch.object(abs_svc, "remove_items_with_issues", new=AsyncMock(return_value=True)),
             patch.object(abs_svc, "_fetch_library_items_all_pages", side_effect=fetch_items),
@@ -111,5 +116,7 @@ def test_fix_metadata_waits_for_scan_before_fetching_items():
         assert out["count"] == 0
         assert out["fixed"] == []
         upd.assert_not_awaited()
+        harden.assert_awaited_once()
+        assert out["hardening"]["library_ok"] is True
 
     asyncio.run(_run())

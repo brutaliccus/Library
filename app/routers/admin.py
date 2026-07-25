@@ -1003,11 +1003,24 @@ async def rematch_abs_item(
     item_id: str,
     _admin: User = Depends(require_admin),
 ):
-    """Fill missing ABS fields via Audible Quick Match (does not force-overwrite)."""
+    """Fill missing ABS fields via Audible Quick Match (does not force-overwrite).
+
+    Skips books that already have an ASIN so LibraForge / manual metadata is not
+    replaced by another provider pass.
+    """
     result = await audiobookshelf.match_item(item_id, override_defaults=False)
     if result is None:
         raise HTTPException(status_code=502, detail="Failed to match item in ABS")
-    return {"updated": result.get("updated", False)}
+    if result.get("skipped"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Skipped Quick Match — ASIN already set ({result.get('asin')}). "
+                "LibraForge / manual metadata is protected; rematch only fills gaps "
+                "on books without an ASIN."
+            ),
+        )
+    return {"updated": result.get("updated", False), "skipped": False}
 
 
 @router.delete("/library/abs/{item_id}")

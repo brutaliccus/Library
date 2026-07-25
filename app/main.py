@@ -51,6 +51,12 @@ async def lifespan(app: FastAPI):
         await apply_runtime_overrides()
     except Exception as e:
         logger.warning("Runtime config overrides skipped: %s", e)
+    try:
+        from app.services import audiobookshelf as abs_svc
+
+        await abs_svc.ensure_metadata_hardening()
+    except Exception as e:
+        logger.warning("ABS metadata hardening skipped: %s", e)
     await resume_interrupted_downloads()
     start_scraper()
     _shelf_refresh_task = asyncio.create_task(_daily_shelf_refresh_loop())

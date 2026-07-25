@@ -61,8 +61,12 @@ export default function ABSBookCard({
       await api.post(`/admin/abs/rematch/${itemId}`);
       await softRefreshLibraryCollectionQueries(queryClient);
       toast("Audible Quick Match ran (fills missing fields only; does not force overwrite).", "success");
-    } catch {
-      toast("Failed to re-match book", "error");
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string }; status?: number } })?.response?.data
+          ?.detail || "Failed to re-match book";
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      toast(detail, status === 409 ? "info" : "error");
     } finally {
       setRematching(false);
     }
@@ -110,7 +114,7 @@ export default function ABSBookCard({
             <span
               onClick={handleRematch}
               className="p-1 bg-black/60 rounded hover:bg-black/80 transition-colors cursor-pointer"
-              title="Quick Match via Audible (fills missing fields only)"
+              title="Quick Match via Audible (fills missing fields only; skipped when ASIN is set)"
             >
               <RefreshCw size={10} className={`text-emerald-400 ${rematching ? "animate-spin" : ""}`} />
             </span>

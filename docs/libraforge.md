@@ -16,7 +16,7 @@ Stack location on the Pi: `/opt/stacks/libraforge`
 
 In Library → **Admin → Health**, the **LibraForge** card shows connected/disconnected (probe from the Library container to `LIBRAFORGE_INTERNAL_URL`) and an **Open LibraForge** button (`LIBRAFORGE_URL`, default `https://forge.library.freiverse.com`).
 
-After Metadata/Folder Forge apply, use **Scan ABS & fix metadata** on the same Health tab.
+After Metadata/Folder Forge apply, use **Scan ABS & clean orphans** on the same Health tab (scan + orphan cleanup only — not Quick Match, not title→folder rewrite).
 
 Env (Library Site `.env` on the Pi):
 
@@ -119,7 +119,7 @@ When `LIBRAFORGE_PIPELINE_ENABLED=true` (default), audiobook requests:
 4. **Chapter Forge** (`POST /api/chaptering/runs`, `backend=audible-chapters`) when an Audible **ASIN** is present in staging sidecars / `metadata.json`. Looks up Audible chapters and rewrites chapter markers on the primary `.m4b` (stream copy — no re-encode). **No ASIN → skip** (keep existing chapters; do not quarantine). **ASIN-present failures soft-continue** with existing chapters (do not fail the whole book).
 5. **Folder Forge** (`POST /api/organizer/runs`) with template  
    `{author}/{series} [{edition}]/{title}/{filename}` → `/audiobooks`.
-6. ABS scan / finalize.
+6. ABS finalize: **scan only** (wait for completion + orphan cleanup), then push LibraForge sidecar metadata into ABS via API. Never Quick Match / provider fetch on this path.
 
 If metadata score is below auto-apply threshold (or LibraForge is down), the request becomes **`quarantined`**: files stay in `.unorganized`, admins are notified, and Admin → Requests offers **Manual Review** (LibraForge), **Continue pipeline**, or **Reject / delete**.
 
@@ -136,7 +136,24 @@ Legacy `_unorganized` folders are migrated into `.unorganized` on install/deploy
 1. **Messy / legacy books** — drop into `/mnt/Audiobooks/.unorganized/`.
 2. **LibraForge Metadata Forge** — Admin → Health → **Open LibraForge**; dry-run, then apply.
 3. **Folder Forge** (`/organizer`) — dry-run then apply into `/audiobooks`.
-4. **Audiobookshelf** — **Scan ABS & fix metadata** from Library Admin → Health.
+4. **Audiobookshelf** — **Scan ABS & clean orphans** from Library Admin → Health.
+
+### ABS settings (preserve LibraForge tags)
+
+Library Site finalize does **not** call ABS Match / Match-all. Overwrites came from our old “fix metadata” title→folder rewrite and from manual Quick Match.
+
+On the Freibooks library, verify:
+
+| Setting | Recommended |
+|---------|-------------|
+| Metadata precedence | Default (folderStructure lowest … **absMetadata highest**) |
+| Prefer overwriting metadata with matched data (server Quick Match) | **Off** |
+| Skip matching media that already has an ASIN | **On** (Library Site sets this via API when deploying this fix) |
+| Periodic / auto Match jobs | **None** — matching is manual only |
+| File watcher | OK (triggers scan, not online match) |
+
+LibraForge writes **embedded** tags plus `libraforge.json` / often `metadata.json` sidecars. Folder Forge moves those with the book (`acknowledge_no_sidecars` only skips the preflight warning).
+
 5. **M4B Tool** — optional; heavy converts may use Windows LibraForge `:5057` manually.
 
 Always **dry-run first** for manual batch work. Back up media before the first write pass.

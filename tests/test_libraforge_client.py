@@ -10,6 +10,7 @@ from app.services.libraforge import (
     metadata_auto_applied,
     metadata_matched_without_apply,
     organizer_moved_files,
+    organizer_move_targets,
     quarantine_reason_from_report,
     run_failed,
 )
@@ -118,6 +119,21 @@ def test_run_failed_on_error_status():
 def test_organizer_moved_files():
     assert organizer_moved_files({"stats": {"moves_succeeded": 1}})
     assert not organizer_moved_files({"stats": {"moves_succeeded": 0, "move_items": []}})
+
+
+def test_organizer_move_targets():
+    report = {
+        "stats": {
+            "moves_succeeded": 1,
+            "move_items": [
+                {"target": "/audiobooks/Author/Title", "source": "/audiobooks/.unorganized/x"},
+                {"target": "/audiobooks/Author/Title"},  # dedupe
+                {"target": ""},
+            ],
+        }
+    }
+    assert organizer_move_targets(report) == ["/audiobooks/Author/Title"]
+    assert organizer_move_targets({}) == []
 
 
 def test_quarantine_reason_from_manual_items():

@@ -750,7 +750,6 @@ function HealthTab() {
       };
       void softPollAbs();
 
-      const fixed = Array.isArray(data.fixed) ? data.fixed : [];
       const bits: string[] = [];
       if (data.scan_complete) {
         bits.push(
@@ -770,24 +769,13 @@ function HealthTab() {
       if (typeof data.items_total === "number" && data.items_total > 0) {
         bits.push(`ABS reports ${data.items_total} item(s).`);
       }
-      if (data.items_examined > 0) {
-        bits.push(`Checked ${data.items_examined} item(s) for title vs. folder name mismatches.`);
+      if (typeof data.items_examined === "number" && data.items_examined > 0) {
+        bits.push(`Indexed ${data.items_examined} item(s).`);
       }
-      if (data.count > 0) {
-        const sample = fixed
-          .slice(0, 6)
-          .map((f) => `"${f.oldTitle}" → "${f.newTitle}"`)
-          .join("; ");
-        bits.push(
-          `Updated ${data.count} title(s)${fixed.length > 6 ? " (showing first 6)" : ""}: ${sample}${fixed.length > 6 ? " …" : ""}`,
-        );
-        toast(bits.join(" "), data.timed_out ? "info" : "success");
-      } else {
-        bits.push(
-          "No title/folder mismatches left. Orphaned rows from an old folder layout are removed when their files are missing after a scan.",
-        );
-        toast(bits.join(" "), data.scan_complete ? "success" : "info");
-      }
+      bits.push(
+        "Titles are left as-is (LibraForge / embedded tags). Orphaned rows whose files are missing are removed after the scan.",
+      );
+      toast(bits.join(" "), data.scan_complete ? "success" : "info");
     },
     onError: (err: any) => {
       toast(err.response?.data?.detail || "Failed to fix metadata", "error");
@@ -811,13 +799,13 @@ function HealthTab() {
         </button>
         <button
           type="button"
-          title="Runs a full Audiobookshelf library scan and waits for it to finish (up to a few minutes), removes library rows whose files are missing (e.g. after a folder restructure), then fixes titles that still differ from the folder name."
+          title="Runs a full Audiobookshelf library scan and waits for it to finish (up to a few minutes), then removes library rows whose files are missing. Does not Quick Match Audible or rewrite titles to folder names."
           onClick={() => fixMetadata.mutate()}
           disabled={fixMetadata.isPending}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-900/50 text-purple-300 text-sm rounded-lg hover:bg-purple-900/70 border border-purple-800/50 disabled:opacity-50"
         >
           <Wrench size={14} className={fixMetadata.isPending ? "animate-spin" : ""} />
-          {fixMetadata.isPending ? "Waiting for ABS scan…" : "Scan ABS & fix metadata"}
+          {fixMetadata.isPending ? "Waiting for ABS scan…" : "Scan ABS & clean orphans"}
         </button>
       </div>
 

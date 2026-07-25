@@ -780,7 +780,7 @@ async def reorganize_audiobook_download(
 
 @router.post("/abs/fix-metadata")
 async def fix_abs_metadata(_admin: User = Depends(require_admin)):
-    """Scan ABS, purge missing/orphan items, then align titles with folder names where they differ."""
+    """Scan ABS and purge missing/orphan items. Does not rewrite titles or Quick Match."""
     result = await audiobookshelf.fix_metadata_mismatches()
     if result.get("fetch_error"):
         raise HTTPException(status_code=502, detail=result["fetch_error"])
@@ -792,8 +792,8 @@ async def rematch_abs_item(
     item_id: str,
     _admin: User = Depends(require_admin),
 ):
-    """Trigger ABS quick match for a single library item."""
-    result = await audiobookshelf.match_item(item_id)
+    """Fill missing ABS fields via Audible Quick Match (does not force-overwrite)."""
+    result = await audiobookshelf.match_item(item_id, override_defaults=False)
     if result is None:
         raise HTTPException(status_code=502, detail="Failed to match item in ABS")
     return {"updated": result.get("updated", False)}

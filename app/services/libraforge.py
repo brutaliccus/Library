@@ -492,6 +492,27 @@ def organizer_moved_files(report: dict[str, Any]) -> bool:
     return isinstance(moves, list) and len(moves) > 0
 
 
+def organizer_move_targets(report: dict[str, Any]) -> list[str]:
+    """Absolute destination folder paths from a successful Folder Forge report."""
+    stats = report.get("stats") or {}
+    if not isinstance(stats, dict):
+        return []
+    moves = stats.get("move_items") or []
+    if not isinstance(moves, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for move in moves:
+        if not isinstance(move, dict):
+            continue
+        target = str(move.get("target") or "").strip()
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        out.append(target)
+    return out
+
+
 def quarantine_reason_from_report(report: dict[str, Any]) -> str:
     if metadata_matched_without_apply(report):
         best = None

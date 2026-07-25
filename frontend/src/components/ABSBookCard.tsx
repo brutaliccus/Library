@@ -60,7 +60,7 @@ export default function ABSBookCard({
     try {
       await api.post(`/admin/abs/rematch/${itemId}`);
       await softRefreshLibraryCollectionQueries(queryClient);
-      toast("Book re-matched. Metadata updated.", "success");
+      toast("Audible Quick Match ran (fills missing fields only; does not force overwrite).", "success");
     } catch {
       toast("Failed to re-match book", "error");
     } finally {
@@ -110,7 +110,7 @@ export default function ABSBookCard({
             <span
               onClick={handleRematch}
               className="p-1 bg-black/60 rounded hover:bg-black/80 transition-colors cursor-pointer"
-              title="Re-match metadata"
+              title="Quick Match via Audible (fills missing fields only)"
             >
               <RefreshCw size={10} className={`text-emerald-400 ${rematching ? "animate-spin" : ""}`} />
             </span>

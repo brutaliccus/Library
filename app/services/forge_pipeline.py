@@ -1389,6 +1389,7 @@ async def run_forge_after_download(
         return
 
     # --- Folder Forge ---
+    organizer_report: dict[str, Any] | None = None
     if start_step == "folder":
         async with async_session() as db:
             await p._update_status(
@@ -1420,6 +1421,7 @@ async def run_forge_after_download(
                 raise libraforge.LibraForgeError(
                     str(report.get("error") or report.get("status") or "Folder Forge failed")
                 )
+            organizer_report = report
         except libraforge.LibraForgeError as e:
             if "cancelled" in str(e).lower():
                 return
@@ -1450,15 +1452,24 @@ async def run_forge_after_download(
         return
 
     # --- Finalize (ABS) ---
-    import asyncio
-
+    # Scan-only (no Quick Match / provider fetch). Then push LibraForge sidecars
+    # into ABS so folder-name precedence cannot overwrite applied titles/covers.
     async with async_session() as db:
         await p._update_status(db, request_id, "finalizing", "Scanning Audiobookshelf…")
 
     try:
-        await audiobookshelf.scan_library()
-        await asyncio.sleep(5)
+        await audiobookshelf.scan_library_and_wait(timeout_seconds=240)
         await audiobookshelf.remove_items_with_issues()
+        if organizer_report and libraforge.organizer_moved_files(organizer_report):
+            sync_results = await audiobookshelf.sync_organizer_moves_to_abs(organizer_report)
+            synced = sum(1 for r in sync_results if r.get("updated") or r.get("cover_updated"))
+            if synced:
+                logger.info(
+                    "Pushed LibraForge metadata to ABS for %s/%s moved book(s) (req %s)",
+                    synced,
+                    len(sync_results),
+                    request_id,
+                )
     except Exception as e:
         logger.warning("ABS scan after forge failed (non-fatal): %s", e)
         try:

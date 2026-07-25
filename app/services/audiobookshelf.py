@@ -1,6 +1,8 @@
 import asyncio
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -825,14 +827,21 @@ async def get_all_series(library_id: str | None = None) -> list[dict]:
     return series_list
 
 
-async def match_item(item_id: str) -> dict | None:
-    """Trigger ABS quick match for a single library item."""
+async def match_item(item_id: str, *, override_defaults: bool = False) -> dict | None:
+    """Trigger ABS quick match for a single library item (Audible provider).
+
+    By default does **not** force-overwrite existing fields (``overrideDefaults=false``).
+    Prefer LibraForge / embedded tags; only use this when intentionally filling gaps.
+    """
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{settings.abs_url}/api/items/{item_id}/match",
                 headers=_headers(),
-                json={"provider": "audible"},
+                json={
+                    "provider": "audible",
+                    "overrideDefaults": bool(override_defaults),
+                },
                 timeout=30,
             )
             resp.raise_for_status()
@@ -843,15 +852,23 @@ async def match_item(item_id: str) -> dict | None:
         return None
 
 
-async def update_item_metadata(item_id: str, title: str) -> bool:
-    """Update a single ABS item's title via PATCH /api/items/{id}/media."""
+async def update_item_metadata(item_id: str, title: str | None = None, *, metadata: dict | None = None) -> bool:
+    """Update ABS item media metadata via PATCH /api/items/{id}/media.
+
+    Pass ``title`` for a title-only update, or a full ``metadata`` dict (LibraForge sync).
+    """
+    payload_meta: dict[str, Any] = dict(metadata or {})
+    if title is not None:
+        payload_meta["title"] = title
+    if not payload_meta:
+        return False
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.patch(
                 f"{settings.abs_url}/api/items/{item_id}/media",
                 headers=_headers(),
-                json={"metadata": {"title": title}},
-                timeout=15,
+                json={"metadata": payload_meta},
+                timeout=30,
             )
             resp.raise_for_status()
             return True
@@ -860,12 +877,293 @@ async def update_item_metadata(item_id: str, title: str) -> bool:
         return False
 
 
-async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, Any]:
-    """Scan ABS (wait for completion), remove missing-file orphans, align titles with folders.
+async def update_library_settings(
+    library_id: str | None = None,
+    *,
+    settings_patch: dict[str, Any] | None = None,
+    provider: str | None = None,
+) -> dict[str, Any] | None:
+    """PATCH ABS library settings (e.g. skipMatchingMediaWithAsin)."""
+    lid = library_id or settings.abs_library_id
+    if not lid or not settings.abs_api_key:
+        return None
+    body: dict[str, Any] = {}
+    if settings_patch:
+        body["settings"] = settings_patch
+    if provider is not None:
+        body["provider"] = provider
+    if not body:
+        return None
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.patch(
+                f"{settings.abs_url}/api/libraries/{lid}",
+                headers=_headers(),
+                json=body,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("library") if isinstance(data, dict) and "library" in data else data
+    except Exception as e:
+        logger.warning("ABS update library settings failed: %s", e)
+        return None
 
-    Duplicate \"covers\" after a folder layout change are usually orphaned library rows whose
-    paths no longer exist; a library scan plus ``DELETE /libraries/{{id}}/issues`` clears those.
-    Title/folder mismatches are a separate class of problem this pass also fixes.
+
+async def find_item_by_rel_path(rel_path: str, library_id: str | None = None) -> dict | None:
+    """Return the ABS library item whose ``relPath`` matches (case-insensitive)."""
+    needle = (rel_path or "").strip().strip("/").replace("\\", "/")
+    if not needle:
+        return None
+    lid = library_id or settings.abs_library_id
+    try:
+        items = await _fetch_library_items_all_pages(lid) if lid else []
+    except Exception as e:
+        logger.warning("ABS find_item_by_rel_path fetch failed: %s", e)
+        return None
+    needle_l = needle.lower()
+    for item in items:
+        rel = str(item.get("relPath") or "").strip().strip("/").replace("\\", "/")
+        if rel.lower() == needle_l:
+            return item
+    # Fallback: suffix match when ABS nests deeper than our target folder.
+    for item in items:
+        rel = str(item.get("relPath") or "").strip().strip("/").replace("\\", "/")
+        if rel.lower().endswith("/" + needle_l) or rel.lower().endswith(needle_l):
+            return item
+    return None
+
+
+def _metadata_payload_from_book_dir(book_dir: Path) -> tuple[dict[str, Any], str | None]:
+    """Build ABS metadata PATCH payload + optional cover URL from on-disk sidecars."""
+    root = Path(book_dir)
+    cover_url: str | None = None
+    meta: dict[str, Any] = {}
+
+    meta_path = root / "metadata.json"
+    if meta_path.is_file():
+        try:
+            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                meta = dict(loaded)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    lf_path = root / "libraforge.json"
+    if lf_path.is_file():
+        try:
+            lf = json.loads(lf_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            lf = None
+        if isinstance(lf, dict):
+            marker = lf.get("marker") if isinstance(lf.get("marker"), dict) else {}
+            audible = marker.get("audible") if isinstance(marker.get("audible"), dict) else {}
+            # Prefer LibraForge audible apply fields over older metadata.json.
+            title = audible.get("title") or audible.get("chosen_title")
+            if title:
+                meta["title"] = title
+            for src_key, dst_key in (
+                ("subtitle", "subtitle"),
+                ("publisher", "publisher"),
+                ("asin", "asin"),
+                ("year", "publishedYear"),
+                ("description", "description"),
+            ):
+                val = audible.get(src_key)
+                if val:
+                    meta[dst_key] = val
+            if audible.get("author"):
+                meta["authors"] = [audible["author"]]
+            if audible.get("narrator"):
+                meta["narrators"] = [audible["narrator"]]
+            if audible.get("series"):
+                meta["series"] = [audible["series"]]
+            genre = audible.get("genre")
+            if genre:
+                meta["genres"] = [g.strip() for g in str(genre).split(",") if g.strip()]
+            cover_url = (
+                str(audible.get("cover_url") or "").strip()
+                or str(marker.get("cover_url") or "").strip()
+                or None
+            )
+
+    payload: dict[str, Any] = {}
+    title = str(meta.get("title") or "").strip()
+    if title:
+        payload["title"] = title
+    subtitle = str(meta.get("subtitle") or "").strip()
+    if subtitle:
+        payload["subtitle"] = subtitle
+    asin = str(meta.get("asin") or "").strip()
+    if asin:
+        payload["asin"] = asin
+    publisher = str(meta.get("publisher") or "").strip()
+    if publisher:
+        payload["publisher"] = publisher
+    year = str(meta.get("publishedYear") or meta.get("year") or "").strip()
+    if year:
+        payload["publishedYear"] = year
+    description = str(meta.get("description") or "").strip()
+    if description:
+        payload["description"] = description
+
+    authors_raw = meta.get("authors") or meta.get("author")
+    authors: list[str] = []
+    if isinstance(authors_raw, str) and authors_raw.strip():
+        authors = [authors_raw.strip()]
+    elif isinstance(authors_raw, list):
+        for a in authors_raw:
+            if isinstance(a, str) and a.strip():
+                authors.append(a.strip())
+            elif isinstance(a, dict) and str(a.get("name") or "").strip():
+                authors.append(str(a["name"]).strip())
+    if authors:
+        payload["authors"] = [{"name": a} for a in authors]
+
+    narrators_raw = meta.get("narrators") or meta.get("narrator")
+    narrators: list[str] = []
+    if isinstance(narrators_raw, str) and narrators_raw.strip():
+        narrators = [narrators_raw.strip()]
+    elif isinstance(narrators_raw, list):
+        for n in narrators_raw:
+            if isinstance(n, str) and n.strip():
+                narrators.append(n.strip())
+            elif isinstance(n, dict) and str(n.get("name") or "").strip():
+                narrators.append(str(n["name"]).strip())
+    if narrators:
+        payload["narrators"] = narrators
+
+    series_raw = meta.get("series")
+    series_out: list[dict[str, str]] = []
+    if isinstance(series_raw, str) and series_raw.strip():
+        # "Series #1" or bare series name
+        name, seq = parse_abs_series_label(series_raw.strip())
+        if name:
+            entry: dict[str, str] = {"name": name}
+            if seq:
+                entry["sequence"] = seq
+            series_out.append(entry)
+    elif isinstance(series_raw, list):
+        for s in series_raw:
+            if isinstance(s, str) and s.strip():
+                name, seq = parse_abs_series_label(s.strip())
+                if name:
+                    entry = {"name": name}
+                    if seq:
+                        entry["sequence"] = seq
+                    series_out.append(entry)
+            elif isinstance(s, dict) and str(s.get("name") or "").strip():
+                entry = {"name": str(s["name"]).strip()}
+                seq = str(s.get("sequence") or "").strip()
+                if seq:
+                    entry["sequence"] = seq
+                series_out.append(entry)
+    if series_out:
+        payload["series"] = series_out
+
+    genres = meta.get("genres")
+    if isinstance(genres, list):
+        cleaned = [str(g).strip() for g in genres if str(g).strip()]
+        if cleaned:
+            payload["genres"] = cleaned
+    elif isinstance(genres, str) and genres.strip():
+        payload["genres"] = [g.strip() for g in genres.split(",") if g.strip()]
+
+    return payload, cover_url
+
+
+async def set_item_cover_from_url(item_id: str, cover_url: str) -> bool:
+    """Ask ABS to download a cover from a URL (POST /api/items/:id/cover)."""
+    url = (cover_url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return False
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{settings.abs_url}/api/items/{item_id}/cover",
+                headers=_headers(),
+                json={"url": url},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            return True
+    except Exception as e:
+        logger.warning("ABS set cover for %s failed: %s", item_id, e)
+        return False
+
+
+async def sync_book_dir_metadata_to_abs(book_dir: str | Path) -> dict[str, Any]:
+    """Push LibraForge / folder sidecar metadata into ABS for one library book dir.
+
+    Scan-only does not rematch online providers; this pins ABS DB fields to our
+    applied tags so later scans keep ``absMetadata`` precedence instead of
+    folder-name drift. Never calls Quick Match.
+    """
+    root = Path(book_dir)
+    out: dict[str, Any] = {
+        "path": str(root),
+        "updated": False,
+        "cover_updated": False,
+        "item_id": None,
+        "error": None,
+    }
+    if not root.is_dir():
+        out["error"] = "book dir missing"
+        return out
+
+    audiobook_root = Path(settings.audiobook_dir).resolve()
+    try:
+        rel = root.resolve().relative_to(audiobook_root)
+    except (ValueError, OSError):
+        # Paths may already be container-style /audiobooks/...
+        parts = str(root).replace("\\", "/").split("/audiobooks/", 1)
+        rel_s = parts[1] if len(parts) == 2 else str(root).lstrip("/")
+        rel = Path(rel_s)
+    rel_path = rel.as_posix().strip("/")
+
+    item = await find_item_by_rel_path(rel_path)
+    if not item:
+        out["error"] = f"ABS item not found for relPath={rel_path}"
+        return out
+    item_id = str(item.get("id") or "").strip()
+    out["item_id"] = item_id or None
+    if not item_id:
+        out["error"] = "ABS item missing id"
+        return out
+
+    payload, cover_url = _metadata_payload_from_book_dir(root)
+    if payload:
+        ok = await update_item_metadata(item_id, metadata=payload)
+        out["updated"] = ok
+        if not ok:
+            out["error"] = "metadata PATCH failed"
+    if cover_url:
+        out["cover_updated"] = await set_item_cover_from_url(item_id, cover_url)
+    if out["updated"] or out["cover_updated"]:
+        invalidate_cache()
+    return out
+
+
+async def sync_organizer_moves_to_abs(organizer_report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """After Folder Forge, push sidecar metadata for each successful move target."""
+    from app.services import libraforge as lf
+
+    results: list[dict[str, Any]] = []
+    for target in lf.organizer_move_targets(organizer_report or {}):
+        try:
+            results.append(await sync_book_dir_metadata_to_abs(target))
+        except Exception as e:
+            logger.warning("ABS metadata sync failed for %s: %s", target, e)
+            results.append({"path": target, "updated": False, "error": str(e)})
+    return results
+
+
+async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, Any]:
+    """Scan ABS (wait for completion) and remove missing-file orphans.
+
+    Intentionally does **not** rewrite titles to folder names — that overwrote
+    LibraForge / Audible titles (e.g. ``Illidan: World of Warcraft`` → ``Illidan``).
+    Scan alone does not Quick Match online providers.
 
     Returns keys: ``fixed``, ``count``, ``scan_ran``, ``scan_complete``, ``timed_out``,
     ``waited_seconds``, ``items_total``, ``orphan_cleanup_ok``, ``items_examined``,
@@ -905,10 +1203,14 @@ async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, An
     except Exception as e:
         logger.warning("fix_metadata_mismatches: library scan / orphan cleanup failed: %s", e)
 
+    items_examined = 0
     try:
         items = await _fetch_library_items_all_pages(lid)
+        items_examined = len(items)
+        if items_total is None:
+            items_total = items_examined
     except Exception as e:
-        logger.warning("Failed to paginate-fetch ABS items for mismatch fix: %s", e, exc_info=True)
+        logger.warning("Failed to paginate-fetch ABS items after scan: %s", e, exc_info=True)
         out = {
             **empty,
             "scan_ran": scan_ran,
@@ -921,40 +1223,19 @@ async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, An
         out["fetch_error"] = str(e)
         return out
 
-    fixed: list[dict] = []
-    for item in items:
-        rel_path = item.get("relPath", "")
-        if not rel_path:
-            continue
-        folder_name = rel_path.rstrip("/").rsplit("/", 1)[-1]
-        if not folder_name:
-            continue
-        media = item.get("media", {})
-        meta = media.get("metadata", {})
-        current_title = meta.get("title", "")
-        if current_title and current_title.strip().lower() != folder_name.strip().lower():
-            item_id = item.get("id", "")
-            if item_id and await update_item_metadata(item_id, folder_name):
-                fixed.append({
-                    "itemId": item_id,
-                    "oldTitle": current_title,
-                    "newTitle": folder_name,
-                })
-                logger.info("Fixed ABS title: '%s' -> '%s' (%s)", current_title, folder_name, item_id)
-
-    if fixed or scan_ran or orphan_cleanup_ok:
+    if scan_ran or orphan_cleanup_ok:
         invalidate_cache()
 
     return {
-        "fixed": fixed,
-        "count": len(fixed),
+        "fixed": [],
+        "count": 0,
         "scan_ran": scan_ran,
         "scan_complete": scan_complete,
         "timed_out": timed_out,
         "waited_seconds": waited_seconds,
-        "items_total": items_total if items_total is not None else len(items),
+        "items_total": items_total,
         "orphan_cleanup_ok": orphan_cleanup_ok,
-        "items_examined": len(items),
+        "items_examined": items_examined,
         "fetch_error": None,
     }
 

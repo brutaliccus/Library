@@ -87,7 +87,7 @@ def test_fix_metadata_waits_for_scan_before_fetching_items():
                 {
                     "id": "i1",
                     "relPath": "Author/Book One",
-                    "media": {"metadata": {"title": "Wrong"}},
+                    "media": {"metadata": {"title": "Book One: Rich Title"}},
                 }
             ]
 
@@ -96,7 +96,7 @@ def test_fix_metadata_waits_for_scan_before_fetching_items():
             patch.object(abs_svc, "scan_library_and_wait", side_effect=wait_scan),
             patch.object(abs_svc, "remove_items_with_issues", new=AsyncMock(return_value=True)),
             patch.object(abs_svc, "_fetch_library_items_all_pages", side_effect=fetch_items),
-            patch.object(abs_svc, "update_item_metadata", new=AsyncMock(return_value=True)),
+            patch.object(abs_svc, "update_item_metadata", new=AsyncMock(return_value=True)) as upd,
             patch.object(abs_svc, "invalidate_cache"),
         ):
             settings.abs_library_id = "lib_x"
@@ -107,7 +107,9 @@ def test_fix_metadata_waits_for_scan_before_fetching_items():
         assert out["scan_ran"] is True
         assert out["scan_complete"] is True
         assert out["timed_out"] is False
-        assert out["count"] == 1
-        assert out["fixed"][0]["newTitle"] == "Book One"
+        # Must not rewrite LibraForge / Audible titles to bare folder names.
+        assert out["count"] == 0
+        assert out["fixed"] == []
+        upd.assert_not_awaited()
 
     asyncio.run(_run())

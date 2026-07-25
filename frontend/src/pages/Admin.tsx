@@ -147,8 +147,7 @@ export default function AdminPage() {
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => void enablePush()}
-              disabled={pushState === "subscribing"}
-              className="px-3 py-1.5 text-xs text-emerald-300 hover:text-emerald-100 border border-emerald-800/60 rounded-lg hover:border-emerald-600 transition-colors disabled:opacity-50"
+              className="px-3 py-1.5 text-xs text-emerald-300 hover:text-emerald-100 border border-emerald-800/60 rounded-lg hover:border-emerald-600 transition-colors"
             >
               Refresh
             </button>

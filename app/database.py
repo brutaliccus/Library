@@ -195,6 +195,7 @@ async def init_db():
             await _add_column_if_missing(conn, "users", "preferred_debrid", "VARCHAR(16) DEFAULT 'rd'")
             await _add_column_if_missing(conn, "stream_history", "debrid_provider", "VARCHAR(16) DEFAULT 'rd'")
             await _add_column_if_missing(conn, "streaming_library", "debrid_provider", "VARCHAR(16) DEFAULT 'rd'")
+            await _add_column_if_missing(conn, "download_requests", "debrid_provider", "VARCHAR(16)")
             await _add_column_if_missing(conn, "users", "library_group_id", "INTEGER")
             await _add_column_if_missing(conn, "users", "library_role", "VARCHAR(16) DEFAULT 'member'")
             await _add_column_if_missing(conn, "download_requests", "progress_percent", "REAL")

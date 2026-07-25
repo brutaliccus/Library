@@ -219,6 +219,10 @@ async def retry_request(
     req.progress_bytes = None
     req.progress_total_bytes = None
     req.progress_speed_bps = None
+    # Non-AA: clear prior debrid binding so retry re-applies preferred/cache pick.
+    if not is_aa:
+        req.rd_torrent_id = None
+        req.debrid_provider = None
     await db.commit()
     await db.refresh(req)
 

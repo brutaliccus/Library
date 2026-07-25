@@ -78,37 +78,92 @@ def pick_provider(
     cached_by_provider: dict[str, set[str]] | None,
     preferred: str | None,
 ) -> str:
-    """Auto-pick: a provider that has the torrent cached wins (preferred one
-    first when both do); otherwise the user's preferred provider; otherwise
-    whichever is configured."""
+    """Select a debrid provider for stream/download.
+
+    Policy:
+      1. Cached on exactly one configured service → that service
+         (even when it is not the user's preferred)
+      2. Cached on both → user's preferred service
+      3. Cached on neither (or hash unknown) → user's preferred service
+
+    If the preferred provider's API key is missing, log and use another
+    configured provider.
+    """
     providers = available_providers()
     if not providers:
+        logger.warning(
+            "No debrid providers configured; defaulting to %s",
+            PROVIDER_LABELS[RD],
+        )
         return RD
+
     pref = normalize_provider(preferred)
-    order = [pref] + [p for p in providers if p != pref] if pref in providers else list(providers)
+    if pref not in providers:
+        logger.warning(
+            "Preferred debrid %s is not configured; falling back among %s",
+            PROVIDER_LABELS.get(pref, pref),
+            ", ".join(PROVIDER_LABELS[p] for p in providers),
+        )
+        order = list(providers)
+    else:
+        order = [pref] + [p for p in providers if p != pref]
 
     if info_hash and cached_by_provider:
         h = info_hash.lower()
-        for p in order:
-            if h in cached_by_provider.get(p, set()):
-                return p
+        hits = [p for p in providers if h in cached_by_provider.get(p, set())]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            # Tie → preferred when available, else first hit in preferred-first order
+            for p in order:
+                if p in hits:
+                    return p
 
     return order[0]
 
 
+def download_provider_order(
+    chosen: str,
+    preferred: str | None = None,
+) -> list[str]:
+    """Try ``chosen`` first; on failure, other configured providers (preferred next)."""
+    providers = available_providers()
+    if not providers:
+        return [normalize_provider(chosen)]
+    primary = normalize_provider(chosen)
+    pref = normalize_provider(preferred)
+    rest = [p for p in providers if p != primary]
+    if pref in rest:
+        rest = [pref] + [p for p in rest if p != pref]
+    return [primary, *rest] if primary in providers else [providers[0], *[p for p in providers[1:]]]
+
+
 async def pick_provider_for_magnet(magnet_or_hash: str | None, preferred: str | None) -> str:
-    """Convenience: resolve the hash, run cache checks, pick a provider."""
+    """Resolve hash, check caches, apply :func:`pick_provider` policy."""
     providers = available_providers()
     if len(providers) <= 1:
-        return providers[0] if providers else RD
+        choice = providers[0] if providers else RD
+        if preferred and normalize_provider(preferred) not in providers:
+            logger.warning(
+                "Preferred debrid %s is not configured; using %s",
+                PROVIDER_LABELS.get(normalize_provider(preferred), preferred),
+                PROVIDER_LABELS.get(choice, choice),
+            )
+        return choice
 
     h = extract_info_hash(magnet_or_hash, magnet_or_hash)
     if not h:
         return pick_provider(None, None, preferred)
     cached = await check_cached_all([h])
     choice = pick_provider(h, cached, preferred)
-    if h and any(h in s for s in cached.values()):
-        logger.info("Debrid auto-pick: %s has %s cached", PROVIDER_LABELS[choice], h[:12])
+    hits = [p for p in ALL_PROVIDERS if h in cached.get(p, set())]
+    logger.info(
+        "Debrid pick: %s (preferred=%s, cache_hits=%s, hash=%s)",
+        PROVIDER_LABELS[choice],
+        PROVIDER_LABELS.get(normalize_provider(preferred), preferred),
+        [PROVIDER_LABELS[p] for p in hits] or "none",
+        h[:12],
+    )
     return choice
 
 

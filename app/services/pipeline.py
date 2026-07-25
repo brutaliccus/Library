@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import async_session
 from app.models import DownloadRequest, User
-from app.services import real_debrid, audiobookshelf, kavita, downloader, annas_archive, goodreads, push
+from app.services import debrid, audiobookshelf, kavita, downloader, annas_archive, goodreads, push
 from app.utils.websocket import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -33,23 +33,30 @@ def _format_speed(speed_bps: float) -> str:
     return f"{speed_bps / 1024:.0f} KB/s"
 
 
-def _rd_progress_detail(info: dict) -> tuple[str, float | None, float | None]:
+def _debrid_progress_detail(
+    info: dict, label: str = "Real-Debrid"
+) -> tuple[str, float | None, float | None]:
     status = info.get("status", "")
     progress = float(info.get("progress") or 0)
     speed = float(info.get("speed") or 0)
     speed_str = _format_speed(speed)
     if status == "downloading":
-        detail = f"Real-Debrid downloading… {progress:.0f}%"
+        detail = f"{label} downloading… {progress:.0f}%"
         if speed_str:
             detail += f" · {speed_str}"
         return detail, progress, speed
     if status == "queued":
-        return "Queued on Real-Debrid…", 0.0, None
+        return f"Queued on {label}…", 0.0, None
     if status == "magnet_conversion":
         return "Converting magnet link…", 0.0, None
     if status == "waiting_files_selection":
-        return "Selecting files on Real-Debrid…", 0.0, None
-    return f"Real-Debrid: {status}", progress if progress > 0 else None, speed if speed > 0 else None
+        return f"Selecting files on {label}…", 0.0, None
+    return f"{label}: {status}", progress if progress > 0 else None, speed if speed > 0 else None
+
+
+def _rd_progress_detail(info: dict) -> tuple[str, float | None, float | None]:
+    """Backward-compatible alias used by older tests/callers."""
+    return _debrid_progress_detail(info, "Real-Debrid")
 
 
 async def _report_progress(
@@ -135,10 +142,13 @@ async def _update_status(
     status: str,
     detail: str | None = None,
     rd_torrent_id: str | None = None,
+    debrid_provider: str | None = None,
     progress_percent: float | None = None,
     progress_bytes: int | None = None,
     progress_total_bytes: int | None = None,
     progress_speed_bps: float | None = None,
+    *,
+    clear_debrid_torrent: bool = False,
 ):
     # Fresh lookup — long-lived download sessions + concurrent progress writers
     # can leave the identity map stale; never crash the pipeline on a missing row.
@@ -155,8 +165,13 @@ async def _update_status(
     req.status = status
     if detail is not None:
         req.status_detail = detail or status
+    if clear_debrid_torrent:
+        req.rd_torrent_id = None
+        req.debrid_provider = None
     if rd_torrent_id is not None:
         req.rd_torrent_id = rd_torrent_id
+    if debrid_provider is not None:
+        req.debrid_provider = debrid_provider
     if status in ("completed", "failed", "cancelled", "quarantined", "admin_rejected"):
         req.progress_percent = None
         req.progress_bytes = None
@@ -556,6 +571,90 @@ def _write_abs_metadata(book_dir: Path, *, author: str, series: str | None = Non
         logger.warning("Could not write metadata.json in %s: %s", book_dir, e)
 
 
+async def _resolve_debrid_torrent(
+    db: AsyncSession,
+    request_id: int,
+    user_id: int,
+    link: str,
+    provider: str,
+    torrent_id: str | None,
+) -> tuple[str, dict]:
+    """Add/poll a torrent on ``provider``. Returns (torrent_id, torrent_info)."""
+    client = debrid.get_client(provider)
+    label = debrid.PROVIDER_LABELS.get(provider, provider)
+
+    if not torrent_id:
+        await _update_status(
+            db,
+            request_id,
+            "sent_to_rd",
+            f"Sending to {label}",
+            debrid_provider=provider,
+        )
+        if link.startswith("magnet:"):
+            result = await client.add_magnet(link)
+        else:
+            result = await client.add_torrent_file(link)
+        torrent_id = result["id"]
+        await _update_status(
+            db,
+            request_id,
+            "sent_to_rd",
+            f"Sent to {label}",
+            rd_torrent_id=torrent_id,
+            debrid_provider=provider,
+        )
+    else:
+        logger.info(
+            "Request %s: resuming with existing %s torrent %s",
+            request_id,
+            label,
+            torrent_id,
+        )
+
+    info = await client.get_torrent_info(torrent_id)
+    status = info.get("status")
+
+    if status in ("magnet_error", "error", "virus", "dead"):
+        raise RuntimeError(f"{label} torrent failed with status: {status}")
+
+    if status == "waiting_files_selection":
+        await client.select_files(torrent_id)
+
+    if status != "downloaded":
+        await _update_status(
+            db, request_id, "downloading_rd", f"Waiting for {label} to finish"
+        )
+
+        async def _on_progress(progress_info: dict) -> None:
+            if await _is_cancelled(request_id):
+                raise RuntimeError("cancelled")
+            detail, pct, speed = _debrid_progress_detail(progress_info, label)
+            await _report_progress(
+                request_id,
+                user_id,
+                "downloading_rd",
+                detail,
+                progress_percent=pct,
+                progress_speed_bps=speed,
+            )
+
+        try:
+            info = await client.poll_until_ready(torrent_id, on_progress=_on_progress)
+        except RuntimeError as e:
+            if "cancelled" in str(e).lower():
+                raise
+            raise
+    else:
+        logger.info(
+            "Request %s: %s torrent already downloaded, skipping poll",
+            request_id,
+            label,
+        )
+
+    return torrent_id, info
+
+
 async def process_download(request_id: int) -> None:
     """Runs (or resumes) the full download pipeline for a request.
     Checks the current DB state so it can skip already-completed steps."""
@@ -566,15 +665,23 @@ async def process_download(request_id: int) -> None:
             )
             req = result.scalar_one_or_none()
             if req is None:
-                logger.warning("RD download: request %s not found", request_id)
+                logger.warning("Download: request %s not found", request_id)
                 return
-            # Download with the requesting user's library-group RD key
+            # Download with the requesting user's library-group debrid keys
             from app.services import debrid_tokens
             await debrid_tokens.apply_tokens_for_user_id(req.user_id)
+
+            user_result = await db.execute(select(User).where(User.id == req.user_id))
+            user = user_result.scalar_one_or_none()
+            preferred = (
+                (getattr(user, "preferred_debrid", None) or "rd") if user else "rd"
+            )
+
             link = req.magnet_link
             title = req.title
             media_type = req.media_type or "audiobook"
-            rd_id = req.rd_torrent_id
+            torrent_id = req.rd_torrent_id
+            stored_provider = getattr(req, "debrid_provider", None) or None
 
             author, book_title = downloader.parse_torrent_name(title)
             if req.author:
@@ -586,71 +693,104 @@ async def process_download(request_id: int) -> None:
             if await _is_cancelled(request_id):
                 return
 
-            if not rd_id:
-                await _update_status(db, request_id, "sent_to_rd", "Sending to Real-Debrid")
-                # ABB detail pages are HTML — scrape the info hash into a magnet first.
-                if (
-                    not link.startswith("magnet:")
-                    and "audiobookbay" in link.lower()
-                ):
-                    try:
-                        from app.services import audiobookbay
+            # ABB detail pages are HTML — scrape the info hash into a magnet first.
+            if (
+                not torrent_id
+                and not link.startswith("magnet:")
+                and "audiobookbay" in link.lower()
+            ):
+                try:
+                    from app.services import audiobookbay
 
-                        m, _h = await audiobookbay.resolve_magnet_from_details(
-                            link, title=title or ""
-                        )
-                        if m:
-                            link = m
-                            req.magnet_link = m
-                            await db.commit()
-                    except Exception as e:
-                        logger.warning("ABB magnet resolve for request %s failed: %s", request_id, e)
-                if link.startswith("magnet:"):
-                    rd_result = await real_debrid.add_magnet(link)
-                else:
-                    rd_result = await real_debrid.add_torrent_file(link)
-                rd_id = rd_result["id"]
-                await _update_status(db, request_id, "sent_to_rd", rd_torrent_id=rd_id)
+                    m, _h = await audiobookbay.resolve_magnet_from_details(
+                        link, title=title or ""
+                    )
+                    if m:
+                        link = m
+                        req.magnet_link = m
+                        await db.commit()
+                except Exception as e:
+                    logger.warning("ABB magnet resolve for request %s failed: %s", request_id, e)
+
+            if torrent_id:
+                # Resume an in-flight torrent on the provider that accepted it.
+                # Legacy rows without debrid_provider were always Real-Debrid.
+                providers_to_try = [
+                    debrid.normalize_provider(stored_provider or debrid.RD)
+                ]
             else:
-                logger.info(f"Request {request_id}: resuming with existing RD torrent {rd_id}")
+                chosen = await debrid.pick_provider_for_magnet(link, preferred)
+                providers_to_try = debrid.download_provider_order(chosen, preferred)
 
-            rd_info = await real_debrid.get_torrent_info(rd_id)
-            rd_status = rd_info.get("status")
+            torrent_info: dict | None = None
+            client = None
+            active_provider: str | None = None
+            last_err: Exception | None = None
 
-            if rd_status in ("magnet_error", "error", "virus", "dead"):
-                raise RuntimeError(f"Real-Debrid torrent failed with status: {rd_status}")
-
-            if rd_status == "waiting_files_selection":
-                await real_debrid.select_files(rd_id)
-
-            if rd_status != "downloaded":
-                await _update_status(db, request_id, "downloading_rd", "Waiting for Real-Debrid to finish")
-
-                async def _on_rd_progress(info: dict) -> None:
-                    if await _is_cancelled(request_id):
-                        raise RuntimeError("cancelled")
-                    detail, pct, speed = _rd_progress_detail(info)
-                    await _report_progress(
+            for idx, provider in enumerate(providers_to_try):
+                label = debrid.PROVIDER_LABELS.get(provider, provider)
+                try_id = torrent_id if idx == 0 else None
+                try:
+                    torrent_id, torrent_info = await _resolve_debrid_torrent(
+                        db,
                         request_id,
                         req.user_id,
-                        "downloading_rd",
-                        detail,
-                        progress_percent=pct,
-                        progress_speed_bps=speed,
+                        link,
+                        provider,
+                        try_id,
                     )
-
-                try:
-                    torrent_info = await real_debrid.poll_until_ready(
-                        rd_id, on_progress=_on_rd_progress
-                    )
+                    active_provider = provider
+                    client = debrid.get_client(provider)
+                    break
                 except RuntimeError as e:
                     if "cancelled" in str(e).lower():
                         return
+                    last_err = e
+                    logger.warning(
+                        "Request %s: %s failed (%s)%s",
+                        request_id,
+                        label,
+                        e,
+                        "; trying fallback" if idx < len(providers_to_try) - 1 else "",
+                    )
+                    if idx < len(providers_to_try) - 1:
+                        await _update_status(
+                            db,
+                            request_id,
+                            "pending",
+                            f"{label} failed — trying fallback…",
+                            clear_debrid_torrent=True,
+                        )
+                        torrent_id = None
+                        continue
                     raise
-            else:
-                logger.info(f"Request {request_id}: RD torrent already downloaded, skipping poll")
-                torrent_info = rd_info
+                except Exception as e:
+                    last_err = e
+                    logger.warning(
+                        "Request %s: %s failed (%s)%s",
+                        request_id,
+                        label,
+                        e,
+                        "; trying fallback" if idx < len(providers_to_try) - 1 else "",
+                    )
+                    if idx < len(providers_to_try) - 1:
+                        await _update_status(
+                            db,
+                            request_id,
+                            "pending",
+                            f"{label} failed — trying fallback…",
+                            clear_debrid_torrent=True,
+                        )
+                        torrent_id = None
+                        continue
+                    raise
 
+            if torrent_info is None or client is None or active_provider is None:
+                raise RuntimeError(
+                    f"No debrid provider could accept this download: {last_err}"
+                )
+
+            label = debrid.PROVIDER_LABELS.get(active_provider, active_provider)
             await _update_status(db, request_id, "transferring", "Downloading to library")
 
             if media_type == "ebook":
@@ -662,7 +802,7 @@ async def process_download(request_id: int) -> None:
                 dest_dir.mkdir(parents=True, exist_ok=True)
 
             total_links = len(torrent_info.get("links", []))
-            for i, rd_link in enumerate(torrent_info.get("links", []), 1):
+            for i, debrid_link in enumerate(torrent_info.get("links", []), 1):
                 file_index = i
 
                 async def _on_file_progress(
@@ -706,8 +846,8 @@ async def process_download(request_id: int) -> None:
                     f"Downloading file {i}/{total_links}",
                     progress_percent=((i - 1) / total_links * 100) if total_links else 0,
                 )
-                direct_url = await real_debrid.unrestrict_link(rd_link)
-                # RD CDN / proxies occasionally drop mid-body — retry a few times.
+                direct_url = await client.unrestrict_link(debrid_link)
+                # CDN / proxies occasionally drop mid-body — retry a few times.
                 last_dl_err: Exception | None = None
                 for attempt in range(3):
                     try:
@@ -721,7 +861,8 @@ async def process_download(request_id: int) -> None:
                             return
                         last_dl_err = e
                         logger.warning(
-                            "RD file download attempt %s/3 failed for request %s: %s",
+                            "%s file download attempt %s/3 failed for request %s: %s",
+                            label,
                             attempt + 1,
                             request_id,
                             e,
@@ -729,7 +870,7 @@ async def process_download(request_id: int) -> None:
                         if attempt < 2:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             try:
-                                direct_url = await real_debrid.unrestrict_link(rd_link)
+                                direct_url = await client.unrestrict_link(debrid_link)
                             except Exception:
                                 pass
                     except (
@@ -741,7 +882,8 @@ async def process_download(request_id: int) -> None:
                     ) as e:
                         last_dl_err = e
                         logger.warning(
-                            "RD file download attempt %s/3 failed for request %s: %s",
+                            "%s file download attempt %s/3 failed for request %s: %s",
+                            label,
                             attempt + 1,
                             request_id,
                             e,
@@ -749,7 +891,7 @@ async def process_download(request_id: int) -> None:
                         if attempt < 2:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             try:
-                                direct_url = await real_debrid.unrestrict_link(rd_link)
+                                direct_url = await client.unrestrict_link(debrid_link)
                             except Exception:
                                 pass
                 if last_dl_err is not None:

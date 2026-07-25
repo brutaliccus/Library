@@ -87,6 +87,8 @@ class DownloadRequest(Base):
     # Ebooks skip m4b_convert / chapter_forge (DIY organizer in ebook_pipeline).
     status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     rd_torrent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Which debrid service is handling this download: "rd" | "torbox"
+    debrid_provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
     aa_file_extension: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Catalog volume the user was browsing (Requests card cover + Find Downloads deep-link)
     google_volume_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

@@ -19,8 +19,8 @@ const STATUS_CONFIG: Record<
   { label: string; color: string; icon: typeof Clock }
 > = {
   pending: { label: "Pending", color: "text-yellow-400 bg-yellow-900/30", icon: Clock },
-  sent_to_rd: { label: "Sent to Real-Debrid", color: "text-blue-400 bg-blue-900/30", icon: CloudUpload },
-  downloading_rd: { label: "Downloading (RD)", color: "text-indigo-400 bg-indigo-900/30", icon: Download },
+  sent_to_rd: { label: "Sent to Debrid", color: "text-blue-400 bg-blue-900/30", icon: CloudUpload },
+  downloading_rd: { label: "Downloading (Debrid)", color: "text-indigo-400 bg-indigo-900/30", icon: Download },
   transferring: { label: "Transferring to Library", color: "text-sky-400 bg-sky-900/30", icon: ArrowRightLeft },
   organizing: { label: "Organizing Files", color: "text-violet-400 bg-violet-900/30", icon: FolderSync },
   matching: { label: "Matching Metadata", color: "text-fuchsia-400 bg-fuchsia-900/30", icon: Search },

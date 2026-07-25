@@ -949,9 +949,9 @@ export default function Settings() {
               <div className="flex-1 min-w-0">
                 <h3 className="text-sm font-semibold text-gray-100">Preferred Debrid Service</h3>
                 <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-                  When you stream a book, the service that already has it cached is picked
-                  automatically for instant playback. When it's cached on both (or neither),
-                  your preferred service is used.
+                  For streams and downloads: if a torrent is cached on exactly one service,
+                  that service is used. If it&apos;s cached on both — or on neither — your
+                  preferred service wins.
                 </p>
                 {(settings?.available_debrid_providers?.length ?? 0) < 2 && (
                   <p className="text-xs text-amber-400/90 mt-2">

@@ -61,6 +61,13 @@ backups/
 prowlarr-config/
 jackett-config/
 auto-m4b-config/
+# Bundled-media profile config (ABS / Kavita / LibraForge local data)
+audiobookshelf-config/
+audiobookshelf-metadata/
+kavita-config/
+libraforge-auth/
+libraforge-config/
+libraforge-reports/
 
 # --- Local-only / unrelated trees ---
 libraforge/

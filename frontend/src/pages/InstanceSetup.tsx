@@ -36,6 +36,14 @@ interface SetupStatus {
     ebookPipelineEnabled?: boolean;
   };
   presets?: Record<string, Record<string, string>>;
+  stack?: {
+    absConfigured?: boolean;
+    kavitaConfigured?: boolean;
+    libraforgeConfigured?: boolean;
+    libraforgePipelineEnabled?: boolean;
+    bundledMedia?: boolean;
+    bundledReady?: boolean;
+  };
 }
 
 interface ConfigSetting {
@@ -55,6 +63,8 @@ interface SetupValidateResult {
   ok: boolean;
   warnings: string[];
   probes: Record<string, { configured?: boolean; connected?: boolean; error?: string }>;
+  bundledMedia?: boolean;
+  bundledReady?: boolean;
 }
 
 interface OlCatalogStatus {
@@ -144,7 +154,12 @@ function localInputToIsoUtc(localValue: string): string {
   return d.toISOString();
 }
 
-function detectPlatformPreset(): "windows_docker" | "linux_docker" {
+function detectPlatformPreset(
+  status?: SetupStatus | null,
+): "bundled_media" | "windows_docker" | "linux_docker" {
+  if (status?.stack?.bundledMedia || status?.stack?.bundledReady) {
+    return "bundled_media";
+  }
   if (typeof navigator !== "undefined" && /Win/i.test(navigator.platform || navigator.userAgent)) {
     return "windows_docker";
   }
@@ -165,6 +180,8 @@ export default function InstanceSetup() {
   const [presetApplied, setPresetApplied] = useState(false);
   const [olChoice, setOlChoice] = useState<"skip" | "now" | "schedule">("skip");
   const [scheduleLocal, setScheduleLocal] = useState(defaultScheduleLocalValue);
+  const [showStackAdvanced, setShowStackAdvanced] = useState(false);
+  const [liveProbes, setLiveProbes] = useState<SetupValidateResult["probes"] | null>(null);
 
   const { data: status, refetch: refetchStatus } = useQuery({
     queryKey: ["admin-setup-status"],
@@ -205,10 +222,14 @@ export default function InstanceSetup() {
     return [...filtered].sort((a, b) => rank(a.key) - rank(b.key));
   }, [config, groupIds, step?.id]);
 
+  const bundledReady = !!status?.stack?.bundledReady;
+  const bundledMedia = !!status?.stack?.bundledMedia || bundledReady;
+
   // Pre-fill empty stack drafts from the detected platform preset once.
+  // Bundled installs already have keys in env — skip forcing host.docker.internal.
   useEffect(() => {
     if (presetApplied || !status?.presets || !config?.settings || step?.id !== "stack") return;
-    const presetKey = detectPlatformPreset();
+    const presetKey = detectPlatformPreset(status);
     const preset = status.presets[presetKey];
     if (!preset) return;
     const next: Record<string, string> = {};
@@ -230,7 +251,28 @@ export default function InstanceSetup() {
       setDrafts((d) => ({ ...next, ...d }));
     }
     setPresetApplied(true);
+    // Bundled + keys present → keep advanced collapsed by default.
+    if (status.stack?.bundledReady) {
+      setShowStackAdvanced(false);
+    }
   }, [status, config, step?.id, presetApplied, drafts]);
+
+  // Soft probe when opening the stack step so bundled installs can show green status.
+  useEffect(() => {
+    if (step?.id !== "stack") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.post("/admin/setup-validate");
+        if (!cancelled) setLiveProbes((data as SetupValidateResult).probes || null);
+      } catch {
+        if (!cancelled) setLiveProbes(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [step?.id]);
 
   const save = useMutation({
     mutationFn: async (updates: Record<string, string>) => {
@@ -342,6 +384,12 @@ export default function InstanceSetup() {
     try {
       const { data } = await api.post("/admin/setup-validate");
       const result = data as SetupValidateResult;
+      setLiveProbes(result.probes || null);
+      // Bundled + keys present: only surface hard miss (neither ABS nor Kavita configured).
+      if (result.bundledReady || (bundledReady && !(result.warnings || []).some((w) => w.includes("Configure at least")))) {
+        const soft = (result.warnings || []).filter((w) => !w.includes("still warming"));
+        return soft;
+      }
       return result.warnings || [];
     } catch {
       return ["Health probe request failed — you can still continue and fix connections later."];
@@ -366,7 +414,14 @@ export default function InstanceSetup() {
         const warnings = await runSoftValidate();
         setProbeWarnings(warnings);
         if (warnings.length) {
-          toast("Saved with connection warnings — you can continue", "error");
+          // Soft: bundled installs should not feel blocked by warming probes.
+          const tone = bundledReady || bundledMedia ? "success" : "error";
+          toast(
+            bundledReady || bundledMedia
+              ? "Saved — you can continue (soft connection notes below)"
+              : "Saved with connection warnings — you can continue",
+            tone === "success" ? "success" : "error",
+          );
         }
       }
       if (step?.id === "openlibrary") {
@@ -427,30 +482,111 @@ export default function InstanceSetup() {
     </div>
   );
 
+  const probeTone = (name: string) => {
+    const p = liveProbes?.[name];
+    if (!p) return "text-gray-500";
+    if (p.connected) return "text-emerald-400";
+    if (p.configured) return "text-amber-400";
+    return "text-gray-500";
+  };
+
   const renderStack = () => (
     <div className="space-y-4">
-      <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 space-y-2">
-        <p className="text-xs font-medium text-gray-300">Platform preset (editable after apply)</p>
-        <div className="flex flex-wrap gap-2">
-          {Object.entries(status?.presets || {}).map(([key, preset]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => applyPreset(key)}
-              className="px-3 py-1.5 rounded-lg border border-gray-700 text-xs text-gray-200 hover:border-brand-500 hover:text-brand-300"
-            >
-              {preset.label || key}
-            </button>
-          ))}
+      {(bundledReady || bundledMedia) && (
+        <div className="rounded-lg border border-emerald-800/50 bg-emerald-950/25 p-3 space-y-2">
+          <p className="text-sm text-emerald-200 inline-flex items-center gap-1.5 font-medium">
+            <CheckCircle2 size={16} className="text-emerald-400" />
+            Using bundled stack
+          </p>
+          <p className="text-xs text-gray-400">
+            Audiobookshelf, Kavita, and LibraForge share this compose network
+            (<code className="text-gray-300"> (profile bundled-media)</code>. API keys were
+            bootstrapped into <code className="text-gray-300">.env</code> — no manual entry needed.
+            Continue when probes look good.
+          </p>
+          <ul className="text-xs space-y-1 font-mono">
+            <li className={probeTone("audiobookshelf")}>
+              ABS {liveProbes?.audiobookshelf?.connected ? "connected" : liveProbes?.audiobookshelf?.configured ? "warming…" : "—"}
+              {" · "}http://audiobookshelf:80 → host :13378
+            </li>
+            <li className={probeTone("kavita")}>
+              Kavita {liveProbes?.kavita?.connected ? "connected" : liveProbes?.kavita?.configured ? "warming…" : "—"}
+              {" · "}http://kavita:5000 → host :5000
+            </li>
+            <li className={probeTone("libraforge")}>
+              LibraForge {liveProbes?.libraforge?.connected ? "connected" : liveProbes?.libraforge?.configured ? "warming…" : "—"}
+              {" · "}http://libraforge:5056 → host :5056
+            </li>
+          </ul>
+          {bundledReady && (
+            <p className="text-[11px] text-emerald-500/90">
+              Keys present — you can Continue without editing fields below.
+            </p>
+          )}
         </div>
-        <p className="text-[11px] text-gray-500">
-          Windows: <code className="text-gray-400">host.docker.internal</code> for ABS (:13378),
-          Kavita (:5000), LibraForge internal (:5056). Linux/Pi: Docker bridge{" "}
-          <code className="text-gray-400">172.17.0.1</code> or compose service names on a shared
-          network. Pipeline toggles default on for new installs.
+      )}
+
+      {!bundledMedia && (
+        <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 space-y-2">
+          <p className="text-xs font-medium text-gray-300">Platform preset (editable after apply)</p>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(status?.presets || {}).map(([key, preset]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => applyPreset(key)}
+                className="px-3 py-1.5 rounded-lg border border-gray-700 text-xs text-gray-200 hover:border-brand-500 hover:text-brand-300"
+              >
+                {preset.label || key}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-gray-500">
+            Prefer <strong className="font-medium text-gray-400">Bundled media</strong> for new
+            installs (<code className="text-gray-400">COMPOSE_PROFILES=bundled-media</code>). External
+            Windows uses <code className="text-gray-400">host.docker.internal</code>; Linux/Pi bridge{" "}
+            <code className="text-gray-400">172.17.0.1</code>. Soft warnings only — you can continue.
+          </p>
+        </div>
+      )}
+
+      {(bundledReady || bundledMedia) && (
+        <button
+          type="button"
+          onClick={() => setShowStackAdvanced((v) => !v)}
+          className="text-xs text-gray-400 hover:text-gray-200 underline-offset-2 hover:underline"
+        >
+          {showStackAdvanced ? "Hide advanced URL / key overrides" : "Advanced: override URLs / keys"}
+        </button>
+      )}
+
+      {(!bundledReady && !bundledMedia) || showStackAdvanced ? (
+        <>
+          {bundledMedia && (
+            <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 space-y-2">
+              <p className="text-xs font-medium text-gray-300">Presets</p>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(status?.presets || {}).map(([key, preset]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => applyPreset(key)}
+                    className="px-3 py-1.5 rounded-lg border border-gray-700 text-xs text-gray-200 hover:border-brand-500 hover:text-brand-300"
+                  >
+                    {preset.label || key}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {renderFields()}
+        </>
+      ) : (
+        <p className="text-sm text-gray-500">
+          Pipeline toggles and connection details are already set from install. Open Advanced only if
+          you need to point at an external ABS/Kavita/LibraForge.
         </p>
-      </div>
-      {renderFields()}
+      )}
     </div>
   );
 

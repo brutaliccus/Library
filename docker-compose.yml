@@ -112,3 +112,73 @@ services:
       - 1.1.1.1
       - 8.8.8.8
     restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Bundled media stack (ABS + Kavita + LibraForge) — same Docker network as app.
+  # Enable with COMPOSE_PROFILES=bundled-media (default for fresh installers).
+  # Existing Pi installs that already point ABS/Kavita/LF at external hosts should
+  # leave this profile off so those URLs/keys stay env-driven.
+  # Extra RAM: expect ~1–2 GB beyond the core indexer stack.
+  # ---------------------------------------------------------------------------
+  audiobookshelf:
+    image: ghcr.io/advplyr/audiobookshelf:latest
+    container_name: audiobookshelf
+    profiles:
+      - bundled-media
+    ports:
+      - "13378:80"
+    volumes:
+      - ./audiobookshelf-config:/config
+      - ./audiobookshelf-metadata:/metadata
+      - ${AUDIOBOOK_HOST_DIR:-./media/audiobooks}:/audiobooks
+    environment:
+      - TZ=${TZ:-UTC}
+    restart: unless-stopped
+
+  kavita:
+    image: lscr.io/linuxserver/kavita:latest
+    container_name: kavita
+    profiles:
+      - bundled-media
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./kavita-config:/config
+      - ${EBOOK_HOST_DIR:-./media/ebooks}:/ebooks
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-UTC}
+    restart: unless-stopped
+
+  # Companion app — installers clone https://github.com/coconautilus17/LibraForge
+  # into ./libraforge (gitignored) before starting this profile.
+  libraforge:
+    build: ./libraforge
+    container_name: libraforge
+    profiles:
+      - bundled-media
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "5056:5056"
+    environment:
+      - SCRIPTS_DIR=/app/scripts
+      - REPORTS_DIR=/app/reports
+      - AUDIOBOOKS_ROOT=/audiobooks
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ${AUDIOBOOK_HOST_DIR:-./media/audiobooks}:/audiobooks
+      - ./libraforge-auth:/auth
+      - ./libraforge-config:/app/config
+      - ./libraforge-reports:/app/reports
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5056/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped

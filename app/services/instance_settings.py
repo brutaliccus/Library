@@ -87,11 +87,10 @@ REGISTRY: list[SettingDef] = [
         label="Audiobookshelf URL",
         env_attr="abs_url",
         help=(
-            "From the Library container: Windows Docker Desktop → "
-            "`http://host.docker.internal:13378`; Linux/Pi → bridge IP "
-            "`http://172.17.0.1:13378` (or the ABS service name on a shared network)."
+            "Bundled-media profile: `http://audiobookshelf:80`. External: Windows → "
+            "`http://host.docker.internal:13378`; Linux/Pi → `http://172.17.0.1:13378`."
         ),
-        placeholder="http://host.docker.internal:13378",
+        placeholder="http://audiobookshelf:80",
     ),
     SettingDef(
         key="config.abs_api_key",
@@ -112,10 +111,10 @@ REGISTRY: list[SettingDef] = [
         label="Kavita URL",
         env_attr="kavita_url",
         help=(
-            "From the Library container: Windows → `http://host.docker.internal:5000`; "
-            "Linux/Pi → `http://172.17.0.1:5000` (common Kavita host port)."
+            "Bundled-media profile: `http://kavita:5000`. External: Windows → "
+            "`http://host.docker.internal:5000`; Linux/Pi → `http://172.17.0.1:5000`."
         ),
-        placeholder="http://host.docker.internal:5000",
+        placeholder="http://kavita:5000",
     ),
     SettingDef(
         key="config.kavita_api_key",
@@ -139,8 +138,8 @@ REGISTRY: list[SettingDef] = [
         label="LibraForge public URL",
         env_attr="libraforge_url",
         help=(
-            "Browser / Admin deep-link. Sibling stack — not in this compose. "
-            "Local: `http://127.0.0.1:5056`. See docs/libraforge.md."
+            "Browser / Admin deep-link. Bundled-media: `http://127.0.0.1:5056`. "
+            "External sibling: see docs/libraforge.md."
         ),
         placeholder="http://127.0.0.1:5056",
     ),
@@ -150,10 +149,11 @@ REGISTRY: list[SettingDef] = [
         label="LibraForge internal URL",
         env_attr="libraforge_internal_url",
         help=(
-            "Reachable from the Library container (API + health). Windows: "
-            "`http://host.docker.internal:5056`; Linux/Pi: `http://172.17.0.1:5056`."
+            "Reachable from the Library container (API + health). Bundled-media: "
+            "`http://libraforge:5056`. External: Windows `host.docker.internal:5056` / "
+            "Linux `172.17.0.1:5056`."
         ),
-        placeholder="http://host.docker.internal:5056",
+        placeholder="http://libraforge:5056",
     ),
     SettingDef(
         key="config.libraforge_pipeline_enabled",
@@ -715,8 +715,18 @@ async def update_config(updates: dict[str, str | None]) -> dict[str, Any]:
 
 # Docker / host URL presets for the instance setup wizard (editable in the UI).
 SETUP_STACK_PRESETS: dict[str, dict[str, str]] = {
+    "bundled_media": {
+        "label": "Bundled media (compose profile)",
+        "config.abs_url": "http://audiobookshelf:80",
+        "config.kavita_url": "http://kavita:5000",
+        "config.libraforge_url": "http://127.0.0.1:5056",
+        "config.libraforge_internal_url": "http://libraforge:5056",
+        "config.libraforge_pipeline_enabled": "true",
+        "config.ebook_pipeline_enabled": "true",
+        "config.libraforge_m4b_jobs": "1",
+    },
     "windows_docker": {
-        "label": "Windows (Docker Desktop)",
+        "label": "Windows (external / host.docker.internal)",
         "config.abs_url": "http://host.docker.internal:13378",
         "config.kavita_url": "http://host.docker.internal:5000",
         "config.libraforge_url": "http://127.0.0.1:5056",
@@ -726,7 +736,7 @@ SETUP_STACK_PRESETS: dict[str, dict[str, str]] = {
         "config.libraforge_m4b_jobs": "1",
     },
     "linux_docker": {
-        "label": "Linux / Pi (Docker bridge)",
+        "label": "Linux / Pi (external bridge)",
         "config.abs_url": "http://172.17.0.1:13378",
         "config.kavita_url": "http://172.17.0.1:5000",
         "config.libraforge_url": "http://127.0.0.1:5056",
@@ -736,6 +746,24 @@ SETUP_STACK_PRESETS: dict[str, dict[str, str]] = {
         "config.libraforge_m4b_jobs": "1",
     },
 }
+
+
+def _is_bundled_media_url(url: str | None) -> bool:
+    u = (url or "").strip().lower()
+    if not u:
+        return False
+    return any(
+        host in u
+        for host in (
+            "://audiobookshelf",
+            "://kavita:",
+            "://kavita/",
+            "://libraforge",
+            "audiobookshelf:80",
+            "kavita:5000",
+            "libraforge:5056",
+        )
+    )
 
 
 async def setup_status() -> dict[str, Any]:
@@ -754,6 +782,12 @@ async def setup_status() -> dict[str, Any]:
     knaben_rss = await get_effective_bool("scraper.knaben_rss_only", True)
 
     stack_done = bool(abs_url and abs_key) or bool(kav_url and kav_key)
+    bundled_media = (
+        _is_bundled_media_url(abs_url)
+        or _is_bundled_media_url(kav_url)
+        or _is_bundled_media_url(lf_internal)
+    )
+    bundled_ready = bundled_media and bool(abs_url and abs_key) and bool(kav_url and kav_key)
 
     steps = [
         {
@@ -762,11 +796,11 @@ async def setup_status() -> dict[str, Any]:
             "done": stack_done,
             "required": True,
             "help": (
-                "Required loadout for a new install. Connect Audiobookshelf and/or Kavita "
-                "(URL + API key; library id when needed), then LibraForge public + internal URLs "
-                "and pipeline toggles. Use a platform preset to pre-fill Docker host URLs — "
-                "Windows uses host.docker.internal; Linux/Pi uses the Docker bridge (172.17.0.1) "
-                "or shared-network service names. Soft health probes run when you continue."
+                "Fresh installs use compose profile bundled-media: Audiobookshelf, Kavita, and "
+                "LibraForge on the shared Docker network with API keys synced automatically. "
+                "If keys are already present, continue without re-entering them. Advanced overrides "
+                "still allow external ABS/Kavita/LF URLs (Pi production). Soft health probes run "
+                "when you continue."
             ),
         },
         {
@@ -861,6 +895,8 @@ async def setup_status() -> dict[str, Any]:
             "kavitaConfigured": bool(kav_url and kav_key),
             "libraforgeConfigured": bool(lf_url or lf_internal),
             "libraforgePipelineEnabled": lf_on,
+            "bundledMedia": bundled_media,
+            "bundledReady": bundled_ready,
         },
     }
 
@@ -888,19 +924,39 @@ async def validate_setup_connections() -> dict[str, Any]:
         "libraforge": lf_p,
         "prowlarr": prow_p,
     }
+    abs_url, abs_key, _ = await get_abs_connection()
+    kav_url, kav_key, _ = await get_kavita_connection()
+    lf_internal = await get_effective("config.libraforge_internal_url")
+    bundled_media = (
+        _is_bundled_media_url(abs_url)
+        or _is_bundled_media_url(kav_url)
+        or _is_bundled_media_url(lf_internal)
+    )
+    bundled_ready = bundled_media and bool(abs_url and abs_key) and bool(kav_url and kav_key)
+
     warnings: list[str] = []
     for name, probe in probes.items():
         if not probe.get("configured"):
             continue
         if not probe.get("connected"):
             err = probe.get("error") or "unreachable"
-            warnings.append(f"{name}: configured but not reachable ({err})")
+            # Soft: bundled installs may still be warming; never hard-block.
+            if bundled_ready and name in ("audiobookshelf", "kavita", "libraforge"):
+                warnings.append(f"{name}: bundled stack still warming ({err})")
+            else:
+                warnings.append(f"{name}: configured but not reachable ({err})")
     if not (abs_p.get("configured") or kav_p.get("configured")):
-        warnings.append("Configure at least Audiobookshelf or Kavita (URL + API key) before finishing.")
+        if not bundled_media:
+            warnings.append(
+                "Configure at least Audiobookshelf or Kavita (URL + API key), "
+                "or enable compose profile bundled-media."
+            )
     return {
         "ok": True,  # soft-fail: UI may continue with warnings
         "warnings": warnings,
         "probes": probes,
+        "bundledMedia": bundled_media,
+        "bundledReady": bundled_ready,
     }
 
 

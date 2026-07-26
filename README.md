@@ -180,7 +180,9 @@ flowchart TB
 - Audiobookshelf and/or Kavita reachable from the host (optional at install time)
 - A public HTTPS hostname (or Tailscale Funnel) if you want off-LAN access and push/Android
 
-**Mullvad / gluetun is optional.** Fresh installs start without the VPN sidecar so the stack is healthy before you add WireGuard keys. Enable later with `COMPOSE_PROFILES=vpn` and `ABB_PROXY_URL=http://gluetun:8888` (see `.env.example`).
+**Mullvad / gluetun is optional.** Fresh installs start without the VPN sidecar so the stack is healthy before you add WireGuard keys. Enable later by adding `vpn` to `COMPOSE_PROFILES` (e.g. `bundled-media,vpn`) and `ABB_PROXY_URL=http://gluetun:8888` (see `.env.example`).
+
+**Bundled media is the default for new installs.** Profile `bundled-media` starts Audiobookshelf, Kavita, and LibraForge on the same Docker network, wires internal URLs into `.env`, and bootstraps API keys (same idea as Jackett/Prowlarr sync). Existing Pi hosts that already use external ABS/Kavita/LF keep those URLs — leave the profile off. Expect ~1–2 GB extra RAM for the media sidecars.
 
 ---
 
@@ -194,16 +196,16 @@ cd library
 powershell -ExecutionPolicy Bypass -File .\scripts\install_library.ps1
 ```
 
-Unattended (CI / test box):
+Unattended (CI / test box) — includes bundled media:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_library.ps1 -Target "C:\dev\Library" -NonInteractive
 ```
 
-Or from a one-liner after clone (script lives in the repo):
+Opt out of bundled ABS/Kavita/LibraForge:
 
 ```powershell
-.\scripts\install_library.ps1 -NonInteractive
+.\scripts\install_library.ps1 -NonInteractive -SkipBundledMedia
 ```
 
 ### Linux / Raspberry Pi
@@ -221,7 +223,7 @@ Or run the installer against a fresh target; it clones from this repo by default
 curl -fsSL https://raw.githubusercontent.com/brutaliccus/Library/main/scripts/install_library.sh | bash
 ```
 
-The installers write `.env`, create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), apply **RSS-only** scraper defaults (unless you opt into deep crawls), build the stack, and wait for `/api/health`. **Mullvad is optional** (especially on Windows). After create-admin → create-library → offline PIN, open **`/admin/setup`** for the ABS / Kavita / LibraForge stack step (platform presets + soft health probes) and optional Open Library catalog. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead.
+The installers write `.env`, create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, then sync Jackett/Prowlarr/ABS/Kavita/LibraForge into `.env`. **Mullvad is optional** (especially on Windows). After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead.
 
 ### Indexer cache seed
 
@@ -252,12 +254,17 @@ The image **builds the frontend in Docker** — you do not need Node on the host
 
 App listens on **`http://127.0.0.1:8085`**.
 
-| Service | Port |
-|---------|------|
-| Library app | `8085` → container `8080` |
-| Prowlarr | `9696` |
-| FlareSolverr | `8191` |
-| Jackett | `9117` |
+| Service | Port | Notes |
+|---------|------|--------|
+| Library app | `8085` → container `8080` | Always |
+| Prowlarr | `9696` | Always |
+| FlareSolverr | `8191` | Always |
+| Jackett | `9117` | Always |
+| Audiobookshelf | `13378` → container `80` | `bundled-media` profile |
+| Kavita | `5000` | `bundled-media` profile |
+| LibraForge | `5056` | `bundled-media` profile |
+
+Internal URLs used by the app container (written by installers): `http://audiobookshelf:80`, `http://kavita:5000`, `http://libraforge:5056`.
 
 ### First-run wizard
 
@@ -265,8 +272,8 @@ App listens on **`http://127.0.0.1:8085`**.
    - Only when `GET /api/auth/setup-required` reports `setup_required: true` (user count is 0).  
    - Reusing an existing `data/app.db` with users skips this step; delete `data/app.db` (+ `-wal`/`-shm`) for a clean first-run.  
 2. **Onboarding** → create your library (name + debrid keys). That generates the invite link.  
-3. **`/admin/setup`** — ABS/Kavita, Prowlarr/Jackett/Flare, debrid (TorBox optional), LibraForge + ebook pipelines, staging checklist, catalog APIs, Android APK repo, scraper mode  
-4. Confirm folder conventions: ABS ignores `.unorganized`; Kavita excludes `unorganized`  
+3. **`/admin/setup`** — with bundled-media, Stack shows **Using bundled stack** (keys already synced); otherwise enter external ABS/Kavita/LF. Then indexers, debrid (TorBox optional), staging checklist, catalog APIs, Android APK repo, scraper mode  
+4. Confirm folder conventions: ABS ignores `.unorganized`; Kavita excludes `unorganized` (bundled bootstrap sets Kavita exclude patterns)  
 5. Share the **invite link** from Settings (`/join/CODE`). Friends open it (Android app if installed, otherwise the site), set username/password + offline PIN, and join — no approval step.  
 6. Anytime later use the Admin left-nav: **Overview** / **Requests** / **Users**, **Discovery** / **Catalog** (Open Library build + schedule), **Pipelines**, **Integrations** (optional OpenRouter LLM assist — off by default: Metadata Forge / ebook identify retry, multi-book split, file prune, ASIN recovery; shows per-key credit usage), and **Settings**
 

@@ -4,7 +4,7 @@
 #   .\scripts\install_library.ps1 -Target "C:\dev\Library" -NonInteractive
 #
 # Prerequisites: Docker Desktop (Engine + Compose), Git (for clone),
-# open ports 8085 / 9696 / 8191 / 9117.
+# open ports 8085 / 9696 / 8191 / 9117 / 13378 / 5000 / 5056 (bundled-media).
 param(
     [string]$Target = "",
     [string]$RepoUrl = "",
@@ -15,10 +15,12 @@ param(
     [string]$EbookHost = "./media/ebooks",
     [string]$OlHost = "./media/openlibrary",
     [string]$ApkRepo = "brutaliccus/Library",
+    [string]$LibraForgeRepo = "https://github.com/coconautilus17/LibraForge.git",
     [switch]$EnableVpn,
     [switch]$EnableDeepScrapers,
     [switch]$DisableLibraForgePipeline,
     [switch]$DisableEbookPipeline,
+    [switch]$SkipBundledMedia,
     [switch]$NonInteractive,
     [switch]$SkipBuild
 )
@@ -126,14 +128,73 @@ function Test-SeedPresent([string]$SeedGz) {
     return (Test-Path $SeedGz) -and ((Get-Item -LiteralPath $SeedGz).Length -gt 1MB)
 }
 
+function Get-EnvKeyValue([string]$EnvPath, [string]$Key) {
+    if (-not (Test-Path $EnvPath)) { return "" }
+    foreach ($line in [System.IO.File]::ReadAllLines($EnvPath)) {
+        if ($line -match ("^" + [regex]::Escape($Key) + "=(.*)$")) {
+            return $Matches[1].Trim()
+        }
+    }
+    return ""
+}
+
+function Merge-ComposeProfiles([string[]]$Profiles) {
+    $parts = @()
+    foreach ($p in $Profiles) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        foreach ($piece in ($p -split ',')) {
+            $t = $piece.Trim()
+            if ($t -and ($parts -notcontains $t)) { $parts += $t }
+        }
+    }
+    return ($parts -join ",")
+}
+
+function Test-LooksExternalMediaUrl([string]$Url) {
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+    if ($Url -match 'your-|placeholder|changeme') { return $false }
+    if ($Url -match 'audiobookshelf|://kavita(:|/|$)|libraforge|host\.docker\.internal|127\.0\.0\.1|localhost') {
+        return $false
+    }
+    return $true
+}
+
+function Ensure-LibraForgeClone([string]$RepoRoot, [string]$GitUrl) {
+    $lfDir = Join-Path $RepoRoot "libraforge"
+    $dockerfile = Join-Path $lfDir "Dockerfile"
+    if (Test-Path $dockerfile) {
+        Write-Ok "LibraForge companion present at $lfDir"
+        return $true
+    }
+    if (-not (Test-Command "git")) {
+        Write-Warn "Git required to clone LibraForge companion - bundled LibraForge skipped"
+        return $false
+    }
+    Write-Step "==> Cloning LibraForge companion into ./libraforge"
+    if ((Test-Path $lfDir) -and -not (Get-ChildItem -Force $lfDir | Select-Object -First 1)) {
+        Remove-Item -Path $lfDir -Force -Recurse -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $lfDir) {
+        Write-Warn "libraforge/ exists but has no Dockerfile - not overwriting"
+        return $false
+    }
+    git clone --depth 1 $GitUrl $lfDir
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $dockerfile)) {
+        Write-Warn "LibraForge clone failed - continue without bundled LibraForge service"
+        return $false
+    }
+    Write-Ok "LibraForge cloned"
+    return $true
+}
+
 function Ensure-IndexerSeed([string]$RepoRoot) {
-    # Warm torrent/indexer cache (~36 MB gzip → ~150 MB on first-boot import).
+    # Warm torrent/indexer cache (~36 MB gzip -> ~150 MB on first-boot import).
     # Prefer repo/LFS copy; else download the GitHub Release asset (optional if it fails).
     $seedDir = Join-Path $RepoRoot "seed"
     $seedGz = Join-Path $seedDir "indexer_cache.db.gz"
     if (Test-SeedPresent $seedGz) {
         $mb = [math]::Round((Get-Item -LiteralPath $seedGz).Length / 1MB, 1)
-        Write-Ok "Indexer cache seed present ($mb MB compressed)"
+        Write-Ok "Indexer cache seed present $($mb) MB compressed"
         return
     }
 
@@ -177,7 +238,7 @@ function Ensure-IndexerSeed([string]$RepoRoot) {
             Write-Warn "Download failed: $($_.Exception.Message)"
         }
     }
-    Write-Warn "Indexer cache seed missing — install continues; first boot starts with an empty cache (optional)."
+    Write-Warn "Indexer cache seed missing - install continues; first boot starts with an empty cache (optional)."
     Write-Warn "Place seed/indexer_cache.db.gz manually or re-run after the data-seed GitHub Release is available."
 }
 
@@ -289,17 +350,49 @@ Set-EnvKey $envPath "AUDIOBOOK_HOST_DIR" $AUDIO_HOST
 Set-EnvKey $envPath "EBOOK_HOST_DIR" $EBOOK_HOST
 Set-EnvKey $envPath "OPENLIBRARY_HOST_DIR" $OL_HOST
 
-# Windows Docker Desktop defaults (editable later in /admin/setup).
-$defaultAbsUrl = "http://host.docker.internal:13378"
-$defaultKavUrl = "http://host.docker.internal:5000"
-
-if ($NonInteractive) {
-    Write-Step "==> Writing Windows Docker stack defaults (API keys via /admin/setup onboarding)"
-    Set-EnvKey $envPath "ABS_URL" $defaultAbsUrl
-    Set-EnvKey $envPath "KAVITA_URL" $defaultKavUrl
+# Bundled ABS+Kavita+LibraForge on the compose network (default for fresh installs).
+# Skip when operator opts out, or when .env already points at an external media stack.
+$existingAbsUrl = Get-EnvKeyValue $envPath "ABS_URL"
+$existingAbsKey = Get-EnvKeyValue $envPath "ABS_API_KEY"
+$externalAlready = (Test-LooksExternalMediaUrl $existingAbsUrl) -or (
+    $existingAbsKey -and $existingAbsKey -notmatch 'your-|placeholder'
+)
+$bundledDefault = -not $SkipBundledMedia -and -not $externalAlready
+$useBundled = if ($NonInteractive) {
+    [bool]$bundledDefault
 }
 else {
-    Write-Step "==> Stack integrations (Enter keeps Docker Desktop defaults; keys can wait for /admin/setup)"
+    if ($externalAlready) {
+        Write-Warn "Existing external ABS/Kavita settings detected - bundled media off by default."
+        Read-YesNo "Start bundled Audiobookshelf + Kavita + LibraForge (Docker profile bundled-media)?" $false
+    }
+    else {
+        Write-Step "==> Bundled media stack (recommended for new installs)"
+        Write-Host "Starts Audiobookshelf (:13378), Kavita (:5000), and LibraForge (:5056) on the same Docker network."
+        Write-Host "API keys are bootstrapped into .env after first start - no manual key entry."
+        Write-Warn "Adds ~1-2 GB RAM vs core indexer stack alone."
+        Read-YesNo "Enable bundled media stack (profile bundled-media)?" $true
+    }
+}
+
+if ($useBundled) {
+    if (-not (Ensure-LibraForgeClone $TARGET $LibraForgeRepo)) {
+        Write-Warn "LibraForge companion unavailable - bundled-media disabled for this run"
+        $useBundled = $false
+    }
+}
+if ($useBundled) {
+    Set-EnvKey $envPath "ABS_URL" "http://audiobookshelf:80"
+    Set-EnvKey $envPath "KAVITA_URL" "http://kavita:5000"
+    Set-EnvKey $envPath "LIBRAFORGE_URL" "http://127.0.0.1:5056"
+    Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" "http://libraforge:5056"
+    Write-Ok "Bundled-media URLs written (keys sync after containers start)"
+}
+elseif (-not $NonInteractive) {
+    Write-Step "==> External stack integrations (Enter keeps defaults; keys can wait for /admin/setup)"
+    $defaultAbsUrl = if ($existingAbsUrl) { $existingAbsUrl } else { "http://host.docker.internal:13378" }
+    $defaultKavUrl = Get-EnvKeyValue $envPath "KAVITA_URL"
+    if (-not $defaultKavUrl) { $defaultKavUrl = "http://host.docker.internal:5000" }
     $prowlarr = Read-Default "Prowlarr API key" ""
     $absUrl = Read-Default "Audiobookshelf URL" $defaultAbsUrl
     $absKey = Read-Default "Audiobookshelf API key" ""
@@ -318,13 +411,23 @@ else {
     else { Set-EnvKey $envPath "REAL_DEBRID_API_TOKEN" "" }
     if ($tor) { Set-EnvKey $envPath "TORBOX_API_TOKEN" $tor }
 }
+elseif (-not $externalAlready) {
+    # NonInteractive + skipped bundled: leave placeholders for /admin/setup.
+    Set-EnvKey $envPath "ABS_URL" "http://host.docker.internal:13378"
+    Set-EnvKey $envPath "KAVITA_URL" "http://host.docker.internal:5000"
+}
 
 Write-Step "==> LibraForge / ebook pipelines"
 $lfOn = if ($NonInteractive) { -not $DisableLibraForgePipeline } else { Read-YesNo "Enable automated LibraForge audiobook pipeline?" $true }
 $ebOn = if ($NonInteractive) { -not $DisableEbookPipeline } else { Read-YesNo "Enable ebook organizer pipeline?" $true }
-# Sensible new-install defaults: public localhost + internal host.docker.internal.
-Set-EnvKey $envPath "LIBRAFORGE_URL" "http://127.0.0.1:5056"
-Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" "http://host.docker.internal:5056"
+if (-not $useBundled) {
+    if (-not (Get-EnvKeyValue $envPath "LIBRAFORGE_URL")) {
+        Set-EnvKey $envPath "LIBRAFORGE_URL" "http://127.0.0.1:5056"
+    }
+    if (-not (Get-EnvKeyValue $envPath "LIBRAFORGE_INTERNAL_URL")) {
+        Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" "http://host.docker.internal:5056"
+    }
+}
 Set-EnvKey $envPath "LIBRAFORGE_M4B_JOBS" "1"
 Set-EnvKey $envPath "LIBRAFORGE_PIPELINE_ENABLED" ($(if ($lfOn) { "true" } else { "false" }))
 Set-EnvKey $envPath "EBOOK_PIPELINE_ENABLED" ($(if ($ebOn) { "true" } else { "false" }))
@@ -355,23 +458,34 @@ else {
 # VPN / gluetun is optional and OFF by default on Windows (Mullvad not required).
 $vpn = [bool]$EnableVpn
 if (-not $NonInteractive) {
-    $vpn = Read-YesNo "Enable Mullvad VPN sidecar (gluetun) now? Optional — not required. Needs WireGuard keys." $false
+    $vpn = Read-YesNo "Enable Mullvad VPN sidecar (gluetun) now? Optional - not required. Needs WireGuard keys." $false
 }
+$profileParts = @()
+if ($useBundled) { $profileParts += "bundled-media" }
 if ($vpn) {
-    Set-EnvKey $envPath "COMPOSE_PROFILES" "vpn"
+    $profileParts += "vpn"
     Set-EnvKey $envPath "ABB_PROXY_URL" "http://gluetun:8888"
-    Write-Warn "Set WIREGUARD_PRIVATE_KEY and WIREGUARD_ADDRESSES in .env, then: docker compose up -d"
+    Write-Warn "Set WIREGUARD_PRIVATE_KEY and WIREGUARD_ADDRESSES in .env if not already present."
 }
 else {
-    Set-EnvKey $envPath "COMPOSE_PROFILES" ""
     Set-EnvKey $envPath "ABB_PROXY_URL" ""
     # Present empty keys so compose does not warn on unset WIREGUARD_* vars.
     Set-EnvKey $envPath "WIREGUARD_PRIVATE_KEY" ""
     Set-EnvKey $envPath "WIREGUARD_ADDRESSES" ""
     Write-Ok "VPN profile off - stack starts without gluetun. Configure Mullvad later in Admin."
 }
+$mergedProfiles = Merge-ComposeProfiles $profileParts
+Set-EnvKey $envPath "COMPOSE_PROFILES" $mergedProfiles
+if ($useBundled) {
+    Write-Ok "COMPOSE_PROFILES=$mergedProfiles (bundled-media starts ABS/Kavita/LibraForge)"
+}
 
-foreach ($d in @("data", "prowlarr-config", "jackett-config", "media\audiobooks", "media\ebooks", "media\openlibrary")) {
+foreach ($d in @(
+        "data", "prowlarr-config", "jackett-config",
+        "audiobookshelf-config", "audiobookshelf-metadata", "kavita-config",
+        "libraforge-auth", "libraforge-config", "libraforge-reports",
+        "media\audiobooks", "media\ebooks", "media\openlibrary"
+    )) {
     $p = Join-Path $TARGET $d
     if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
 }
@@ -399,7 +513,13 @@ Ensure-IndexerSeed $TARGET
 
 Write-Step "==> Starting Docker stack"
 Write-Warn "First boot imports seed/indexer_cache.db.gz into an empty DB (~150 MB). This may take a few minutes."
-Write-Host "After create-admin / create-library / offline PIN, /admin/setup configures ABS, Kavita, and LibraForge."
+if ($useBundled) {
+    Write-Warn "First LibraForge image build can take several minutes."
+    Write-Host "Bundled media keys sync automatically after services are healthy."
+}
+else {
+    Write-Host "After create-admin / create-library / offline PIN, /admin/setup configures ABS, Kavita, and LibraForge."
+}
 if ($SkipBuild) {
     $upCode = Invoke-Compose @("compose", "up", "-d")
 }
@@ -435,19 +555,37 @@ $syncPs1 = Join-Path $TARGET "scripts\sync_jackett_env.ps1"
 if (Test-Path $syncPs1) {
     Write-Step "==> Syncing Jackett API key into .env"
     & powershell -ExecutionPolicy Bypass -File $syncPs1 -RepoRoot $TARGET
-    [void](Invoke-Compose @("compose", "up", "-d", "app"))
 }
 
 $prowlSyncPs1 = Join-Path $TARGET "scripts\sync_prowlarr_env.ps1"
 if (Test-Path $prowlSyncPs1) {
     Write-Step "==> Syncing Prowlarr API key into .env"
     & powershell -ExecutionPolicy Bypass -File $prowlSyncPs1 -RepoRoot $TARGET
-    [void](Invoke-Compose @("compose", "up", "-d", "app"))
 }
+
+if ($useBundled) {
+    $absSync = Join-Path $TARGET "scripts\sync_abs_env.ps1"
+    $kavSync = Join-Path $TARGET "scripts\sync_kavita_env.ps1"
+    $lfSync = Join-Path $TARGET "scripts\sync_libraforge_env.ps1"
+    if (Test-Path $absSync) {
+        Write-Step "==> Bootstrapping Audiobookshelf API key + library"
+        & powershell -ExecutionPolicy Bypass -File $absSync -RepoRoot $TARGET
+    }
+    if (Test-Path $kavSync) {
+        Write-Step "==> Bootstrapping Kavita API key + library"
+        & powershell -ExecutionPolicy Bypass -File $kavSync -RepoRoot $TARGET
+    }
+    if (Test-Path $lfSync) {
+        Write-Step "==> Wiring LibraForge URLs"
+        & powershell -ExecutionPolicy Bypass -File $lfSync -RepoRoot $TARGET
+    }
+}
+
+[void](Invoke-Compose @("compose", "up", "-d", "app"))
 
 $dbPath = Join-Path $TARGET "data\app.db"
 if (Test-Path $dbPath) {
-    Write-Warn "Existing data\app.db found — first-run admin create only appears when there are zero users."
+    Write-Warn "Existing data\app.db found - first-run admin create only appears when there are zero users."
     Write-Warn "To reset first-run: stop the stack, delete data\app.db (+ -wal/-shm), then docker compose up -d."
 }
 
@@ -457,16 +595,24 @@ Write-Host ""
 Write-Host "Next steps:"
 Write-Host ("  1. Open " + $APP_URL.TrimEnd('/') + "/login  or  http://127.0.0.1:8085/login")
 Write-Host "  2. Create the admin account (shown automatically when the DB has zero users)"
-Write-Host "  3. Create library + offline PIN, then complete /admin/setup (ABS / Kavita / LibraForge presets)"
-Write-Host "  4. Optional Open Library catalog from that wizard (skip freely — seed cache is enough)"
-Write-Host "  5. ABS: confirm audiobook staging .unorganized is ignored"
-Write-Host "  6. Kavita: exclude ebook staging folder unorganized"
-Write-Host "  7. Optional Mullvad later: WireGuard keys + COMPOSE_PROFILES=vpn (not required for Windows)"
-Write-Host "  8. Optional LibraForge sibling - see docs/libraforge.md"
+Write-Host "  3. Create library + offline PIN, then /admin/setup"
+if ($useBundled) {
+    Write-Host "     Stack step should show Using bundled stack (keys already synced) - Continue"
+}
+else {
+    Write-Host "     Stack step: ABS / Kavita / LibraForge presets + soft health probes"
+}
+Write-Host "  4. Optional Open Library catalog from that wizard (skip freely - seed cache is enough)"
+Write-Host "  5. Optional Mullvad later: WireGuard keys + add vpn to COMPOSE_PROFILES"
 Write-Host ""
 Write-Host ("Stack dir: " + $TARGET)
 Write-Host ("Logs:      Set-Location '" + $TARGET + "'; docker compose logs -f app")
-Write-Host "Ports:     app 8085 | prowlarr 9696 | flaresolverr 8191 | jackett 9117"
+if ($useBundled) {
+    Write-Host "Ports:     app 8085 | ABS 13378 | Kavita 5000 | LibraForge 5056 | prowlarr 9696 | flare 8191 | jackett 9117"
+}
+else {
+    Write-Host "Ports:     app 8085 | prowlarr 9696 | flaresolverr 8191 | jackett 9117"
+}
 Write-Host ""
 Write-Host "Note: Linux host cron helpers are skipped on Windows."
 Write-Host "      Use Task Scheduler or Admin -> Catalog schedule instead."

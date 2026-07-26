@@ -135,60 +135,68 @@ export default function OfflineUnlockModal({
           <div className="mb-3 p-2 bg-red-900/30 text-red-400 text-xs rounded-lg">{error}</div>
         )}
 
-        <label className="block text-[11px] text-gray-500 mb-1">
-          {mode === "setup" ? "Choose a PIN (4–8 digits)" : "PIN"}
-        </label>
-        <input
-          type="password"
-          inputMode="numeric"
-          autoComplete="one-time-code"
-          value={pin}
-          onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 8))}
-          className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3 tracking-widest"
-          autoFocus
-        />
-
-        {mode === "setup" && (
-          <>
-            <label className="block text-[11px] text-gray-500 mb-1">Confirm PIN</label>
-            <input
-              type="password"
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              value={pinConfirm}
-              onChange={(e) => setPinConfirm(e.target.value.replace(/\D/g, "").slice(0, 8))}
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3 tracking-widest"
-            />
-            {bioOk && (
-              <label className="flex items-center gap-2 text-xs text-gray-300 mb-4 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={enableBio}
-                  onChange={(e) => setEnableBio(e.target.checked)}
-                  className="rounded border-gray-600"
-                />
-                <Fingerprint size={14} className="text-brand-400" />
-                Also unlock with fingerprint / face
-              </label>
-            )}
-          </>
-        )}
-
-        <button
-          type="button"
-          disabled={busy || pin.length < 4 || (mode === "setup" && pinConfirm.length < 4)}
-          onClick={() => void (mode === "setup" ? submitSetup() : submitUnlock())}
-          className="w-full flex items-center justify-center gap-2 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-500 disabled:opacity-50"
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void (mode === "setup" ? submitSetup() : submitUnlock());
+          }}
         >
-          {busy ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
-          {busy
-            ? mode === "setup"
-              ? "Saving…"
-              : "Unlocking…"
-            : mode === "setup"
-              ? "Save & continue"
-              : "Unlock"}
-        </button>
+          <label className="block text-[11px] text-gray-500 mb-1">
+            {mode === "setup" ? "Choose a PIN (4–8 digits)" : "PIN"}
+          </label>
+          <input
+            type="password"
+            name="offline-pin"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            value={pin}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 8))}
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3 tracking-widest"
+            autoFocus
+          />
+
+          {mode === "setup" && (
+            <>
+              <label className="block text-[11px] text-gray-500 mb-1">Confirm PIN</label>
+              <input
+                type="password"
+                name="offline-pin-confirm"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={pinConfirm}
+                onChange={(e) => setPinConfirm(e.target.value.replace(/\D/g, "").slice(0, 8))}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3 tracking-widest"
+              />
+              {bioOk && (
+                <label className="flex items-center gap-2 text-xs text-gray-300 mb-4 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={enableBio}
+                    onChange={(e) => setEnableBio(e.target.checked)}
+                    className="rounded border-gray-600"
+                  />
+                  <Fingerprint size={14} className="text-brand-400" />
+                  Also unlock with fingerprint / face
+                </label>
+              )}
+            </>
+          )}
+
+          <button
+            type="submit"
+            disabled={busy || pin.length < 4 || (mode === "setup" && pinConfirm.length < 4)}
+            className="w-full flex items-center justify-center gap-2 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-500 disabled:opacity-50"
+          >
+            {busy ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
+            {busy
+              ? mode === "setup"
+                ? "Saving…"
+                : "Unlocking…"
+              : mode === "setup"
+                ? "Save & continue"
+                : "Unlock"}
+          </button>
+        </form>
 
         {mode === "setup" && allowSkip && !required && (
           <button

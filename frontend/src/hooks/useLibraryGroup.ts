@@ -33,6 +33,8 @@ export interface LibraryGroupInfo {
 
 export interface LibraryGroupResponse {
   library: LibraryGroupInfo | null;
+  /** Server .env / Admin → Config already has RD and/or Torbox keys. */
+  serverDebridConfigured?: boolean;
 }
 
 /** The user's library group; `library: null` means onboarding is required. */

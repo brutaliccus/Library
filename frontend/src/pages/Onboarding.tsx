@@ -64,9 +64,17 @@ export default function Onboarding() {
   const [enableBio, setEnableBio] = useState(false);
   const [bioOk, setBioOk] = useState(false);
   const [pendingLibName, setPendingLibName] = useState("Library");
+  const [serverDebridConfigured, setServerDebridConfigured] = useState(false);
 
   useEffect(() => {
     void biometricAvailable().then(setBioOk);
+  }, []);
+
+  useEffect(() => {
+    void api
+      .get("/libraries/me")
+      .then(({ data }) => setServerDebridConfigured(!!data?.serverDebridConfigured))
+      .catch(() => setServerDebridConfigured(false));
   }, []);
 
   // Invite signup lands here; skip if PIN already enrolled on this device.
@@ -178,13 +186,31 @@ export default function Onboarding() {
     setCoverPreview(file ? URL.createObjectURL(file) : null);
   };
 
+  const apiErrorDetail = (e: unknown, fallback: string): string => {
+    const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    if (Array.isArray(detail)) {
+      const parts = detail
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item && typeof item === "object" && "msg" in item) {
+            return String((item as { msg: unknown }).msg);
+          }
+          return "";
+        })
+        .filter(Boolean);
+      if (parts.length) return parts.join("; ");
+    }
+    return fallback;
+  };
+
   const handleCreate = async () => {
     setError(null);
     if (!name.trim()) {
       setError("Give your library a name");
       return;
     }
-    if (!rdToken.trim() && !torboxToken.trim()) {
+    if (!rdToken.trim() && !torboxToken.trim() && !serverDebridConfigured) {
       setError("Enter at least one API key (Real-Debrid or Torbox)");
       return;
     }
@@ -227,8 +253,8 @@ export default function Onboarding() {
         );
       }
       await finish(library);
-    } catch (e: any) {
-      setError(e.response?.data?.detail || "Failed to create library");
+    } catch (e: unknown) {
+      setError(apiErrorDetail(e, "Failed to create library"));
     } finally {
       setBusy(false);
     }
@@ -382,6 +408,12 @@ export default function Onboarding() {
                 </div>
               </div>
             </div>
+            {serverDebridConfigured && (
+              <p className="text-[11px] text-emerald-400/90 leading-relaxed">
+                Server debrid keys are already configured — you can leave both fields blank
+                and this library will use them.
+              </p>
+            )}
             <div>
               <label className="block text-xs font-medium text-gray-400 mb-1.5">
                 Real-Debrid API key{" "}
@@ -397,7 +429,11 @@ export default function Onboarding() {
               <input
                 value={rdToken}
                 onChange={(e) => setRdToken(e.target.value)}
-                placeholder="Optional if you provide a Torbox key"
+                placeholder={
+                  serverDebridConfigured
+                    ? "Optional — blank uses server key"
+                    : "Optional if you provide a Torbox key"
+                }
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-500 font-mono"
               />
             </div>
@@ -416,7 +452,11 @@ export default function Onboarding() {
               <input
                 value={torboxToken}
                 onChange={(e) => setTorboxToken(e.target.value)}
-                placeholder="Optional if you provide a Real-Debrid key"
+                placeholder={
+                  serverDebridConfigured
+                    ? "Optional — blank uses server key"
+                    : "Optional if you provide a Real-Debrid key"
+                }
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-500 font-mono"
               />
             </div>
@@ -498,7 +538,13 @@ export default function Onboarding() {
         )}
 
         {mode === "offline-pin" && (
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+          <form
+            className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleOfflinePin();
+            }}
+          >
             <p className="text-xs text-gray-400 leading-relaxed">
               Required so you can open downloads offline. Optional fingerprint / face unlock
               uses this device&apos;s biometrics.
@@ -509,6 +555,7 @@ export default function Onboarding() {
               </label>
               <input
                 type="password"
+                name="offline-pin"
                 inputMode="numeric"
                 autoComplete="one-time-code"
                 value={pin}
@@ -521,6 +568,7 @@ export default function Onboarding() {
               <label className="block text-xs font-medium text-gray-400 mb-1.5">Confirm PIN</label>
               <input
                 type="password"
+                name="offline-pin-confirm"
                 inputMode="numeric"
                 autoComplete="one-time-code"
                 value={pinConfirm}
@@ -542,15 +590,14 @@ export default function Onboarding() {
             )}
             {error && <p className="text-xs text-red-400">{error}</p>}
             <button
-              type="button"
-              onClick={() => void handleOfflinePin()}
+              type="submit"
               disabled={busy || pin.length < 4 || pinConfirm.length < 4}
               className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-500 disabled:opacity-50 transition-colors"
             >
               {busy ? <Loader2 size={15} className="animate-spin" /> : <KeyRound size={15} />}
               {busy ? "Saving…" : pinStepOnly ? "Save & continue" : "Save PIN & finish"}
             </button>
-          </div>
+          </form>
         )}
       </div>
     </div>

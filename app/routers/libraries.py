@@ -164,9 +164,13 @@ async def my_library_group(
 ):
     """The user's library group, or {"library": null} when onboarding is needed."""
     group = await _get_group(user, db)
+    server_debrid = await _server_has_debrid_keys()
     if not group:
-        return {"library": None}
-    return {"library": await _serialize_group(group, user, db)}
+        return {"library": None, "serverDebridConfigured": server_debrid}
+    return {
+        "library": await _serialize_group(group, user, db),
+        "serverDebridConfigured": server_debrid,
+    }
 
 
 async def _validate_tokens(rd_token: str, torbox_token: str) -> None:
@@ -187,6 +191,15 @@ async def _validate_tokens(rd_token: str, torbox_token: str) -> None:
             raise HTTPException(status_code=400, detail="Torbox API key was rejected by Torbox")
         finally:
             debrid_tokens.clear_tokens()
+
+
+async def _server_has_debrid_keys() -> bool:
+    """True when Admin/Config (or .env) already has RD and/or Torbox keys."""
+    from app.services import instance_settings
+
+    rd = (await instance_settings.get_effective("config.real_debrid_api_token")).strip()
+    tb = (await instance_settings.get_effective("config.torbox_api_token")).strip()
+    return bool(rd or tb)
 
 
 async def _ensure_can_leave(user: User, db: AsyncSession) -> None:
@@ -216,23 +229,35 @@ async def create_group(
 ):
     """Create a library group with your own API keys and become its owner."""
     name = body.name.strip()
+    rd = (body.real_debrid_api_token or "").strip()
+    tb = (body.torbox_api_token or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Library name is required")
-    if not body.real_debrid_api_token.strip() and not body.torbox_api_token.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Provide a Real-Debrid or Torbox API key (at least one)",
+    if not rd and not tb:
+        # Fresh installs often already have keys in .env / Admin → Config.
+        # Empty group tokens fall back to those server defaults (see debrid_tokens).
+        if not await _server_has_debrid_keys():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Provide a Real-Debrid or Torbox API key (at least one), "
+                    "or configure server keys in Admin → Config"
+                ),
+            )
+        logger.info(
+            "libraries/create: using empty group tokens; server debrid keys will apply"
         )
     await _ensure_can_leave(user, db)
-    await _validate_tokens(body.real_debrid_api_token.strip(), body.torbox_api_token.strip())
+    if rd or tb:
+        await _validate_tokens(rd, tb)
 
     old_group_id = user.library_group_id
     theme = normalize_theme(body.default_theme) or DEFAULT_THEME
     group = LibraryGroup(
         name=name,
         owner_user_id=user.id,
-        real_debrid_api_token=body.real_debrid_api_token.strip(),
-        torbox_api_token=body.torbox_api_token.strip(),
+        real_debrid_api_token=rd,
+        torbox_api_token=tb,
         default_theme=theme,
     )
     db.add(group)

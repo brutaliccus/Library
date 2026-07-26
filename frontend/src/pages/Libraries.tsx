@@ -38,7 +38,8 @@ import {
 } from "../utils/offlineUnlock";
 
 export default function LibrariesPage() {
-  const { user, logout, enterLibrary, enterLibraryOffline, login, sessionReady } = useAuth();
+  const { user, logout, enterLibrary, enterLibraryOffline, login, sessionReady, setupRequired } =
+    useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
   const online = useOnlineStatus();
@@ -357,15 +358,26 @@ export default function LibrariesPage() {
             <p className="text-gray-200 font-medium">No libraries on this device</p>
             <p className="text-sm text-gray-500 mt-1 mb-5">
               {online
-                ? "Use Add or sign in above — paste an invite link to join, or sign in if you already have an account (admins don’t need an invite)."
+                ? setupRequired
+                  ? "This server has no admin yet — create the first account to continue."
+                  : "Use Add or sign in above — paste an invite link to join, or sign in if you already have an account (admins don’t need an invite)."
                 : "Connect once to join or sign in, then set up offline unlock for next time."}
             </p>
-            <p className="text-xs text-gray-600">
-              Or{" "}
-              <Link to="/join" className="text-brand-400 hover:text-brand-300">
-                open join page
+            {setupRequired && online ? (
+              <Link
+                to="/login"
+                className="inline-flex items-center justify-center gap-2 px-5 h-11 rounded-full bg-brand-600 text-white hover:bg-brand-500 text-sm font-medium"
+              >
+                Create admin account
               </Link>
-            </p>
+            ) : (
+              <p className="text-xs text-gray-600">
+                Or{" "}
+                <Link to="/join" className="text-brand-400 hover:text-brand-300">
+                  open join page
+                </Link>
+              </p>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">

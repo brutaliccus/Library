@@ -369,13 +369,19 @@ if (Test-Path $syncPs1) {
     [void](Invoke-Compose @("compose", "up", "-d", "app"))
 }
 
+$dbPath = Join-Path $TARGET "data\app.db"
+if (Test-Path $dbPath) {
+    Write-Warn "Existing data\app.db found — first-run admin create only appears when there are zero users."
+    Write-Warn "To reset first-run: stop the stack, delete data\app.db (+ -wal/-shm), then docker compose up -d."
+}
+
 Write-Ok ""
 Write-Ok "Install complete."
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host ("  1. Open " + $APP_URL + "  or  http://127.0.0.1:8085")
-Write-Host "  2. Create the admin account"
-Write-Host "  3. Complete /admin/setup"
+Write-Host ("  1. Open " + $APP_URL.TrimEnd('/') + "/login  or  http://127.0.0.1:8085/login")
+Write-Host "  2. Create the admin account (shown automatically when the DB has zero users)"
+Write-Host "  3. Complete onboarding (create library) then /admin/setup"
 Write-Host "  4. ABS: confirm audiobook staging .unorganized is ignored"
 Write-Host "  5. Kavita: exclude ebook staging folder unorganized"
 Write-Host "  6. Optional Mullvad: WireGuard keys + COMPOSE_PROFILES=vpn + ABB_PROXY_URL=http://gluetun:8888"

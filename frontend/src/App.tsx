@@ -47,8 +47,12 @@ function authGatePath(user: { mustChangePassword: boolean; mustSetEmail: boolean
   return null;
 }
 
+function unauthHome(setupRequired: boolean): string {
+  return setupRequired ? "/login" : "/libraries";
+}
+
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { user, isLoading, sessionReady, offlineSession } = useAuth();
+  const { user, isLoading, sessionReady, offlineSession, setupRequired } = useAuth();
   const online = useOnlineStatus();
   const hasLibraryToken = !!localStorage.getItem("access_token");
   const libraryQuery = useLibraryGroup(
@@ -61,7 +65,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
       !offlineSession
   );
   if (isLoading || !sessionReady) return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
-  if (!hasLibraryToken || !user) return <Navigate to="/libraries" />;
+  if (!hasLibraryToken || !user) return <Navigate to={unauthHome(setupRequired)} />;
   const gate = authGatePath(user);
   // Offline unlock restores must_* flags from cache — don't block reading offline.
   if (gate && online && !offlineSession && !isLikelyOffline()) return <Navigate to={gate} />;
@@ -77,12 +81,30 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 function OnboardingRoute({ children }: { children: React.ReactNode }) {
-  const { user, isLoading } = useAuth();
+  const { user, isLoading, setupRequired } = useAuth();
   if (isLoading) return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
-  if (!user) return <Navigate to="/libraries" />;
+  if (!user) return <Navigate to={unauthHome(setupRequired)} />;
   const gate = authGatePath(user);
   if (gate) return <Navigate to={gate} />;
   return <>{children}</>;
+}
+
+/** Zero users → force first-run admin create on /login (not invite-only /libraries). */
+function FirstRunRedirect({ children }: { children: React.ReactNode }) {
+  const { user, sessionReady, setupRequired } = useAuth();
+  if (!sessionReady) {
+    return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
+  }
+  if (setupRequired && !user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+function CatchAllHome() {
+  const { user, sessionReady, setupRequired } = useAuth();
+  if (!sessionReady) {
+    return <div className="min-h-screen flex items-center justify-center text-gray-400">Loading...</div>;
+  }
+  return <Navigate to={user ? "/libraries" : unauthHome(setupRequired)} replace />;
 }
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
@@ -173,9 +195,30 @@ export default function App() {
         <Route path="/account-status" element={<Navigate to="/join" replace />} />
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="/set-email" element={<SetEmail />} />
-        <Route path="/join/:code" element={<JoinInvite />} />
-        <Route path="/join" element={<JoinInvite />} />
-        <Route path="/libraries" element={<LibrariesPage />} />
+        <Route
+          path="/join/:code"
+          element={
+            <FirstRunRedirect>
+              <JoinInvite />
+            </FirstRunRedirect>
+          }
+        />
+        <Route
+          path="/join"
+          element={
+            <FirstRunRedirect>
+              <JoinInvite />
+            </FirstRunRedirect>
+          }
+        />
+        <Route
+          path="/libraries"
+          element={
+            <FirstRunRedirect>
+              <LibrariesPage />
+            </FirstRunRedirect>
+          }
+        />
         <Route
           path="/onboarding"
           element={
@@ -310,7 +353,10 @@ export default function App() {
             </AdminRoute>
           }
         />
-        <Route path="*" element={<Navigate to="/libraries" />} />
+        <Route
+          path="*"
+          element={<CatchAllHome />}
+        />
       </Routes>
       {!expanded && <MiniPlayer />}
     </div>

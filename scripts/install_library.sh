@@ -243,13 +243,18 @@ else
   c_yellow "Skipping host cron installers (non-Linux). Use Admin → Catalog schedule or Task Scheduler."
 fi
 
+if [[ -f "${TARGET}/data/app.db" ]]; then
+  c_yellow "Existing data/app.db found — first-run admin create only appears when there are zero users."
+  c_yellow "To reset first-run: stop the stack, delete data/app.db (+ -wal/-shm), then docker compose up -d."
+fi
+
 c_green ""
 c_green "Install complete."
 echo ""
 echo "Next steps:"
-echo "  1. Open ${APP_URL} (or http://<host>:8085)"
-echo "  2. Create the admin account"
-echo "  3. Complete /admin/setup (libraries, pipelines, debrid, scraper, APK)"
+echo "  1. Open ${APP_URL%/}/login (or http://<host>:8085/login)"
+echo "  2. Create the admin account (shown automatically when the DB has zero users)"
+echo "  3. Complete onboarding (create library) then /admin/setup (libraries, pipelines, debrid, scraper, APK)"
 echo "     Later: Admin left-nav — Overview, Discovery, Catalog (OL schedule), Pipelines, Integrations, Settings"
 echo "  4. ABS: confirm audiobook staging (default .unorganized) is ignored (dot folder + .ignore)"
 echo "  5. Kavita: exclude ebook staging folder (default unorganized) from the ebook library"

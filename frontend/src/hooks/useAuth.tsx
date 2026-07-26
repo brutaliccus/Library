@@ -136,9 +136,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSetupRequired(needed);
       return needed;
     } catch {
+      // Keep prior value on transient failure (never invent "setup done").
       return setupRequired;
     }
   }, [setupRequired]);
+
+  const fetchSetupRequiredWithRetry = useCallback(async () => {
+    applyApiBaseUrl();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const { data } = await api.get("/auth/setup-required");
+        const needed = !!data.setup_required;
+        setSetupRequired(needed);
+        return needed;
+      } catch {
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      }
+    }
+    return null;
+  }, []);
 
   const rememberCurrentLibrary = useCallback(async () => {
     const origin = currentOrigin();
@@ -268,22 +284,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             clearActiveSession();
             setUser(null);
             setOfflineSession(false);
-            try {
-              const { data } = await api.get("/auth/setup-required");
-              setSetupRequired(!!data.setup_required);
-            } catch {
-              /* unreachable */
-            }
+            await fetchSetupRequiredWithRetry();
           }
           // Other HTTP errors: keep cached user if we painted one.
         }
       } else if (!isNativeApp() || getStoredInstanceUrl()) {
-        try {
-          const { data } = await api.get("/auth/setup-required");
-          setSetupRequired(!!data.setup_required);
-        } catch {
-          /* unreachable */
-        }
+        await fetchSetupRequiredWithRetry();
       }
       setIsLoading(false);
       setSessionReady(true);

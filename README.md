@@ -248,7 +248,9 @@ App listens on **`http://127.0.0.1:8085`**.
 
 ### First-run wizard
 
-1. Open the site → create the **admin** account (only when the server has zero users)  
+1. Open **`/login`** (or the site root — with zero users you are redirected there) → create the **admin** account  
+   - Only when `GET /api/auth/setup-required` reports `setup_required: true` (user count is 0).  
+   - Reusing an existing `data/app.db` with users skips this step; delete `data/app.db` (+ `-wal`/`-shm`) for a clean first-run.  
 2. **Onboarding** → create your library (name + debrid keys). That generates the invite link.  
 3. **`/admin/setup`** — ABS/Kavita, Prowlarr/Jackett/Flare, debrid (TorBox optional), LibraForge + ebook pipelines, staging checklist, catalog APIs, Android APK repo, scraper mode  
 4. Confirm folder conventions: ABS ignores `.unorganized`; Kavita excludes `unorganized`  

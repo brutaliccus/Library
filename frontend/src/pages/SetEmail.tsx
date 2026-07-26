@@ -47,7 +47,7 @@ export default function SetEmail() {
         password,
       });
       applyEmailUpdate(data);
-      navigate("/", { replace: true });
+      navigate("/my-library", { replace: true });
     } catch (err: any) {
       setError(err.response?.data?.detail || "Could not save email");
     } finally {

@@ -91,7 +91,7 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   if (!user) return <Navigate to="/login" />;
   const gate = authGatePath(user);
   if (gate) return <Navigate to={gate} />;
-  if (user.role !== "admin") return <Navigate to="/" />;
+  if (user.role !== "admin") return <Navigate to="/my-library" />;
   return <>{children}</>;
 }
 
@@ -149,15 +149,17 @@ export default function App() {
       {user &&
         !user.mustChangePassword &&
         !user.mustSetEmail &&
-        location.pathname !== "/libraries" && (
-        <>
-          <Navbar
-            onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
-            genreActiveCount={showGenreButton ? genreActiveCount : 0}
-          />
-          <OfflineBanner />
-        </>
+        location.pathname !== "/libraries" &&
+        !location.pathname.startsWith("/read/") && (
+        <Navbar
+          onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
+          genreActiveCount={showGenreButton ? genreActiveCount : 0}
+        />
       )}
+      {user &&
+        !user.mustChangePassword &&
+        !user.mustSetEmail &&
+        location.pathname !== "/libraries" && <OfflineBanner />}
       {user && !user.mustChangePassword && !user.mustSetEmail && (
         <OfflineUnlockSetupPrompt />
       )}

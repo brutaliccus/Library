@@ -71,7 +71,7 @@ export default function PlayerPage() {
 
   useEffect(() => {
     if (!nowPlaying) {
-      navigate("/", { replace: true });
+      navigate("/my-library", { replace: true });
     }
   }, [nowPlaying, navigate]);
 

@@ -103,7 +103,7 @@ export default function LibrariesPage() {
     try {
       const result = await enterLibrary(lib.origin);
       if (result === "ok") {
-        navigate("/", { replace: true });
+        navigate("/my-library", { replace: true });
         return;
       }
       if (result === "need_offline_unlock") {
@@ -171,7 +171,7 @@ export default function LibrariesPage() {
         setUnlockLib(loginLib);
         return;
       }
-      navigate("/", { replace: true });
+      navigate("/my-library", { replace: true });
     } catch (e: any) {
       setLoginError(e?.response?.data?.detail || "Sign in failed");
     } finally {
@@ -289,7 +289,7 @@ export default function LibrariesPage() {
         });
         return;
       }
-      navigate("/", { replace: true });
+      navigate("/my-library", { replace: true });
     } catch (e: any) {
       setSignInError(e?.response?.data?.detail || "Sign in failed");
     } finally {
@@ -607,7 +607,7 @@ export default function LibrariesPage() {
               unlockLib.email || email || loginEmail || signInEmail
             );
             setUnlockLib(null);
-            navigate("/", { replace: true });
+            navigate("/my-library", { replace: true });
           }}
           onUnlocked={() => {
             void (async () => {
@@ -618,7 +618,7 @@ export default function LibrariesPage() {
                   const result = await enterLibrary(unlockLib.origin);
                   setUnlockLib(null);
                   if (result === "ok") {
-                    navigate("/", { replace: true });
+                    navigate("/my-library", { replace: true });
                     return;
                   }
                   if (result === "need_offline_unlock") {

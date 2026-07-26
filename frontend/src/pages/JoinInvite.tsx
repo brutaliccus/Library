@@ -140,7 +140,7 @@ export default function JoinInvite() {
         takePendingInvite();
         if (!cancelled) {
           toast("You're in!", "success");
-          navigate("/", { replace: true });
+          navigate("/my-library", { replace: true });
         }
       } catch (e: any) {
         const detail = e.response?.data?.detail || "";
@@ -162,7 +162,7 @@ export default function JoinInvite() {
             /* ignore */
           }
           takePendingInvite();
-          if (!cancelled) navigate("/", { replace: true });
+          if (!cancelled) navigate("/my-library", { replace: true });
           return;
         }
         joinedExisting.current = false;

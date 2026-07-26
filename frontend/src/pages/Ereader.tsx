@@ -78,9 +78,6 @@ interface ChapterItem {
 
 const SWIPE_THRESHOLD = 60;
 
-// Vertical padding so ascenders/descenders aren't clipped at page edges
-const PAGE_VERTICAL_PADDING = 32;
-
 export default function Ereader() {
   const { chapterId } = useParams<{ chapterId: string }>();
   const navigate = useNavigate();
@@ -94,17 +91,22 @@ export default function Ereader() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettingsState] = useState<ReaderSettings>(loadSettings);
   const [fullscreen, setFullscreen] = useState(false);
+  /** In fullscreen, chrome (header/footer) is hidden until center-tap reveals it. */
+  const [chromeHidden, setChromeHidden] = useState(false);
   const [viewportPage, setViewportPage] = useState(0);
   const [totalViewportPages, setTotalViewportPages] = useState(1);
   const [pageHeight, setPageHeight] = useState(400);
   const [pageOffsets, setPageOffsets] = useState<number[]>([0]);
+  const [contentHeight, setContentHeight] = useState(0);
   const [pdfPageCount, setPdfPageCount] = useState(0);
   const pageCache = useRef<Map<number, string>>(new Map());
 
   const contentRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const touchStartX = useRef<number>(0);
+  const touchStartY = useRef<number>(0);
   const pendingRestore = useRef<{ page: number; viewportPage: number } | null>(null);
+  const showChrome = !fullscreen || !chromeHidden;
 
   const cid = chapterId ? parseInt(chapterId, 10) : NaN;
 
@@ -301,26 +303,34 @@ export default function Ereader() {
     };
   }, [saveProgressImmediate]);
 
-  // Measure viewport and split content into discrete pages at line boundaries (book-like)
+  // Measure viewport and split content into discrete pages at line boundaries (book-like).
+  // Pages never overlap: a line that doesn't fully fit moves entirely to the next page,
+  // and the viewport clips exactly to the next page offset.
   useEffect(() => {
     if (loading || !content) return;
+    const applyFixedPages = (scrollH: number, effectiveH: number) => {
+      setContentHeight(scrollH);
+      const total = Math.max(1, Math.ceil(scrollH / effectiveH));
+      setPageOffsets(Array.from({ length: total }, (_, i) => i * effectiveH));
+      setTotalViewportPages(total);
+      setViewportPage((prev) => Math.min(prev, total - 1));
+    };
     const measure = () => {
       const containerEl = containerRef.current;
       const contentEl = contentRef.current;
       if (!containerEl || !contentEl) return;
       const h = containerEl.clientHeight;
       if (h <= 0) return;
-      const effectiveH = Math.max(1, h - 2 * PAGE_VERTICAL_PADDING);
+      const style = getComputedStyle(containerEl);
+      const padTop = parseFloat(style.paddingTop) || 0;
+      const padBottom = parseFloat(style.paddingBottom) || 0;
+      const effectiveH = Math.max(1, h - padTop - padBottom);
       setPageHeight(effectiveH);
 
       // Get line rects via Range API for book-like pagination (no mid-line cuts)
       const readerEl = contentEl.querySelector(".reader-content") ?? contentEl.firstElementChild;
       if (!readerEl || !readerEl.childNodes.length) {
-        const scrollH = contentEl.scrollHeight;
-        const total = Math.max(1, Math.ceil(scrollH / effectiveH));
-        setPageOffsets(Array.from({ length: total }, (_, i) => i * effectiveH));
-        setTotalViewportPages(total);
-        setViewportPage((prev) => Math.min(prev, total - 1));
+        applyFixedPages(contentEl.scrollHeight, effectiveH);
         return;
       }
 
@@ -331,11 +341,7 @@ export default function Ereader() {
         range.detach();
 
         if (rects.length === 0) {
-          const scrollH = contentEl.scrollHeight;
-          const total = Math.max(1, Math.ceil(scrollH / effectiveH));
-          setPageOffsets(Array.from({ length: total }, (_, i) => i * effectiveH));
-          setTotalViewportPages(total);
-          setViewportPage((prev) => Math.min(prev, total - 1));
+          applyFixedPages(contentEl.scrollHeight, effectiveH);
           return;
         }
 
@@ -349,34 +355,46 @@ export default function Ereader() {
         }
 
         if (lines.length === 0) {
+          setContentHeight(contentEl.scrollHeight);
           setPageOffsets([0]);
           setTotalViewportPages(1);
           return;
         }
 
-        const offsets: number[] = [lines[0].top];
-        let pageBottom = lines[0].top + effectiveH;
+        const EPS = 0.5;
+        const offsets: number[] = [0];
+        let pageStart = 0;
+        let pageBottom = effectiveH;
 
-        for (let i = 1; i < lines.length; i++) {
+        for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
-          if (line.top >= pageBottom) {
-            offsets.push(line.top);
-            pageBottom = line.top + effectiveH;
-          } else if (line.bottom > pageBottom) {
-            offsets.push(line.top);
-            pageBottom = line.top + effectiveH;
+          if (line.bottom <= pageBottom + EPS) continue;
+
+          // Oversized line at page start: keep it, break after it
+          if (line.top <= pageStart + EPS) {
+            if (i + 1 < lines.length) {
+              const nextStart = lines[i + 1].top;
+              if (nextStart > pageStart + EPS) {
+                offsets.push(nextStart);
+                pageStart = nextStart;
+                pageBottom = pageStart + effectiveH;
+              }
+            }
+            continue;
           }
+
+          // Line does not fully fit — start next page here (no overlap with prior page)
+          offsets.push(line.top);
+          pageStart = line.top;
+          pageBottom = pageStart + effectiveH;
         }
 
+        setContentHeight(contentEl.scrollHeight);
         setPageOffsets(offsets);
         setTotalViewportPages(offsets.length);
         setViewportPage((prev) => Math.min(prev, offsets.length - 1));
       } catch {
-        const scrollH = contentEl.scrollHeight;
-        const total = Math.max(1, Math.ceil(scrollH / effectiveH));
-        setPageOffsets(Array.from({ length: total }, (_, i) => i * effectiveH));
-        setTotalViewportPages(total);
-        setViewportPage((prev) => Math.min(prev, total - 1));
+        applyFixedPages(contentEl.scrollHeight, effectiveH);
       }
     };
     const timer = requestAnimationFrame(() => requestAnimationFrame(measure));
@@ -387,7 +405,7 @@ export default function Ereader() {
       cancelAnimationFrame(timer);
       ro.disconnect();
     };
-  }, [content, loading, settings.fontSize, settings.fontFamily]);
+  }, [content, loading, settings.fontSize, settings.fontFamily, showChrome, fullscreen]);
 
   const flattenChapters = (items: ChapterItem[]): { title: string; page: number }[] => {
     const out: { title: string; page: number }[] = [];
@@ -439,7 +457,7 @@ export default function Ereader() {
   const canPrev = isPdf ? page > 0 : viewportPage > 0 || canPrevKavita;
   const canNext = isPdf ? page < totalKavitaPages - 1 : viewportPage < totalViewportPages - 1 || canNextKavita;
 
-  // Tap/click zones: left = prev, right = next
+  // Tap/click zones: left = prev, right = next, center = toggle chrome in fullscreen
   const handleContentClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (tocOpen || settingsOpen) return;
@@ -449,42 +467,60 @@ export default function Ereader() {
       const third = rect.width / 3;
       if (x < third) goPrev();
       else if (x > third * 2) goNext();
+      else if (fullscreen) setChromeHidden((h) => !h);
     },
-    [goPrev, goNext, tocOpen, settingsOpen]
+    [goPrev, goNext, tocOpen, settingsOpen, fullscreen]
   );
 
   // Swipe gestures
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
     touchStartX.current = e.touches[0].clientX;
+    touchStartY.current = e.touches[0].clientY;
   }, []);
 
   const handleTouchEnd = useCallback(
     (e: React.TouchEvent) => {
       const endX = e.changedTouches[0].clientX;
-      const diff = endX - touchStartX.current;
-      if (diff > SWIPE_THRESHOLD) goPrev();
-      else if (diff < -SWIPE_THRESHOLD) goNext();
+      const endY = e.changedTouches[0].clientY;
+      const diffX = endX - touchStartX.current;
+      const diffY = endY - touchStartY.current;
+      // Prefer horizontal swipe; ignore mostly-vertical moves
+      if (Math.abs(diffX) < SWIPE_THRESHOLD || Math.abs(diffX) < Math.abs(diffY)) return;
+      if (diffX > 0) goPrev();
+      else goNext();
     },
     [goPrev, goNext]
   );
 
-  // Fullscreen
+  // Fullscreen / locked reading mode — hide chrome so only text fills the viewport
   const toggleFullscreen = useCallback(async () => {
     try {
       if (document.fullscreenElement) {
         await document.exitFullscreen();
         setFullscreen(false);
+        setChromeHidden(false);
       } else {
         await document.documentElement.requestFullscreen();
         setFullscreen(true);
+        setChromeHidden(true);
       }
     } catch {
-      /* ignore */
+      // Some WebViews block Fullscreen API — still enter locked chrome-hidden mode
+      setFullscreen((prev) => {
+        const next = !prev;
+        setChromeHidden(next);
+        return next;
+      });
     }
   }, []);
 
   useEffect(() => {
-    const onFullscreenChange = () => setFullscreen(!!document.fullscreenElement);
+    const onFullscreenChange = () => {
+      const on = !!document.fullscreenElement;
+      setFullscreen(on);
+      if (!on) setChromeHidden(false);
+      else setChromeHidden(true);
+    };
     document.addEventListener("fullscreenchange", onFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
@@ -535,52 +571,63 @@ export default function Ereader() {
     ? "fixed inset-0 z-[9999] bg-gray-950 flex flex-col"
     : "h-screen bg-gray-950 flex flex-col overflow-hidden";
 
+  const pageStart = pageOffsets[viewportPage] ?? viewportPage * pageHeight;
+  const pageEnd =
+    viewportPage + 1 < pageOffsets.length
+      ? pageOffsets[viewportPage + 1]
+      : contentHeight > pageStart
+        ? contentHeight
+        : pageStart + pageHeight;
+  const pageClipH = Math.max(1, Math.min(pageHeight, pageEnd - pageStart));
+
   return (
     <div className={containerClass}>
-      {/* Header */}
-      <header className="sticky top-0 z-10 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800 shrink-0">
-        <button
-          onClick={() => navigate("/my-library")}
-          className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
-          title="Back to Library"
-        >
-          <ChevronLeft size={20} />
-        </button>
-        <h1 className="text-sm font-medium text-gray-200 truncate max-w-[40%]">
-          {bookInfo?.bookTitle || bookInfo?.seriesName || "Loading..."}
-        </h1>
-        <div className="flex items-center gap-1">
+      {/* Header — hidden in fullscreen locked mode until center-tap */}
+      {showChrome && (
+        <header className="sticky top-0 z-10 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800 shrink-0">
           <button
-            onClick={toggleFullscreen}
+            onClick={() => navigate("/my-library")}
             className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
-            title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            title="Back to Library"
           >
-            {fullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
+            <ChevronLeft size={20} />
           </button>
-          <button
-            onClick={() => setSettingsOpen((o) => !o)}
-            className={`p-2 rounded-lg transition-colors ${
-              settingsOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
-            }`}
-            title="Reader settings"
-          >
-            <Settings size={20} />
-          </button>
-          <button
-            onClick={() => setTocOpen((o) => !o)}
-            className={`p-2 rounded-lg transition-colors ${
-              tocOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
-            }`}
-            title="Table of Contents"
-          >
-            {tocOpen ? <X size={20} /> : <Menu size={20} />}
-          </button>
-        </div>
-      </header>
+          <h1 className="text-sm font-medium text-gray-200 truncate max-w-[40%]">
+            {bookInfo?.bookTitle || bookInfo?.seriesName || "Loading..."}
+          </h1>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={toggleFullscreen}
+              className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
+              title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            >
+              {fullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
+            </button>
+            <button
+              onClick={() => setSettingsOpen((o) => !o)}
+              className={`p-2 rounded-lg transition-colors ${
+                settingsOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
+              }`}
+              title="Reader settings"
+            >
+              <Settings size={20} />
+            </button>
+            <button
+              onClick={() => setTocOpen((o) => !o)}
+              className={`p-2 rounded-lg transition-colors ${
+                tocOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
+              }`}
+              title="Table of Contents"
+            >
+              {tocOpen ? <X size={20} /> : <Menu size={20} />}
+            </button>
+          </div>
+        </header>
+      )}
 
       <div className="flex flex-1 overflow-hidden min-h-0">
         {/* Settings panel */}
-        {settingsOpen && (
+        {showChrome && settingsOpen && (
           <aside className="w-64 shrink-0 border-r border-gray-800 bg-gray-900/50 overflow-y-auto">
             <div className="p-4 space-y-4">
               <h2 className="text-xs font-semibold text-gray-500 uppercase">Reader settings</h2>
@@ -621,7 +668,7 @@ export default function Ereader() {
         )}
 
         {/* TOC sidebar */}
-        {tocOpen && !settingsOpen && (
+        {showChrome && tocOpen && !settingsOpen && (
           <aside className="w-64 shrink-0 border-r border-gray-800 bg-gray-900/50 overflow-y-auto">
             <div className="p-3">
               <h2 className="text-xs font-semibold text-gray-500 uppercase mb-2">Contents</h2>
@@ -651,14 +698,18 @@ export default function Ereader() {
           onClick={handleContentClick}
           onTouchStart={handleTouchStart}
           onTouchEnd={handleTouchEnd}
-          className="flex-1 overflow-hidden flex flex-col items-center p-4 md:p-6 min-h-0"
+          className={`flex-1 overflow-hidden flex flex-col items-center min-h-0 ${
+            showChrome
+              ? "p-4 md:p-6"
+              : "p-0 pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] px-[env(safe-area-inset-left,0px)]"
+          }`}
         >
           {isPdf ? (
             <PdfViewer chapterId={cid} page={page} onReady={handlePdfReady} />
           ) : (
           <div
             ref={containerRef}
-            className="relative w-full max-w-2xl flex-1 min-h-0 overflow-hidden py-8"
+            className={`relative w-full max-w-2xl flex-1 min-h-0 ${showChrome ? "py-2" : "py-0"}`}
           >
             {loading ? (
               <div className="flex justify-center py-12 h-full items-center">
@@ -666,19 +717,26 @@ export default function Ereader() {
               </div>
             ) : (
               <div
-                ref={contentRef}
-                className="transition-transform duration-150 ease-out"
-                style={{
-                  fontFamily: FONT_FAMILIES[settings.fontFamily],
-                  fontSize: FONT_SIZES[settings.fontSize],
-                  transform: `translateY(-${(pageOffsets[viewportPage] ?? viewportPage * pageHeight)}px)`,
-                }}
+                className="overflow-hidden w-full"
+                style={{ height: pageClipH }}
               >
                 <div
-                  className="reader-content max-w-2xl w-full bg-gray-900/30 rounded-lg p-6 md:p-10 text-gray-100 leading-relaxed prose prose-invert prose-p:my-0 max-w-none select-none [&_img]:max-w-full [&_img]:h-auto"
-                  dangerouslySetInnerHTML={{ __html: content }}
-                  style={{ paddingBottom: "2rem" }}
-                />
+                  ref={contentRef}
+                  className="transition-transform duration-150 ease-out"
+                  style={{
+                    fontFamily: FONT_FAMILIES[settings.fontFamily],
+                    fontSize: FONT_SIZES[settings.fontSize],
+                    transform: `translateY(-${pageStart}px)`,
+                  }}
+                >
+                  <div
+                    className={`reader-content max-w-2xl w-full text-gray-100 leading-relaxed prose prose-invert prose-p:my-0 max-w-none select-none [&_img]:max-w-full [&_img]:h-auto ${
+                      showChrome ? "bg-gray-900/30 rounded-lg p-6 md:p-10" : "bg-transparent rounded-none px-4 py-2 md:px-8"
+                    }`}
+                    dangerouslySetInnerHTML={{ __html: content }}
+                    style={{ paddingBottom: showChrome ? "2rem" : "0.5rem" }}
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -686,35 +744,37 @@ export default function Ereader() {
         </main>
       </div>
 
-      {/* Footer nav */}
-      <footer className="sticky bottom-0 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800 shrink-0">
-        <button
-          onClick={goPrev}
-          disabled={!canPrev}
-          className="flex items-center gap-1 px-3 py-2 rounded-lg bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          <ChevronLeft size={18} /> Previous
-        </button>
-        <span className="text-sm text-gray-500">
-          {isPdf ? (
-            <>Page {page + 1}{totalKavitaPages > 0 ? ` of ${totalKavitaPages}` : ""}</>
-          ) : (
-            <>
-              Page {viewportPage + 1} of {totalViewportPages}
-              {totalKavitaPages > 1 && (
-                <span className="text-gray-600 ml-1">· Ch. {page + 1}/{totalKavitaPages}</span>
-              )}
-            </>
-          )}
-        </span>
-        <button
-          onClick={goNext}
-          disabled={!canNext}
-          className="flex items-center gap-1 px-3 py-2 rounded-lg bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          Next <ChevronRight size={18} />
-        </button>
-      </footer>
+      {/* Footer nav — hidden in fullscreen locked mode until center-tap */}
+      {showChrome && (
+        <footer className="sticky bottom-0 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800 shrink-0">
+          <button
+            onClick={goPrev}
+            disabled={!canPrev}
+            className="flex items-center gap-1 px-3 py-2 rounded-lg bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronLeft size={18} /> Previous
+          </button>
+          <span className="text-sm text-gray-500">
+            {isPdf ? (
+              <>Page {page + 1}{totalKavitaPages > 0 ? ` of ${totalKavitaPages}` : ""}</>
+            ) : (
+              <>
+                Page {viewportPage + 1} of {totalViewportPages}
+                {totalKavitaPages > 1 && (
+                  <span className="text-gray-600 ml-1">· Ch. {page + 1}/{totalKavitaPages}</span>
+                )}
+              </>
+            )}
+          </span>
+          <button
+            onClick={goNext}
+            disabled={!canNext}
+            className="flex items-center gap-1 px-3 py-2 rounded-lg bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            Next <ChevronRight size={18} />
+          </button>
+        </footer>
+      )}
     </div>
   );
 }

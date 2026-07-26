@@ -49,10 +49,10 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
   if (!user) return null;
 
   const links = [
-    { to: "/libraries", label: "Libraries", icon: LayoutGrid },
-    { to: "/", label: "Store", icon: Store, onlineOnly: true },
     { to: "/my-library", label: "My Library", icon: Library },
-    { to: "/requests", label: "My Requests", icon: List, onlineOnly: true },
+    { to: "/", label: "Store", icon: Store, onlineOnly: true },
+    { to: "/requests", label: "Requests", icon: List, onlineOnly: true },
+    { to: "/libraries", label: "Libraries", icon: LayoutGrid },
     ...(user.role === "admin"
       ? [{ to: "/admin", label: "Admin", icon: Shield, onlineOnly: true }]
       : []),
@@ -75,7 +75,7 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
   return (
     <nav className="bg-gray-900 border-b border-gray-800 sticky top-0 z-50 pt-[env(safe-area-inset-top,0px)]">
       <div className="px-4 lg:px-6 flex items-center justify-between h-14 gap-3">
-        <Link to="/" className="flex items-center gap-2 text-brand-400 font-bold text-lg shrink-0">
+        <Link to="/my-library" className="flex items-center gap-2 text-brand-400 font-bold text-lg shrink-0">
           <BookOpen size={22} />
           <span className="hidden sm:inline">Library</span>
         </Link>

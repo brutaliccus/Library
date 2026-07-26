@@ -41,7 +41,7 @@ export default function Login() {
     !user.mustSetEmail &&
     getStoredInstanceUrl()
   ) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/my-library" replace />;
   }
   if (!isLoading && user?.mustChangePassword) {
     return <Navigate to="/change-password" replace />;
@@ -92,7 +92,7 @@ export default function Login() {
         return;
       }
       await login(email.trim(), password, origin || undefined);
-      navigate("/", { replace: true });
+      navigate("/my-library", { replace: true });
     } catch (err: any) {
       setError(
         err.response?.data?.detail ||

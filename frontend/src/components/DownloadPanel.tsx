@@ -6,7 +6,7 @@ import { useToast } from "../contexts/ToastContext";
 import { usePlayer } from "../contexts/PlayerContext";
 import ResultCard from "./ResultCard";
 import Modal from "./Modal";
-import { Search, Headphones, BookText } from "lucide-react";
+import { Search, Headphones, BookText, RefreshCw } from "lucide-react";
 import type { SearchResult } from "../types/book";
 
 interface Props {
@@ -55,7 +55,7 @@ export default function DownloadPanel({
   const { playRD } = usePlayer();
   const queryClient = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
-  const [cacheTrigger, setCacheTrigger] = useState(0);
+  const [cacheTrigger] = useState(0);
   const [aaTrigger, setAaTrigger] = useState(0);
   const [requestingIdx, setRequestingIdx] = useState<number | null>(null);
   const [streamingIdx, setStreamingIdx] = useState<number | null>(null);
@@ -87,17 +87,27 @@ export default function DownloadPanel({
     return title;
   }, [title, seriesName, seriesIndex]);
 
-  const searchParams = useMemo(() => {
-    const p = new URLSearchParams();
-    p.set("title", title);
-    if (author) p.set("author", author);
-    if (subtitle) p.set("subtitle", subtitle);
-    if (seriesName) p.set("series_name", seriesName);
-    if (seriesIndex) p.set("series_index", seriesIndex);
-    const trimmedAbb = abbQuery.trim();
-    if (trimmedAbb) p.set("abb_query", trimmedAbb);
-    return p;
-  }, [title, author, subtitle, seriesName, seriesIndex, abbQuery]);
+  const effectiveAbbQuery = abbQuery.trim() || defaultAbbQuery.trim();
+
+  const buildSearchParams = useCallback(
+    (abbOverride?: string) => {
+      const p = new URLSearchParams();
+      p.set("title", title);
+      if (author) p.set("author", author);
+      if (subtitle) p.set("subtitle", subtitle);
+      if (seriesName) p.set("series_name", seriesName);
+      if (seriesIndex) p.set("series_index", seriesIndex);
+      const trimmedAbb = (abbOverride ?? abbQuery).trim() || defaultAbbQuery.trim();
+      if (trimmedAbb) p.set("abb_query", trimmedAbb);
+      return p;
+    },
+    [title, author, subtitle, seriesName, seriesIndex, abbQuery, defaultAbbQuery]
+  );
+
+  const searchParams = useMemo(
+    () => buildSearchParams(),
+    [buildSearchParams]
+  );
 
   const searchHint = seriesIndex
     ? `Searching for Book ${seriesIndex} in ${seriesName || title}…`
@@ -231,10 +241,13 @@ export default function DownloadPanel({
     }
   }, [hasSearched, indexerLoading, searchProgress, liveSearch]);
 
-  const runLiveStream = useCallback(async () => {
+  const runLiveStream = useCallback(async (abbOverride?: string) => {
     liveAbortRef.current?.abort();
     const ac = new AbortController();
     liveAbortRef.current = ac;
+
+    const q = (abbOverride ?? abbQuery).trim() || defaultAbbQuery.trim();
+    if (q && !abbQuery.trim()) setAbbQuery(q);
 
     setLiveSearch(true);
     setLiveLoading(true);
@@ -253,7 +266,8 @@ export default function DownloadPanel({
     setAaTrigger((n) => n + 1);
 
     const token = localStorage.getItem("access_token") || "";
-    const url = toAbsoluteUrl(`/api/search/live-stream?${searchParams.toString()}`);
+    const params = buildSearchParams(abbOverride);
+    const url = toAbsoluteUrl(`/api/search/live-stream?${params.toString()}`);
 
     armLiveTimeout(ac, false);
 
@@ -365,7 +379,7 @@ export default function DownloadPanel({
         setSearchProgress((p) => (p < 100 ? 100 : p));
       }
     }
-  }, [searchParams, toast, armLiveTimeout]);
+  }, [abbQuery, defaultAbbQuery, buildSearchParams, toast, armLiveTimeout]);
 
   useEffect(() => {
     return () => {
@@ -376,20 +390,20 @@ export default function DownloadPanel({
   const handleFindDownloads = () => {
     liveAbortRef.current?.abort();
     setModalOpen(true);
-    setLiveSearch(false);
-    setLiveLoading(false);
     setLiveError(false);
-    setLiveData(null);
-    setSearchProgress(0);
-    setSearchPhase("Checking download cache…");
     setShowWeakMatches(false);
     setResultFilter("");
-    setCacheTrigger((prev) => prev + 1);
-    setAaTrigger((prev) => prev + 1);
+    // Auto-run live ABB/indexer search with the default (or current) term on open.
+    void runLiveStream(effectiveAbbQuery || undefined);
+  };
+
+  const handleAbbSearch = () => {
+    if (liveLoading) return;
+    void runLiveStream(abbQuery.trim() || defaultAbbQuery || undefined);
   };
 
   const handleRefresh = () => {
-    void runLiveStream();
+    void runLiveStream(effectiveAbbQuery || undefined);
   };
 
   const filteredResults = useMemo(() => {
@@ -528,7 +542,7 @@ export default function DownloadPanel({
         size="lg"
       >
         <div className="flex items-center justify-between -mt-1 mb-3 gap-3">
-          <p className="text-xs text-gray-500">
+          <p className="text-xs text-gray-500 min-w-0">
             {liveSearch
               ? liveLoading
                 ? "Live search — Jackett (~2 ABB pages) & Knaben"
@@ -539,9 +553,11 @@ export default function DownloadPanel({
             type="button"
             onClick={handleRefresh}
             disabled={liveLoading}
-            className="text-sm text-brand-400 hover:text-brand-300 transition-colors disabled:opacity-50 shrink-0"
+            title="Force reload from indexers"
+            aria-label="Force reload from indexers"
+            className="p-1.5 rounded-md text-gray-500 hover:text-gray-300 hover:bg-gray-800/80 transition-colors disabled:opacity-40 shrink-0"
           >
-            Refresh from indexers
+            <RefreshCw size={14} className={liveLoading ? "animate-spin" : ""} />
           </button>
         </div>
 
@@ -553,15 +569,33 @@ export default function DownloadPanel({
               — Jackett only returns ~2 pages; narrow the query for popular series
             </span>
           </label>
-          <input
-            id="abb-query"
-            type="text"
-            value={abbQuery}
-            onChange={(e) => setAbbQuery(e.target.value)}
-            placeholder={defaultAbbQuery || "Title, book #, narrator, format…"}
-            disabled={liveLoading}
-            className="w-full px-3 py-2 rounded-lg bg-gray-900 border border-gray-700/60 text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-brand-500/60 disabled:opacity-60"
-          />
+          <form
+            className="relative"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleAbbSearch();
+            }}
+          >
+            <input
+              id="abb-query"
+              type="search"
+              enterKeyHint="search"
+              value={abbQuery}
+              onChange={(e) => setAbbQuery(e.target.value)}
+              placeholder={defaultAbbQuery || "Title, book #, narrator, format…"}
+              disabled={liveLoading}
+              className="w-full pl-3 pr-11 py-2.5 rounded-lg bg-gray-900 border border-gray-700/60 text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus:ring-1 focus:ring-brand-500/60 disabled:opacity-60"
+            />
+            <button
+              type="submit"
+              disabled={liveLoading}
+              title="Search AudioBook Bay"
+              aria-label="Search AudioBook Bay"
+              className="absolute right-1 top-1/2 -translate-y-1/2 p-2 rounded-md text-gray-400 hover:text-brand-300 hover:bg-gray-800 transition-colors disabled:opacity-40 touch-manipulation"
+            >
+              <Search size={16} />
+            </button>
+          </form>
           {!abbQuery.trim() && defaultAbbQuery && (
             <p className="text-xs text-gray-500">
               Using auto query: <span className="text-gray-400">{defaultAbbQuery}</span>

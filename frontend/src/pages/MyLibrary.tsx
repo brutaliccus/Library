@@ -17,6 +17,7 @@ import {
   Trash2,
   Loader2,
   Search,
+  Store,
   BookOpen,
   Headphones,
   Layers,
@@ -1068,7 +1069,7 @@ export default function MyLibrary() {
   }: {
     options: { genres: string[]; series: string[]; authors: string[] };
   }) => (
-    <div className="flex w-full flex-nowrap items-center gap-1.5 sm:gap-2 mb-4">
+    <div className="flex w-full flex-nowrap items-center gap-1.5 sm:gap-2">
       <CompactFilterSelect
         label="Genre"
         value={filterGenre}
@@ -1110,7 +1111,7 @@ export default function MyLibrary() {
   );
 
   const viewToggle = (view: TabView, setView: (v: TabView) => void) => (
-    <div className="flex w-full gap-1 mb-3 bg-gray-800/30 p-0.5 rounded-md">
+    <div className="flex w-full gap-1 bg-gray-800/30 p-0.5 rounded-md">
       {(["all", "genre", "series", "author"] as const).map((v) => (
         <button
           key={v}
@@ -1205,21 +1206,30 @@ export default function MyLibrary() {
         </div>
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={handleRefreshLibrary}
             disabled={scanning || offline}
-            className="flex items-center gap-2 px-3 py-2 bg-gray-700 text-gray-200 rounded-lg hover:bg-gray-600 transition-colors text-sm font-medium disabled:opacity-50"
-            title={offline ? "Unavailable offline" : "Rescan library and remove stale entries"}
+            className="inline-flex items-center justify-center p-2.5 bg-gray-700 text-gray-200 rounded-lg hover:bg-gray-600 transition-colors disabled:opacity-50"
+            title={
+              offline
+                ? "Unavailable offline"
+                : scanning
+                  ? "Scanning library…"
+                  : "Rescan library and remove stale entries"
+            }
+            aria-label={scanning ? "Scanning library" : "Refresh library"}
           >
-            <RefreshCw size={15} className={scanning ? "animate-spin" : ""} />
-            {scanning ? "Scanning..." : "Refresh"}
+            <RefreshCw size={16} className={scanning ? "animate-spin" : ""} />
           </button>
           <button
+            type="button"
             onClick={() => navigate("/")}
             disabled={offline}
-            className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-500 transition-colors text-sm font-medium disabled:opacity-50"
+            className="inline-flex items-center justify-center p-2.5 bg-brand-600 text-white rounded-lg hover:bg-brand-500 transition-colors disabled:opacity-50"
+            title={offline ? "Unavailable offline" : "Store search"}
+            aria-label="Store search"
           >
-            <Search size={16} />
-            Browse Store
+            <Store size={16} />
           </button>
         </div>
       </div>
@@ -1230,21 +1240,83 @@ export default function MyLibrary() {
         </div>
       )}
 
-      {/* Search */}
-      <div className="relative mb-6">
-        <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-        <input
-          type="text"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder={offline ? "Search unavailable offline" : "Search your library..."}
-          disabled={offline}
-          className="w-full pl-10 pr-10 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500 disabled:opacity-50"
-        />
-        {searchQuery && (
-          <button onClick={() => setSearchQuery("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
-            <X size={16} />
-          </button>
+      {/* Sticky chrome: library search + tab/filter panels (under app nav + safe area) */}
+      <div className="sticky z-40 -mx-4 lg:-mx-6 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800/80 pt-1 pb-3 mb-4 space-y-3 top-[calc(3.5rem+env(safe-area-inset-top,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))] lg:pl-[max(1.5rem,env(safe-area-inset-left,0px))] lg:pr-[max(1.5rem,env(safe-area-inset-right,0px))]">
+        <div className="relative">
+          <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={offline ? "Search unavailable offline" : "Search your library..."}
+            disabled={offline}
+            className="w-full pl-10 pr-10 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500 disabled:opacity-50"
+            aria-label="Search your library"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+              aria-label="Clear library search"
+            >
+              <X size={16} />
+            </button>
+          )}
+        </div>
+
+        {!isSearching && (
+          <>
+            <div className="flex flex-nowrap gap-1 bg-gray-800/50 p-1 rounded-lg overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-full">
+              <button
+                onClick={() => setTab("abs")}
+                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  tab === "abs" ? "bg-emerald-600 text-white" : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <Headphones size={14} />
+                Audiobooks
+              </button>
+              <button
+                onClick={() => setTab("ebooks")}
+                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  tab === "ebooks" ? "bg-amber-600 text-white" : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <BookOpen size={14} />
+                eBooks
+              </button>
+              <button
+                onClick={() => setTab("streams")}
+                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  tab === "streams" ? "bg-teal-700 text-white" : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <Layers size={14} />
+                My Collection
+              </button>
+              <button
+                onClick={() => setTab("downloaded")}
+                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  tab === "downloaded" ? "bg-brand-600 text-white" : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <Download size={14} />
+                Downloads
+                {downloadedItems.length > 0 && (
+                  <span className="text-[10px] opacity-80">({downloadedItems.length})</span>
+                )}
+              </button>
+            </div>
+
+            {tab === "abs" && viewToggle(absView, setAbsView)}
+            {tab === "ebooks" && viewToggle(ebookView, setEbookView)}
+            {tab === "streams" && viewToggle(rdView, setRdView)}
+
+            {tab === "abs" && <FilterBar options={absFilterOptions} />}
+            {tab === "ebooks" && <FilterBar options={ebookFilterOptions} />}
+            {tab === "streams" && <FilterBar options={rdFilterOptions} />}
+          </>
         )}
       </div>
 
@@ -1338,58 +1410,6 @@ export default function MyLibrary() {
         </div>
       ) : (
         <>
-          {/* Tabs — single row; scroll horizontally on narrow screens */}
-          <div className="flex flex-nowrap gap-1 mb-4 bg-gray-800/50 p-1 rounded-lg overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-full">
-            <button
-              onClick={() => setTab("abs")}
-              className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                tab === "abs" ? "bg-emerald-600 text-white" : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              <Headphones size={14} />
-              Audiobooks
-            </button>
-            <button
-              onClick={() => setTab("ebooks")}
-              className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                tab === "ebooks" ? "bg-amber-600 text-white" : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              <BookOpen size={14} />
-              eBooks
-            </button>
-            <button
-              onClick={() => setTab("streams")}
-              className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                tab === "streams" ? "bg-teal-700 text-white" : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              <Layers size={14} />
-              My Collection
-            </button>
-            <button
-              onClick={() => setTab("downloaded")}
-              className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                tab === "downloaded" ? "bg-brand-600 text-white" : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              <Download size={14} />
-              Downloads
-              {downloadedItems.length > 0 && (
-                <span className="text-[10px] opacity-80">({downloadedItems.length})</span>
-              )}
-            </button>
-          </div>
-
-          {/* Mode tabs (By Genre/Series/Author) above dropdown filters — full width */}
-          {tab === "abs" && viewToggle(absView, setAbsView)}
-          {tab === "ebooks" && viewToggle(ebookView, setEbookView)}
-          {tab === "streams" && viewToggle(rdView, setRdView)}
-
-          {tab === "abs" && <FilterBar options={absFilterOptions} />}
-          {tab === "ebooks" && <FilterBar options={ebookFilterOptions} />}
-          {tab === "streams" && <FilterBar options={rdFilterOptions} />}
-
           <ContinueShelves />
 
           {/* ABS Tab */}

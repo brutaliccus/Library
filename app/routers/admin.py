@@ -1232,8 +1232,8 @@ async def delete_abs_library_media(
     """Delete on-disk audiobook folder and soft-remove the ABS library item."""
     from app.config import get_settings
     from app.services.library_media_delete import (
-        ABS_FORBIDDEN_DIRNAMES,
         delete_tree_under_library,
+        get_abs_forbidden_dirnames,
         resolve_abs_book_dir,
     )
 
@@ -1244,7 +1244,7 @@ async def delete_abs_library_media(
     audiobook_dir = Path(settings.audiobook_dir)
     try:
         book_dir = resolve_abs_book_dir(audiobook_dir, item)
-        delete_tree_under_library(book_dir, audiobook_dir, ABS_FORBIDDEN_DIRNAMES)
+        delete_tree_under_library(book_dir, audiobook_dir, get_abs_forbidden_dirnames())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     deleted = await audiobookshelf.delete_library_item(item_id, hard=False)
@@ -1261,8 +1261,8 @@ async def delete_ebook_library_media(
     """Delete on-disk ebook files/dirs and remove the Kavita series."""
     from app.config import get_settings
     from app.services.library_media_delete import (
-        EBOOK_FORBIDDEN_DIRNAMES,
         delete_tree_under_library,
+        get_ebook_forbidden_dirnames,
         resolve_ebook_book_dirs,
     )
 
@@ -1271,7 +1271,7 @@ async def delete_ebook_library_media(
     ebook_dir = Path(settings.ebook_dir)
     try:
         for book_dir in resolve_ebook_book_dirs(ebook_dir, file_paths):
-            delete_tree_under_library(book_dir, ebook_dir, EBOOK_FORBIDDEN_DIRNAMES)
+            delete_tree_under_library(book_dir, ebook_dir, get_ebook_forbidden_dirnames())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     deleted = await kavita.delete_series(series_id)

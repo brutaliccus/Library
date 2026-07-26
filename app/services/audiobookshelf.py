@@ -1318,9 +1318,16 @@ async def sync_book_dir_metadata_to_abs(book_dir: str | Path) -> dict[str, Any]:
     try:
         rel = root.resolve().relative_to(audiobook_root)
     except (ValueError, OSError):
-        # Paths may already be container-style /audiobooks/...
-        parts = str(root).replace("\\", "/").split("/audiobooks/", 1)
-        rel_s = parts[1] if len(parts) == 2 else str(root).lstrip("/")
+        # Paths may already be container-style under AUDIOBOOK_DIR (default /audiobooks/...).
+        root_s = str(root).replace("\\", "/")
+        mount = str(settings.audiobook_dir).replace("\\", "/").rstrip("/")
+        marker = f"{mount}/" if mount else "/audiobooks/"
+        if marker in root_s:
+            rel_s = root_s.split(marker, 1)[1]
+        elif "/audiobooks/" in root_s:
+            rel_s = root_s.split("/audiobooks/", 1)[1]
+        else:
+            rel_s = root_s.lstrip("/")
         rel = Path(rel_s)
     rel_path = rel.as_posix().strip("/")
 

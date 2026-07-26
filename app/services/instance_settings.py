@@ -1,8 +1,9 @@
 """Unified instance configuration registry.
 
 Editable settings live in ``app_settings`` (DB) with env-var fallbacks from
-``Settings``. Paths / SECRET_KEY / Docker-internal URLs stay env-only and are
-exposed as read-only in the Admin Config UI.
+``Settings``. SECRET_KEY and VAPID private key stay env-only (read-only in UI).
+Storage paths and staging dirnames are editable under Storage / Paths
+(env fallback; container roots may need a restart to match compose mounts).
 """
 
 from __future__ import annotations
@@ -146,8 +147,9 @@ REGISTRY: list[SettingDef] = [
         env_attr="libraforge_pipeline_enabled",
         value_type="bool",
         help=(
-            "Land downloads in /audiobooks/.unorganized → Metadata → M4B → Chapter Forge (ASIN) → "
-            "Folder Forge → ABS. Cross-request M4B is serialized (concurrency 1) for auto + Quick Review."
+            "Land downloads in audiobook staging (default /audiobooks/.unorganized) → Metadata → M4B → "
+            "Chapter Forge (ASIN) → Folder Forge → ABS. Cross-request M4B is serialized (concurrency 1). "
+            "Staging name is under Config → Storage / Paths."
         ),
     ),
     SettingDef(
@@ -177,7 +179,10 @@ REGISTRY: list[SettingDef] = [
         label="Ebook organizer pipeline",
         env_attr="ebook_pipeline_enabled",
         value_type="bool",
-        help="Land in /ebooks/unorganized → identify → Author/Series/Title → Kavita. See docs/ebooks.md.",
+        help=(
+            "Land in ebook staging (default /ebooks/unorganized) → identify → Author/Series/Title → Kavita. "
+            "Staging name is under Config → Storage / Paths. See docs/ebooks.md."
+        ),
     ),
     SettingDef(
         key="config.ebook_min_score",
@@ -185,7 +190,7 @@ REGISTRY: list[SettingDef] = [
         label="Ebook min score",
         env_attr="ebook_min_score",
         value_type="float",
-        help="Below this confidence → quarantine under unorganized/.",
+        help="Below this confidence → quarantine under the ebook staging folder.",
         placeholder="0.70",
     ),
     # --- Indexers ---
@@ -401,30 +406,83 @@ REGISTRY: list[SettingDef] = [
         restart_required=True,
         help="Env kill switch. Runtime on/off is Admin → Cache.",
     ),
-    # --- Storage (read-only) ---
+    # --- Storage / Paths ---
     SettingDef(
         key="config.audiobook_dir",
         group="storage",
-        label="Audiobook directory",
+        label="Audiobook directory (container)",
         env_attr="audiobook_dir",
-        editable=False,
         restart_required=True,
+        help=(
+            "In-container path for the audiobook library (default /audiobooks). "
+            "Must match the docker-compose volume target. Host bind path is "
+            "AUDIOBOOK_HOST_DIR in .env / compose — not editable here."
+        ),
+        placeholder="/audiobooks",
     ),
     SettingDef(
         key="config.ebook_dir",
         group="storage",
-        label="Ebook directory",
+        label="Ebook directory (container)",
         env_attr="ebook_dir",
-        editable=False,
         restart_required=True,
+        help=(
+            "In-container path for the ebook library (default /ebooks). "
+            "Must match the docker-compose volume target. Host bind path is "
+            "EBOOK_HOST_DIR in .env / compose — not editable here."
+        ),
+        placeholder="/ebooks",
+    ),
+    SettingDef(
+        key="config.audiobook_staging_dirname",
+        group="storage",
+        label="Audiobook staging folder name",
+        env_attr="audiobook_staging_dirname",
+        help=(
+            "Folder under the audiobook directory where downloads land before LibraForge "
+            "(default .unorganized). Prefer a dot-name so Audiobookshelf skips it."
+        ),
+        placeholder=".unorganized",
+    ),
+    SettingDef(
+        key="config.audiobook_staging_legacy_dirname",
+        group="storage",
+        label="Audiobook staging legacy name",
+        env_attr="audiobook_staging_legacy_dirname",
+        help=(
+            "Also treated as staging (migration / path remap). Default _unorganized. "
+            "Keep both if you still have legacy folders on disk."
+        ),
+        placeholder="_unorganized",
+    ),
+    SettingDef(
+        key="config.ebook_staging_dirname",
+        group="storage",
+        label="Ebook staging folder name",
+        env_attr="ebook_staging_dirname",
+        help=(
+            "Folder under the ebook directory for pipeline staging (default unorganized). "
+            "Configure Kavita to exclude this name from its library root."
+        ),
+        placeholder="unorganized",
     ),
     SettingDef(
         key="config.ol_catalog_db_path",
         group="storage",
         label="Open Library catalog DB",
         env_attr="ol_catalog_db_path",
-        editable=False,
         restart_required=True,
+        help="SQLite path for the local Open Library catalog (usually on fast storage).",
+        placeholder="/app/data/ol_catalog.db",
+    ),
+    SettingDef(
+        key="config.ol_dumps_dir",
+        group="storage",
+        label="Open Library dumps directory",
+        env_attr="ol_dumps_dir",
+        restart_required=True,
+        help="Where monthly Open Library dump files are downloaded/stored (often a large disk).",
+        placeholder="/openlibrary/dumps",
     ),
 ]
 
@@ -439,7 +497,7 @@ GROUPS: list[dict[str, str]] = [
     {"id": "vpn", "label": "VPN / ABB proxy"},
     {"id": "notifications", "label": "Push notifications"},
     {"id": "scraper", "label": "Scraper / discovery"},
-    {"id": "storage", "label": "Storage paths"},
+    {"id": "storage", "label": "Storage / Paths"},
 ]
 
 _BY_KEY = {d.key: d for d in REGISTRY}
@@ -621,6 +679,18 @@ async def update_config(updates: dict[str, str | None]) -> dict[str, Any]:
             invalidate_cache(key)
             continue
 
+        if key in (
+            "config.audiobook_staging_dirname",
+            "config.audiobook_staging_legacy_dirname",
+            "config.ebook_staging_dirname",
+        ):
+            # Folder name only — no slashes / traversal (empty clears to env default).
+            if value:
+                if "/" in value or "\\" in value or value in (".", "..") or ".." in value:
+                    raise ValueError(
+                        f"{key} must be a single folder name (no slashes), got: {value!r}"
+                    )
+
         await app_settings.set_setting(key, value)
         invalidate_cache(key)
 
@@ -651,8 +721,9 @@ async def setup_status() -> dict[str, Any]:
             "help": (
                 "Connect at least one library (ABS for audiobooks, Kavita for ebooks). "
                 "ABS/local metadata is the My Library source of truth for series/author/genre/sequence "
-                "(Hardcover may fill empty genres only). ABS ignores `.unorganized` (dot folder); "
-                "configure Kavita to exclude `unorganized`."
+                "(Hardcover may fill empty genres only). ABS ignores the audiobook staging "
+                "dot-folder (default `.unorganized`); configure Kavita to exclude the ebook "
+                "staging name (default `unorganized`). Names are editable under Config → Storage / Paths."
             ),
         },
         {
@@ -681,11 +752,11 @@ async def setup_status() -> dict[str, Any]:
             "done": bool(lf_url and lf_internal),
             "required": False,
             "help": (
-                "Audiobooks: `.unorganized` → Metadata → M4B → Chapter Forge (ASIN) → Folder Forge → ABS. "
+                "Audiobooks: staging folder → Metadata → M4B → Chapter Forge (ASIN) → Folder Forge → ABS. "
                 "M4B encodes share a global queue (concurrency 1) across auto-forge and Quick Review; "
                 "request cards show Queued for M4B vs Converting M4B. "
                 "`LIBRAFORGE_M4B_JOBS` is per-run workers (keep 1 on a Pi). "
-                "Ebooks: `unorganized` → identify → Author/Series/Title → Kavita. "
+                "Ebooks: staging folder → identify → Author/Series/Title → Kavita. "
                 "Sibling stack: docs/libraforge.md."
             ),
         },
@@ -695,8 +766,9 @@ async def setup_status() -> dict[str, Any]:
             "done": True,
             "required": False,
             "help": (
-                "Confirm media staging + optional clients. Pipelines create "
-                "`/audiobooks/.unorganized` and `/ebooks/unorganized` automatically."
+                "Confirm media staging + optional clients. Pipelines create staging roots under "
+                "AUDIOBOOK_DIR / EBOOK_DIR automatically (defaults `/audiobooks/.unorganized` and "
+                "`/ebooks/unorganized`). Override names in Admin → Config → Storage / Paths."
             ),
         },
         {

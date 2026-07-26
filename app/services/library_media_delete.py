@@ -5,11 +5,20 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from app.services.ebook_pipeline import EBOOK_UNORGANIZED_DIRNAME
-from app.services.forge_pipeline import LEGACY_UNORGANIZED_DIRNAME, UNORGANIZED_DIRNAME
+from app.services.ebook_pipeline import ebook_staging_dirname
+from app.services.forge_pipeline import unorganized_dirnames
 
-ABS_FORBIDDEN_DIRNAMES = frozenset({UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME})
-EBOOK_FORBIDDEN_DIRNAMES = frozenset({EBOOK_UNORGANIZED_DIRNAME})
+# Defaults for tests / import-time callers; prefer the getters below at runtime.
+ABS_FORBIDDEN_DIRNAMES = frozenset({".unorganized", "_unorganized"})
+EBOOK_FORBIDDEN_DIRNAMES = frozenset({"unorganized"})
+
+
+def get_abs_forbidden_dirnames() -> frozenset[str]:
+    return unorganized_dirnames()
+
+
+def get_ebook_forbidden_dirnames() -> frozenset[str]:
+    return frozenset({ebook_staging_dirname()})
 
 
 def _assert_deletable_under(
@@ -39,23 +48,24 @@ def resolve_abs_book_dir(audiobook_dir: Path, library_item: dict) -> Path:
     if not rel:
         path_str = (library_item.get("path") or "").strip()
         if path_str:
-            return _assert_deletable_under(Path(path_str), audiobook_dir, ABS_FORBIDDEN_DIRNAMES)
+            return _assert_deletable_under(Path(path_str), audiobook_dir, get_abs_forbidden_dirnames())
         raise ValueError("Missing relPath on library item")
     if ".." in Path(rel).parts:
         raise ValueError("Path traversal is not allowed")
     book_dir = audiobook_dir / rel
-    return _assert_deletable_under(book_dir, audiobook_dir, ABS_FORBIDDEN_DIRNAMES)
+    return _assert_deletable_under(book_dir, audiobook_dir, get_abs_forbidden_dirnames())
 
 
 def resolve_ebook_book_dirs(ebook_dir: Path, file_paths: list[Path]) -> list[Path]:
     if not file_paths:
         raise ValueError("No local ebook files for series")
     root = ebook_dir.resolve()
+    forbidden = get_ebook_forbidden_dirnames()
     parents: set[Path] = set()
     for raw in file_paths:
         p = Path(raw).resolve()
         parent = p.parent if p.is_file() or p.suffix else p
-        parents.add(_assert_deletable_under(parent, root, EBOOK_FORBIDDEN_DIRNAMES))
+        parents.add(_assert_deletable_under(parent, root, forbidden))
     ordered = sorted(parents, key=lambda x: len(x.parts), reverse=True)
     out: list[Path] = []
     for candidate in ordered:

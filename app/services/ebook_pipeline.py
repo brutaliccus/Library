@@ -23,8 +23,14 @@ from app.services import downloader, kavita, push
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Non-dot folder — Kavita is configured to ignore ``unorganized`` (see docs/ebooks.md).
+# Default — prefer settings.ebook_staging_dirname (Admin Config → Storage / Paths).
+# Kavita must exclude this folder name from its library root (see docs/ebooks.md).
 EBOOK_UNORGANIZED_DIRNAME = "unorganized"
+
+
+def ebook_staging_dirname() -> str:
+    name = (getattr(settings, "ebook_staging_dirname", None) or EBOOK_UNORGANIZED_DIRNAME).strip()
+    return name or EBOOK_UNORGANIZED_DIRNAME
 EBOOK_EXTENSIONS = {
     ".epub",
     ".pdf",
@@ -83,11 +89,11 @@ class EbookMeta:
 
 
 def ebook_unorganized_root() -> Path:
-    return Path(settings.ebook_dir) / EBOOK_UNORGANIZED_DIRNAME
+    return Path(settings.ebook_dir) / ebook_staging_dirname()
 
 
 def ensure_ebook_unorganized_root() -> Path:
-    """Create ``unorganized`` under the ebook library (Kavita excludes this name)."""
+    """Create ebook staging under the ebook library (Kavita excludes this name)."""
     root = ebook_unorganized_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -101,13 +107,13 @@ def ensure_ebook_unorganized_root() -> Path:
 
 
 def ebook_staging_dir(request_id: int, title: str) -> Path:
-    """Per-request landing folder under ``/ebooks/unorganized``."""
+    """Per-request landing folder under ebook staging (default ``/ebooks/unorganized``)."""
     slug = downloader.sanitize_filename(title or "book")[:80] or "book"
     return ensure_ebook_unorganized_root() / f"req_{request_id}_{slug}"
 
 
 def staging_path_for_storage(staging: Path) -> str:
-    """POSIX-style path as seen in Docker (``/ebooks/unorganized/...``)."""
+    """POSIX-style path as seen in Docker (e.g. ``/ebooks/unorganized/...``)."""
     try:
         resolved = staging.resolve()
     except OSError:

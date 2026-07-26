@@ -50,6 +50,7 @@ const STEP_GROUPS: Record<string, string[]> = {
   indexers: ["indexers"],
   debrid: ["debrid"],
   pipeline: ["pipeline"],
+  folders: ["storage"],
   catalog: ["catalog"],
   scraper: ["scraper"],
   mobile: ["mobile"],
@@ -57,14 +58,14 @@ const STEP_GROUPS: Record<string, string[]> = {
 
 const FOLDER_CHECKS: Array<{ title: string; detail: string }> = [
   {
-    title: "ABS ignores `.unorganized`",
+    title: "ABS ignores audiobook staging",
     detail:
-      "Audiobook staging is `/audiobooks/.unorganized/` (dot folder). ABS skips hidden dirs by default; a `.ignore` marker is also written.",
+      "Default staging is `/audiobooks/.unorganized/` (dot folder). ABS skips hidden dirs by default; a `.ignore` marker is also written. Names/paths are editable under Admin → Config → Storage / Paths.",
   },
   {
-    title: "Kavita excludes `unorganized`",
+    title: "Kavita excludes ebook staging",
     detail:
-      "Ebook staging is `/ebooks/unorganized/` (non-dot). Add `unorganized` to Kavita’s library ignore/exclude list so quarantine drops never appear as series.",
+      "Default staging is `/ebooks/unorganized/` (non-dot). Add that folder name to Kavita’s library ignore/exclude list so quarantine drops never appear as series. Override under Config → Storage / Paths.",
   },
   {
     title: "M4B global encode queue",

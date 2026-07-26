@@ -162,8 +162,15 @@ class Settings(BaseSettings):
     # written to data/mullvad.env for gluetun). Never commit the real number.
     mullvad_account_number: str = ""
 
+    # In-container library roots (must match docker-compose volume targets).
+    # Host bind mounts stay compose-only: AUDIOBOOK_HOST_DIR / EBOOK_HOST_DIR.
     audiobook_dir: str = "/audiobooks"
     ebook_dir: str = "/ebooks"
+    # Staging folder names under the library roots (pipelines land downloads here).
+    # ABS skips dot-dirs; Kavita must exclude the ebook staging name from its library.
+    audiobook_staging_dirname: str = ".unorganized"
+    audiobook_staging_legacy_dirname: str = "_unorganized"
+    ebook_staging_dirname: str = "unorganized"
 
     vapid_private_key: str = ""
     vapid_public_key: str = ""

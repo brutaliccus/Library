@@ -110,7 +110,11 @@ export default function AdminPage() {
   ];
 
   return (
-    <div className="w-full max-w-5xl mx-auto px-4 py-8 min-w-0 overflow-x-hidden">
+    <div
+      className={`w-full mx-auto px-4 py-8 min-w-0 overflow-x-hidden ${
+        activeTab === "config" ? "max-w-6xl" : "max-w-5xl"
+      }`}
+    >
       <h1 className="text-2xl font-bold text-gray-100 mb-6 flex items-center gap-2">
         <Shield size={24} />
         Admin Panel

@@ -31,10 +31,27 @@ _ASIN_TAG_KEYS = (
     "----:com.apple.iTunes:ASIN",
 )
 
-# Dot-directory so Audiobookshelf skips staging (ABS indexes `_unorganized`).
+# Defaults — prefer settings.audiobook_staging_* (Admin Config → Storage / Paths).
 UNORGANIZED_DIRNAME = ".unorganized"
 LEGACY_UNORGANIZED_DIRNAME = "_unorganized"
 UNORGANIZED_DIRNAMES = frozenset({UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME})
+
+
+def audiobook_staging_dirname() -> str:
+    name = (getattr(settings, "audiobook_staging_dirname", None) or UNORGANIZED_DIRNAME).strip()
+    return name or UNORGANIZED_DIRNAME
+
+
+def audiobook_staging_legacy_dirname() -> str:
+    name = (
+        getattr(settings, "audiobook_staging_legacy_dirname", None) or LEGACY_UNORGANIZED_DIRNAME
+    ).strip()
+    return name or LEGACY_UNORGANIZED_DIRNAME
+
+
+def unorganized_dirnames() -> frozenset[str]:
+    """Active + legacy audiobook staging folder names (config-aware)."""
+    return frozenset({audiobook_staging_dirname(), audiobook_staging_legacy_dirname()})
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".ogg", ".opus", ".flac", ".wav", ".wma", ".aac", ".mp4"}
 # Sibling folders that are alternate encodes of the same book (not separate titles).
 _FORMAT_DIR_NAMES = frozenset({
@@ -89,11 +106,11 @@ PIPELINE_TERMINAL = frozenset({
 
 
 def unorganized_root() -> Path:
-    return Path(settings.audiobook_dir) / UNORGANIZED_DIRNAME
+    return Path(settings.audiobook_dir) / audiobook_staging_dirname()
 
 
 def ensure_unorganized_root() -> Path:
-    """Create ``.unorganized`` (and a sibling ``.ignore``) for ABS-safe staging."""
+    """Create audiobook staging root (and a sibling ``.ignore``) for ABS-safe staging."""
     root = unorganized_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -106,7 +123,7 @@ def ensure_unorganized_root() -> Path:
 
 
 def audiobook_staging_dir(request_id: int, title: str) -> Path:
-    """Per-request landing folder under ``.unorganized`` (not final library layout)."""
+    """Per-request landing folder under audiobook staging (not final library layout)."""
     slug = downloader.sanitize_filename(title or "book")[:80] or "book"
     return ensure_unorganized_root() / f"req_{request_id}_{slug}"
 
@@ -341,16 +358,16 @@ def collect_staging_llm_context(staging: Path) -> dict[str, Any]:
 
 def _staging_library_roots() -> list[tuple[Path, tuple[str, ...]]]:
     """(library_root, staging_dirname_variants) for audiobook + ebook staging."""
-    from app.services.ebook_pipeline import EBOOK_UNORGANIZED_DIRNAME
+    from app.services.ebook_pipeline import ebook_staging_dirname
 
     return [
         (
             Path(settings.audiobook_dir).resolve(),
-            (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME),
+            (audiobook_staging_dirname(), audiobook_staging_legacy_dirname()),
         ),
         (
             Path(settings.ebook_dir).resolve(),
-            (EBOOK_UNORGANIZED_DIRNAME,),
+            (ebook_staging_dirname(),),
         ),
     ]
 
@@ -376,11 +393,15 @@ def resolve_staging_dir(staging_str: str) -> Path:
     if not raw:
         raise FileNotFoundError("Request has no staging_path")
 
-    from app.services.ebook_pipeline import EBOOK_UNORGANIZED_DIRNAME
+    from app.services.ebook_pipeline import ebook_staging_dirname
 
     lib_specs = _staging_library_roots()
     staging_roots = all_staging_roots()
     candidates: list[Path] = [Path(raw)]
+    ab_name = audiobook_staging_dirname()
+    ab_legacy = audiobook_staging_legacy_dirname()
+    eb_name = ebook_staging_dirname()
+    ab_names = unorganized_dirnames()
 
     # Normalize Docker / host mount prefixes to paths under library roots.
     # Path.parts keeps the root as '/' or 'C:\\'; drop that for remapping.
@@ -395,12 +416,14 @@ def resolve_staging_dir(staging_str: str) -> Path:
         if mapped:
             for lib_root, names in lib_specs:
                 candidates.append(lib_root.joinpath(*mapped))
-                # Rewrite audiobook legacy _unorganized ↔ .unorganized.
+                # Rewrite audiobook legacy staging name ↔ current staging name.
                 for old, new in (
+                    (ab_legacy, ab_name),
+                    (ab_name, ab_legacy),
                     (LEGACY_UNORGANIZED_DIRNAME, UNORGANIZED_DIRNAME),
                     (UNORGANIZED_DIRNAME, LEGACY_UNORGANIZED_DIRNAME),
                 ):
-                    if old in mapped:
+                    if old in mapped and old != new:
                         remapped = [new if p == old else p for p in mapped]
                         candidates.append(lib_root.joinpath(*remapped))
                 for name in names:
@@ -411,9 +434,7 @@ def resolve_staging_dir(staging_str: str) -> Path:
             for root in staging_roots:
                 candidates.append(root / mapped[-1])
             # Also try ebook unorganized if path only had audiobook-style parts
-            if EBOOK_UNORGANIZED_DIRNAME in mapped or any(
-                n in mapped for n in UNORGANIZED_DIRNAMES
-            ):
+            if eb_name in mapped or any(n in mapped for n in ab_names):
                 pass
 
     if not Path(raw).is_absolute():
@@ -2244,7 +2265,7 @@ def find_library_book_dir(title: str, author: str | None = None) -> Path | None:
             if not path.is_dir():
                 continue
             parts = set(path.parts)
-            if parts & UNORGANIZED_DIRNAMES:
+            if parts & unorganized_dirnames():
                 continue
             if path.name in {"lost+found", ".git"} or path.name.startswith("."):
                 continue

@@ -1,6 +1,16 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Save, Settings2, AlertTriangle, Eye, EyeOff, Database } from "lucide-react";
+import {
+  Save,
+  Settings2,
+  AlertTriangle,
+  Eye,
+  EyeOff,
+  Database,
+  Menu,
+  X,
+  ChevronDown,
+} from "lucide-react";
 import api from "../../api/client";
 import { useToast } from "../../contexts/ToastContext";
 
@@ -45,6 +55,7 @@ export default function ConfigTab() {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [activeGroup, setActiveGroup] = useState<string>("libraries");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["admin-config"],
@@ -103,6 +114,17 @@ export default function ConfigTab() {
     },
   });
 
+  useEffect(() => {
+    if (mobileNavOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [mobileNavOpen]);
+
   const groups = data?.groups || [];
   const settings = data?.settings || [];
   const byGroup = useMemo(() => {
@@ -113,6 +135,13 @@ export default function ConfigTab() {
     return map;
   }, [settings]);
 
+  useEffect(() => {
+    if (!groups.length) return;
+    if (!groups.some((g) => g.id === activeGroup)) {
+      setActiveGroup(groups[0].id);
+    }
+  }, [groups, activeGroup]);
+
   const dirtyKeys = Object.keys(drafts).filter((k) => {
     const original = settings.find((s) => s.key === k);
     if (!original) return false;
@@ -120,6 +149,16 @@ export default function ConfigTab() {
     if (original.secret) return drafts[k] !== undefined && drafts[k] !== "";
     return drafts[k] !== original.value;
   });
+
+  const dirtyByGroup = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const key of dirtyKeys) {
+      const def = settings.find((s) => s.key === key);
+      if (!def) continue;
+      counts[def.group] = (counts[def.group] || 0) + 1;
+    }
+    return counts;
+  }, [dirtyKeys, settings]);
 
   const saveGroup = () => {
     const updates: Record<string, string> = {};
@@ -147,11 +186,52 @@ export default function ConfigTab() {
     save.mutate(updates);
   };
 
+  const selectGroup = (id: string) => {
+    setActiveGroup(id);
+    setMobileNavOpen(false);
+  };
+
   if (isLoading) {
     return <p className="text-sm text-gray-500">Loading configuration…</p>;
   }
 
   const current = byGroup[activeGroup] || [];
+  const activeLabel = groups.find((g) => g.id === activeGroup)?.label || "Section";
+
+  const navList = (
+    <nav className="space-y-0.5" aria-label="Config sections">
+      <p className="px-3 pt-1 pb-2 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+        Sections
+      </p>
+      {groups.map((g) => {
+        const dirty = dirtyByGroup[g.id] || 0;
+        const active = activeGroup === g.id;
+        return (
+          <button
+            key={g.id}
+            type="button"
+            onClick={() => selectGroup(g.id)}
+            className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors flex items-center justify-between gap-2 ${
+              active
+                ? "bg-brand-600/20 text-brand-300 font-medium"
+                : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+            }`}
+          >
+            <span className="truncate">{g.label}</span>
+            {dirty > 0 && (
+              <span
+                className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-md ${
+                  active ? "bg-brand-600/30 text-brand-200" : "bg-gray-800 text-amber-400"
+                }`}
+              >
+                {dirty}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </nav>
+  );
 
   return (
     <div className="space-y-4">
@@ -177,157 +257,186 @@ export default function ConfigTab() {
         </button>
       </div>
 
-      <div className="flex gap-2 overflow-x-auto pb-1">
-        {groups.map((g) => (
-          <button
-            key={g.id}
-            type="button"
-            onClick={() => setActiveGroup(g.id)}
-            className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              activeGroup === g.id
-                ? "bg-gray-800 text-brand-400 border border-brand-500/40"
-                : "bg-gray-900 text-gray-400 border border-gray-800 hover:text-gray-200"
-            }`}
-          >
-            {g.label}
-          </button>
-        ))}
-      </div>
-
-      {(activeGroup === "storage" || activeGroup === "catalog") && (
-        <OlCatalogPanel
-          status={olQuery.data}
-          loading={olQuery.isLoading}
-          building={olBuild.isPending || olQuery.data?.status === "running"}
-          onBuild={(includeEditions) => {
-            const editionsNote = includeEditions
-              ? "\n\nIncluding editions makes the download and final DB much larger (often 10-20+ GB)."
-              : "";
-            const ok = window.confirm(
-              "Build the local Open Library catalog?\n\n" +
-                "This downloads multi-GB dump files and can take many hours on a Pi. " +
-                "The finished database is typically several GB. " +
-                "Keep the app running until it finishes." +
-                editionsNote +
-                "\n\nContinue?"
-            );
-            if (ok) olBuild.mutate(includeEditions);
-          }}
-        />
-      )}
-
-      <div className="space-y-3">
-        {current.map((s) => {
-          const draft = drafts[s.key];
-          const show = showSecrets[s.key];
-          const isBool = s.valueType === "bool";
-          const displayValue =
-            draft !== undefined
-              ? draft
-              : s.secret
-                ? ""
-                : s.value;
-
-          return (
-            <div
-              key={s.key}
-              className="p-3 rounded-xl border border-gray-800 bg-gray-900/50 space-y-2"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <p className="text-sm font-medium text-gray-100">{s.label}</p>
-                  {s.help && <p className="text-xs text-gray-500 mt-0.5">{s.help}</p>}
-                </div>
-                <div className="flex flex-wrap gap-1 justify-end">
-                  {s.configured && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-400">
-                      set{s.overridden ? "" : " (env)"}
-                    </span>
-                  )}
-                  {s.highUsage && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-400 inline-flex items-center gap-0.5">
-                      <AlertTriangle size={10} /> high usage
-                    </span>
-                  )}
-                  {s.restartRequired && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400">
-                      may need restart
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {!s.editable ? (
-                <p className="text-xs text-gray-400 font-mono break-all">
-                  {s.secret ? s.hint || "(not set)" : s.value || "(not set)"}
-                </p>
-              ) : isBool ? (
-                <label className="inline-flex items-center gap-2 text-sm text-gray-300">
-                  <input
-                    type="checkbox"
-                    checked={(draft ?? s.value) === "true"}
-                    onChange={(e) =>
-                      setDrafts((d) => ({ ...d, [s.key]: e.target.checked ? "true" : "false" }))
-                    }
-                    className="rounded border-gray-600 bg-gray-800"
-                  />
-                  Enabled
-                </label>
-              ) : (
-                <div className="flex gap-2">
-                  <input
-                    type={s.secret && !show ? "password" : "text"}
-                    value={displayValue}
-                    placeholder={
-                      s.secret
-                        ? s.hint
-                          ? `Configured · ${s.hint} — enter new value to replace`
-                          : s.placeholder || "Enter value"
-                        : s.placeholder || ""
-                    }
-                    onChange={(e) => setDrafts((d) => ({ ...d, [s.key]: e.target.value }))}
-                    className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-gray-950 border border-gray-700 text-sm text-gray-100 placeholder:text-gray-600"
-                  />
-                  {s.secret && (
-                    <button
-                      type="button"
-                      onClick={() => setShowSecrets((m) => ({ ...m, [s.key]: !show }))}
-                      className="px-2 rounded-lg border border-gray-700 text-gray-400 hover:text-gray-200"
-                      aria-label={show ? "Hide" : "Show"}
-                    >
-                      {show ? <EyeOff size={14} /> : <Eye size={14} />}
-                    </button>
-                  )}
-                  {s.overridden && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDrafts((d) => ({ ...d, [s.key]: "" }));
-                        save.mutate({ [s.key]: "" });
-                      }}
-                      className="px-2 text-xs text-gray-400 hover:text-red-400 border border-gray-700 rounded-lg"
-                      title="Clear DB override (revert to env)"
-                    >
-                      Clear
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="flex justify-end">
+      {/* Mobile section picker */}
+      <div className="lg:hidden">
         <button
           type="button"
-          onClick={saveGroup}
-          disabled={save.isPending}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-600 text-sm text-gray-200 hover:border-gray-500"
+          onClick={() => setMobileNavOpen(true)}
+          className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg border border-gray-800 bg-gray-900 text-sm text-gray-200"
         >
-          <Save size={14} />
-          Save this section
+          <span className="inline-flex items-center gap-2 min-w-0">
+            <Menu size={16} className="text-gray-500 shrink-0" />
+            <span className="truncate">{activeLabel}</span>
+            {(dirtyByGroup[activeGroup] || 0) > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-400">
+                {dirtyByGroup[activeGroup]} unsaved
+              </span>
+            )}
+          </span>
+          <ChevronDown size={16} className="text-gray-500 shrink-0" />
         </button>
+      </div>
+
+      {mobileNavOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setMobileNavOpen(false)} />
+          <div className="absolute left-0 top-0 bottom-0 w-72 max-w-[85vw] bg-gray-900 border-r border-gray-800 overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))]">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-semibold text-gray-200">Config sections</h3>
+              <button
+                type="button"
+                onClick={() => setMobileNavOpen(false)}
+                className="p-1 text-gray-500 hover:text-gray-300 transition-colors"
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            {navList}
+          </div>
+        </div>
+      )}
+
+      <div className="flex gap-6 items-start min-w-0">
+        <aside className="hidden lg:block w-52 shrink-0 sticky top-[4.5rem] max-h-[calc(100vh-5rem)] overflow-y-auto pr-2 scrollbar-hide">
+          {navList}
+        </aside>
+
+        <div className="flex-1 min-w-0 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-gray-200">{activeLabel}</h3>
+            <button
+              type="button"
+              onClick={saveGroup}
+              disabled={save.isPending || !(dirtyByGroup[activeGroup] > 0)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-200 hover:border-gray-500 disabled:opacity-40"
+            >
+              <Save size={12} />
+              Save section
+            </button>
+          </div>
+
+          {(activeGroup === "storage" || activeGroup === "catalog") && (
+            <OlCatalogPanel
+              status={olQuery.data}
+              loading={olQuery.isLoading}
+              building={olBuild.isPending || olQuery.data?.status === "running"}
+              onBuild={(includeEditions) => {
+                const editionsNote = includeEditions
+                  ? "\n\nIncluding editions makes the download and final DB much larger (often 10-20+ GB)."
+                  : "";
+                const ok = window.confirm(
+                  "Build the local Open Library catalog?\n\n" +
+                    "This downloads multi-GB dump files and can take many hours on a Pi. " +
+                    "The finished database is typically several GB. " +
+                    "Keep the app running until it finishes." +
+                    editionsNote +
+                    "\n\nContinue?"
+                );
+                if (ok) olBuild.mutate(includeEditions);
+              }}
+            />
+          )}
+
+          {current.map((s) => {
+            const draft = drafts[s.key];
+            const show = showSecrets[s.key];
+            const isBool = s.valueType === "bool";
+            const displayValue = draft !== undefined ? draft : s.secret ? "" : s.value;
+
+            return (
+              <div
+                key={s.key}
+                className="p-3 rounded-xl border border-gray-800 bg-gray-900/50 space-y-2"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium text-gray-100">{s.label}</p>
+                    {s.help && <p className="text-xs text-gray-500 mt-0.5">{s.help}</p>}
+                  </div>
+                  <div className="flex flex-wrap gap-1 justify-end">
+                    {s.configured && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-400">
+                        set{s.overridden ? "" : " (env)"}
+                      </span>
+                    )}
+                    {s.highUsage && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-400 inline-flex items-center gap-0.5">
+                        <AlertTriangle size={10} /> high usage
+                      </span>
+                    )}
+                    {s.restartRequired && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400">
+                        may need restart
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {!s.editable ? (
+                  <p className="text-xs text-gray-400 font-mono break-all">
+                    {s.secret ? s.hint || "(not set)" : s.value || "(not set)"}
+                  </p>
+                ) : isBool ? (
+                  <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={(draft ?? s.value) === "true"}
+                      onChange={(e) =>
+                        setDrafts((d) => ({ ...d, [s.key]: e.target.checked ? "true" : "false" }))
+                      }
+                      className="rounded border-gray-600 bg-gray-800"
+                    />
+                    Enabled
+                  </label>
+                ) : (
+                  <div className="flex gap-2">
+                    <input
+                      type={s.secret && !show ? "password" : "text"}
+                      value={displayValue}
+                      placeholder={
+                        s.secret
+                          ? s.hint
+                            ? `Configured · ${s.hint} — enter new value to replace`
+                            : s.placeholder || "Enter value"
+                          : s.placeholder || ""
+                      }
+                      onChange={(e) => setDrafts((d) => ({ ...d, [s.key]: e.target.value }))}
+                      className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-gray-950 border border-gray-700 text-sm text-gray-100 placeholder:text-gray-600"
+                    />
+                    {s.secret && (
+                      <button
+                        type="button"
+                        onClick={() => setShowSecrets((m) => ({ ...m, [s.key]: !show }))}
+                        className="px-2 rounded-lg border border-gray-700 text-gray-400 hover:text-gray-200"
+                        aria-label={show ? "Hide" : "Show"}
+                      >
+                        {show ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                    )}
+                    {s.overridden && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDrafts((d) => ({ ...d, [s.key]: "" }));
+                          save.mutate({ [s.key]: "" });
+                        }}
+                        className="px-2 text-xs text-gray-400 hover:text-red-400 border border-gray-700 rounded-lg"
+                        title="Clear DB override (revert to env)"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {!current.length && (
+            <p className="text-sm text-gray-500">No settings in this section.</p>
+          )}
+        </div>
       </div>
     </div>
   );

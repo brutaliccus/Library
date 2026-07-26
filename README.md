@@ -256,7 +256,7 @@ Proxy to `http://127.0.0.1:8085`.
 
 See [`.env.example`](.env.example) for the full list.
 
-Most integration keys can also be set in **Admin -> Config** (stored in the DB, env as fallback). `SECRET_KEY`, VAPID private key, and storage paths stay env-only.
+Most integration keys can also be set in **Admin -> Config** (stored in the DB, env as fallback). `SECRET_KEY` and the VAPID private key stay env-only. Library/staging paths are editable under **Admin → Config → Storage / Paths** (env fallback; host bind mounts remain compose-only via `AUDIOBOOK_HOST_DIR` / `EBOOK_HOST_DIR`).
 
 | Area | Variables |
 |------|-----------|

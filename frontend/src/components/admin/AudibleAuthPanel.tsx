@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
+  Copy,
   ExternalLink,
   Headphones,
   Loader2,
@@ -56,6 +57,38 @@ function apiError(err: unknown): string {
   );
 }
 
+/** Device OAuth URLs must keep the full query string — Amazon 404s if params are truncated. */
+export function isValidAudibleOauthUrl(url: string): boolean {
+  const u = (url || "").trim();
+  if (!/^https:\/\/www\.(amazon|audible)\./i.test(u)) return false;
+  if (!u.includes("/ap/signin?")) return false;
+  // Real PKCE URLs have many &-separated openid params; a lone ?param is a broken open.
+  return (u.match(/&/g) || []).length >= 5 && u.includes("openid.oa2.code_challenge=");
+}
+
+export function redirectHasAuthCode(url: string): boolean {
+  const raw = (url || "").trim();
+  if (!raw) return false;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.searchParams.get("openid.oa2.authorization_code")) return true;
+  } catch {
+    /* fall through — pasted strings are sometimes messy */
+  }
+  return /[?&]openid\.oa2\.authorization_code=/.test(raw);
+}
+
+/** Open via <a> so the full query string (including &) is preserved. */
+function openExternalUrl(url: string): void {
+  const a = document.createElement("a");
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 type Props = {
   /** Compact layout for setup wizard */
   compact?: boolean;
@@ -99,22 +132,35 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
       return body as { oauth_url: string };
     },
     onSuccess: (body) => {
-      const url = body.oauth_url || "";
+      const url = (body.oauth_url || "").trim();
       setOauthUrl(url);
-      if (url) {
-        window.open(url, "_blank", "noopener,noreferrer");
-        toast("Amazon sign-in opened — paste the final redirect URL below", "success");
-      } else {
+      if (!url) {
         toast("No OAuth URL returned from LibraForge", "error");
+        return;
       }
+      if (!isValidAudibleOauthUrl(url)) {
+        toast(
+          "LibraForge returned a malformed Amazon login URL (query string missing). Retry Sign in, or use Open LibraForge Accounts.",
+          "error",
+        );
+        return;
+      }
+      openExternalUrl(url);
+      toast("Amazon sign-in opened — after login, paste the full address-bar URL below", "success");
     },
     onError: (err) => toast(apiError(err), "error"),
   });
 
   const completeLogin = useMutation({
     mutationFn: async () => {
+      const redirect = redirectUrl.trim();
+      if (!redirectHasAuthCode(redirect)) {
+        throw new Error(
+          "That URL is missing openid.oa2.authorization_code. After Amazon sign-in, copy the entire address bar (usually …/ap/maplanding?…), not just the Page Not Found page title.",
+        );
+      }
       const { data: body } = await api.post("/admin/audible-auth/login/complete", {
-        redirect_url: redirectUrl.trim(),
+        redirect_url: redirect,
       });
       return body as AudibleAuthStatus & { ok?: boolean };
     },
@@ -149,6 +195,16 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
       }
     },
   });
+
+  const copyOauthUrl = async () => {
+    if (!oauthUrl) return;
+    try {
+      await navigator.clipboard.writeText(oauthUrl);
+      toast("Login URL copied", "success");
+    } catch {
+      toast("Could not copy — select the URL manually", "error");
+    }
+  };
 
   const chip = statusLabel(data);
   const locales = data?.locales || { us: "United States" };
@@ -203,8 +259,8 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
       {data?.reachable && !(data.configured || data.auth_ok) && (
         <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
           <p className="text-xs text-gray-400">
-            1) Name this account and pick a marketplace → 2) Sign in at Amazon → 3) Paste the
-            final redirect URL (address bar after login succeeds).
+            1) Nickname + marketplace → 2) Sign in at Amazon → 3) Paste the{" "}
+            <span className="text-gray-300">full</span> address-bar URL after Amazon finishes.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <label className="block space-y-1">
@@ -247,18 +303,46 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
             Sign in to Audible
           </button>
           {oauthUrl && (
-            <p className="text-[11px] text-gray-500 break-all">
-              If the window was blocked, open{" "}
-              <a
-                href={oauthUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-brand-400 hover:underline"
-              >
-                this Amazon login URL
-              </a>
-              .
-            </p>
+            <div className="space-y-2 rounded-lg border border-gray-800 bg-gray-900/50 p-2.5">
+              <p className="text-xs text-amber-100/90 inline-flex gap-2 items-start">
+                <AlertTriangle size={14} className="shrink-0 mt-0.5 text-amber-400" />
+                <span>
+                  After sign-in, Amazon shows a dog /{" "}
+                  <span className="text-amber-50">“Sorry! We couldn&apos;t find that page”</span>{" "}
+                  screen — that is expected (landing on{" "}
+                  <code className="text-[11px] text-gray-300">/ap/maplanding</code>). Copy the{" "}
+                  <span className="text-amber-50">entire</span> address bar URL (must include{" "}
+                  <code className="text-[11px] text-gray-300">openid.oa2.authorization_code</code>
+                  ). If you never see a login form, retry in a private window.
+                </span>
+              </p>
+              <label className="block space-y-1">
+                <span className="text-xs text-gray-500">Amazon login URL</span>
+                <textarea
+                  readOnly
+                  value={oauthUrl}
+                  rows={compact ? 2 : 3}
+                  className="w-full px-3 py-1.5 bg-gray-950 border border-gray-700 rounded-lg text-gray-300 text-[11px] font-mono focus:outline-none"
+                />
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <a
+                  href={oauthUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs text-brand-300 hover:text-brand-200 border border-brand-900/50 rounded-lg"
+                >
+                  <ExternalLink size={12} /> Open login URL
+                </a>
+                <button
+                  type="button"
+                  onClick={() => void copyOauthUrl()}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs text-gray-300 hover:text-white border border-gray-700 rounded-lg"
+                >
+                  <Copy size={12} /> Copy URL
+                </button>
+              </div>
+            </div>
           )}
           <label className="block space-y-1">
             <span className="text-xs text-gray-500">Paste final Amazon redirect URL</span>
@@ -266,7 +350,7 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
               value={redirectUrl}
               onChange={(e) => setRedirectUrl(e.target.value)}
               rows={compact ? 2 : 3}
-              placeholder="https://www.amazon.com/ap/maplanding?…"
+              placeholder="https://www.amazon.com/ap/maplanding?…&openid.oa2.authorization_code=…"
               className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-gray-100 text-sm font-mono focus:outline-none focus:border-gray-500"
             />
           </label>

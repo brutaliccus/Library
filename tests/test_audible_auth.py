@@ -5,11 +5,36 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+from app.routers.admin import _looks_like_audible_oauth_url
 from app.services.libraforge import (
     LibraForgeError,
     audible_auth_summary,
     public_accounts_url,
 )
+
+
+_SAMPLE_OAUTH = (
+    "https://www.amazon.com/ap/signin?openid.oa2.response_type=code"
+    "&openid.oa2.code_challenge_method=S256"
+    "&openid.oa2.code_challenge=abc123XYZ"
+    "&openid.return_to=https%3A%2F%2Fwww.amazon.com%2Fap%2Fmaplanding"
+    "&openid.assoc_handle=amzn_audible_ios_us"
+    "&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select"
+    "&pageId=amzn_audible_ios"
+)
+
+
+def test_looks_like_audible_oauth_url_accepts_full_pkce():
+    assert _looks_like_audible_oauth_url(_SAMPLE_OAUTH) is True
+
+
+def test_looks_like_audible_oauth_url_rejects_truncated():
+    # Truncation at first & is what produces Amazon's dog / "not a functioning page" 404.
+    assert _looks_like_audible_oauth_url(
+        "https://www.amazon.com/ap/signin?openid.oa2.response_type=code"
+    ) is False
+    assert _looks_like_audible_oauth_url("https://www.amazon.com/ap/maplanding") is False
+    assert _looks_like_audible_oauth_url("") is False
 
 
 def test_public_accounts_url(monkeypatch):

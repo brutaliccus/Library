@@ -1800,6 +1800,16 @@ async def get_audible_auth(_admin: User = Depends(require_admin)):
     return await lf.audible_auth_summary()
 
 
+def _looks_like_audible_oauth_url(url: str) -> bool:
+    """Amazon 404s if the PKCE query string is truncated — require a full /ap/signin URL."""
+    u = (url or "").strip()
+    if not u.startswith("https://www.amazon.") and not u.startswith("https://www.audible."):
+        return False
+    if "/ap/signin?" not in u:
+        return False
+    return u.count("&") >= 5 and "openid.oa2.code_challenge=" in u
+
+
 @router.post("/audible-auth/login/start")
 async def post_audible_login_start(
     body: AudibleLoginStartBody,
@@ -1814,8 +1824,23 @@ async def post_audible_login_start(
         data = await lf.auth_login_start(locale=(body.locale or "us").strip(), flavor_name=name)
     except LibraForgeError as e:
         raise _lf_http_error(e) from e
+    oauth_url = str(data.get("oauth_url") or "").strip()
+    if not oauth_url:
+        raise HTTPException(
+            status_code=502,
+            detail="LibraForge returned no OAuth URL. Check LibraForge health / version.",
+        )
+    if not _looks_like_audible_oauth_url(oauth_url):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "LibraForge returned a malformed Amazon login URL (missing OAuth query params). "
+                "Amazon will show a 404 dog page if that truncated URL is opened. "
+                "Retry, or use LibraForge Settings → Accounts."
+            ),
+        )
     return {
-        "oauth_url": data.get("oauth_url") or "",
+        "oauth_url": oauth_url,
         "locale": (body.locale or "us").strip(),
         "flavor_name": name,
     }
@@ -1833,6 +1858,16 @@ async def post_audible_login_complete(
     redirect = (body.redirect_url or "").strip()
     if not redirect:
         raise HTTPException(status_code=400, detail="Paste the final Amazon redirect URL.")
+    if "openid.oa2.authorization_code=" not in redirect:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Redirect URL is missing openid.oa2.authorization_code. "
+                "After Amazon sign-in you should land on a Page Not Found / dog page — that is "
+                "expected. Copy the entire address bar (usually …/ap/maplanding?…), not just the "
+                "path without query parameters."
+            ),
+        )
     try:
         result = await lf.auth_login_complete(redirect_url=redirect)
     except LibraForgeError as e:

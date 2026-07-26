@@ -87,7 +87,14 @@ Use a **dedicated** Audible account (not your main one). Library Site never stor
 
 1. Open **`/admin/setup`** → **Audible account (metadata)**, or later **Admin → Integrations → Audible**.
 2. Pick marketplace + nickname → **Sign in to Audible** (opens Amazon OAuth).
-3. After Amazon finishes, paste the final redirect URL → **Complete sign-in**.
+3. Sign in with the Audible/Amazon account. Amazon then lands on a **Page Not Found / dog** page
+   (“Sorry! We couldn't find that page”) at `/ap/maplanding` — **that is expected**, not a broken
+   login link. Copy the **entire** address-bar URL (must include `openid.oa2.authorization_code=…`).
+4. Paste that URL → **Complete sign-in**.
+
+If Amazon never shows a login form (jumps straight to the dog page without `authorization_code`),
+retry the login URL in a private/incognito window. The admin UI also shows the raw OAuth URL with
+a copy button if the popup was blocked.
 
 Library Site proxies LibraForge’s `/api/auth/login/*` endpoints; the auth file is written only into the LibraForge `/auth` mount.
 

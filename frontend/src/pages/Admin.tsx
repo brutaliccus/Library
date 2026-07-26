@@ -21,6 +21,9 @@ import {
   Circle,
   FolderTree,
   Sparkles,
+  Search,
+  X,
+  Headphones,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import ScraperTab from "../components/admin/ScraperTab";
@@ -45,19 +48,19 @@ type Tab = "users" | "requests" | "scraper" | "health" | "config";
 type AdminUser = {
   id: number;
   username: string;
+  email: string | null;
   role: string;
   is_active: boolean;
   created_at: string;
-  library_name: string | null;
   last_seen_at: string | null;
   is_online: boolean;
   requests_total: number;
   stream_sessions: number;
-  last_stream_at: string | null;
-  abs_titles_played: number;
-  last_abs_played_at: string | null;
-  active_alerts: number;
   finished_streams: number;
+  last_audiobook_title: string | null;
+  last_audiobook_at: string | null;
+  last_ebook_title: string | null;
+  last_ebook_at: string | null;
 };
 
 function formatRelativeTime(iso: string | null | undefined): string {
@@ -200,6 +203,7 @@ function UsersTab() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const { user: me } = useAuth();
+  const [userSearch, setUserSearch] = useState("");
   const [disableUserModal, setDisableUserModal] = useState<{ id: number; username: string } | null>(null);
   const [deleteUserModal, setDeleteUserModal] = useState<{ id: number; username: string } | null>(null);
 
@@ -212,6 +216,16 @@ function UsersTab() {
     refetchInterval: 60_000,
     refetchOnWindowFocus: true,
   });
+
+  const searchQ = userSearch.trim().toLowerCase();
+  const filteredUsers = !users
+    ? []
+    : !searchQ
+      ? users
+      : users.filter((u) => {
+          const hay = [u.username, u.email].filter(Boolean).join(" ").toLowerCase();
+          return hay.includes(searchQ);
+        });
 
   const setActive = useMutation({
     mutationFn: async ({ id, is_active }: { id: number; is_active: boolean }) => {
@@ -264,15 +278,39 @@ function UsersTab() {
         passwords, disable/enable accounts, or permanently delete them here.
       </p>
 
+      <div className="relative">
+        <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+        <input
+          type="search"
+          value={userSearch}
+          onChange={(e) => setUserSearch(e.target.value)}
+          placeholder="Search users by name or email..."
+          className="w-full pl-10 pr-10 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500"
+        />
+        {userSearch && (
+          <button
+            type="button"
+            onClick={() => setUserSearch("")}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+            aria-label="Clear search"
+          >
+            <X size={16} />
+          </button>
+        )}
+      </div>
+
       <section className="space-y-3">
         <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
-          Users ({users?.length ?? 0})
+          Users ({filteredUsers.length}
+          {searchQ ? ` of ${users?.length ?? 0}` : ""})
         </h2>
         {!users?.length ? (
           <p className="text-center py-8 text-gray-500">No users yet</p>
+        ) : !filteredUsers.length ? (
+          <p className="text-center py-8 text-gray-500">No users match “{userSearch.trim()}”</p>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
-            {users.map((user) => {
+            {filteredUsers.map((user) => {
               const isSelf = me?.username === user.username;
               const presenceLabel = user.is_online
                 ? "Online"
@@ -294,6 +332,11 @@ function UsersTab() {
                           </span>
                         )}
                       </p>
+                      {user.email && (
+                        <p className="mt-0.5 text-xs text-gray-500 truncate" title={user.email}>
+                          {user.email}
+                        </p>
+                      )}
                       <p className="mt-1 flex items-center gap-1.5 text-xs text-gray-400">
                         <Circle
                           size={8}
@@ -340,12 +383,6 @@ function UsersTab() {
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-gray-500">Library</dt>
-                      <dd className="text-gray-200 truncate" title={user.library_name || undefined}>
-                        {user.library_name || "—"}
-                      </dd>
-                    </div>
-                    <div>
                       <dt className="text-gray-500">Requests</dt>
                       <dd className="text-gray-200">{user.requests_total}</dd>
                     </div>
@@ -354,29 +391,38 @@ function UsersTab() {
                       <dd className="text-gray-200">{user.finished_streams}</dd>
                     </div>
                     <div>
-                      <dt className="text-gray-500">Listening sessions</dt>
-                      <dd className="text-gray-200">
-                        {user.stream_sessions}
-                        <span className="text-gray-500 font-normal">
-                          {" "}
-                          · last {formatRelativeTime(user.last_stream_at)}
-                        </span>
-                      </dd>
+                      <dt className="text-gray-500">Sessions</dt>
+                      <dd className="text-gray-200">{user.stream_sessions}</dd>
                     </div>
-                    <div>
-                      <dt className="text-gray-500">ABS titles played</dt>
-                      <dd className="text-gray-200">
-                        {user.abs_titles_played}
-                        <span className="text-gray-500 font-normal">
-                          {" "}
-                          · last {formatRelativeTime(user.last_abs_played_at)}
-                        </span>
-                      </dd>
-                    </div>
-                    <div className="col-span-2">
-                      <dt className="text-gray-500">Availability alerts</dt>
-                      <dd className="text-gray-200">
-                        {user.active_alerts} active
+                    <div className="col-span-2 space-y-1.5">
+                      <dt className="text-gray-500">Last Book</dt>
+                      <dd className="space-y-1 text-gray-200">
+                        <p className="flex items-start gap-1.5 min-w-0">
+                          <Headphones size={12} className="mt-0.5 shrink-0 text-gray-500" />
+                          <span className="min-w-0">
+                            <span className="truncate block" title={user.last_audiobook_title || undefined}>
+                              {user.last_audiobook_title || "—"}
+                            </span>
+                            {user.last_audiobook_at && (
+                              <span className="text-gray-500">
+                                {formatRelativeTime(user.last_audiobook_at)}
+                              </span>
+                            )}
+                          </span>
+                        </p>
+                        <p className="flex items-start gap-1.5 min-w-0">
+                          <BookOpen size={12} className="mt-0.5 shrink-0 text-gray-500" />
+                          <span className="min-w-0">
+                            <span className="truncate block" title={user.last_ebook_title || undefined}>
+                              {user.last_ebook_title || "—"}
+                            </span>
+                            {user.last_ebook_at && (
+                              <span className="text-gray-500">
+                                {formatRelativeTime(user.last_ebook_at)}
+                              </span>
+                            )}
+                          </span>
+                        </p>
                       </dd>
                     </div>
                   </dl>

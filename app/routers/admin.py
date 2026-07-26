@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -35,23 +35,27 @@ logger = logging.getLogger(__name__)
 # Client heartbeats ~every 60s while focused; treat as online within ~3 minutes.
 ONLINE_THRESHOLD = timedelta(minutes=3)
 
+# Finished-stream rule: status=finished OR within 5 minutes of book end
+# (total known and total_seconds - progress_seconds <= 300).
+FINISHED_NEAR_END_SECONDS = 300
+
 
 class UserResponse(BaseModel):
     id: int
     username: str
+    email: str | None = None
     role: str
     is_active: bool
     created_at: str
-    library_name: str | None = None
     last_seen_at: str | None = None
     is_online: bool = False
     requests_total: int = 0
     stream_sessions: int = 0
-    last_stream_at: str | None = None
-    abs_titles_played: int = 0
-    last_abs_played_at: str | None = None
-    active_alerts: int = 0
     finished_streams: int = 0
+    last_audiobook_title: str | None = None
+    last_audiobook_at: str | None = None
+    last_ebook_title: str | None = None
+    last_ebook_at: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -90,6 +94,26 @@ def user_is_online(last_seen_at: datetime | None, *, now: datetime | None = None
     seen = _as_utc(last_seen_at)
     assert seen is not None
     return (now - seen) <= ONLINE_THRESHOLD
+
+
+def stream_counts_as_finished(
+    status: str | None,
+    progress_seconds: float | None,
+    total_seconds: float | None,
+) -> bool:
+    """True when a stream is finished or within 5 minutes of the book end.
+
+    Rule: ``status == "finished"`` OR (``total_seconds > 0`` and
+    ``total_seconds - progress_seconds <= FINISHED_NEAR_END_SECONDS``).
+    ABS play rows have no progress fields, so this applies to stream_history only.
+    """
+    if (status or "") == "finished":
+        return True
+    total = float(total_seconds or 0)
+    if total <= 0:
+        return False
+    progress = float(progress_seconds or 0)
+    return (total - progress) <= FINISHED_NEAR_END_SECONDS
 
 
 class SetActiveBody(BaseModel):
@@ -245,14 +269,10 @@ async def list_users(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List accounts with per-user activity stats (aggregated â€” no N+1)."""
-    rows = (
-        await db.execute(
-            select(User, LibraryGroup.name)
-            .outerjoin(LibraryGroup, User.library_group_id == LibraryGroup.id)
-            .order_by(User.created_at.desc())
-        )
-    ).all()
+    """List accounts with per-user activity stats (aggregated — no N+1)."""
+    users = (
+        await db.execute(select(User).order_by(User.created_at.desc()))
+    ).scalars().all()
 
     req_counts = dict(
         (
@@ -262,78 +282,163 @@ async def list_users(
             )
         ).all()
     )
+
+    # Finished = status finished OR within 5 min of book end (total known).
+    near_end = and_(
+        StreamHistory.total_seconds > 0,
+        (StreamHistory.total_seconds - StreamHistory.progress_seconds)
+        <= FINISHED_NEAR_END_SECONDS,
+    )
+    finished_case = case(
+        (or_(StreamHistory.status == "finished", near_end), 1),
+        else_=0,
+    )
     stream_rows = (
         await db.execute(
             select(
                 StreamHistory.user_id,
                 func.count().label("sessions"),
-                func.coalesce(
-                    func.sum(case((StreamHistory.status == "finished", 1), else_=0)),
-                    0,
-                ).label("finished"),
-                func.max(StreamHistory.updated_at).label("last_stream"),
+                func.coalesce(func.sum(finished_case), 0).label("finished"),
             ).group_by(StreamHistory.user_id)
         )
     ).all()
     stream_stats = {
-        uid: {
-            "sessions": int(sessions or 0),
-            "finished": int(finished or 0),
-            "last_stream": last_stream,
-        }
-        for uid, sessions, finished, last_stream in stream_rows
+        uid: {"sessions": int(sessions or 0), "finished": int(finished or 0)}
+        for uid, sessions, finished in stream_rows
     }
+
     abs_rows = (
         await db.execute(
             select(
                 ABSPlayTracking.user_id,
                 func.count().label("titles"),
-                func.max(ABSPlayTracking.last_played_at).label("last_played"),
             ).group_by(ABSPlayTracking.user_id)
         )
     ).all()
-    abs_stats = {
-        uid: {"titles": int(titles or 0), "last_played": last_played}
-        for uid, titles, last_played in abs_rows
-    }
-    alert_counts = dict(
-        (
-            await db.execute(
-                select(AvailabilityAlert.user_id, func.count())
-                .where(AvailabilityAlert.notified_at.is_(None))
-                .group_by(AvailabilityAlert.user_id)
-            )
-        ).all()
+    abs_session_counts = {uid: int(titles or 0) for uid, titles in abs_rows}
+
+    # Latest RD stream title/time per user (for Last Book → audiobook).
+    sh_max = (
+        select(
+            StreamHistory.user_id.label("user_id"),
+            func.max(StreamHistory.updated_at).label("max_at"),
+        )
+        .group_by(StreamHistory.user_id)
+        .subquery()
     )
+    sh_latest_rows = (
+        await db.execute(
+            select(StreamHistory.user_id, StreamHistory.title, StreamHistory.updated_at)
+            .join(
+                sh_max,
+                and_(
+                    StreamHistory.user_id == sh_max.c.user_id,
+                    StreamHistory.updated_at == sh_max.c.max_at,
+                ),
+            )
+        )
+    ).all()
+    last_stream_by_user: dict[int, tuple[str, datetime | None]] = {}
+    for uid, title, updated_at in sh_latest_rows:
+        if uid not in last_stream_by_user:
+            last_stream_by_user[uid] = (title or "", updated_at)
+
+    # Latest ABS play title/time per user.
+    abs_max = (
+        select(
+            ABSPlayTracking.user_id.label("user_id"),
+            func.max(ABSPlayTracking.last_played_at).label("max_at"),
+        )
+        .group_by(ABSPlayTracking.user_id)
+        .subquery()
+    )
+    abs_latest_rows = (
+        await db.execute(
+            select(
+                ABSPlayTracking.user_id,
+                ABSPlayTracking.title,
+                ABSPlayTracking.last_played_at,
+            ).join(
+                abs_max,
+                and_(
+                    ABSPlayTracking.user_id == abs_max.c.user_id,
+                    ABSPlayTracking.last_played_at == abs_max.c.max_at,
+                ),
+            )
+        )
+    ).all()
+    last_abs_by_user: dict[int, tuple[str, datetime | None]] = {}
+    for uid, title, last_played in abs_latest_rows:
+        if uid not in last_abs_by_user:
+            last_abs_by_user[uid] = (title or "", last_played)
+
+    # Ebook reading progress is client-only (localStorage). Best server signal:
+    # most recent ebook download request (completed_at, else created_at).
+    ebook_at = func.coalesce(DownloadRequest.completed_at, DownloadRequest.created_at)
+    ebook_max = (
+        select(
+            DownloadRequest.user_id.label("user_id"),
+            func.max(ebook_at).label("max_at"),
+        )
+        .where(DownloadRequest.media_type == "ebook")
+        .group_by(DownloadRequest.user_id)
+        .subquery()
+    )
+    ebook_latest_rows = (
+        await db.execute(
+            select(DownloadRequest.user_id, DownloadRequest.title, ebook_at)
+            .join(
+                ebook_max,
+                and_(
+                    DownloadRequest.user_id == ebook_max.c.user_id,
+                    ebook_at == ebook_max.c.max_at,
+                ),
+            )
+            .where(DownloadRequest.media_type == "ebook")
+        )
+    ).all()
+    last_ebook_by_user: dict[int, tuple[str, datetime | None]] = {}
+    for uid, title, at in ebook_latest_rows:
+        if uid not in last_ebook_by_user:
+            last_ebook_by_user[uid] = (title or "", at)
 
     now = datetime.now(timezone.utc)
     out: list[UserResponse] = []
-    for user, library_name in rows:
+    for user in users:
         st = stream_stats.get(user.id, {})
-        ab = abs_stats.get(user.id, {})
         rd_sessions = int(st.get("sessions") or 0)
-        abs_titles = int(ab.get("titles") or 0)
-        # Listening activity spans debrid stream_history AND ABS library playback.
-        # ABS never writes stream_history (progress goes to ABS + abs_play_tracking).
+        abs_titles = int(abs_session_counts.get(user.id) or 0)
+
+        sh_title, sh_at = last_stream_by_user.get(user.id, ("", None))
+        abs_title, abs_at = last_abs_by_user.get(user.id, ("", None))
+        audio_at = later_datetime(sh_at, abs_at)
+        if audio_at is None:
+            last_audio_title = None
+        elif abs_at is not None and _as_utc(abs_at) == audio_at:
+            last_audio_title = abs_title or None
+        else:
+            last_audio_title = sh_title or None
+
+        ebook_title, ebook_when = last_ebook_by_user.get(user.id, (None, None))
+
+        # Listening sessions span debrid stream_history AND ABS play tracking.
         out.append(
             UserResponse(
                 id=user.id,
                 username=user.username,
+                email=user.email,
                 role=user.role,
                 is_active=user.is_active,
                 created_at=_iso(user.created_at) or "",
-                library_name=library_name,
                 last_seen_at=_iso(user.last_seen_at),
                 is_online=user_is_online(user.last_seen_at, now=now),
                 requests_total=int(req_counts.get(user.id) or 0),
                 stream_sessions=rd_sessions + abs_titles,
-                last_stream_at=_iso(
-                    later_datetime(st.get("last_stream"), ab.get("last_played"))
-                ),
-                abs_titles_played=abs_titles,
-                last_abs_played_at=_iso(ab.get("last_played")),
-                active_alerts=int(alert_counts.get(user.id) or 0),
                 finished_streams=int(st.get("finished") or 0),
+                last_audiobook_title=last_audio_title,
+                last_audiobook_at=_iso(audio_at),
+                last_ebook_title=ebook_title or None,
+                last_ebook_at=_iso(ebook_when),
             )
         )
     return out

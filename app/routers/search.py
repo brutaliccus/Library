@@ -438,16 +438,16 @@ async def search_abb_releases(
         info_hash = (item.get("infoHash") or "").strip().lower()
         if not info_hash:
             continue
+        from app.utils.release_title import split_release_title_author
+
         title_raw = item.get("title") or ""
-        display = _clean_release_text(title_raw) or title_raw
-        author = ""
-        if " - " in display:
-            parts = [p.strip() for p in display.split(" - ") if p.strip()]
-            if len(parts) >= 2:
-                if len(parts[0]) >= len(parts[-1]):
-                    display, author = parts[0], parts[-1]
-                else:
-                    author, display = parts[0], parts[-1]
+        cleaned = _clean_release_text(title_raw) or title_raw
+        display, author = split_release_title_author(
+            cleaned or title_raw,
+            indexer=item.get("indexer") or "AudioBookBay",
+        )
+        if not display:
+            display = cleaned or title_raw
         releases.append({
             "id": f"cache:{info_hash}",
             "volumeId": f"cache:{info_hash}",

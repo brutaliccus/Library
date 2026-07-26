@@ -433,7 +433,9 @@ export default function DownloadPanel({
       const mediaType = mediaTypeOverride || result.mediaType || "unknown";
       await api.post("/requests", {
         title: result.title,
-        author: result.author || author || undefined,
+        // Prefer catalog author from the book page over torrent-parsed author
+        // (ABB "Title - Author" mis-parses used to swap short titles).
+        author: author || result.author || undefined,
         magnet_link: result.magnetUrl || undefined,
         download_url: result.downloadUrl || undefined,
         indexer: result.indexer,

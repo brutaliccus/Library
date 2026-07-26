@@ -1150,7 +1150,9 @@ async def reorganize_audiobook_download(
     if (req.media_type or "audiobook") != "audiobook":
         raise HTTPException(status_code=400, detail="Only audiobook requests can be reorganized")
 
-    author, book_title = downloader.parse_torrent_name(req.title)
+    author, book_title = downloader.parse_torrent_name(
+        req.title, indexer=req.indexer
+    )
     if req.author:
         author = req.author
         if book_title == author or not book_title or book_title == "Unknown":

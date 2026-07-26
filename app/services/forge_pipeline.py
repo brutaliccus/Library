@@ -773,6 +773,156 @@ def cover_url_from_staging(staging: Path) -> str | None:
     return None
 
 
+def _str_field_from_mapping(data: Any, *keys: str) -> str:
+    if not isinstance(data, dict):
+        return ""
+    for key in keys:
+        val = data.get(key)
+        if isinstance(val, list):
+            parts = [str(x).strip() for x in val if str(x).strip()]
+            if parts:
+                return ", ".join(parts)
+        text = str(val or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def title_author_from_staging(staging: Path) -> tuple[str, str]:
+    """Best-effort catalog title/author from applied staging sidecars."""
+    if not staging.is_dir():
+        return "", ""
+
+    def _from_dict(data: dict[str, Any]) -> tuple[str, str]:
+        title = _str_field_from_mapping(data, "title", "raw_title")
+        author = _str_field_from_mapping(data, "author", "authorName", "authors")
+        if not title or not author:
+            for nest in ("book", "audible", "marker", "sidecar", "applied_tags", "backup"):
+                nested = data.get(nest)
+                if not isinstance(nested, dict):
+                    continue
+                # backup.applied_tags
+                if nest == "backup":
+                    applied = nested.get("applied_tags")
+                    if isinstance(applied, dict):
+                        nested = applied
+                title = title or _str_field_from_mapping(nested, "title", "raw_title")
+                author = author or _str_field_from_mapping(
+                    nested, "author", "authorName", "authors"
+                )
+        return title, author
+
+    for meta_path in sorted(
+        list(staging.rglob("metadata.json")) + list(staging.rglob("*.metadata.json")),
+        key=lambda p: (len(p.parts), str(p)),
+    ):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(meta, dict):
+            title, author = _from_dict(meta)
+            if title or author:
+                return title, author
+
+    for marker_path in sorted(
+        staging.rglob("libraforge.json"),
+        key=lambda p: (len(p.parts), str(p)),
+    ):
+        try:
+            data = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            title, author = _from_dict(data)
+            if title or author:
+                return title, author
+    return "", ""
+
+
+async def refresh_request_display_metadata(
+    request_id: int,
+    staging: Path | None = None,
+    *,
+    title: str | None = None,
+    author: str | None = None,
+    cover_url: str | None = None,
+) -> dict[str, str]:
+    """Persist matched title/author/cover onto DownloadRequest for the Requests UI.
+
+    Overwrites stale placeholder covers and swapped ABB title/author once
+    Metadata Forge / Quick Review / identify succeeds.
+    """
+    from app.utils.websocket import ws_manager
+
+    resolved_title = (title or "").strip()
+    resolved_author = (author or "").strip()
+    resolved_cover = (cover_url or "").strip()
+
+    if staging is not None and staging.is_dir():
+        if not resolved_cover:
+            resolved_cover = cover_url_from_staging(staging) or ""
+        if not resolved_title or not resolved_author:
+            st_title, st_author = title_author_from_staging(staging)
+            resolved_title = resolved_title or st_title
+            resolved_author = resolved_author or st_author
+
+    if resolved_author.lower() in {"", "unknown", "unknown author"}:
+        resolved_author = ""
+
+    if not resolved_title and not resolved_author and not resolved_cover:
+        return {}
+
+    updated: dict[str, str] = {}
+    user_id: int | None = None
+    status = ""
+    detail: str | None = None
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req = result.scalar_one_or_none()
+        if not req or req.status in ("cancelled", "admin_rejected"):
+            return {}
+        user_id = req.user_id
+        status = req.status or ""
+        detail = req.status_detail
+        if resolved_title and resolved_title != (req.title or ""):
+            req.title = resolved_title[:512]
+            updated["title"] = req.title
+        if resolved_author and resolved_author != (req.author or ""):
+            req.author = resolved_author[:256]
+            updated["author"] = req.author
+        if resolved_cover.startswith("http") and resolved_cover != (req.cover_url or ""):
+            req.cover_url = resolved_cover[:1024]
+            updated["cover_url"] = req.cover_url
+        if updated:
+            await db.commit()
+
+    if updated and user_id is not None:
+        try:
+            await ws_manager.send_to_user(
+                user_id,
+                {
+                    "type": "status_update",
+                    "request_id": request_id,
+                    "status": status,
+                    "detail": detail,
+                    **updated,
+                },
+            )
+        except Exception:
+            logger.debug(
+                "WS display refresh failed for request %s", request_id, exc_info=True
+            )
+        logger.info(
+            "Refreshed request %s display metadata: %s",
+            request_id,
+            ", ".join(sorted(updated)),
+        )
+    return updated
+
+
 async def _run_metadata_forge_once(
     request_id: int,
     *,
@@ -949,6 +1099,7 @@ async def _apply_metadata_forge(
         phase_detail=phase_detail,
     )
     if status == "ok":
+        await refresh_request_display_metadata(request_id, staging)
         return True
     if status == "cancelled":
         return False
@@ -962,6 +1113,7 @@ async def _apply_metadata_forge(
         )
         if status == "ok":
             logger.info("Metadata Forge succeeded after LLM assist for request %s", request_id)
+            await refresh_request_display_metadata(request_id, staging)
             return True
         if status == "cancelled":
             return False

@@ -57,29 +57,21 @@ async def extract_archive(archive_path: Path) -> bool:
     return True
 
 
-def parse_torrent_name(title: str) -> tuple[str, str]:
+def parse_torrent_name(title: str, *, indexer: str | None = None) -> tuple[str, str]:
     """Best-effort extraction of author and book title from a torrent name.
 
     Common patterns:
-      - "Author - Title (year)" 
+      - "Title - Author" (AudioBookBay)
+      - "Author - Title (year)" (some Knaben / scene packs)
       - "Title by Author"
-      - "Author_Title"
     Falls back to using the full title if no pattern matches.
+
+    Returns ``(author, book_title)`` for folder organization.
     """
-    title = title.strip()
+    from app.utils.release_title import parse_torrent_name_parts
 
-    if " - " in title:
-        parts = title.split(" - ", 1)
-        author = parts[0].strip()
-        book = re.sub(r"\(.*?\)|\[.*?\]", "", parts[1]).strip()
-        return sanitize_filename(author), sanitize_filename(book)
-
-    by_match = re.search(r"^(.+?)\s+by\s+(.+?)(?:\s*[\(\[]|$)", title, re.IGNORECASE)
-    if by_match:
-        return sanitize_filename(by_match.group(2)), sanitize_filename(by_match.group(1))
-
-    cleaned = re.sub(r"\(.*?\)|\[.*?\]", "", title).strip()
-    return "Unknown Author", sanitize_filename(cleaned)
+    author, book = parse_torrent_name_parts(title or "", indexer=indexer)
+    return sanitize_filename(author), sanitize_filename(book)
 
 
 def _looks_like_html(data: bytes) -> bool:

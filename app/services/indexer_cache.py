@@ -434,16 +434,15 @@ async def search_cache_releases(
         info_hash = item.get("infoHash") or ""
         title = item.get("title") or ""
         cover = await _cover_for(title, info_hash) if info_hash else ""
-        display_title = _clean_release_text(title) or title
-        author = ""
-        if " - " in display_title:
-            parts = [p.strip() for p in display_title.split(" - ") if p.strip()]
-            if len(parts) >= 2:
-                # Heuristic: shorter segment often author on ABB "Title - Author"
-                if len(parts[0]) >= len(parts[-1]):
-                    display_title, author = parts[0], parts[-1]
-                else:
-                    author, display_title = parts[0], parts[-1]
+        from app.utils.release_title import split_release_title_author
+
+        cleaned = _clean_release_text(title) or title
+        display_title, author = split_release_title_author(
+            cleaned or title,
+            indexer=item.get("indexer"),
+        )
+        if not display_title:
+            display_title = cleaned or title
         cards.append(
             {
                 "id": f"cache:{info_hash}",
@@ -515,16 +514,17 @@ async def get_cache_release_detail(info_hash: str) -> dict | None:
         api = torrent_row_to_api(row)
         title_raw = row.title or ""
         info_hash_out = row.info_hash
+        indexer_name = row.indexer or api.get("indexer")
 
-    display = _clean_release_text(title_raw) or title_raw
-    author = ""
-    if " - " in display:
-        parts = [p.strip() for p in display.split(" - ") if p.strip()]
-        if len(parts) >= 2:
-            if len(parts[0]) >= len(parts[-1]):
-                display, author = parts[0], parts[-1]
-            else:
-                author, display = parts[0], parts[-1]
+    from app.utils.release_title import split_release_title_author
+
+    cleaned = _clean_release_text(title_raw) or title_raw
+    display, author = split_release_title_author(
+        cleaned or title_raw,
+        indexer=indexer_name,
+    )
+    if not display:
+        display = cleaned or title_raw
 
     cover = ""
     for guess in (_torrent_search_queries(title_raw) or [display])[:1]:

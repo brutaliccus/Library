@@ -495,6 +495,42 @@ async def apply_quick_review(
                 "Could not stamp cover_url into staging for request %s: %s", req.id, e
             )
 
+    # Refresh Requests UI cover/title/author from the matched Audible metadata.
+    from app.services.forge_pipeline import refresh_request_display_metadata
+
+    preview_title = str(
+        (preview or {}).get("title")
+        or enriched.get("title")
+        or selected_result.get("title")
+        or ""
+    ).strip()
+    authors_list = enriched.get("authors")
+    if isinstance(authors_list, list):
+        authors_joined = ", ".join(str(a).strip() for a in authors_list if str(a).strip())
+    else:
+        authors_joined = ""
+    preview_author = str(
+        (preview or {}).get("author")
+        or enriched.get("author")
+        or authors_joined
+        or selected_result.get("author")
+        or ""
+    ).strip()
+    try:
+        await refresh_request_display_metadata(
+            req.id,
+            staging,
+            title=preview_title or None,
+            author=preview_author or None,
+            cover_url=applied_cover or None,
+        )
+    except Exception as e:
+        logger.warning(
+            "Could not refresh request display after Quick Review apply for %s: %s",
+            req.id,
+            e,
+        )
+
     return {
         "ok": True,
         "request_id": req.id,

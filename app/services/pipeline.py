@@ -791,7 +791,9 @@ async def process_download(request_id: int) -> None:
             torrent_id = req.rd_torrent_id
             stored_provider = getattr(req, "debrid_provider", None) or None
 
-            author, book_title = downloader.parse_torrent_name(title)
+            author, book_title = downloader.parse_torrent_name(
+                title, indexer=req.indexer
+            )
             if req.author:
                 author = req.author
                 if book_title == author or not book_title or book_title == "Unknown":
@@ -1157,7 +1159,9 @@ async def process_aa_download(request_id: int) -> None:
             media_type = req.media_type or "audiobook"
             aa_md5 = req.rd_torrent_id  # repurposed: stores AA md5 hash
 
-            author, book_title = downloader.parse_torrent_name(title)
+            author, book_title = downloader.parse_torrent_name(
+                title, indexer=req.indexer
+            )
             if req.author:
                 author = req.author
                 if book_title == author or not book_title or book_title == "Unknown":

@@ -752,16 +752,24 @@ async def run_ebook_after_download(
 
         wipe_staging(staging)
 
-        # Refresh cover on the request if we found one
-        if meta.cover_url:
-            async with async_session() as db:
-                result = await db.execute(
-                    select(DownloadRequest).where(DownloadRequest.id == request_id)
+        # Refresh Requests UI cover/title/author from identified metadata
+        # (overwrite stale placeholders / swapped ABB fields).
+        if meta.cover_url or meta.title or meta.author:
+            from app.services.forge_pipeline import refresh_request_display_metadata
+
+            try:
+                await refresh_request_display_metadata(
+                    request_id,
+                    title=meta.title or None,
+                    author=meta.author or None,
+                    cover_url=meta.cover_url or None,
                 )
-                req = result.scalar_one_or_none()
-                if req and not req.cover_url:
-                    req.cover_url = meta.cover_url[:1024]
-                    await db.commit()
+            except Exception as e:
+                logger.warning(
+                    "Could not refresh request display after ebook identify for %s: %s",
+                    request_id,
+                    e,
+                )
 
         logger.info("Ebook organized for request %s → %s", request_id, dest_file)
 

@@ -10,6 +10,8 @@ export interface WSMessage {
   status?: string;
   detail?: string;
   title?: string;
+  author?: string;
+  cover_url?: string;
   progress_percent?: number | null;
   progress_bytes?: number | null;
   progress_total_bytes?: number | null;

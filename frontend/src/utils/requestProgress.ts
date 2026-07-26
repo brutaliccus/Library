@@ -88,6 +88,9 @@ export function applyRequestWsUpdate(
       ...r,
       status: msg.status ?? r.status,
       status_detail: msg.detail ?? r.status_detail,
+      title: msg.title !== undefined ? msg.title : r.title,
+      author: msg.author !== undefined ? msg.author : r.author,
+      cover_url: msg.cover_url !== undefined ? msg.cover_url : r.cover_url,
       progress_percent:
         msg.progress_percent !== undefined ? msg.progress_percent : r.progress_percent,
       progress_bytes:

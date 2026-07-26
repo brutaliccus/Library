@@ -33,9 +33,9 @@ function markOptimisticPlaying(): void {
 async function withWebViewReady(fn: () => void): Promise<void> {
   markOptimisticPlaying();
   try {
-    // Native LibraryAutoPlugin already bringToForeground + delays ~400ms before
-    // delivering play. Do not stack another sleep here — that delayed audio.play()
-    // and widened the native-focus vs WebView-focus race.
+    // Native soft-wakes WebView timers + sticky-retries play after deep idle.
+    // Do not stack another sleep here — that delayed audio.play() and widened
+    // the native-focus vs WebView-focus race.
     void LibraryAuto.bringToForeground();
   } catch {
     /* native only */

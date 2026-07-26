@@ -1,13 +1,18 @@
 package com.freiverse.library;
 
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Base64;
 import android.util.Log;
+import android.webkit.WebView;
 import androidx.core.content.ContextCompat;
+import com.getcapacitor.Bridge;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -30,14 +35,28 @@ public class LibraryAutoPlugin extends Plugin
     implements LibraryAutoBridge.ActionListener, LibraryAutoBridge.BrowseRequestEmitter {
 
     private static final String TAG = "LibraryAuto";
-    /** Delay so a frozen WebView can resume before audio.play(). */
+    /** Short thaw for brief pauses (call / skip). */
     private static final long PLAY_WAKE_DELAY_MS = 400;
+    /** Brief pause: one quick deliver + one backup. */
+    private static final long[] PLAY_RETRY_DELAYS_MS = { 400, 1_200 };
+    /** After multi-minute idle the Chromium WebView often needs seconds to thaw. */
+    private static final long[] PLAY_RETRY_DELAYS_DEEP_MS = { 600, 1_500, 3_000, 5_000, 7_500 };
+    private static final long WAKE_LOCK_MS = 12_000;
 
     private final Map<String, PluginCall> actionHandlers = new HashMap<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final List<PendingAction> pendingActions = new ArrayList<>();
     private String cachedArtworkUrl = null;
     private Bitmap cachedArtwork = null;
+
+    /** Sticky play/playmedia until retries exhaust or user pauses (not optimistic play). */
+    private PendingAction stickyPlay = null;
+    private int stickyPlayAttempt = 0;
+    private long stickyPlayStartedElapsed = 0;
+    private long stickyPlayUntilElapsed = 0;
+    private boolean stickyPlayDeepIdle = false;
+    private PowerManager.WakeLock playWakeLock = null;
+    private final Runnable stickyPlayRetryRunnable = this::runStickyPlayAttempt;
 
     private static final class PendingAction {
         final String action;
@@ -58,9 +77,24 @@ public class LibraryAutoPlugin extends Plugin
 
     @Override
     protected void handleOnDestroy() {
+        cancelStickyPlay();
+        releasePlayWakeLock();
         LibraryAutoBridge.getInstance().removeActionListener(this);
         LibraryAutoBridge.getInstance().setBrowseRequestEmitter(null);
         super.handleOnDestroy();
+    }
+
+    @Override
+    protected void handleOnResume() {
+        super.handleOnResume();
+        // Activity came up (AA soft-wake or user opened app) — thaw + flush play.
+        softWakeWebView();
+        // Do not cancel on bridge.isPlaying() — that flag is optimistic from AA onPlay.
+        if (stickyPlay != null && SystemClock.elapsedRealtime() < stickyPlayUntilElapsed) {
+            mainHandler.removeCallbacks(stickyPlayRetryRunnable);
+            mainHandler.postDelayed(stickyPlayRetryRunnable, 150);
+        }
+        flushAllPending();
     }
 
     @Override
@@ -127,8 +161,71 @@ public class LibraryAutoPlugin extends Plugin
 
     @PluginMethod
     public void bringToForeground(PluginCall call) {
+        softWakeWebView();
         bringActivityToForeground();
         call.resolve();
+    }
+
+    /**
+     * Thaw a Doze / background-frozen WebView so Capacitor callbacks and
+     * audio.play() can run without requiring the user to open the app UI.
+     * resumeTimers() is process-global and is the critical piece after idle.
+     */
+    private void softWakeWebView() {
+        try {
+            Bridge bridge = getBridge();
+            if (bridge == null) {
+                return;
+            }
+            WebView webView = bridge.getWebView();
+            if (webView == null) {
+                return;
+            }
+            webView.post(() -> {
+                try {
+                    webView.onResume();
+                    webView.resumeTimers();
+                } catch (Exception e) {
+                    Log.w(TAG, "softWakeWebView failed", e);
+                }
+            });
+        } catch (Exception e) {
+            Log.w(TAG, "softWakeWebView unavailable", e);
+        }
+    }
+
+    private void acquirePlayWakeLock() {
+        try {
+            Context ctx = getContext();
+            if (ctx == null) {
+                return;
+            }
+            if (playWakeLock != null && playWakeLock.isHeld()) {
+                playWakeLock.acquire(WAKE_LOCK_MS);
+                return;
+            }
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            if (pm == null) {
+                return;
+            }
+            playWakeLock =
+                pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "library:aa_play_wake");
+            playWakeLock.setReferenceCounted(false);
+            playWakeLock.acquire(WAKE_LOCK_MS);
+        } catch (Exception e) {
+            Log.w(TAG, "acquirePlayWakeLock failed", e);
+        }
+    }
+
+    private void releasePlayWakeLock() {
+        try {
+            if (playWakeLock != null && playWakeLock.isHeld()) {
+                playWakeLock.release();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "releasePlayWakeLock failed", e);
+        }
+        playWakeLock = null;
     }
 
     private void bringActivityToForeground() {
@@ -142,6 +239,7 @@ public class LibraryAutoPlugin extends Plugin
                 | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
                 | android.content.Intent.FLAG_ACTIVITY_NEW_TASK
                 | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | android.content.Intent.FLAG_ACTIVITY_NO_USER_ACTION
         );
         intent.putExtra("library_media_resume", true);
         try {
@@ -178,6 +276,7 @@ public class LibraryAutoPlugin extends Plugin
         if (!active) {
             cachedArtworkUrl = null;
             cachedArtwork = null;
+            cancelStickyPlay();
             LibraryAutoBridge.getInstance().clear();
             call.resolve();
             return;
@@ -189,6 +288,7 @@ public class LibraryAutoPlugin extends Plugin
                 Math.round(positionSec * 1000),
                 playbackRate
             );
+            maybeConfirmStickyPlay(playing);
             call.resolve();
             return;
         }
@@ -227,8 +327,25 @@ public class LibraryAutoPlugin extends Plugin
             playbackRate
         );
         ensurePlaybackService();
+        maybeConfirmStickyPlay(playing);
 
         call.resolve();
+    }
+
+    /**
+     * JS sync saying playing=true may be optimistic (AA settle grace). Only stop
+     * sticky retries once enough time has passed for audio to actually start —
+     * especially after multi-minute idle thaws.
+     */
+    private void maybeConfirmStickyPlay(boolean playing) {
+        if (!playing || stickyPlay == null) {
+            return;
+        }
+        long minConfirmMs = stickyPlayDeepIdle ? 2_500 : 900;
+        if (SystemClock.elapsedRealtime() - stickyPlayStartedElapsed >= minConfirmMs) {
+            Log.i(TAG, "Sticky AA play confirmed by JS sync");
+            cancelStickyPlay();
+        }
     }
 
     private Bitmap getCachedArtwork(String url) throws IOException {
@@ -250,6 +367,15 @@ public class LibraryAutoPlugin extends Plugin
         if (action != null) {
             actionHandlers.put(action, call);
             flushPendingFor(action);
+            // Handlers re-registered after WebView thaw — retry sticky play.
+            if (
+                stickyPlay != null
+                    && action.equals(stickyPlay.action)
+                    && SystemClock.elapsedRealtime() < stickyPlayUntilElapsed
+            ) {
+                mainHandler.removeCallbacks(stickyPlayRetryRunnable);
+                mainHandler.postDelayed(stickyPlayRetryRunnable, 100);
+            }
         } else {
             call.resolve();
         }
@@ -269,18 +395,153 @@ public class LibraryAutoPlugin extends Plugin
         }
     }
 
+    private void flushAllPending() {
+        List<PendingAction> due;
+        synchronized (pendingActions) {
+            due = new ArrayList<>(pendingActions);
+            pendingActions.clear();
+        }
+        for (PendingAction p : due) {
+            deliverToJs(p.action, p.extras);
+        }
+    }
+
+    private void cancelStickyPlay() {
+        stickyPlay = null;
+        stickyPlayAttempt = 0;
+        stickyPlayStartedElapsed = 0;
+        stickyPlayUntilElapsed = 0;
+        stickyPlayDeepIdle = false;
+        mainHandler.removeCallbacks(stickyPlayRetryRunnable);
+        releasePlayWakeLock();
+        LibraryAutoBridge.getInstance().clearDeepIdlePlayLatch();
+    }
+
+    private void beginStickyPlay(String action, Bundle extras, boolean deepIdle) {
+        stickyPlay = new PendingAction(action, extras);
+        stickyPlayAttempt = 0;
+        stickyPlayDeepIdle = deepIdle;
+        stickyPlayStartedElapsed = SystemClock.elapsedRealtime();
+        long[] delays = deepIdle ? PLAY_RETRY_DELAYS_DEEP_MS : PLAY_RETRY_DELAYS_MS;
+        stickyPlayUntilElapsed =
+            stickyPlayStartedElapsed + delays[delays.length - 1] + 2_500;
+        acquirePlayWakeLock();
+        softWakeWebView();
+        ensurePlaybackService();
+        // Soft-wake timers first; only bring the activity up for deep idle so the
+        // phone UI isn't flashed on every short AA pause/resume.
+        if (deepIdle) {
+            bringActivityToForeground();
+        }
+        mainHandler.removeCallbacks(stickyPlayRetryRunnable);
+        scheduleStickyPlayAttempt(delays[0]);
+    }
+
+    private void scheduleStickyPlayAttempt(long delayMs) {
+        mainHandler.removeCallbacks(stickyPlayRetryRunnable);
+        mainHandler.postDelayed(stickyPlayRetryRunnable, delayMs);
+    }
+
+    private void runStickyPlayAttempt() {
+        if (stickyPlay == null) {
+            return;
+        }
+        if (SystemClock.elapsedRealtime() >= stickyPlayUntilElapsed) {
+            Log.w(TAG, "Sticky AA play timed out without confirmation");
+            cancelStickyPlay();
+            return;
+        }
+
+        long[] delays = stickyPlayDeepIdle ? PLAY_RETRY_DELAYS_DEEP_MS : PLAY_RETRY_DELAYS_MS;
+
+        softWakeWebView();
+        ensurePlaybackService();
+        // Deep idle: activity wake from the start. Short pause: escalate only if
+        // the first timer-only deliver didn't get a JS confirm.
+        if (stickyPlayDeepIdle || stickyPlayAttempt >= 1) {
+            bringActivityToForeground();
+        }
+        LibraryAutoBridge.getInstance().requestAudioFocusForPlay();
+
+        PluginCall handler = actionHandlers.get(stickyPlay.action);
+        boolean missing =
+            handler == null || PluginCall.CALLBACK_ID_DANGLING.equals(handler.getCallbackId());
+        if (missing) {
+            Log.d(
+                TAG,
+                "Sticky AA play waiting for JS handler (attempt "
+                    + stickyPlayAttempt
+                    + "): "
+                    + stickyPlay.action
+            );
+            synchronized (pendingActions) {
+                pendingActions.add(new PendingAction(stickyPlay.action, stickyPlay.extras));
+                while (pendingActions.size() > 8) {
+                    pendingActions.remove(0);
+                }
+            }
+        } else {
+            Log.i(
+                TAG,
+                "Delivering sticky AA play attempt "
+                    + stickyPlayAttempt
+                    + " action="
+                    + stickyPlay.action
+            );
+            deliverToJs(stickyPlay.action, stickyPlay.extras);
+        }
+
+        stickyPlayAttempt++;
+        if (stickyPlayAttempt < delays.length) {
+            long nextDelay = delays[stickyPlayAttempt];
+            long already = delays[stickyPlayAttempt - 1];
+            scheduleStickyPlayAttempt(Math.max(200, nextDelay - already));
+        } else {
+            mainHandler.postDelayed(
+                () -> {
+                    if (stickyPlay == null) {
+                        return;
+                    }
+                    if (SystemClock.elapsedRealtime() >= stickyPlayUntilElapsed) {
+                        Log.w(TAG, "Sticky AA play exhausted retries");
+                        cancelStickyPlay();
+                    }
+                },
+                2_500
+            );
+        }
+    }
+
     @Override
     public void onAction(String action, Bundle extras) {
+        boolean isPlay = "play".equals(action) || "playmedia".equals(action);
         boolean needsWake =
-            "play".equals(action)
-                || "playmedia".equals(action)
+            isPlay
                 || "seekto".equals(action)
                 || "seekforward".equals(action)
                 || "seekbackward".equals(action);
 
         if (needsWake) {
-            bringActivityToForeground();
+            softWakeWebView();
             ensurePlaybackService();
+            acquirePlayWakeLock();
+        }
+
+        if (isPlay) {
+            boolean deepIdle = LibraryAutoBridge.getInstance().isDeepIdlePlay();
+            Log.i(
+                TAG,
+                "AA play wake deepIdle="
+                    + deepIdle
+                    + " idleMs="
+                    + LibraryAutoBridge.getInstance().millisSincePause()
+            );
+            beginStickyPlay(action, extras, deepIdle);
+            return;
+        }
+
+        if ("pause".equals(action) || "stop".equals(action)) {
+            cancelStickyPlay();
         }
 
         PluginCall handler = actionHandlers.get(action);
@@ -297,6 +558,7 @@ public class LibraryAutoPlugin extends Plugin
             }
             // Retry delivery after WebView has a chance to re-register handlers.
             mainHandler.postDelayed(() -> {
+                softWakeWebView();
                 PluginCall h = actionHandlers.get(action);
                 if (h != null && !PluginCall.CALLBACK_ID_DANGLING.equals(h.getCallbackId())) {
                     flushPendingFor(action);
@@ -305,15 +567,9 @@ public class LibraryAutoPlugin extends Plugin
             return;
         }
 
-        if ("play".equals(action) || "playmedia".equals(action)) {
-            // Soft-wake first, then deliver play so audio.play() isn't rejected
-            // by a still-frozen WebView (phone call / car reconnect).
-            // Re-arm focus-loss grace so it covers WebView audio.play(), not just
-            // the earlier MediaSession onPlay focus request.
-            mainHandler.postDelayed(() -> {
-                LibraryAutoBridge.getInstance().requestAudioFocusForPlay();
-                deliverToJs(action, extras);
-            }, PLAY_WAKE_DELAY_MS);
+        if (needsWake) {
+            // Seek path: brief thaw then deliver (keep ±15 snappy).
+            mainHandler.postDelayed(() -> deliverToJs(action, extras), PLAY_WAKE_DELAY_MS);
             return;
         }
 

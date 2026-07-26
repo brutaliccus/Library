@@ -115,6 +115,16 @@ public final class LibraryAutoBridge {
      */
     private long ignoreFocusLossUntilElapsed = 0;
     private static final long FOCUS_LOSS_GRACE_MS = 8_000;
+    /** Longer grace after multi-minute idle — WebView thaw can take seconds. */
+    private static final long FOCUS_LOSS_GRACE_LONG_IDLE_MS = 16_000;
+    /** ElapsedRealtime when we last entered paused (for deep-idle wake sizing). */
+    private long pausedAtElapsed = 0;
+    /**
+     * Latched when AA/lock play starts after a long pause — survives clearing
+     * {@link #pausedAtElapsed} during optimistic play so the soft-wake path
+     * still uses the deep-idle retry schedule.
+     */
+    private boolean deepIdlePlayLatched = false;
 
     private LibraryAutoBridge() {}
 
@@ -192,10 +202,15 @@ public final class LibraryAutoBridge {
     private boolean applyPlayingSync(boolean playing) {
         if (playing) {
             ignorePausedSyncUntilElapsed = 0;
+            pausedAtElapsed = 0;
+            deepIdlePlayLatched = false;
             return true;
         }
         if (SystemClock.elapsedRealtime() < ignorePausedSyncUntilElapsed) {
             return this.playing;
+        }
+        if (this.playing) {
+            pausedAtElapsed = SystemClock.elapsedRealtime();
         }
         return false;
     }
@@ -219,14 +234,50 @@ public final class LibraryAutoBridge {
         }
         this.playing = playing;
         if (playing) {
+            // Sample before clearing pause timestamp — grace size depends on idle depth.
+            boolean deep = isDeepIdlePause() || deepIdlePlayLatched;
+            deepIdlePlayLatched = deep;
+            long grace = deep ? FOCUS_LOSS_GRACE_LONG_IDLE_MS : FOCUS_LOSS_GRACE_MS;
+            pausedAtElapsed = 0;
             long now = SystemClock.elapsedRealtime();
             ignorePausedSyncUntilElapsed = now + PAUSED_SYNC_GRACE_MS;
-            ignoreFocusLossUntilElapsed = now + FOCUS_LOSS_GRACE_MS;
+            ignoreFocusLossUntilElapsed = now + grace;
         } else {
             ignorePausedSyncUntilElapsed = 0;
             ignoreFocusLossUntilElapsed = 0;
+            deepIdlePlayLatched = false;
+            pausedAtElapsed = SystemClock.elapsedRealtime();
         }
         refreshSession(false);
+    }
+
+    /** Milliseconds since last pause; 0 if playing / never paused this session. */
+    public long millisSincePause() {
+        if (pausedAtElapsed <= 0) {
+            return 0;
+        }
+        return Math.max(0, SystemClock.elapsedRealtime() - pausedAtElapsed);
+    }
+
+    /** True when paused long enough that the WebView is often frozen/Doze-throttled. */
+    public boolean isDeepIdlePause() {
+        return millisSincePause() >= 90_000;
+    }
+
+    /**
+     * Whether the in-flight AA/lock play came from a multi-minute pause.
+     * Remains true through optimistic play until playback is confirmed or cancelled.
+     */
+    public boolean isDeepIdlePlay() {
+        return deepIdlePlayLatched || isDeepIdlePause();
+    }
+
+    public void clearDeepIdlePlayLatch() {
+        deepIdlePlayLatched = false;
+    }
+
+    private long focusLossGraceMs() {
+        return isDeepIdlePlay() ? FOCUS_LOSS_GRACE_LONG_IDLE_MS : FOCUS_LOSS_GRACE_MS;
     }
 
     public boolean isActive() {
@@ -255,6 +306,8 @@ public final class LibraryAutoBridge {
         resumeAfterFocusGain = false;
         ignorePausedSyncUntilElapsed = 0;
         ignoreFocusLossUntilElapsed = 0;
+        pausedAtElapsed = 0;
+        deepIdlePlayLatched = false;
         update("", "", "", null, false, false, 0, 0, 1.0f);
         Context ctx = appContextRef.get();
         if (ctx != null) {
@@ -285,10 +338,14 @@ public final class LibraryAutoBridge {
 
     /** Request audio focus before resuming; returns false if focus was denied. */
     public boolean requestAudioFocusForPlay() {
+        // Latch deep-idle before optimistic play clears the pause timestamp.
+        if (isDeepIdlePause()) {
+            deepIdlePlayLatched = true;
+        }
         // Always arm the grace window — even if we already hold focus — because
         // the upcoming WebView audio.play() may still steal it from us.
         ignoreFocusLossUntilElapsed =
-            SystemClock.elapsedRealtime() + FOCUS_LOSS_GRACE_MS;
+            SystemClock.elapsedRealtime() + focusLossGraceMs();
 
         if (audioManager == null) {
             Context ctx = appContextRef.get();

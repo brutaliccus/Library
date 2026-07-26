@@ -966,14 +966,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const attemptPlay = (retriesLeft: number) => {
       audio.play().catch((err) => {
         const name = err instanceof Error ? err.name : "";
-        // Locked / frozen WebView — wake and retry (Android Auto after a call).
+        // Locked / frozen WebView — wake and retry (AA after long idle / call).
         if (name === "NotAllowedError" || retriesLeft > 0) {
           void import("../media/libraryAuto")
             .then(({ LibraryAuto }) => LibraryAuto.bringToForeground())
             .catch(() => {})
             .finally(() => {
               if (retriesLeft > 0) {
-                setTimeout(() => attemptPlay(retriesLeft - 1), 450);
+                // Back off — deep-idle thaw often needs >1s; native also redelivers.
+                const delay = retriesLeft >= 4 ? 500 : retriesLeft >= 2 ? 900 : 1_400;
+                setTimeout(() => attemptPlay(retriesLeft - 1), delay);
               } else {
                 reloadAtPosition();
               }
@@ -983,7 +985,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         reloadAtPosition();
       });
     };
-    attemptPlay(5);
+    attemptPlay(6);
   }, [getAudio, playABS, playRD, setPlayIntent]);
 
   const pause = useCallback(() => {

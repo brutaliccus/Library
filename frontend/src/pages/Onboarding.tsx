@@ -83,9 +83,22 @@ export default function Onboarding() {
     const origin = currentOrigin();
     const email = user?.email || localStorage.getItem("user_email") || "";
     if (origin && email && hasOfflineUnlock(origin, email)) {
-      navigate("/libraries", { replace: true });
+      void (async () => {
+        if (user?.role === "admin") {
+          try {
+            const { data } = await api.get("/admin/setup-status");
+            if (data && data.complete === false) {
+              navigate("/admin/setup", { replace: true });
+              return;
+            }
+          } catch {
+            /* fall through */
+          }
+        }
+        navigate("/libraries", { replace: true });
+      })();
     }
-  }, [searchParams, user?.email, navigate]);
+  }, [searchParams, user?.email, user?.role, navigate]);
 
   useEffect(() => {
     if (searchParams.get("step") === "offline-pin") {
@@ -126,11 +139,27 @@ export default function Onboarding() {
     });
   };
 
+  /** Admins continue to instance stack setup when required steps are incomplete. */
+  const leaveOnboarding = async () => {
+    if (user?.role === "admin") {
+      try {
+        const { data } = await api.get("/admin/setup-status");
+        if (data && data.complete === false) {
+          navigate("/admin/setup", { replace: true });
+          return;
+        }
+      } catch {
+        // Soft-fail: still land on libraries if status is unavailable.
+      }
+    }
+    navigate("/libraries", { replace: true });
+  };
+
   const goHome = async (lib?: { name?: string; coverUrl?: string | null } | null) => {
     rememberLibrary(lib);
     await queryClient.invalidateQueries({ queryKey: ["library-group"] });
     await queryClient.invalidateQueries({ queryKey: ["user-settings"] });
-    navigate("/libraries", { replace: true });
+    await leaveOnboarding();
   };
 
   /** After create/join (or invite signup), require offline PIN unless already enrolled. */
@@ -148,7 +177,7 @@ export default function Onboarding() {
       setMode("offline-pin");
       return;
     }
-    navigate("/libraries", { replace: true });
+    await leaveOnboarding();
   };
 
   const handleOfflinePin = async () => {

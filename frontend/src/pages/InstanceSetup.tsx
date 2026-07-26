@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
@@ -9,6 +9,9 @@ import {
   Shield,
   AlertTriangle,
   Sparkles,
+  Database,
+  CalendarClock,
+  Loader2,
 } from "lucide-react";
 import api from "../api/client";
 import { useToast } from "../contexts/ToastContext";
@@ -29,7 +32,10 @@ interface SetupStatus {
     knabenRssOnly: boolean;
     abbAuthorCrawl: boolean;
     abbLiveSearch: boolean;
+    libraforgePipelineEnabled?: boolean;
+    ebookPipelineEnabled?: boolean;
   };
+  presets?: Record<string, Record<string, string>>;
 }
 
 interface ConfigSetting {
@@ -45,16 +51,45 @@ interface ConfigSetting {
   configured: boolean;
 }
 
+interface SetupValidateResult {
+  ok: boolean;
+  warnings: string[];
+  probes: Record<string, { configured?: boolean; connected?: boolean; error?: string }>;
+}
+
+interface OlCatalogStatus {
+  status?: string;
+  catalog_ready?: boolean;
+  dumps_present?: boolean;
+  warnings?: string[];
+  scheduled_build_at?: string | null;
+  new_dumps_available?: boolean;
+}
+
 const STEP_GROUPS: Record<string, string[]> = {
-  libraries: ["libraries"],
+  stack: ["libraries", "pipeline"],
   indexers: ["indexers"],
   debrid: ["debrid"],
-  pipeline: ["pipeline"],
   folders: ["storage"],
+  openlibrary: [],
   catalog: ["catalog"],
   scraper: ["scraper"],
   mobile: ["mobile"],
 };
+
+/** Stack fields shown first; remaining pipeline knobs stay editable below. */
+const STACK_PRIMARY_KEYS = [
+  "config.abs_url",
+  "config.abs_api_key",
+  "config.abs_library_id",
+  "config.kavita_url",
+  "config.kavita_api_key",
+  "config.kavita_library_id",
+  "config.libraforge_url",
+  "config.libraforge_internal_url",
+  "config.libraforge_pipeline_enabled",
+  "config.ebook_pipeline_enabled",
+];
 
 const FOLDER_CHECKS: Array<{ title: string; detail: string }> = [
   {
@@ -89,6 +124,33 @@ const FOLDER_CHECKS: Array<{ title: string; detail: string }> = [
   },
 ];
 
+function toLocalDatetimeInput(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function defaultScheduleLocalValue(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(0, 0, 0, 0);
+  return toLocalDatetimeInput(d);
+}
+
+function localInputToIsoUtc(localValue: string): string {
+  const d = new Date(localValue);
+  if (Number.isNaN(d.getTime())) {
+    throw new Error("Invalid date/time");
+  }
+  return d.toISOString();
+}
+
+function detectPlatformPreset(): "windows_docker" | "linux_docker" {
+  if (typeof navigator !== "undefined" && /Win/i.test(navigator.platform || navigator.userAgent)) {
+    return "windows_docker";
+  }
+  return "linux_docker";
+}
+
 export default function InstanceSetup() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -98,6 +160,11 @@ export default function InstanceSetup() {
   const [abbRss, setAbbRss] = useState(true);
   const [knabenRss, setKnabenRss] = useState(true);
   const [enableDeep, setEnableDeep] = useState(false);
+  const [probeWarnings, setProbeWarnings] = useState<string[]>([]);
+  const [validating, setValidating] = useState(false);
+  const [presetApplied, setPresetApplied] = useState(false);
+  const [olChoice, setOlChoice] = useState<"skip" | "now" | "schedule">("skip");
+  const [scheduleLocal, setScheduleLocal] = useState(defaultScheduleLocalValue);
 
   const { data: status, refetch: refetchStatus } = useQuery({
     queryKey: ["admin-setup-status"],
@@ -115,13 +182,55 @@ export default function InstanceSetup() {
     },
   });
 
+  const { data: olStatus, isLoading: olLoading } = useQuery({
+    queryKey: ["admin-ol-catalog"],
+    queryFn: async () => {
+      const { data } = await api.get("/admin/ol-catalog");
+      return data as OlCatalogStatus;
+    },
+    enabled: status?.steps?.[stepIdx]?.id === "openlibrary",
+  });
+
   const steps = status?.steps || [];
   const step = steps[stepIdx];
   const groupIds = step ? STEP_GROUPS[step.id] || [] : [];
   const fields = useMemo(() => {
     const all = config?.settings || [];
-    return all.filter((s) => groupIds.includes(s.group) && s.key !== "config.scraper_enabled");
-  }, [config, groupIds]);
+    const filtered = all.filter((s) => groupIds.includes(s.group) && s.key !== "config.scraper_enabled");
+    if (step?.id !== "stack") return filtered;
+    const rank = (key: string) => {
+      const i = STACK_PRIMARY_KEYS.indexOf(key);
+      return i === -1 ? 1000 : i;
+    };
+    return [...filtered].sort((a, b) => rank(a.key) - rank(b.key));
+  }, [config, groupIds, step?.id]);
+
+  // Pre-fill empty stack drafts from the detected platform preset once.
+  useEffect(() => {
+    if (presetApplied || !status?.presets || !config?.settings || step?.id !== "stack") return;
+    const presetKey = detectPlatformPreset();
+    const preset = status.presets[presetKey];
+    if (!preset) return;
+    const next: Record<string, string> = {};
+    for (const [key, val] of Object.entries(preset)) {
+      if (key === "label") continue;
+      const existing = config.settings.find((s) => s.key === key);
+      const configured = existing?.configured && existing.valueType !== "bool";
+      const draftEmpty = drafts[key] === undefined || drafts[key] === "";
+      if (!configured && draftEmpty && val) {
+        next[key] = val;
+      }
+    }
+    // Bool pipeline defaults when not yet overridden in drafts.
+    for (const boolKey of ["config.libraforge_pipeline_enabled", "config.ebook_pipeline_enabled"]) {
+      if (drafts[boolKey] !== undefined) continue;
+      if (preset[boolKey]) next[boolKey] = preset[boolKey];
+    }
+    if (Object.keys(next).length) {
+      setDrafts((d) => ({ ...next, ...d }));
+    }
+    setPresetApplied(true);
+  }, [status, config, step?.id, presetApplied, drafts]);
 
   const save = useMutation({
     mutationFn: async (updates: Record<string, string>) => {
@@ -151,6 +260,59 @@ export default function InstanceSetup() {
     },
   });
 
+  const olBuild = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post("/admin/ol-catalog/build", {
+        include_editions: false,
+        force_download: true,
+      });
+      return data;
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-ol-catalog"] });
+      toast("Open Library catalog build started", "success");
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Could not start catalog build";
+      toast(String(msg), "error");
+    },
+  });
+
+  const olSchedule = useMutation({
+    mutationFn: async (localValue: string) => {
+      const { data } = await api.post("/admin/ol-catalog/schedule", {
+        scheduled_at: localInputToIsoUtc(localValue),
+        include_editions: false,
+        force_download: true,
+      });
+      return data;
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-ol-catalog"] });
+      toast("Catalog build scheduled", "success");
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Could not schedule catalog build";
+      toast(String(msg), "error");
+    },
+  });
+
+  const applyPreset = (presetKey: string) => {
+    const preset = status?.presets?.[presetKey];
+    if (!preset) return;
+    const next: Record<string, string> = {};
+    for (const [key, val] of Object.entries(preset)) {
+      if (key === "label") continue;
+      next[key] = val;
+    }
+    setDrafts((d) => ({ ...d, ...next }));
+    toast(`Applied ${preset.label || presetKey} defaults`, "success");
+  };
+
   const saveStep = async () => {
     if (step?.id === "scraper") {
       const updates: Record<string, string> = {
@@ -162,13 +324,12 @@ export default function InstanceSetup() {
       await save.mutateAsync(updates);
       return;
     }
-    if (step?.id === "folders") {
+    if (step?.id === "folders" || step?.id === "openlibrary") {
       return;
     }
     const updates: Record<string, string> = {};
     for (const f of fields) {
       if (drafts[f.key] === undefined) continue;
-      // Bools may be "false"; other fields skip empty (leave existing / env).
       if (f.valueType !== "bool" && drafts[f.key] === "") continue;
       updates[f.key] = drafts[f.key];
     }
@@ -177,10 +338,51 @@ export default function InstanceSetup() {
     }
   };
 
+  const runSoftValidate = async (): Promise<string[]> => {
+    try {
+      const { data } = await api.post("/admin/setup-validate");
+      const result = data as SetupValidateResult;
+      return result.warnings || [];
+    } catch {
+      return ["Health probe request failed — you can still continue and fix connections later."];
+    }
+  };
+
+  const handleOpenLibraryContinue = async () => {
+    if (olChoice === "now") {
+      await olBuild.mutateAsync();
+    } else if (olChoice === "schedule") {
+      await olSchedule.mutateAsync(scheduleLocal);
+    }
+    // skip / after action — never blocks finishing
+  };
+
   const next = async () => {
-    await saveStep();
-    if (stepIdx < steps.length - 1) setStepIdx((i) => i + 1);
-    else navigate("/admin?tab=settings");
+    setValidating(true);
+    setProbeWarnings([]);
+    try {
+      await saveStep();
+      if (step?.id === "stack" || step?.id === "indexers") {
+        const warnings = await runSoftValidate();
+        setProbeWarnings(warnings);
+        if (warnings.length) {
+          toast("Saved with connection warnings — you can continue", "error");
+        }
+      }
+      if (step?.id === "openlibrary") {
+        await handleOpenLibraryContinue();
+      }
+      if (stepIdx < steps.length - 1) setStepIdx((i) => i + 1);
+      else navigate("/libraries");
+    } finally {
+      setValidating(false);
+    }
+  };
+
+  const fieldValue = (f: ConfigSetting) => {
+    if (drafts[f.key] !== undefined) return drafts[f.key];
+    if (f.valueType === "bool") return f.value || "false";
+    return "";
   };
 
   const renderFields = () => (
@@ -195,7 +397,7 @@ export default function InstanceSetup() {
               <span className="inline-flex items-center gap-2 text-sm text-gray-300">
                 <input
                   type="checkbox"
-                  checked={(drafts[f.key] ?? f.value) === "true"}
+                  checked={fieldValue(f) === "true"}
                   onChange={(e) =>
                     setDrafts((d) => ({ ...d, [f.key]: e.target.checked ? "true" : "false" }))
                   }
@@ -225,6 +427,127 @@ export default function InstanceSetup() {
     </div>
   );
 
+  const renderStack = () => (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 space-y-2">
+        <p className="text-xs font-medium text-gray-300">Platform preset (editable after apply)</p>
+        <div className="flex flex-wrap gap-2">
+          {Object.entries(status?.presets || {}).map(([key, preset]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => applyPreset(key)}
+              className="px-3 py-1.5 rounded-lg border border-gray-700 text-xs text-gray-200 hover:border-brand-500 hover:text-brand-300"
+            >
+              {preset.label || key}
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-gray-500">
+          Windows: <code className="text-gray-400">host.docker.internal</code> for ABS (:13378),
+          Kavita (:5000), LibraForge internal (:5056). Linux/Pi: Docker bridge{" "}
+          <code className="text-gray-400">172.17.0.1</code> or compose service names on a shared
+          network. Pipeline toggles default on for new installs.
+        </p>
+      </div>
+      {renderFields()}
+    </div>
+  );
+
+  const renderOpenLibrary = () => (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-amber-900/40 bg-amber-950/20 p-3 space-y-1">
+        <p className="text-sm text-amber-100 inline-flex items-center gap-1.5">
+          <Database size={14} />
+          Optional — does not block finishing setup
+        </p>
+        <p className="text-xs text-gray-400">
+          The shipped indexer cache seed (~36 MB compressed / ~150 MB on import) already powers
+          release search. Build the full Open Library catalog only if you want local OL metadata
+          (multi-GB, can take hours on a Pi).
+        </p>
+        {olStatus && (
+          <p className="text-[11px] text-gray-500 font-mono pt-1">
+            Status:{" "}
+            {olLoading
+              ? "…"
+              : olStatus.catalog_ready
+                ? `${olStatus.status || "ready"} · catalog ready`
+                : olStatus.dumps_present
+                  ? `${olStatus.status || "idle"} · dumps only`
+                  : olStatus.status || "idle"}
+            {olStatus.scheduled_build_at
+              ? ` · scheduled ${new Date(olStatus.scheduled_build_at).toLocaleString()}`
+              : ""}
+          </p>
+        )}
+      </div>
+
+      <label className="flex items-start gap-3 text-sm text-gray-200 cursor-pointer">
+        <input
+          type="radio"
+          name="ol-choice"
+          checked={olChoice === "skip"}
+          onChange={() => setOlChoice("skip")}
+          className="mt-1"
+        />
+        <span>
+          <strong>Skip for now</strong>
+          <span className="block text-xs text-gray-500">
+            Finish onboarding; configure later under Admin → Catalog.
+          </span>
+        </span>
+      </label>
+
+      <label className="flex items-start gap-3 text-sm text-gray-200 cursor-pointer">
+        <input
+          type="radio"
+          name="ol-choice"
+          checked={olChoice === "now"}
+          onChange={() => setOlChoice("now")}
+          className="mt-1"
+        />
+        <span>
+          <strong>Start initial catalog build now</strong>
+          <span className="block text-xs text-gray-500">
+            Downloads dumps and builds in the background. Keep the container running.
+          </span>
+        </span>
+      </label>
+
+      <label className="flex items-start gap-3 text-sm text-gray-200 cursor-pointer">
+        <input
+          type="radio"
+          name="ol-choice"
+          checked={olChoice === "schedule"}
+          onChange={() => setOlChoice("schedule")}
+          className="mt-1"
+        />
+        <span>
+          <strong>Schedule for later</strong>
+          <span className="block text-xs text-gray-500">
+            Same off-peak schedule UI as Admin → Catalog.
+          </span>
+        </span>
+      </label>
+
+      {olChoice === "schedule" && (
+        <label className="block text-xs text-gray-300 space-y-1.5 pl-6">
+          <span className="inline-flex items-center gap-1.5 font-medium">
+            <CalendarClock size={12} />
+            Start download + rebuild at (local time)
+          </span>
+          <input
+            type="datetime-local"
+            value={scheduleLocal}
+            onChange={(e) => setScheduleLocal(e.target.value)}
+            className="w-full min-h-11 px-3 py-2 rounded-lg bg-gray-950 border border-gray-700 text-sm text-gray-100"
+          />
+        </label>
+      )}
+    </div>
+  );
+
   return (
     <div className="max-w-2xl mx-auto px-4 py-10">
       <div className="mb-8">
@@ -233,8 +556,8 @@ export default function InstanceSetup() {
           Instance setup
         </h1>
         <p className="text-sm text-gray-500 mt-2">
-          Configure libraries, debrid, download pipelines, and scrapers. Change anything later in
-          Admin → Settings / Catalog / Pipelines.
+          Configure the library stack (ABS / Kavita / LibraForge), indexers, and optional catalog.
+          Change anything later in Admin → Settings / Catalog / Pipelines.
         </p>
       </div>
 
@@ -269,7 +592,11 @@ export default function InstanceSetup() {
             <p className="text-sm text-gray-500 mt-1">{step.help}</p>
           </div>
 
-          {step.id === "scraper" ? (
+          {step.id === "stack" ? (
+            renderStack()
+          ) : step.id === "openlibrary" ? (
+            renderOpenLibrary()
+          ) : step.id === "scraper" ? (
             <div className="space-y-4">
               <button
                 type="button"
@@ -348,6 +675,20 @@ export default function InstanceSetup() {
             renderFields()
           )}
 
+          {probeWarnings.length > 0 && (
+            <div className="rounded-lg border border-amber-800/50 bg-amber-950/30 px-3 py-2.5 space-y-1">
+              <p className="text-xs font-medium text-amber-200 inline-flex items-center gap-1">
+                <AlertTriangle size={12} />
+                Connection warnings (OK to continue)
+              </p>
+              <ul className="text-xs text-amber-100/80 list-disc pl-4 space-y-0.5">
+                {probeWarnings.map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <div className="flex justify-between pt-2">
             <button
               type="button"
@@ -368,9 +709,12 @@ export default function InstanceSetup() {
               <button
                 type="button"
                 onClick={() => void next()}
-                disabled={save.isPending}
+                disabled={save.isPending || validating || olBuild.isPending || olSchedule.isPending}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-brand-600 text-white text-sm font-medium hover:bg-brand-500 disabled:opacity-50"
               >
+                {(save.isPending || validating || olBuild.isPending || olSchedule.isPending) && (
+                  <Loader2 size={14} className="animate-spin" />
+                )}
                 {stepIdx >= steps.length - 1 ? "Finish" : "Save & continue"}
                 <ArrowRight size={14} />
               </button>

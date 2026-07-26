@@ -42,6 +42,61 @@ yes_no() {
   [[ "$val" =~ ^[Yy] ]]
 }
 
+seed_present() {
+  local f="$1"
+  [[ -f "$f" ]] && [[ "$(wc -c <"$f" 2>/dev/null || echo 0)" -gt 1048576 ]]
+}
+
+ensure_indexer_seed() {
+  # Warm torrent/indexer cache (~36 MB gzip → ~150 MB on first-boot import).
+  # Prefer repo/LFS copy; else download the GitHub Release asset (optional if it fails).
+  local seed_dir="$TARGET/seed"
+  local seed_gz="$seed_dir/indexer_cache.db.gz"
+  if seed_present "$seed_gz"; then
+    local mb
+    mb=$(awk "BEGIN {printf \"%.1f\", $(wc -c <"$seed_gz")/1024/1024}")
+    c_green "Indexer cache seed present (${mb} MB compressed)"
+    return 0
+  fi
+
+  if [[ -f "$TARGET/.gitattributes" ]] && command -v git >/dev/null 2>&1; then
+    c_cyan "==> Pulling indexer cache seed via Git LFS (if tracked)"
+    (cd "$TARGET" && git lfs pull --include "seed/indexer_cache.db.gz") >/dev/null 2>&1 || true
+    if seed_present "$seed_gz"; then
+      c_green "Indexer cache seed restored via Git LFS"
+      return 0
+    fi
+  fi
+
+  mkdir -p "$seed_dir" 2>/dev/null || sudo mkdir -p "$seed_dir" 2>/dev/null || true
+  local url
+  for url in \
+    "https://github.com/brutaliccus/Library/releases/download/data-seed/indexer_cache.db.gz" \
+    "https://github.com/brutaliccus/Library/releases/download/data-seed/seed-cache" \
+    "https://github.com/brutaliccus/Library/releases/latest/download/indexer_cache.db.gz"
+  do
+    c_yellow "Downloading indexer cache seed from $url ..."
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fsSL "$url" -o "$seed_gz"; then
+        if seed_present "$seed_gz"; then
+          c_green "Downloaded indexer cache seed"
+          return 0
+        fi
+      fi
+    elif command -v wget >/dev/null 2>&1; then
+      if wget -q -O "$seed_gz" "$url"; then
+        if seed_present "$seed_gz"; then
+          c_green "Downloaded indexer cache seed"
+          return 0
+        fi
+      fi
+    fi
+  done
+  c_yellow "Indexer cache seed missing — install continues; first boot starts with an empty cache (optional)."
+  c_yellow "Place seed/indexer_cache.db.gz manually or re-run after the data-seed GitHub Release is available."
+  return 0
+}
+
 c_cyan "==> Library installer"
 echo "Target directory: $TARGET"
 
@@ -186,14 +241,14 @@ fi
 
 mkdir -p data prowlarr-config jackett-config media/audiobooks media/ebooks media/openlibrary
 
-c_cyan "==> Mullvad VPN sidecar (optional)"
+c_cyan "==> Mullvad VPN sidecar (optional — not required)"
 c_yellow "gluetun is behind Docker Compose profile 'vpn' so fresh installs work without WireGuard keys."
 # Enable VPN if keys already present, or when the operator opts in now.
 _has_wg=false
 if grep -qE '^WIREGUARD_PRIVATE_KEY=.+' .env 2>/dev/null && grep -qE '^WIREGUARD_ADDRESSES=.+' .env 2>/dev/null; then
   _has_wg=true
 fi
-if $_has_wg || yes_no "Enable Mullvad VPN sidecar (gluetun) now? (requires WireGuard keys in .env)" "n"; then
+if $_has_wg || yes_no "Enable Mullvad VPN sidecar (gluetun) now? Optional — not required. Needs WireGuard keys in .env" "n"; then
   if ! $_has_wg; then
     c_yellow "Add WIREGUARD_PRIVATE_KEY and WIREGUARD_ADDRESSES to .env (or Admin → Integrations), then re-run compose with the vpn profile."
   fi
@@ -208,9 +263,13 @@ else
   c_green "VPN profile off — stack starts without gluetun (configure Mullvad later)."
 fi
 
+c_cyan "==> Ensuring indexer cache seed"
+ensure_indexer_seed
+
 c_cyan "==> Starting Docker stack"
-c_yellow "First boot imports the shipped indexer cache seed (~150 MB decompressed) if the DB is empty."
-c_yellow "Optional Open Library catalog (multi-GB) can be built/scheduled later from Admin → Catalog."
+c_yellow "First boot imports seed/indexer_cache.db.gz into an empty DB (~150 MB decompressed)."
+c_yellow "After create-admin / create-library / offline PIN, /admin/setup configures ABS, Kavita, and LibraForge."
+c_yellow "Optional Open Library catalog (multi-GB) can be skipped, built, or scheduled in that wizard."
 docker compose up -d --build
 
 c_cyan "==> Waiting for app health"
@@ -254,15 +313,17 @@ echo ""
 echo "Next steps:"
 echo "  1. Open ${APP_URL%/}/login (or http://<host>:8085/login)"
 echo "  2. Create the admin account (shown automatically when the DB has zero users)"
-echo "  3. Complete onboarding (create library) then /admin/setup (libraries, pipelines, debrid, scraper, APK)"
+echo "  3. Create library + offline PIN, then /admin/setup stack step (ABS / Kavita / LibraForge presets)"
+echo "  4. Optional Open Library in that wizard (skip freely — indexer seed is enough for search)"
 echo "     Later: Admin left-nav — Overview, Discovery, Catalog (OL schedule), Pipelines, Integrations, Settings"
-echo "  4. ABS: confirm audiobook staging (default .unorganized) is ignored (dot folder + .ignore)"
-echo "  5. Kavita: exclude ebook staging folder (default unorganized) from the ebook library"
+echo "  5. ABS: confirm audiobook staging (default .unorganized) is ignored (dot folder + .ignore)"
+echo "  6. Kavita: exclude ebook staging folder (default unorganized) from the ebook library"
 echo "     (override names/paths later in Admin → Settings → Storage / Paths)"
-echo "  6. Optional LibraForge sibling: bash scripts/install_libraforge.sh (docs/libraforge.md)"
-echo "  7. Optional magnet extension: load unpacked browser-extension/ (see its README)"
-echo "  8. Android APK: GitHub Releases for ${APK_REPO}"
-echo "  9. Share invite link from Settings; friends set offline PIN on join"
+echo "  7. Optional LibraForge sibling: bash scripts/install_libraforge.sh (docs/libraforge.md)"
+echo "  8. Optional magnet extension: load unpacked browser-extension/ (see its README)"
+echo "  9. Android APK: GitHub Releases for ${APK_REPO}"
+echo " 10. Share invite link from Settings; friends set offline PIN on join"
+echo " 11. Mullvad/gluetun is optional — not required for a healthy stack"
 echo ""
 echo "Notes:"
 echo "  - TorBox/RD: unique cache wins; both/neither → user preferred provider"

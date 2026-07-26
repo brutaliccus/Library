@@ -1737,6 +1737,18 @@ async def get_setup_status(_admin: User = Depends(require_admin)):
     return await inst.setup_status()
 
 
+@router.post("/setup-validate")
+async def post_setup_validate(_admin: User = Depends(require_admin)):
+    """Soft-probe ABS / Kavita / LibraForge / Prowlarr after saving stack settings.
+
+    Always returns HTTP 200 with ``ok: true`` and a ``warnings`` list so the
+    wizard can continue even when siblings are temporarily down.
+    """
+    from app.services import instance_settings as inst
+
+    return await inst.validate_setup_connections()
+
+
 @router.post("/setup-defaults")
 async def post_setup_defaults(_admin: User = Depends(require_admin)):
     """Apply recommended RSS-only scraper defaults (safe for Pi)."""

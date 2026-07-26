@@ -20,7 +20,7 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 
 ### Search & indexer cache
 - Cache-first search against a local torrent index (fast, no indexer hammering)
-- **Shipped warm cache** (~36 MB compressed seed) imported automatically on first boot so new installs are useful immediately
+- **Shipped warm cache** (~36 MB compressed / ~150 MB on import) so cached books show on first boot — see [Indexer cache seed](#indexer-cache-seed)
 - Live Prowlarr search when you need fresher results (SSE live-stream)
 - AudioBook Bay integration (RSS ingest + Jackett live search); Find Downloads auto-runs ABB search
 - Knaben RSS ingest (optional full crawl)
@@ -221,7 +221,20 @@ Or run the installer against a fresh target; it clones from this repo by default
 curl -fsSL https://raw.githubusercontent.com/brutaliccus/Library/main/scripts/install_library.sh | bash
 ```
 
-The installers write `.env`, create media/staging directories, apply **RSS-only** scraper defaults (unless you opt into deep crawls), build the stack, and wait for `/api/health`. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead.
+The installers write `.env`, create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), apply **RSS-only** scraper defaults (unless you opt into deep crawls), build the stack, and wait for `/api/health`. **Mullvad is optional** (especially on Windows). After create-admin → create-library → offline PIN, open **`/admin/setup`** for the ABS / Kavita / LibraForge stack step (platform presets + soft health probes) and optional Open Library catalog. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead.
+
+### Indexer cache seed
+
+| | |
+|---|---|
+| **File** | `seed/indexer_cache.db.gz` |
+| **Size** | ~36 MB compressed → ~150 MB when imported into `data/app.db` |
+| **Contents** | Sanitized torrent/indexer cache + catalog match tables (no users or API keys) |
+| **Import** | Automatic on first boot when `indexer_torrents` is empty (`app/services/indexer_seed.py`) |
+| **Distribution** | Shipped in git + Docker image; installers also try Git LFS, then the GitHub Release tag [`data-seed`](https://github.com/brutaliccus/Library/releases/tag/data-seed) (`indexer_cache.db.gz` / `seed-cache`) |
+| **Optional** | If the download fails, install still succeeds — the cache starts empty and fills via scrapers/indexers |
+
+Rebuild: `python scripts/export_indexer_seed.py /path/to/app.db ./seed` (see `seed/README.md`).
 
 ### Manual (any OS with Docker)
 

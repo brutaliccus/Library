@@ -122,6 +122,65 @@ function Ensure-Dir([string]$Path) {
     return $full
 }
 
+function Test-SeedPresent([string]$SeedGz) {
+    return (Test-Path $SeedGz) -and ((Get-Item -LiteralPath $SeedGz).Length -gt 1MB)
+}
+
+function Ensure-IndexerSeed([string]$RepoRoot) {
+    # Warm torrent/indexer cache (~36 MB gzip → ~150 MB on first-boot import).
+    # Prefer repo/LFS copy; else download the GitHub Release asset (optional if it fails).
+    $seedDir = Join-Path $RepoRoot "seed"
+    $seedGz = Join-Path $seedDir "indexer_cache.db.gz"
+    if (Test-SeedPresent $seedGz) {
+        $mb = [math]::Round((Get-Item -LiteralPath $seedGz).Length / 1MB, 1)
+        Write-Ok "Indexer cache seed present ($mb MB compressed)"
+        return
+    }
+
+    if ((Test-Path (Join-Path $RepoRoot ".gitattributes")) -and (Test-Command "git")) {
+        Write-Step "==> Pulling indexer cache seed via Git LFS (if tracked)"
+        Push-Location $RepoRoot
+        try {
+            git lfs pull --include "seed/indexer_cache.db.gz" 2>$null | Out-Null
+        }
+        catch {
+            Write-Warn "git lfs pull skipped: $($_.Exception.Message)"
+        }
+        finally {
+            Pop-Location
+        }
+        if (Test-SeedPresent $seedGz) {
+            Write-Ok "Indexer cache seed restored via Git LFS"
+            return
+        }
+    }
+
+    if (-not (Test-Path $seedDir)) {
+        New-Item -ItemType Directory -Path $seedDir -Force | Out-Null
+    }
+
+    $urls = @(
+        "https://github.com/brutaliccus/Library/releases/download/data-seed/indexer_cache.db.gz",
+        "https://github.com/brutaliccus/Library/releases/download/data-seed/seed-cache",
+        "https://github.com/brutaliccus/Library/releases/latest/download/indexer_cache.db.gz"
+    )
+    foreach ($url in $urls) {
+        Write-Warn "Downloading indexer cache seed from $url ..."
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $seedGz -UseBasicParsing
+            if (Test-SeedPresent $seedGz) {
+                Write-Ok "Downloaded indexer cache seed"
+                return
+            }
+        }
+        catch {
+            Write-Warn "Download failed: $($_.Exception.Message)"
+        }
+    }
+    Write-Warn "Indexer cache seed missing — install continues; first boot starts with an empty cache (optional)."
+    Write-Warn "Place seed/indexer_cache.db.gz manually or re-run after the data-seed GitHub Release is available."
+}
+
 Write-Step "==> Library installer (Windows / Docker Desktop)"
 if (-not (Test-Command "docker")) {
     Write-Err "Docker is required. Install Docker Desktop, start it, then re-run."
@@ -230,56 +289,43 @@ Set-EnvKey $envPath "AUDIOBOOK_HOST_DIR" $AUDIO_HOST
 Set-EnvKey $envPath "EBOOK_HOST_DIR" $EBOOK_HOST
 Set-EnvKey $envPath "OPENLIBRARY_HOST_DIR" $OL_HOST
 
+# Windows Docker Desktop defaults (editable later in /admin/setup).
+$defaultAbsUrl = "http://host.docker.internal:13378"
+$defaultKavUrl = "http://host.docker.internal:5000"
+
 if ($NonInteractive) {
-    Write-Step "==> Skipping interactive integrations (configure in /admin/setup)"
+    Write-Step "==> Writing Windows Docker stack defaults (API keys via /admin/setup onboarding)"
+    Set-EnvKey $envPath "ABS_URL" $defaultAbsUrl
+    Set-EnvKey $envPath "KAVITA_URL" $defaultKavUrl
 }
 else {
-    Write-Step "==> Optional integrations (press Enter to skip)"
+    Write-Step "==> Stack integrations (Enter keeps Docker Desktop defaults; keys can wait for /admin/setup)"
     $prowlarr = Read-Default "Prowlarr API key" ""
-    $absUrl = Read-Default "Audiobookshelf URL" ""
+    $absUrl = Read-Default "Audiobookshelf URL" $defaultAbsUrl
     $absKey = Read-Default "Audiobookshelf API key" ""
     $absLib = Read-Default "Audiobookshelf library ID" ""
-    $kavUrl = Read-Default "Kavita URL" ""
+    $kavUrl = Read-Default "Kavita URL" $defaultKavUrl
     $kavKey = Read-Default "Kavita API key" ""
     $rd = Read-Default "Real-Debrid API token (server default)" ""
     $tor = Read-Default "TorBox API token (optional second debrid)" ""
     if ($prowlarr) { Set-EnvKey $envPath "PROWLARR_API_KEY" $prowlarr }
-    if ($absUrl) {
-        Set-EnvKey $envPath "ABS_URL" $absUrl
-        if ($absKey) { Set-EnvKey $envPath "ABS_API_KEY" $absKey }
-        if ($absLib) { Set-EnvKey $envPath "ABS_LIBRARY_ID" $absLib }
-    }
-    else {
-        Set-EnvKey $envPath "ABS_URL" ""
-        Set-EnvKey $envPath "ABS_API_KEY" ""
-        Set-EnvKey $envPath "ABS_LIBRARY_ID" ""
-    }
-    if ($kavUrl) {
-        Set-EnvKey $envPath "KAVITA_URL" $kavUrl
-        if ($kavKey) { Set-EnvKey $envPath "KAVITA_API_KEY" $kavKey }
-    }
-    else {
-        Set-EnvKey $envPath "KAVITA_URL" ""
-        Set-EnvKey $envPath "KAVITA_API_KEY" ""
-    }
+    Set-EnvKey $envPath "ABS_URL" $absUrl
+    if ($absKey) { Set-EnvKey $envPath "ABS_API_KEY" $absKey }
+    if ($absLib) { Set-EnvKey $envPath "ABS_LIBRARY_ID" $absLib }
+    Set-EnvKey $envPath "KAVITA_URL" $kavUrl
+    if ($kavKey) { Set-EnvKey $envPath "KAVITA_API_KEY" $kavKey }
     if ($rd) { Set-EnvKey $envPath "REAL_DEBRID_API_TOKEN" $rd }
     else { Set-EnvKey $envPath "REAL_DEBRID_API_TOKEN" "" }
     if ($tor) { Set-EnvKey $envPath "TORBOX_API_TOKEN" $tor }
 }
 
 Write-Step "==> LibraForge / ebook pipelines"
-$lfOn = if ($NonInteractive) { -not $DisableLibraForgePipeline } else { Read-YesNo "Enable automated LibraForge audiobook pipeline?" $false }
+$lfOn = if ($NonInteractive) { -not $DisableLibraForgePipeline } else { Read-YesNo "Enable automated LibraForge audiobook pipeline?" $true }
 $ebOn = if ($NonInteractive) { -not $DisableEbookPipeline } else { Read-YesNo "Enable ebook organizer pipeline?" $true }
-if ($lfOn) {
-    Set-EnvKey $envPath "LIBRAFORGE_URL" "http://127.0.0.1:5056"
-    Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" "http://host.docker.internal:5056"
-    Set-EnvKey $envPath "LIBRAFORGE_M4B_JOBS" "1"
-}
-else {
-    Set-EnvKey $envPath "LIBRAFORGE_URL" ""
-    Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" ""
-    Set-EnvKey $envPath "LIBRAFORGE_M4B_JOBS" "1"
-}
+# Sensible new-install defaults: public localhost + internal host.docker.internal.
+Set-EnvKey $envPath "LIBRAFORGE_URL" "http://127.0.0.1:5056"
+Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" "http://host.docker.internal:5056"
+Set-EnvKey $envPath "LIBRAFORGE_M4B_JOBS" "1"
 Set-EnvKey $envPath "LIBRAFORGE_PIPELINE_ENABLED" ($(if ($lfOn) { "true" } else { "false" }))
 Set-EnvKey $envPath "EBOOK_PIPELINE_ENABLED" ($(if ($ebOn) { "true" } else { "false" }))
 
@@ -306,10 +352,10 @@ else {
     Write-Ok "RSS-only defaults written to .env"
 }
 
-# VPN / gluetun is optional. Without WireGuard keys, leave profile off.
+# VPN / gluetun is optional and OFF by default on Windows (Mullvad not required).
 $vpn = [bool]$EnableVpn
 if (-not $NonInteractive) {
-    $vpn = Read-YesNo "Enable Mullvad VPN sidecar (gluetun) now? Requires WireGuard keys." $false
+    $vpn = Read-YesNo "Enable Mullvad VPN sidecar (gluetun) now? Optional — not required. Needs WireGuard keys." $false
 }
 if ($vpn) {
     Set-EnvKey $envPath "COMPOSE_PROFILES" "vpn"
@@ -348,8 +394,12 @@ function Invoke-Compose {
     return $code
 }
 
+Write-Step "==> Ensuring indexer cache seed"
+Ensure-IndexerSeed $TARGET
+
 Write-Step "==> Starting Docker stack"
-Write-Warn "First boot imports the shipped indexer cache seed if the DB is empty. This may take a few minutes."
+Write-Warn "First boot imports seed/indexer_cache.db.gz into an empty DB (~150 MB). This may take a few minutes."
+Write-Host "After create-admin / create-library / offline PIN, /admin/setup configures ABS, Kavita, and LibraForge."
 if ($SkipBuild) {
     $upCode = Invoke-Compose @("compose", "up", "-d")
 }
@@ -407,11 +457,12 @@ Write-Host ""
 Write-Host "Next steps:"
 Write-Host ("  1. Open " + $APP_URL.TrimEnd('/') + "/login  or  http://127.0.0.1:8085/login")
 Write-Host "  2. Create the admin account (shown automatically when the DB has zero users)"
-Write-Host "  3. Complete onboarding (create library) then /admin/setup"
-Write-Host "  4. ABS: confirm audiobook staging .unorganized is ignored"
-Write-Host "  5. Kavita: exclude ebook staging folder unorganized"
-Write-Host "  6. Optional Mullvad: WireGuard keys + COMPOSE_PROFILES=vpn + ABB_PROXY_URL=http://gluetun:8888"
-Write-Host "  7. Optional LibraForge sibling - see docs/libraforge.md"
+Write-Host "  3. Create library + offline PIN, then complete /admin/setup (ABS / Kavita / LibraForge presets)"
+Write-Host "  4. Optional Open Library catalog from that wizard (skip freely — seed cache is enough)"
+Write-Host "  5. ABS: confirm audiobook staging .unorganized is ignored"
+Write-Host "  6. Kavita: exclude ebook staging folder unorganized"
+Write-Host "  7. Optional Mullvad later: WireGuard keys + COMPOSE_PROFILES=vpn (not required for Windows)"
+Write-Host "  8. Optional LibraForge sibling - see docs/libraforge.md"
 Write-Host ""
 Write-Host ("Stack dir: " + $TARGET)
 Write-Host ("Logs:      Set-Location '" + $TARGET + "'; docker compose logs -f app")

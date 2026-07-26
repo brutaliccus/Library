@@ -86,7 +86,12 @@ REGISTRY: list[SettingDef] = [
         group="libraries",
         label="Audiobookshelf URL",
         env_attr="abs_url",
-        placeholder="http://192.168.1.10:13378",
+        help=(
+            "From the Library container: Windows Docker Desktop → "
+            "`http://host.docker.internal:13378`; Linux/Pi → bridge IP "
+            "`http://172.17.0.1:13378` (or the ABS service name on a shared network)."
+        ),
+        placeholder="http://host.docker.internal:13378",
     ),
     SettingDef(
         key="config.abs_api_key",
@@ -106,7 +111,11 @@ REGISTRY: list[SettingDef] = [
         group="libraries",
         label="Kavita URL",
         env_attr="kavita_url",
-        placeholder="http://192.168.1.10:5000",
+        help=(
+            "From the Library container: Windows → `http://host.docker.internal:5000`; "
+            "Linux/Pi → `http://172.17.0.1:5000` (common Kavita host port)."
+        ),
+        placeholder="http://host.docker.internal:5000",
     ),
     SettingDef(
         key="config.kavita_api_key",
@@ -129,16 +138,22 @@ REGISTRY: list[SettingDef] = [
         group="pipeline",
         label="LibraForge public URL",
         env_attr="libraforge_url",
-        help="Opens from Admin → Health / Manual Review. Sibling stack — not in this compose. See docs/libraforge.md.",
-        placeholder="https://forge.library.example.com",
+        help=(
+            "Browser / Admin deep-link. Sibling stack — not in this compose. "
+            "Local: `http://127.0.0.1:5056`. See docs/libraforge.md."
+        ),
+        placeholder="http://127.0.0.1:5056",
     ),
     SettingDef(
         key="config.libraforge_internal_url",
         group="pipeline",
         label="LibraForge internal URL",
         env_attr="libraforge_internal_url",
-        help="Reachable from the Library container (API + health). Often Docker bridge gateway :5056.",
-        placeholder="http://172.17.0.1:5056",
+        help=(
+            "Reachable from the Library container (API + health). Windows: "
+            "`http://host.docker.internal:5056`; Linux/Pi: `http://172.17.0.1:5056`."
+        ),
+        placeholder="http://host.docker.internal:5056",
     ),
     SettingDef(
         key="config.libraforge_pipeline_enabled",
@@ -698,6 +713,31 @@ async def update_config(updates: dict[str, str | None]) -> dict[str, Any]:
     return await list_config()
 
 
+# Docker / host URL presets for the instance setup wizard (editable in the UI).
+SETUP_STACK_PRESETS: dict[str, dict[str, str]] = {
+    "windows_docker": {
+        "label": "Windows (Docker Desktop)",
+        "config.abs_url": "http://host.docker.internal:13378",
+        "config.kavita_url": "http://host.docker.internal:5000",
+        "config.libraforge_url": "http://127.0.0.1:5056",
+        "config.libraforge_internal_url": "http://host.docker.internal:5056",
+        "config.libraforge_pipeline_enabled": "true",
+        "config.ebook_pipeline_enabled": "true",
+        "config.libraforge_m4b_jobs": "1",
+    },
+    "linux_docker": {
+        "label": "Linux / Pi (Docker bridge)",
+        "config.abs_url": "http://172.17.0.1:13378",
+        "config.kavita_url": "http://172.17.0.1:5000",
+        "config.libraforge_url": "http://127.0.0.1:5056",
+        "config.libraforge_internal_url": "http://172.17.0.1:5056",
+        "config.libraforge_pipeline_enabled": "true",
+        "config.ebook_pipeline_enabled": "true",
+        "config.libraforge_m4b_jobs": "1",
+    },
+}
+
+
 async def setup_status() -> dict[str, Any]:
     """First-run checklist for the instance setup wizard."""
     abs_url, abs_key, _ = await get_abs_connection()
@@ -708,22 +748,25 @@ async def setup_status() -> dict[str, Any]:
     hc = await get_effective("integrations.hardcover_api_key")
     lf_url = await get_effective("config.libraforge_url")
     lf_internal = await get_effective("config.libraforge_internal_url")
+    lf_on = await get_effective_bool("config.libraforge_pipeline_enabled", False)
     apk_repo = await get_effective("config.android_apk_github_repo")
     abb_rss = await get_effective_bool("scraper.abb_rss_only", True)
     knaben_rss = await get_effective_bool("scraper.knaben_rss_only", True)
 
+    stack_done = bool(abs_url and abs_key) or bool(kav_url and kav_key)
+
     steps = [
         {
-            "id": "libraries",
-            "label": "Audiobookshelf / Kavita",
-            "done": bool(abs_url and abs_key) or bool(kav_url and kav_key),
+            "id": "stack",
+            "label": "Library stack (ABS / Kavita / LibraForge)",
+            "done": stack_done,
             "required": True,
             "help": (
-                "Connect at least one library (ABS for audiobooks, Kavita for ebooks). "
-                "ABS/local metadata is the My Library source of truth for series/author/genre/sequence "
-                "(Hardcover may fill empty genres only). ABS ignores the audiobook staging "
-                "dot-folder (default `.unorganized`); configure Kavita to exclude the ebook "
-                "staging name (default `unorganized`). Names are editable under Config → Storage / Paths."
+                "Required loadout for a new install. Connect Audiobookshelf and/or Kavita "
+                "(URL + API key; library id when needed), then LibraForge public + internal URLs "
+                "and pipeline toggles. Use a platform preset to pre-fill Docker host URLs — "
+                "Windows uses host.docker.internal; Linux/Pi uses the Docker bridge (172.17.0.1) "
+                "or shared-network service names. Soft health probes run when you continue."
             ),
         },
         {
@@ -747,20 +790,6 @@ async def setup_status() -> dict[str, Any]:
             ),
         },
         {
-            "id": "pipeline",
-            "label": "LibraForge / ebook pipeline",
-            "done": bool(lf_url and lf_internal),
-            "required": False,
-            "help": (
-                "Audiobooks: staging folder → Metadata → M4B → Chapter Forge (ASIN) → Folder Forge → ABS. "
-                "M4B encodes share a global queue (concurrency 1) across auto-forge and Quick Review; "
-                "request cards show Queued for M4B vs Converting M4B. "
-                "`LIBRAFORGE_M4B_JOBS` is per-run workers (keep 1 on a Pi). "
-                "Ebooks: staging folder → identify → Author/Series/Title → Kavita. "
-                "Sibling stack: docs/libraforge.md."
-            ),
-        },
-        {
             "id": "folders",
             "label": "Staging folders & extras",
             "done": True,
@@ -769,6 +798,17 @@ async def setup_status() -> dict[str, Any]:
                 "Confirm media staging + optional clients. Pipelines create staging roots under "
                 "AUDIOBOOK_DIR / EBOOK_DIR automatically (defaults `/audiobooks/.unorganized` and "
                 "`/ebooks/unorganized`). Override names in Admin → Config → Storage / Paths."
+            ),
+        },
+        {
+            "id": "openlibrary",
+            "label": "Open Library catalog (optional)",
+            "done": True,  # never blocks finishing onboarding
+            "required": False,
+            "help": (
+                "Optional multi-GB local Open Library catalog. Skip freely — the shipped indexer "
+                "cache seed is enough for release search. Or start a build now, or schedule it "
+                "for off-peak (same controls as Admin → Catalog)."
             ),
         },
         {
@@ -812,7 +852,55 @@ async def setup_status() -> dict[str, Any]:
             "knabenRssOnly": True,
             "abbAuthorCrawl": False,
             "abbLiveSearch": False,
+            "libraforgePipelineEnabled": True,
+            "ebookPipelineEnabled": True,
         },
+        "presets": SETUP_STACK_PRESETS,
+        "stack": {
+            "absConfigured": bool(abs_url and abs_key),
+            "kavitaConfigured": bool(kav_url and kav_key),
+            "libraforgeConfigured": bool(lf_url or lf_internal),
+            "libraforgePipelineEnabled": lf_on,
+        },
+    }
+
+
+async def validate_setup_connections() -> dict[str, Any]:
+    """Soft health probes for the stack setup step (warnings only — never hard-fail)."""
+    import asyncio
+
+    from app.services.health_checks import (
+        _probe_abs,
+        _probe_kavita,
+        _probe_libraforge,
+        _probe_prowlarr,
+    )
+
+    abs_p, kav_p, lf_p, prow_p = await asyncio.gather(
+        _probe_abs(),
+        _probe_kavita(),
+        _probe_libraforge(),
+        _probe_prowlarr(),
+    )
+    probes = {
+        "audiobookshelf": abs_p,
+        "kavita": kav_p,
+        "libraforge": lf_p,
+        "prowlarr": prow_p,
+    }
+    warnings: list[str] = []
+    for name, probe in probes.items():
+        if not probe.get("configured"):
+            continue
+        if not probe.get("connected"):
+            err = probe.get("error") or "unreachable"
+            warnings.append(f"{name}: configured but not reachable ({err})")
+    if not (abs_p.get("configured") or kav_p.get("configured")):
+        warnings.append("Configure at least Audiobookshelf or Kavita (URL + API key) before finishing.")
+    return {
+        "ok": True,  # soft-fail: UI may continue with warnings
+        "warnings": warnings,
+        "probes": probes,
     }
 
 

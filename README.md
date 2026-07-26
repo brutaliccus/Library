@@ -73,11 +73,12 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 - Per-user preferred debrid provider and private mode
 
 ### Admin
+- Left-nav console grouped into **Operations**, **Library**, and **System** (legacy `?tab=` aliases still remap)
 - First-run setup wizard at `/admin/setup` (libraries, pipelines, debrid, staging checklist, catalog, APK, scraper)
-- **Config** tab: runtime settings and API keys (DB override with env fallback), including LibraForge / ebook pipeline knobs
-- **Cache** tab: scraper enable/run, RSS vs deep-crawl tuning, debrid refresh, catalog relink
+- **Operations**: Overview (health probes, Scan ABS & clean orphans, Open LibraForge), Requests, Users
+- **Library**: Discovery (scraper enable/run, RSS vs deep-crawl, debrid refresh, catalog relink), Catalog (API keys + Open Library build/update/schedule)
+- **System**: Pipelines (LibraForge / ebook toggles and scores), Integrations (debrid, VPN, OpenRouter, secrets), Settings (core, libraries, indexers, storage paths)
 - All Requests: Requested by, cover → store, staging browser, Quick Review / Re-run / reject; M4B badge **Queued for M4B** vs **Converting M4B**
-- Health: integration probes, Scan ABS & clean orphans, Open LibraForge
 - Push notifications (Disable → Enable to refresh a stuck browser subscription)
 - RSS-only scraper defaults (Pi-friendly); optional high-usage FlareSolverr crawls
 
@@ -218,7 +219,7 @@ App listens on **`http://127.0.0.1:8085`**.
 3. **`/admin/setup`** — ABS/Kavita, Prowlarr/Jackett/Flare, debrid (TorBox optional), LibraForge + ebook pipelines, staging checklist, catalog APIs, Android APK repo, scraper mode  
 4. Confirm folder conventions: ABS ignores `.unorganized`; Kavita excludes `unorganized`  
 5. Share the **invite link** from Settings (`/join/CODE`). Friends open it (Android app if installed, otherwise the site), set username/password + offline PIN, and join — no approval step.  
-6. Anytime later: **Admin → Config**, **Admin → Integrations** (optional OpenRouter LLM assist — off by default: Metadata Forge / ebook identify retry, multi-book split, file prune, ASIN recovery; shows per-key credit usage), **Admin → Cache**, **Admin → Requests**, and **Admin → Users**
+6. Anytime later use the Admin left-nav: **Overview** / **Requests** / **Users**, **Discovery** / **Catalog** (Open Library build + schedule), **Pipelines**, **Integrations** (optional OpenRouter LLM assist — off by default: Metadata Forge / ebook identify retry, multi-book split, file prune, ASIN recovery; shows per-key credit usage), and **Settings**
 
 ### Media mounts
 
@@ -256,7 +257,7 @@ Proxy to `http://127.0.0.1:8085`.
 
 See [`.env.example`](.env.example) for the full list.
 
-Most integration keys can also be set in **Admin -> Config** (stored in the DB, env as fallback). `SECRET_KEY` and the VAPID private key stay env-only. Library/staging paths are editable under **Admin → Config → Storage / Paths** (env fallback; host bind mounts remain compose-only via `AUDIOBOOK_HOST_DIR` / `EBOOK_HOST_DIR`).
+Most integration keys can also be set in **Admin → Settings** / **Integrations** / **Catalog** / **Pipelines** (stored in the DB, env as fallback). `SECRET_KEY` and the VAPID private key stay env-only. Library/staging paths are editable under **Admin → Settings → Storage / Paths** (env fallback; host bind mounts remain compose-only via `AUDIOBOOK_HOST_DIR` / `EBOOK_HOST_DIR`).
 
 | Area | Variables |
 |------|-----------|
@@ -267,7 +268,7 @@ Most integration keys can also be set in **Admin -> Config** (stored in the DB, 
 | Libraries | `ABS_URL`, `ABS_API_KEY`, `ABS_LIBRARY_ID`, `KAVITA_*` |
 | LibraForge | `LIBRAFORGE_URL`, `LIBRAFORGE_INTERNAL_URL`, `LIBRAFORGE_PIPELINE_ENABLED`, `LIBRAFORGE_MIN_SCORE`, `LIBRAFORGE_NAMING_TEMPLATE`, `LIBRAFORGE_M4B_JOBS` (per-run workers; app also serializes cross-request M4B to 1) |
 | Ebooks | `EBOOK_PIPELINE_ENABLED`, `EBOOK_MIN_SCORE` |
-| Catalog | `HARDCOVER_API_KEY`, `NYT_API_KEY`, `ISBNDB_API_KEY`, `GOOGLE_BOOKS_API_KEY`, `AA_ACCOUNT_ID` |
+| Catalog | `HARDCOVER_API_KEY`, `NYT_API_KEY`, `ISBNDB_API_KEY`, `GOOGLE_BOOKS_API_KEY`, `AA_ACCOUNT_ID`, `OPENROUTER_*` (optional LLM assist) |
 | Mobile | `ANDROID_APK_GITHUB_REPO`, `GITHUB_TOKEN` (optional rate-limit) |
 | VPN | `WIREGUARD_PRIVATE_KEY`, `WIREGUARD_ADDRESSES`, `MULLVAD_*`, `ABB_PROXY_URL` |
 | Push | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (`python scripts/generate_vapid.py`) |
@@ -288,15 +289,15 @@ Prefer RSS-only unless you know you need the deeper coverage.
 
 A local SQLite catalog avoids hammering live Open Library APIs during scrape/match. It is **not** required for a working install (the indexer cache seed is enough to search releases).
 
-**Admin → Config → Storage (or Catalog)** has a **Generate catalog** button with size/time warnings. That runs the same import as:
+**Admin → Catalog** shows catalog readiness, dump presence, and whether newer remote dumps are available (admins get a notification when dumps change). Use **Generate catalog** / **Update catalog** for an immediate multi-GB download + rebuild, or **schedule** dump download + rebuild for a chosen local time (persists across restarts; cancel/reschedule anytime). That runs the same import as:
 
 ```bash
 python scripts/ol_import_dumps.py --help
-# Monthly refresh cron (optional):
+# Optional host cron (in addition to in-app schedule):
 bash scripts/install_ol_catalog_cron.sh
 ```
 
-Expect multi-GB downloads and a multi-GB finished DB (much larger if you include editions). On a Pi this often takes many hours. Mount dump/working dirs via `OPENLIBRARY_HOST_DIR`.
+Expect multi-GB downloads and a multi-GB finished DB (much larger if you include editions). On a Pi this often takes many hours—prefer scheduling off-peak. Mount dump/working dirs via `OPENLIBRARY_HOST_DIR`.
 
 ---
 
@@ -324,7 +325,7 @@ Expect multi-GB downloads and a multi-GB finished DB (much larger if you include
 
 ### Health
 
-**Admin → Health** probes Real-Debrid, TorBox, Audiobookshelf, Kavita, LibraForge, Prowlarr, Jackett, FlareSolverr, Mullvad, Knaben, Open Library catalog, NYT, and disk space. **Scan ABS & clean orphans** runs scan + orphan cleanup only (no Quick Match / title rewrite). **Open LibraForge** uses `LIBRAFORGE_URL`.
+**Admin → Overview** probes Real-Debrid, TorBox, Audiobookshelf, Kavita, LibraForge, Prowlarr, Jackett, FlareSolverr, Mullvad, Knaben, Open Library catalog, NYT, and disk space. **Scan ABS & clean orphans** runs scan + orphan cleanup only (no Quick Match / title rewrite). **Open LibraForge** uses `LIBRAFORGE_URL`.
 
 ---
 

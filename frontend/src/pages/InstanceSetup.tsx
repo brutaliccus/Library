@@ -60,7 +60,7 @@ const FOLDER_CHECKS: Array<{ title: string; detail: string }> = [
   {
     title: "ABS ignores audiobook staging",
     detail:
-      "Default staging is `/audiobooks/.unorganized/` (dot folder). ABS skips hidden dirs by default; a `.ignore` marker is also written. Names/paths are editable under Admin → Config → Storage / Paths.",
+      "Default staging is `/audiobooks/.unorganized/` (dot folder). ABS skips hidden dirs by default; a `.ignore` marker is also written. Names/paths are editable under Admin → Settings → Storage / Paths.",
   },
   {
     title: "Kavita excludes ebook staging",
@@ -234,7 +234,7 @@ export default function InstanceSetup() {
         </h1>
         <p className="text-sm text-gray-500 mt-2">
           Configure libraries, debrid, download pipelines, and scrapers. Change anything later in
-          Admin → Config.
+          Admin → Settings / Catalog / Pipelines.
         </p>
       </div>
 

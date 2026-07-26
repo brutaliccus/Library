@@ -654,10 +654,15 @@ function AllRequestsTab() {
               <div className="flex-1 min-w-0 flex flex-col">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <h3 className="font-semibold text-gray-100 truncate text-base">
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0">
+                      <h3 className="font-semibold text-gray-100 truncate text-base max-w-full">
                         {req.title}
                       </h3>
+                      {req.username && (
+                        <span className="text-xs text-gray-500 shrink-0">
+                          Requested by {req.username}
+                        </span>
+                      )}
                       {req.is_private && (
                         <span
                           className="inline-flex items-center gap-1 shrink-0 text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-300 border border-purple-700/40"
@@ -675,7 +680,6 @@ function AllRequestsTab() {
                   <RequestStatusBadge status={req.status} detail={null} />
                 </div>
                 <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-gray-500">
-                  <span>by {req.username}</span>
                   <span>{new Date(req.created_at).toLocaleString()}</span>
                   {req.indexer && <span className="truncate">{req.indexer}</span>}
                   {req.media_type && req.media_type !== "unknown" && (

@@ -221,6 +221,9 @@ def seed_staging_metadata_hints(
     *,
     title: str,
     author: str | None,
+    asin: str | None = None,
+    series: str | None = None,
+    force: bool = False,
 ) -> None:
     """Write ABS-style metadata.json hints for single-book staging folders.
 
@@ -228,6 +231,9 @@ def seed_staging_metadata_hints(
     names. Catalog title+author from DownloadRequest are much more reliable for
     typical one-book downloads with empty tags. Multi-book packs are left alone
     (folder names are better than a series-pack request title).
+
+    ``force=True`` overwrites existing title/author/asin/series (used by LLM
+    assist after a failed Metadata Forge pass).
     """
     audio = _collect_audio(staging)
     if not audio:
@@ -237,12 +243,14 @@ def seed_staging_metadata_hints(
     if len(parents) != 1:
         return
     raw_title = (title or "").strip()
-    if raw_title and _SERIES_PACK_RE.search(raw_title):
+    if not force and raw_title and _SERIES_PACK_RE.search(raw_title):
         return
 
     hint_title = clean_catalog_title(raw_title) or raw_title
     hint_author = (author or "").strip()
-    if not hint_title and not hint_author:
+    hint_asin = normalize_asin(asin) if asin else ""
+    hint_series = (series or "").strip()
+    if not hint_title and not hint_author and not hint_asin:
         return
 
     target_dir = parents[0]
@@ -257,18 +265,29 @@ def seed_staging_metadata_hints(
             meta = {}
 
     changed = False
-    if hint_title and not str(meta.get("title") or "").strip():
-        meta["title"] = hint_title
-        changed = True
+    if hint_title and (force or not str(meta.get("title") or "").strip()):
+        if str(meta.get("title") or "").strip() != hint_title:
+            meta["title"] = hint_title
+            changed = True
     if hint_author and hint_author.lower() != "unknown":
         authors = meta.get("authors")
         if not isinstance(authors, list):
             authors = []
-        if not any(str(a).strip() for a in authors):
-            meta["authors"] = [hint_author]
+        if force or not any(str(a).strip() for a in authors):
+            if authors != [hint_author]:
+                meta["authors"] = [hint_author]
+                changed = True
+        if force or not str(meta.get("author") or "").strip():
+            if str(meta.get("author") or "").strip() != hint_author:
+                meta["author"] = hint_author
+                changed = True
+    if hint_asin and (force or not normalize_asin(meta.get("asin"))):
+        if str(meta.get("asin") or "").strip().upper() != hint_asin:
+            meta["asin"] = hint_asin
             changed = True
-        if not str(meta.get("author") or "").strip():
-            meta["author"] = hint_author
+    if hint_series and (force or not str(meta.get("series") or "").strip()):
+        if str(meta.get("series") or "").strip() != hint_series:
+            meta["series"] = hint_series
             changed = True
 
     if not changed:
@@ -276,14 +295,49 @@ def seed_staging_metadata_hints(
     try:
         meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info(
-            "Seeded Metadata Forge hints in %s (title=%r author=%r)",
+            "Seeded Metadata Forge hints in %s (title=%r author=%r asin=%r force=%s)",
             meta_path,
             meta.get("title"),
             hint_author,
+            hint_asin or "",
+            force,
         )
     except OSError as e:
         logger.warning("Could not seed metadata.json in %s: %s", target_dir, e)
 
+
+def collect_staging_llm_context(staging: Path) -> dict[str, Any]:
+    """File names/sizes + partial tags for OpenRouter metadata assist."""
+    files: list[dict[str, Any]] = []
+    if staging.is_dir():
+        for path in sorted(staging.rglob("*")):
+            if not path.is_file():
+                continue
+            # Skip bulky binaries in the prompt — name + size is enough.
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            rel = str(path.relative_to(staging))
+            files.append({"path": rel, "size": size})
+            if len(files) >= 40:
+                break
+
+    tags: dict[str, Any] = {}
+    if staging.is_dir():
+        for meta_path in staging.rglob("metadata.json"):
+            try:
+                loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(loaded, dict):
+                tags = {
+                    k: loaded.get(k)
+                    for k in ("title", "author", "authors", "series", "asin", "narrator", "narrators")
+                    if loaded.get(k)
+                }
+                break
+    return {"files": files, "partial_tags": tags}
 
 def _staging_library_roots() -> list[tuple[Path, tuple[str, ...]]]:
     """(library_root, staging_dirname_variants) for audiobook + ebook staging."""
@@ -698,16 +752,17 @@ def cover_url_from_staging(staging: Path) -> str | None:
     return None
 
 
-async def _apply_metadata_forge(
+async def _run_metadata_forge_once(
     request_id: int,
     *,
     staging: Path,
     user_id: int,
-    phase_detail: str = "Matching metadata via LibraForge…",
-) -> bool:
-    """Run Metadata Forge apply (overwrite + replace_cover). Returns True if applied.
+    phase_detail: str,
+) -> tuple[str, str]:
+    """One Metadata Forge apply attempt.
 
-    On failure / no write evidence, quarantines and returns False.
+    Returns ``("ok", "")``, ``("cancelled", "")``, or ``("fail", reason)``.
+    Does not quarantine — caller decides assist vs quarantine.
     """
     p = _pipeline()
     lf_path = staging_path_for_libraforge(staging)
@@ -740,39 +795,158 @@ async def _apply_metadata_forge(
         )
     except libraforge.LibraForgeError as e:
         if "cancelled" in str(e).lower():
-            return False
-        await _set_quarantine(
-            request_id,
-            f"LibraForge Metadata Forge unavailable or failed: {e}",
-            staging,
-        )
-        return False
+            return "cancelled", ""
+        return "fail", f"LibraForge Metadata Forge unavailable or failed: {e}"
 
     if libraforge.run_failed(report):
         err = report.get("error") or report.get("status") or "Metadata Forge failed"
-        await _set_quarantine(request_id, str(err)[:500], staging)
-        return False
+        return "fail", str(err)[:500]
 
     if not libraforge.metadata_auto_applied(report):
-        await _set_quarantine(
-            request_id,
-            libraforge.quarantine_reason_from_report(report),
-            staging,
-        )
-        return False
+        return "fail", libraforge.quarantine_reason_from_report(report)
 
     if not staging_has_applied_metadata(staging):
-        await _set_quarantine(
-            request_id,
-            (
-                "Metadata Forge reported a write, but no applied libraforge.json / "
-                "ASIN metadata.json was found in staging. Match may not have been "
-                "persisted (permissions or apply race)."
-            ),
-            staging,
+        return "fail", (
+            "Metadata Forge reported a write, but no applied libraforge.json / "
+            "ASIN metadata.json was found in staging. Match may not have been "
+            "persisted (permissions or apply race)."
         )
+    return "ok", ""
+
+
+async def _llm_metadata_assist_retry(
+    request_id: int,
+    *,
+    staging: Path,
+    user_id: int,
+    prior_reason: str,
+) -> tuple[str, str]:
+    """OpenRouter identify → seed hints → one Metadata Forge retry.
+
+    Soft-fails to ``("fail", reason)`` on disable/low confidence/API errors.
+    """
+    from app.services import openrouter
+
+    if not await openrouter.is_enabled():
+        return "fail", prior_reason
+
+    p = _pipeline()
+    req_title = ""
+    req_author = ""
+    media_type = "audiobook"
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req_row = result.scalar_one_or_none()
+        if req_row:
+            req_title = req_row.title or ""
+            req_author = req_row.author or ""
+            media_type = req_row.media_type or "audiobook"
+        await p._update_status(
+            db, request_id, "metadata_forge", "Identifying with AI…"
+        )
+
+    context = {
+        "request_title": req_title,
+        "request_author": req_author,
+        "media_type": media_type,
+        "prior_failure": prior_reason[:500],
+        **collect_staging_llm_context(staging),
+    }
+
+    try:
+        identification = await openrouter.identify_book(context)
+    except Exception as e:  # pragma: no cover - defensive soft-fail
+        logger.warning("OpenRouter assist unexpected error for request %s: %s", request_id, e)
+        return "fail", prior_reason
+
+    if identification is None:
+        logger.info(
+            "OpenRouter assist unavailable/failed for request %s — quarantining",
+            request_id,
+        )
+        return "fail", prior_reason
+
+    threshold = await openrouter.get_confidence_threshold()
+    if identification.confidence < threshold:
+        logger.info(
+            "OpenRouter assist low confidence for request %s (%.2f < %.2f) — quarantining",
+            request_id,
+            identification.confidence,
+            threshold,
+        )
+        return "fail", (
+            f"{prior_reason} | AI assist confidence {identification.confidence:.2f} "
+            f"below {threshold:.2f}"
+            + (f" ({identification.rationale})" if identification.rationale else "")
+        )[:500]
+
+    seed_staging_metadata_hints(
+        staging,
+        title=identification.title,
+        author=identification.author or None,
+        asin=identification.asin or None,
+        series=identification.series or None,
+        force=True,
+    )
+    logger.info(
+        "LLM metadata assist for request %s: title=%r author=%r asin=%r "
+        "confidence=%.2f — retrying Metadata Forge",
+        request_id,
+        identification.title,
+        identification.author,
+        identification.asin or "",
+        identification.confidence,
+    )
+
+    return await _run_metadata_forge_once(
+        request_id,
+        staging=staging,
+        user_id=user_id,
+        phase_detail="Retrying metadata with AI clues…",
+    )
+
+
+async def _apply_metadata_forge(
+    request_id: int,
+    *,
+    staging: Path,
+    user_id: int,
+    phase_detail: str = "Matching metadata via LibraForge…",
+    allow_llm_assist: bool = False,
+) -> bool:
+    """Run Metadata Forge apply (overwrite + replace_cover). Returns True if applied.
+
+    On failure / no write evidence, optionally tries OpenRouter assist once
+    (when ``allow_llm_assist`` and enabled), then quarantines and returns False.
+    """
+    status, reason = await _run_metadata_forge_once(
+        request_id,
+        staging=staging,
+        user_id=user_id,
+        phase_detail=phase_detail,
+    )
+    if status == "ok":
+        return True
+    if status == "cancelled":
         return False
-    return True
+
+    if allow_llm_assist:
+        status, reason = await _llm_metadata_assist_retry(
+            request_id,
+            staging=staging,
+            user_id=user_id,
+            prior_reason=reason,
+        )
+        if status == "ok":
+            logger.info("Metadata Forge succeeded after LLM assist for request %s", request_id)
+            return True
+        if status == "cancelled":
+            return False
+
+    await _set_quarantine(request_id, reason or "Metadata Forge failed", staging)
+    return False
 
 
 def staging_has_applied_metadata(staging: Path) -> bool:
@@ -1262,6 +1436,7 @@ async def run_forge_after_download(
             staging=staging,
             user_id=user_id,
             phase_detail="Matching metadata via LibraForge…",
+            allow_llm_assist=True,
         )
         if not applied:
             return

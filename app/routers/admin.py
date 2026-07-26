@@ -1406,6 +1406,10 @@ class IntegrationKeysUpdate(BaseModel):
     nyt_api_key: str | None = None
     isbndb_api_key: str | None = None
     hardcover_api_key: str | None = None
+    openrouter_enabled: bool | None = None
+    openrouter_api_key: str | None = None
+    openrouter_model: str | None = None
+    openrouter_confidence_threshold: float | None = None
     mullvad_account_number: str | None = None
 
 
@@ -1462,7 +1466,8 @@ async def _resolve_mullvad_account() -> tuple[str, str]:
 
 
 async def _integrations_payload() -> dict:
-    from app.services import nyt_books, isbndb, hardcover, app_settings
+    from app.services import nyt_books, isbndb, hardcover, openrouter, app_settings
+    from app.services import instance_settings as inst
 
     stored = await app_settings.get_setting(nyt_books.API_KEY_SETTING, default="")
     effective = await nyt_books.get_api_key()
@@ -1470,6 +1475,11 @@ async def _integrations_payload() -> dict:
     isbn_effective = await isbndb.get_api_key()
     hc_stored = await app_settings.get_setting(hardcover.API_KEY_SETTING, default="")
     hc_effective = await hardcover.get_api_key()
+    or_stored = await app_settings.get_setting(openrouter.API_KEY_SETTING, default="")
+    or_effective = await openrouter.get_api_key()
+    or_enabled = await inst.get_effective_bool(openrouter.ENABLED_SETTING, False)
+    or_model = await openrouter.get_model()
+    or_threshold = await openrouter.get_confidence_threshold()
     mullvad_stored, mullvad_eff = await _resolve_mullvad_account()
     wg_key = await app_settings.get_setting("integrations.mullvad_wg_private_key", default="")
     wg_addr = await app_settings.get_setting("integrations.mullvad_wg_addresses", default="")
@@ -1489,6 +1499,16 @@ async def _integrations_payload() -> dict:
             "configured": bool(hc_effective),
             "overridden": bool(hc_stored),
             "hint": _mask(hc_effective.replace("Bearer ", "") if hc_effective else ""),
+        },
+        "openrouter": {
+            "enabled": or_enabled,
+            "configured": bool(or_effective),
+            "overridden": bool(or_stored),
+            "hint": _mask(or_effective),
+            "model": or_model,
+            "confidenceThreshold": or_threshold,
+            "note": "When Metadata Forge would quarantine, OpenRouter can identify "
+                    "the book and retry once if confidence is high enough. Off by default.",
         },
         "mullvad": {
             "configured": bool(mullvad_eff),
@@ -1514,7 +1534,7 @@ async def update_integrations(
     body: IntegrationKeysUpdate,
     _admin: User = Depends(require_admin),
 ):
-    from app.services import nyt_books, isbndb, hardcover, app_settings
+    from app.services import nyt_books, isbndb, hardcover, openrouter, app_settings
 
     if body.nyt_api_key is not None:
         await app_settings.set_setting(nyt_books.API_KEY_SETTING, body.nyt_api_key.strip())
@@ -1522,6 +1542,23 @@ async def update_integrations(
         await app_settings.set_setting(isbndb.API_KEY_SETTING, body.isbndb_api_key.strip())
     if body.hardcover_api_key is not None:
         await app_settings.set_setting(hardcover.API_KEY_SETTING, body.hardcover_api_key.strip())
+    if body.openrouter_enabled is not None:
+        await app_settings.set_setting(
+            openrouter.ENABLED_SETTING,
+            "true" if body.openrouter_enabled else "false",
+        )
+    if body.openrouter_api_key is not None:
+        await app_settings.set_setting(
+            openrouter.API_KEY_SETTING, body.openrouter_api_key.strip()
+        )
+    if body.openrouter_model is not None:
+        model = body.openrouter_model.strip() or openrouter.DEFAULT_MODEL
+        await app_settings.set_setting(openrouter.MODEL_SETTING, model)
+    if body.openrouter_confidence_threshold is not None:
+        threshold = max(0.0, min(1.0, float(body.openrouter_confidence_threshold)))
+        await app_settings.set_setting(
+            openrouter.CONFIDENCE_SETTING, f"{threshold:.2f}"
+        )
     if body.mullvad_account_number is not None:
         digits = _normalize_mullvad_account(body.mullvad_account_number)
         await app_settings.set_setting(MULLVAD_SETTING, digits)

@@ -123,6 +123,8 @@ When `LIBRAFORGE_PIPELINE_ENABLED=true` (default), audiobook requests:
 
 If metadata score is below auto-apply threshold (or LibraForge is down), the request becomes **`quarantined`**: files stay in `.unorganized`, admins are notified, and Admin → Requests offers **Manual Review** (LibraForge), **Continue pipeline**, or **Reject / delete**.
 
+**Optional OpenRouter LLM assist** (Admin → Integrations, **off by default**): when Metadata Forge would quarantine and OpenRouter is enabled with an API key, Library asks the configured model (default `openai/gpt-4o-mini`) to identify the book. If confidence ≥ threshold (default `0.85`), staging hints are re-seeded (title/author/series/ASIN) and Metadata Forge runs **once** more without admin. Low confidence, missing key, timeouts, or API errors soft-fail to the normal quarantine path.
+
 **Re-queue M4B for a book already in the library** (staging empty / request `completed`): do **not** hit Continue on the old request. In LibraForge M4B Tool, load `/audiobooks/{Author}/{Title}` (flat multi-file folder) and Create M4B. After success, delete leftover source parts manually if desired, then Scan ABS.
 
 ### ABS exclusion for `.unorganized`

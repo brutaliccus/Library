@@ -1107,6 +1107,15 @@ interface IntegrationsResponse {
   nyt?: { configured: boolean; overridden: boolean; hint: string };
   isbndb?: { configured: boolean; overridden: boolean; hint: string };
   hardcover?: { configured: boolean; overridden: boolean; hint: string };
+  openrouter?: {
+    enabled: boolean;
+    configured: boolean;
+    overridden: boolean;
+    hint: string;
+    model: string;
+    confidenceThreshold: number;
+    note?: string;
+  };
   mullvad?: {
     configured: boolean;
     overridden: boolean;
@@ -1121,6 +1130,9 @@ function IntegrationsCard() {
   const [nytKey, setNytKey] = useState("");
   const [isbndbKey, setIsbndbKey] = useState("");
   const [hardcoverKey, setHardcoverKey] = useState("");
+  const [openrouterKey, setOpenrouterKey] = useState("");
+  const [openrouterModel, setOpenrouterModel] = useState("");
+  const [openrouterThreshold, setOpenrouterThreshold] = useState("");
   const [mullvadAcct, setMullvadAcct] = useState("");
 
   const { data } = useQuery<IntegrationsResponse>({
@@ -1172,6 +1184,21 @@ function IntegrationsCard() {
     onError: () => toast("Failed to save Hardcover key", "error"),
   });
 
+  const saveOpenrouter = useMutation({
+    mutationFn: async (payload: Record<string, unknown>) => {
+      const { data } = await api.put("/admin/integrations", payload);
+      return data as IntegrationsResponse;
+    },
+    onSuccess: () => {
+      setOpenrouterKey("");
+      setOpenrouterModel("");
+      setOpenrouterThreshold("");
+      queryClient.invalidateQueries({ queryKey: ["admin-integrations"] });
+      toast("OpenRouter settings saved", "success");
+    },
+    onError: () => toast("Failed to save OpenRouter settings", "error"),
+  });
+
   const saveMullvad = useMutation({
     mutationFn: async (value: string) => {
       const { data } = await api.put("/admin/integrations", {
@@ -1193,6 +1220,7 @@ function IntegrationsCard() {
   const nyt = data?.nyt;
   const isbndb = data?.isbndb;
   const hardcover = data?.hardcover;
+  const openrouter = data?.openrouter;
   const mullvad = data?.mullvad;
 
   return (
@@ -1325,6 +1353,121 @@ function IntegrationsCard() {
         <p className="text-xs text-gray-500">
           Token from hardcover.app/account/api — used only for public book ratings, series
           graphs, and curated lists. Does not sync your Hardcover account or library.
+        </p>
+      </div>
+
+      <div className="space-y-2 text-sm border-t border-gray-700 pt-4">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-gray-300">OpenRouter LLM assist</span>
+          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={Boolean(openrouter?.enabled)}
+              onChange={(e) =>
+                saveOpenrouter.mutate({ openrouter_enabled: e.target.checked })
+              }
+              disabled={saveOpenrouter.isPending}
+              className="rounded border-gray-600 bg-gray-900 text-emerald-500 focus:ring-emerald-700"
+            />
+            {openrouter?.enabled ? "On" : "Off"}
+          </label>
+        </div>
+        <div className="flex items-center justify-between text-xs">
+          <span className="text-gray-500">API key</span>
+          <span className={openrouter?.configured ? "text-emerald-400" : "text-gray-500"}>
+            {openrouter?.configured
+              ? `Configured${openrouter.overridden ? "" : " (env)"}${openrouter.hint ? ` · ${openrouter.hint}` : ""}`
+              : "Not set"}
+          </span>
+        </div>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            type="password"
+            value={openrouterKey}
+            onChange={(e) => setOpenrouterKey(e.target.value)}
+            placeholder="sk-or-… OpenRouter API key"
+            autoComplete="off"
+            className="flex-1 min-w-0 px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-gray-100 text-sm focus:outline-none focus:border-gray-500"
+          />
+          <button
+            type="button"
+            onClick={() =>
+              saveOpenrouter.mutate({ openrouter_api_key: openrouterKey.trim() })
+            }
+            disabled={saveOpenrouter.isPending || !openrouterKey.trim()}
+            className="px-3 py-1.5 bg-emerald-900/50 text-emerald-300 text-sm rounded-lg hover:bg-emerald-900/70 border border-emerald-800/50 disabled:opacity-50"
+          >
+            {saveOpenrouter.isPending ? "Saving…" : "Save key"}
+          </button>
+          {openrouter?.overridden && (
+            <button
+              type="button"
+              onClick={() => saveOpenrouter.mutate({ openrouter_api_key: "" })}
+              disabled={saveOpenrouter.isPending}
+              className="px-3 py-1.5 bg-gray-900 text-gray-400 text-sm rounded-lg hover:text-gray-200 border border-gray-700 disabled:opacity-50"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <label className="text-xs text-gray-500">Model</label>
+            <input
+              type="text"
+              value={openrouterModel}
+              onChange={(e) => setOpenrouterModel(e.target.value)}
+              placeholder={openrouter?.model || "openai/gpt-4o-mini"}
+              autoComplete="off"
+              className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-gray-100 text-sm focus:outline-none focus:border-gray-500"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-gray-500">Confidence threshold (0–1)</label>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              value={openrouterThreshold}
+              onChange={(e) => setOpenrouterThreshold(e.target.value)}
+              placeholder={
+                openrouter?.confidenceThreshold != null
+                  ? String(openrouter.confidenceThreshold)
+                  : "0.85"
+              }
+              className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-gray-100 text-sm focus:outline-none focus:border-gray-500"
+            />
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            const payload: Record<string, unknown> = {};
+            if (openrouterModel.trim()) {
+              payload.openrouter_model = openrouterModel.trim();
+            }
+            if (openrouterThreshold.trim()) {
+              const n = Number(openrouterThreshold);
+              if (!Number.isNaN(n)) payload.openrouter_confidence_threshold = n;
+            }
+            if (Object.keys(payload).length === 0) {
+              toast("Enter a model and/or threshold to save", "error");
+              return;
+            }
+            saveOpenrouter.mutate(payload);
+          }}
+          disabled={saveOpenrouter.isPending}
+          className="px-3 py-1.5 bg-gray-900 text-gray-300 text-sm rounded-lg hover:text-gray-100 border border-gray-700 disabled:opacity-50"
+        >
+          Save model / threshold
+        </button>
+        <p className="text-xs text-gray-500">
+          {openrouter?.note ||
+            "After Metadata Forge fails, OpenRouter can suggest title/author/ASIN and retry once when confidence is high. Default off — no calls without a key."}
+          {" "}
+          Current model: {openrouter?.model || "openai/gpt-4o-mini"}; threshold{" "}
+          {openrouter?.confidenceThreshold ?? 0.85}.
         </p>
       </div>
 

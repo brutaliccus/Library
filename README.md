@@ -154,7 +154,7 @@ flowchart TB
 | Frontend | React, Vite, Tailwind CSS, TanStack Query, pdf.js |
 | Mobile | Capacitor Android (+ Android Auto MediaBrowserService) |
 | Infra | Docker Compose, optional nginx / Tailscale |
-| Integrations | Prowlarr, Jackett, FlareSolverr, Real-Debrid, TorBox, Audiobookshelf, Kavita, Mullvad/gluetun |
+| Integrations | Prowlarr, Jackett, FlareSolverr, Real-Debrid, TorBox, Audiobookshelf, Kavita, Mullvad/gluetun, optional OpenRouter LLM assist |
 
 ### Docker services
 
@@ -218,7 +218,7 @@ App listens on **`http://127.0.0.1:8085`**.
 3. **`/admin/setup`** — ABS/Kavita, Prowlarr/Jackett/Flare, debrid (TorBox optional), LibraForge + ebook pipelines, staging checklist, catalog APIs, Android APK repo, scraper mode  
 4. Confirm folder conventions: ABS ignores `.unorganized`; Kavita excludes `unorganized`  
 5. Share the **invite link** from Settings (`/join/CODE`). Friends open it (Android app if installed, otherwise the site), set username/password + offline PIN, and join — no approval step.  
-6. Anytime later: **Admin → Config**, **Admin → Cache**, **Admin → Requests**, and **Admin → Users**
+6. Anytime later: **Admin → Config**, **Admin → Integrations** (optional OpenRouter LLM assist for Metadata Forge quarantine recovery — off by default), **Admin → Cache**, **Admin → Requests**, and **Admin → Users**
 
 ### Media mounts
 

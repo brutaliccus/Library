@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     # Hardcover GraphQL — ratings, series graphs, curated lists (no user-library sync).
     # Token from hardcover.app/account/api. Optional; Admin → Integrations.
     hardcover_api_key: str = ""
+    # OpenRouter — optional LLM assist when Metadata Forge would quarantine.
+    # Off by default. Prefer Admin → Integrations; env is fallback only.
+    openrouter_api_key: str = ""
+    openrouter_enabled: bool = False
+    openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_confidence_threshold: float = 0.85
     aa_account_id: str = ""
     flaresolverr_url: str = ""
 

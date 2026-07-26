@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -37,9 +38,21 @@ DEFAULT_MODEL = "openai/gpt-4o-mini"
 DEFAULT_CONFIDENCE = 0.85
 # Soft-fail budget — never block the download pipeline on LLM latency.
 REQUEST_TIMEOUT_SECONDS = 45.0
+# After credit/quota errors, treat assist as disabled until this TTL (or credits return).
+CREDITS_SOFT_DISABLE_SECONDS = 3600.0
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 _ASIN_RE = re.compile(r"^(?:B[\dA-Z]{9}|\d{10})$", re.IGNORECASE)
+_CREDIT_ERROR_RE = re.compile(
+    r"(?:credit|quota|balance|billing|payment|insufficient\s+funds|"
+    r"out\s+of\s+credits|limit\s+(?:remaining\s+)?(?:is\s+)?(?:0|zero)|"
+    r"exceeded\s+your\s+(?:credit\s+)?limit|requires?\s+more\s+credits|"
+    r"can\s+only\s+afford|402\b)",
+    re.IGNORECASE,
+)
+
+# Monotonic deadline: while set, ``is_enabled()`` is False (same as toggle off).
+_credits_exhausted_until: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -145,7 +158,63 @@ class KeyUsage:
             "limitReset": self.limit_reset,
             "isFreeTier": self.is_free_tier,
             "error": self.error or None,
+            "creditsExhausted": credits_exhausted(),
         }
+
+
+def credits_exhausted() -> bool:
+    """True while credit/quota soft-disable is active (assist behaves as toggle-off)."""
+    return time.monotonic() < _credits_exhausted_until
+
+
+def mark_credits_exhausted(reason: str = "") -> None:
+    """Soft-disable LLM assist — same as toggle off until TTL or credits return."""
+    global _credits_exhausted_until
+    _credits_exhausted_until = time.monotonic() + CREDITS_SOFT_DISABLE_SECONDS
+    logger.info(
+        "OpenRouter credits/quota exhausted — LLM assist skipped "
+        "(same as disabled) for %.0fs%s",
+        CREDITS_SOFT_DISABLE_SECONDS,
+        f": {reason[:160]}" if reason else "",
+    )
+
+
+def clear_credits_exhausted() -> None:
+    """Clear soft-disable after successful usage/chat shows credits available."""
+    global _credits_exhausted_until
+    if _credits_exhausted_until:
+        logger.info("OpenRouter credits available again — LLM assist re-enabled")
+    _credits_exhausted_until = 0.0
+
+
+def is_credit_error(status_code: int, body: str = "") -> bool:
+    """Detect payment/credit/quota exhaustion (not ordinary 5xx/parse errors)."""
+    if status_code == 402:
+        return True
+    text = body or ""
+    if _CREDIT_ERROR_RE.search(text):
+        return True
+    # 429 alone is often rate-limit; only treat as credits when the body says so.
+    if status_code == 429 and _CREDIT_ERROR_RE.search(text):
+        return True
+    return False
+
+
+def note_usage_credits(usage: KeyUsage) -> None:
+    """Update soft-disable from ``GET /api/v1/key`` limit_remaining when present."""
+    if usage.error:
+        return
+    remaining = usage.limit_remaining
+    # null limit_remaining ⇒ unlimited / no per-key cap — do not soft-disable.
+    if remaining is None:
+        if credits_exhausted():
+            # Usage succeeded; allow a re-try path to clear stale disable.
+            clear_credits_exhausted()
+        return
+    if remaining <= 0:
+        mark_credits_exhausted(f"limit_remaining={remaining}")
+    else:
+        clear_credits_exhausted()
 
 
 async def get_api_key() -> str:
@@ -157,9 +226,15 @@ async def get_api_key() -> str:
 
 
 async def is_enabled() -> bool:
-    """True only when the toggle is on **and** an API key is available."""
+    """True only when toggle on, API key present, and credits not soft-exhausted.
+
+    Credit exhaustion uses the **same code path as toggle off / no key**: callers
+    skip LLM and continue the normal non-LLM pipeline (no special quarantine).
+    """
     from app.services import instance_settings as inst
 
+    if credits_exhausted():
+        return False
     if not await inst.get_effective_bool(ENABLED_SETTING, False):
         return False
     return bool(await get_api_key())
@@ -289,13 +364,16 @@ async def _chat_json(
         return None
 
     if resp.status_code >= 400:
+        body_text = (resp.text or "")[:300]
         # Never log Authorization / key material — body only.
         logger.warning(
             "OpenRouter %s failed %s: %s",
             log_label,
             resp.status_code,
-            (resp.text or "")[:300],
+            body_text,
         )
+        if is_credit_error(resp.status_code, body_text):
+            mark_credits_exhausted(f"HTTP {resp.status_code}")
         return None
 
     try:
@@ -303,6 +381,14 @@ async def _chat_json(
     except json.JSONDecodeError:
         logger.warning("OpenRouter %s returned non-JSON body", log_label)
         return None
+
+    # Some error payloads return 200 with an error object.
+    err = body.get("error") if isinstance(body, dict) else None
+    if isinstance(err, dict):
+        err_msg = str(err.get("message") or err.get("code") or "")
+        if is_credit_error(int(err.get("code") or 0) or 402, err_msg):
+            mark_credits_exhausted(err_msg)
+            return None
 
     try:
         content = body["choices"][0]["message"]["content"]
@@ -314,6 +400,10 @@ async def _chat_json(
     data = _parse_json_object(text or "")
     if not data:
         logger.warning("OpenRouter %s could not parse response: %s", log_label, str(content)[:300])
+        return None
+
+    # A successful completion proves credits work — clear soft-disable.
+    clear_credits_exhausted()
     return data
 
 
@@ -603,11 +693,14 @@ async def fetch_key_usage() -> KeyUsage:
         return KeyUsage(error="Usage request failed")
 
     if resp.status_code >= 400:
+        body_text = (resp.text or "")[:200]
         logger.warning(
             "OpenRouter key usage failed %s: %s",
             resp.status_code,
-            (resp.text or "")[:200],
+            body_text,
         )
+        if is_credit_error(resp.status_code, body_text):
+            mark_credits_exhausted(f"usage HTTP {resp.status_code}")
         return KeyUsage(error=f"OpenRouter returned {resp.status_code}")
 
     try:
@@ -633,7 +726,7 @@ async def fetch_key_usage() -> KeyUsage:
     if len(label) > 40:
         label = label[:20] + "…" + label[-8:]
 
-    return KeyUsage(
+    usage = KeyUsage(
         label=label,
         usage=_num("usage"),
         usage_daily=_num("usage_daily"),
@@ -644,3 +737,5 @@ async def fetch_key_usage() -> KeyUsage:
         limit_reset=str(data.get("limit_reset") or "").strip() or None,
         is_free_tier=bool(data["is_free_tier"]) if "is_free_tier" in data else None,
     )
+    note_usage_credits(usage)
+    return usage

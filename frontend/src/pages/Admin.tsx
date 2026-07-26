@@ -1114,6 +1114,7 @@ type OpenRouterUsage = {
   limitReset?: string | null;
   isFreeTier?: boolean | null;
   error?: string | null;
+  creditsExhausted?: boolean;
 };
 
 function formatCredits(n: number | null | undefined): string {
@@ -1162,6 +1163,15 @@ function OpenRouterUsageBlock({
         <p className="text-xs text-amber-400/90">{u.error}</p>
       ) : (
         <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+          {u?.creditsExhausted ||
+          (u?.limitRemaining != null && u.limitRemaining <= 0) ? (
+            <>
+              <dt className="text-gray-500 col-span-2">LLM assist</dt>
+              <dd className="text-amber-300/90 col-span-2 text-left">
+                Credits exhausted — assist skipped (same as toggle off); pipeline continues.
+              </dd>
+            </>
+          ) : null}
           <dt className="text-gray-500">Limit remaining</dt>
           <dd className="text-gray-200 text-right tabular-nums">
             {u?.limitRemaining == null && u?.limit == null

@@ -315,6 +315,138 @@ def test_ebook_llm_identify_retry_high_confidence(tmp_path: Path, monkeypatch):
     assert meta.score >= 0.9
 
 
+@pytest.fixture(autouse=True)
+def _clear_openrouter_credit_soft_disable():
+    openrouter.clear_credits_exhausted()
+    yield
+    openrouter.clear_credits_exhausted()
+
+
+def test_is_credit_error_detects_402_and_messages():
+    assert openrouter.is_credit_error(402, "") is True
+    assert openrouter.is_credit_error(429, "rate limit exceeded") is False
+    assert openrouter.is_credit_error(429, "Insufficient credits") is True
+    assert openrouter.is_credit_error(403, "Payment required: out of credits") is True
+    assert openrouter.is_credit_error(500, "internal error") is False
+
+
+def test_credits_exhausted_disables_like_toggle_off(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.instance_settings.get_effective_bool",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(openrouter, "get_api_key", AsyncMock(return_value="sk-test"))
+
+    assert asyncio.run(openrouter.is_enabled()) is True
+    openrouter.mark_credits_exhausted("test")
+    # Same as toggle off — callers skip LLM entirely.
+    assert openrouter.credits_exhausted() is True
+    assert asyncio.run(openrouter.is_enabled()) is False
+
+
+def test_chat_json_402_soft_disables_and_returns_none(monkeypatch):
+    monkeypatch.setattr(openrouter, "is_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(openrouter, "get_api_key", AsyncMock(return_value="sk-test"))
+    monkeypatch.setattr(openrouter, "get_model", AsyncMock(return_value="openai/gpt-4o-mini"))
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 402
+    mock_resp.text = '{"error":{"message":"Insufficient credits"}}'
+
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.post = AsyncMock(return_value=mock_resp)
+
+    async def _run():
+        with patch("app.services.openrouter.httpx.AsyncClient", return_value=mock_client):
+            return await openrouter._chat_json("sys", {"x": 1}, log_label="test")
+
+    assert asyncio.run(_run()) is None
+    assert openrouter.credits_exhausted() is True
+
+
+def test_identify_book_skips_when_credits_exhausted(monkeypatch):
+    openrouter.mark_credits_exhausted("no credits")
+    monkeypatch.setattr(
+        "app.services.instance_settings.get_effective_bool",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(openrouter, "get_api_key", AsyncMock(return_value="sk-test"))
+
+    post = AsyncMock()
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.post = post
+
+    async def _run():
+        with patch("app.services.openrouter.httpx.AsyncClient", return_value=mock_client):
+            return await openrouter.identify_book({"request_title": "Dune"})
+
+    assert asyncio.run(_run()) is None
+    post.assert_not_called()
+
+
+def test_llm_metadata_assist_credits_exhausted_same_as_disabled(tmp_path: Path, monkeypatch):
+    """Credits out ⇒ same as toggle off: prior_reason only, no Forge retry, no credit note."""
+    from app.services.forge_pipeline import _llm_metadata_assist_retry
+
+    staging = tmp_path / "req"
+    staging.mkdir()
+    (staging / "book.m4b").write_bytes(b"x")
+
+    openrouter.mark_credits_exhausted("402")
+    monkeypatch.setattr(
+        "app.services.instance_settings.get_effective_bool",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(openrouter, "get_api_key", AsyncMock(return_value="sk-test"))
+
+    identify = AsyncMock(
+        return_value=BookIdentification(title="X", author="Y", confidence=0.99)
+    )
+    monkeypatch.setattr(openrouter, "identify_book", identify)
+
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(
+        return_value=MagicMock(
+            scalar_one_or_none=MagicMock(
+                return_value=MagicMock(title="x", author="y", media_type="audiobook")
+            )
+        )
+    )
+    pipeline = MagicMock()
+    pipeline._update_status = AsyncMock()
+    pipeline._is_cancelled = AsyncMock(return_value=False)
+
+    async def _run():
+        with (
+            patch("app.services.forge_pipeline.async_session", return_value=session),
+            patch("app.services.forge_pipeline._pipeline", return_value=pipeline),
+            patch(
+                "app.services.forge_pipeline._run_metadata_forge_once",
+                new=AsyncMock(return_value=("ok", "")),
+            ) as run_once,
+        ):
+            status, reason = await _llm_metadata_assist_retry(
+                9,
+                staging=staging,
+                user_id=1,
+                prior_reason="score too low",
+            )
+            return status, reason, run_once
+
+    status, reason, run_once = asyncio.run(_run())
+    assert status == "fail"
+    assert reason == "score too low"
+    assert "credit" not in reason.lower()
+    run_once.assert_not_awaited()
+    identify.assert_not_awaited()
+
+
 def test_fetch_key_usage_parses(monkeypatch):
     monkeypatch.setattr(openrouter, "get_api_key", AsyncMock(return_value="sk-test"))
 
@@ -347,6 +479,36 @@ def test_fetch_key_usage_parses(monkeypatch):
     assert usage.limit_remaining == pytest.approx(74.5)
     assert usage.usage_monthly == pytest.approx(20.0)
     assert usage.error == ""
+    assert openrouter.credits_exhausted() is False
     d = usage.to_dict()
     assert d["limitRemaining"] == pytest.approx(74.5)
     assert "sk-test" not in json.dumps(d)
+
+
+def test_fetch_key_usage_zero_remaining_soft_disables(monkeypatch):
+    monkeypatch.setattr(openrouter, "get_api_key", AsyncMock(return_value="sk-test"))
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "data": {
+            "label": "sk-or-v1-x",
+            "usage": 100.0,
+            "limit": 100.0,
+            "limit_remaining": 0.0,
+            "limit_reset": "monthly",
+        }
+    }
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.get = AsyncMock(return_value=mock_resp)
+
+    async def _run():
+        with patch("app.services.openrouter.httpx.AsyncClient", return_value=mock_client):
+            return await openrouter.fetch_key_usage()
+
+    usage = asyncio.run(_run())
+    assert usage.limit_remaining == pytest.approx(0.0)
+    assert openrouter.credits_exhausted() is True
+    assert usage.to_dict()["creditsExhausted"] is True

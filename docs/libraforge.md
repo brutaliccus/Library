@@ -123,7 +123,7 @@ When `LIBRAFORGE_PIPELINE_ENABLED=true` (default), audiobook requests:
 
 If metadata score is below auto-apply threshold (or LibraForge is down), the request becomes **`quarantined`**: files stay in `.unorganized`, admins are notified, and Admin → Requests offers **Manual Review** (LibraForge), **Continue pipeline**, or **Reject / delete**.
 
-**Optional OpenRouter LLM assist** (Admin → Integrations, **off by default**; no key → no LLM calls). Same confidence threshold (default `0.85`) and model for all paths. Soft-fails (timeouts/API/parse) keep the previous behavior.
+**Optional OpenRouter LLM assist** (Admin → Integrations, **off by default**; no key → no LLM calls). Same confidence threshold (default `0.85`) and model for all paths. Soft-fails (timeouts/API/parse) keep the previous behavior. If OpenRouter returns credit/quota/payment errors (HTTP 402, credit messages) or `limit_remaining` is 0, assist is treated **exactly like toggle off** for that period — full non-LLM pipeline continues (no request failure, no credit-specific quarantine reason).
 
 | Use case | Auto (confidence ≥ threshold) | Quick Review |
 | --- | --- | --- |

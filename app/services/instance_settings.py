@@ -122,6 +122,57 @@ REGISTRY: list[SettingDef] = [
         value_type="int",
         help="0 = use default / first ebook library.",
     ),
+    # --- Pipelines (LibraForge + ebooks) ---
+    SettingDef(
+        key="config.libraforge_url",
+        group="pipeline",
+        label="LibraForge public URL",
+        env_attr="libraforge_url",
+        help="Opens from Admin → Health / Manual Review. Sibling stack — not in this compose. See docs/libraforge.md.",
+        placeholder="https://forge.library.example.com",
+    ),
+    SettingDef(
+        key="config.libraforge_internal_url",
+        group="pipeline",
+        label="LibraForge internal URL",
+        env_attr="libraforge_internal_url",
+        help="Reachable from the Library container (API + health). Often Docker bridge gateway :5056.",
+        placeholder="http://172.17.0.1:5056",
+    ),
+    SettingDef(
+        key="config.libraforge_pipeline_enabled",
+        group="pipeline",
+        label="Audiobook LibraForge pipeline",
+        env_attr="libraforge_pipeline_enabled",
+        value_type="bool",
+        help="Land downloads in /audiobooks/.unorganized → Metadata → M4B (queue concurrency 1) → Chapter Forge (ASIN) → Folder Forge → ABS.",
+    ),
+    SettingDef(
+        key="config.libraforge_min_score",
+        group="pipeline",
+        label="LibraForge min score",
+        env_attr="libraforge_min_score",
+        value_type="float",
+        help="Below this confidence → quarantine for admin Quick Review.",
+        placeholder="0.70",
+    ),
+    SettingDef(
+        key="config.ebook_pipeline_enabled",
+        group="pipeline",
+        label="Ebook organizer pipeline",
+        env_attr="ebook_pipeline_enabled",
+        value_type="bool",
+        help="Land in /ebooks/unorganized → identify → Author/Series/Title → Kavita. See docs/ebooks.md.",
+    ),
+    SettingDef(
+        key="config.ebook_min_score",
+        group="pipeline",
+        label="Ebook min score",
+        env_attr="ebook_min_score",
+        value_type="float",
+        help="Below this confidence → quarantine under unorganized/.",
+        placeholder="0.70",
+    ),
     # --- Indexers ---
     SettingDef(
         key="config.prowlarr_url",
@@ -172,9 +223,10 @@ REGISTRY: list[SettingDef] = [
     SettingDef(
         key="config.torbox_api_token",
         group="debrid",
-        label="TorBox API token (server default)",
+        label="TorBox API token (server default, optional)",
         env_attr="torbox_api_token",
         secret=True,
+        help="Optional second debrid. Unique cache wins; both/neither cached → user preferred.",
     ),
     # --- Catalog APIs ---
     SettingDef(
@@ -331,6 +383,7 @@ GROUPS: list[dict[str, str]] = [
     {"id": "core", "label": "Core"},
     {"id": "mobile", "label": "Android / mobile"},
     {"id": "libraries", "label": "Libraries (ABS / Kavita)"},
+    {"id": "pipeline", "label": "Pipelines (LibraForge / ebooks)"},
     {"id": "indexers", "label": "Indexers"},
     {"id": "debrid", "label": "Debrid (server defaults)"},
     {"id": "catalog", "label": "Catalog APIs"},
@@ -534,6 +587,9 @@ async def setup_status() -> dict[str, Any]:
     rd = await get_effective("config.real_debrid_api_token")
     torbox = await get_effective("config.torbox_api_token")
     hc = await get_effective("integrations.hardcover_api_key")
+    lf_url = await get_effective("config.libraforge_url")
+    lf_internal = await get_effective("config.libraforge_internal_url")
+    apk_repo = await get_effective("config.android_apk_github_repo")
     abb_rss = await get_effective_bool("scraper.abb_rss_only", True)
     knaben_rss = await get_effective_bool("scraper.knaben_rss_only", True)
 
@@ -543,28 +599,75 @@ async def setup_status() -> dict[str, Any]:
             "label": "Audiobookshelf / Kavita",
             "done": bool(abs_url and abs_key) or bool(kav_url and kav_key),
             "required": True,
-            "help": "Connect at least one library (ABS for audiobooks, Kavita for ebooks).",
+            "help": (
+                "Connect at least one library (ABS for audiobooks, Kavita for ebooks). "
+                "ABS/local metadata is the My Library source of truth for series/author/genre/sequence "
+                "(Hardcover may fill empty genres only). ABS ignores `.unorganized` (dot folder); "
+                "configure Kavita to exclude `unorganized`."
+            ),
         },
         {
             "id": "indexers",
-            "label": "Prowlarr",
+            "label": "Prowlarr / Flare / Jackett",
             "done": bool(prow_url and prow_key),
             "required": True,
-            "help": "Needed for torrent search and the indexer cache scraper.",
+            "help": (
+                "Prowlarr for torrent search + scraper. Jackett/FlareSolverr are compose sidecars "
+                "(ABB RSS + live search). Deep Flare crawls stay opt-in on the Scraper step."
+            ),
         },
         {
             "id": "debrid",
             "label": "Debrid (RD or TorBox)",
             "done": bool(rd or torbox),
             "required": False,
-            "help": "Server default keys. Users can also set keys per library group.",
+            "help": (
+                "Server defaults; users can also set keys per library group. TorBox is optional. "
+                "When both are configured: unique cache wins; both/neither → user preferred provider."
+            ),
+        },
+        {
+            "id": "pipeline",
+            "label": "LibraForge / ebook pipeline",
+            "done": bool(lf_url and lf_internal),
+            "required": False,
+            "help": (
+                "Audiobooks: `.unorganized` → Metadata → M4B (queued, concurrency 1) → "
+                "Chapter Forge (ASIN) → Folder Forge → ABS. Ebooks: `unorganized` → identify → "
+                "Author/Series/Title → Kavita. Sibling stack install: docs/libraforge.md."
+            ),
+        },
+        {
+            "id": "folders",
+            "label": "Staging folders & extras",
+            "done": True,
+            "required": False,
+            "help": (
+                "Confirm media staging + optional clients. Pipelines create "
+                "`/audiobooks/.unorganized` and `/ebooks/unorganized` automatically."
+            ),
         },
         {
             "id": "catalog",
             "label": "Catalog APIs (optional)",
             "done": bool(hc),
             "required": False,
-            "help": "Hardcover for ratings/series/curated shelves. NYT/ISBNdb optional.",
+            "help": (
+                "Hardcover for store ratings/series/curated shelves (optional). "
+                "My Library keeps ABS/local metadata authoritative; Hardcover genres fill empty only. "
+                "NYT/ISBNdb optional."
+            ),
+        },
+        {
+            "id": "mobile",
+            "label": "Android APK updates",
+            "done": bool(apk_repo),
+            "required": False,
+            "help": (
+                "GitHub `owner/repo` whose Releases host the Library APK "
+                "(latest .apk asset; APK 1.34+ includes My Library metadata/search/filter layout). "
+                "See docs/android-app.md."
+            ),
         },
         {
             "id": "scraper",
@@ -639,7 +742,9 @@ async def apply_runtime_overrides() -> None:
                 coerced = float(raw)
             else:
                 coerced = raw
-                if attr in ("abs_url", "kavita_url") and os.path.exists("/.dockerenv"):
+                if attr in ("abs_url", "kavita_url", "libraforge_internal_url") and os.path.exists(
+                    "/.dockerenv"
+                ):
                     coerced = _host_for_docker(str(coerced))
             object.__setattr__(s, attr, coerced)
         except Exception as e:

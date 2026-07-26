@@ -97,6 +97,9 @@ prompt APP_URL "Public site URL" "https://library.local"
 prompt SECRET_KEY "Secret key (random string)" "$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 32)"
 set_env APP_URL "$APP_URL"
 set_env SECRET_KEY "$SECRET_KEY"
+# Match LibraForge default UID so M4B/Folder Forge can write shared media.
+set_env PUID "1000"
+set_env PGID "1000"
 
 c_cyan "==> Host media mounts (must exist)"
 prompt AUDIO_HOST "Host audiobooks path" "./media/audiobooks"
@@ -109,6 +112,10 @@ for p in "$AUDIO_HOST" "$EBOOK_HOST"; do
   fi
 done
 mkdir -p "$OL_HOST" 2>/dev/null || sudo mkdir -p "$OL_HOST" 2>/dev/null || true
+# Pipeline staging (ABS skips dot dirs; Kavita must exclude non-dot unorganized)
+mkdir -p "$AUDIO_HOST/.unorganized" 2>/dev/null || sudo mkdir -p "$AUDIO_HOST/.unorganized" 2>/dev/null || true
+mkdir -p "$EBOOK_HOST/unorganized" 2>/dev/null || sudo mkdir -p "$EBOOK_HOST/unorganized" 2>/dev/null || true
+touch "$AUDIO_HOST/.unorganized/.ignore" 2>/dev/null || true
 
 set_env AUDIOBOOK_HOST_DIR "$AUDIO_HOST"
 set_env EBOOK_HOST_DIR "$EBOOK_HOST"
@@ -122,7 +129,7 @@ prompt ABS_LIBRARY_ID "Audiobookshelf library ID" ""
 prompt KAVITA_URL "Kavita URL" "http://172.17.0.1:5000"
 prompt KAVITA_API_KEY "Kavita API key" ""
 prompt RD_TOKEN "Real-Debrid API token (server default)" ""
-prompt TORBOX_TOKEN "TorBox API token (server default)" ""
+prompt TORBOX_TOKEN "TorBox API token (optional second debrid)" ""
 
 [[ -n "$PROWLARR_API_KEY" ]] && set_env PROWLARR_API_KEY "$PROWLARR_API_KEY"
 set_env ABS_URL "$ABS_URL"
@@ -132,6 +139,30 @@ set_env KAVITA_URL "$KAVITA_URL"
 [[ -n "$KAVITA_API_KEY" ]] && set_env KAVITA_API_KEY "$KAVITA_API_KEY"
 [[ -n "$RD_TOKEN" ]] && set_env REAL_DEBRID_API_TOKEN "$RD_TOKEN"
 [[ -n "$TORBOX_TOKEN" ]] && set_env TORBOX_API_TOKEN "$TORBOX_TOKEN"
+
+c_cyan "==> LibraForge audiobook pipeline (sibling stack — see docs/libraforge.md)"
+echo "Flow: .unorganized → Metadata → M4B (queue concurrency 1) → Chapter Forge (ASIN) → Folder Forge → ABS"
+prompt LF_URL "LibraForge public URL" "https://forge.library.freiverse.com"
+prompt LF_INTERNAL "LibraForge internal URL (from Library container)" "http://172.17.0.1:5056"
+set_env LIBRAFORGE_URL "$LF_URL"
+set_env LIBRAFORGE_INTERNAL_URL "$LF_INTERNAL"
+if yes_no "Enable automated LibraForge audiobook pipeline?" "y"; then
+  set_env LIBRAFORGE_PIPELINE_ENABLED "true"
+else
+  set_env LIBRAFORGE_PIPELINE_ENABLED "false"
+fi
+
+c_cyan "==> Ebook pipeline (DIY organizer — see docs/ebooks.md)"
+echo "Flow: unorganized → identify → Author/Series/Title → Kavita"
+if yes_no "Enable ebook organizer pipeline?" "y"; then
+  set_env EBOOK_PIPELINE_ENABLED "true"
+else
+  set_env EBOOK_PIPELINE_ENABLED "false"
+fi
+
+c_cyan "==> Android APK updates (GitHub Releases)"
+prompt APK_REPO "GitHub owner/repo for Library APK releases" "brutaliccus/Library"
+set_env ANDROID_APK_GITHUB_REPO "$APK_REPO"
 
 c_cyan "==> Scraper mode"
 c_yellow "Deep FlareSolverr crawls are HIGH USAGE on a Pi."
@@ -184,9 +215,19 @@ echo ""
 echo "Next steps:"
 echo "  1. Open ${APP_URL} (or http://<host>:8085)"
 echo "  2. Create the admin account"
-echo "  3. Complete /admin/setup (libraries, Prowlarr, debrid, scraper)"
-echo "  4. Create or join a library group (debrid keys)"
-echo "  5. Fine-tune anytime in Admin → Config"
+echo "  3. Complete /admin/setup (libraries, pipelines, debrid, scraper, APK)"
+echo "  4. ABS: confirm .unorganized is ignored (dot folder + .ignore)"
+echo "  5. Kavita: exclude folder named unorganized from the ebook library"
+echo "  6. Optional LibraForge sibling: bash scripts/install_libraforge.sh (docs/libraforge.md)"
+echo "  7. Optional magnet extension: load unpacked browser-extension/ (see its README)"
+echo "  8. Android APK: GitHub Releases for ${APK_REPO}"
+echo "  9. Share invite link from Settings; friends set offline PIN on join"
+echo ""
+echo "Notes:"
+echo "  - TorBox/RD: unique cache wins; both/neither → user preferred provider"
+echo "  - My Library uses ABS/local metadata (series/author/genre/sequence); Hardcover genres fill-empty only"
+echo "  - Admin → Health: Scan ABS & clean orphans (no metadata rewrite); Open LibraForge"
+echo "  - PUID/PGID=1000 written so app matches typical LibraForge UID"
 echo ""
 echo "Stack dir: $TARGET"
 echo "Logs:      cd \"$TARGET\" && docker compose logs -f app"

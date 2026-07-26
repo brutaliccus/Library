@@ -49,9 +49,39 @@ const STEP_GROUPS: Record<string, string[]> = {
   libraries: ["libraries"],
   indexers: ["indexers"],
   debrid: ["debrid"],
+  pipeline: ["pipeline"],
   catalog: ["catalog"],
   scraper: ["scraper"],
+  mobile: ["mobile"],
 };
+
+const FOLDER_CHECKS: Array<{ title: string; detail: string }> = [
+  {
+    title: "ABS ignores `.unorganized`",
+    detail:
+      "Audiobook staging is `/audiobooks/.unorganized/` (dot folder). ABS skips hidden dirs by default; a `.ignore` marker is also written.",
+  },
+  {
+    title: "Kavita excludes `unorganized`",
+    detail:
+      "Ebook staging is `/ebooks/unorganized/` (non-dot). Add `unorganized` to Kavita’s library ignore/exclude list so quarantine drops never appear as series.",
+  },
+  {
+    title: "PUID 1000 for shared media",
+    detail:
+      "App and LibraForge should share UID 1000 (see PUID/PGID) so M4B / Folder Forge can write under staging and library folders.",
+  },
+  {
+    title: "Browser extension (optional)",
+    detail:
+      "Load unpacked from `browser-extension/` to right-click magnets into the request queue. See browser-extension/README.md.",
+  },
+  {
+    title: "Android APK releases",
+    detail:
+      "Friends install the prebuilt APK from GitHub Releases (owner/repo on the next step). Offline unlock, Downloads tab, Android Auto ±15s / idle resume.",
+  },
+];
 
 export default function InstanceSetup() {
   const navigate = useNavigate();
@@ -126,11 +156,15 @@ export default function InstanceSetup() {
       await save.mutateAsync(updates);
       return;
     }
+    if (step?.id === "folders") {
+      return;
+    }
     const updates: Record<string, string> = {};
     for (const f of fields) {
-      if (drafts[f.key] !== undefined && drafts[f.key] !== "") {
-        updates[f.key] = drafts[f.key];
-      }
+      if (drafts[f.key] === undefined) continue;
+      // Bools may be "false"; other fields skip empty (leave existing / env).
+      if (f.valueType !== "bool" && drafts[f.key] === "") continue;
+      updates[f.key] = drafts[f.key];
     }
     if (Object.keys(updates).length) {
       await save.mutateAsync(updates);
@@ -143,6 +177,48 @@ export default function InstanceSetup() {
     else navigate("/admin?tab=config");
   };
 
+  const renderFields = () => (
+    <div className="space-y-3">
+      {fields.map((f) => {
+        const isBool = f.valueType === "bool";
+        return (
+          <label key={f.key} className="block space-y-1">
+            <span className="text-sm text-gray-200">{f.label}</span>
+            {f.help && <span className="block text-xs text-gray-500">{f.help}</span>}
+            {isBool ? (
+              <span className="inline-flex items-center gap-2 text-sm text-gray-300">
+                <input
+                  type="checkbox"
+                  checked={(drafts[f.key] ?? f.value) === "true"}
+                  onChange={(e) =>
+                    setDrafts((d) => ({ ...d, [f.key]: e.target.checked ? "true" : "false" }))
+                  }
+                  className="rounded border-gray-600 bg-gray-800"
+                />
+                Enabled
+              </span>
+            ) : (
+              <input
+                type={f.secret ? "password" : "text"}
+                placeholder={
+                  f.configured && f.secret
+                    ? `Configured · ${f.hint} — enter to replace`
+                    : f.placeholder || ""
+                }
+                value={drafts[f.key] ?? ""}
+                onChange={(e) => setDrafts((d) => ({ ...d, [f.key]: e.target.value }))}
+                className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-700 text-sm text-gray-100"
+              />
+            )}
+          </label>
+        );
+      })}
+      {fields.length === 0 && (
+        <p className="text-sm text-gray-500">No settings for this step — continue when ready.</p>
+      )}
+    </div>
+  );
+
   return (
     <div className="max-w-2xl mx-auto px-4 py-10">
       <div className="mb-8">
@@ -151,8 +227,8 @@ export default function InstanceSetup() {
           Instance setup
         </h1>
         <p className="text-sm text-gray-500 mt-2">
-          Configure the server so search, libraries, and scrapers work. You can change everything
-          later in Admin → Config.
+          Configure libraries, debrid, download pipelines, and scrapers. Change anything later in
+          Admin → Config.
         </p>
       </div>
 
@@ -250,26 +326,20 @@ export default function InstanceSetup() {
                 </span>
               </label>
             </div>
-          ) : (
-            <div className="space-y-3">
-              {fields.map((f) => (
-                <label key={f.key} className="block space-y-1">
-                  <span className="text-sm text-gray-200">{f.label}</span>
-                  {f.help && <span className="block text-xs text-gray-500">{f.help}</span>}
-                  <input
-                    type={f.secret ? "password" : "text"}
-                    placeholder={
-                      f.configured && f.secret
-                        ? `Configured · ${f.hint} — enter to replace`
-                        : f.placeholder || ""
-                    }
-                    value={drafts[f.key] ?? ""}
-                    onChange={(e) => setDrafts((d) => ({ ...d, [f.key]: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-700 text-sm text-gray-100"
-                  />
-                </label>
+          ) : step.id === "folders" ? (
+            <ul className="space-y-3">
+              {FOLDER_CHECKS.map((item) => (
+                <li
+                  key={item.title}
+                  className="rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2.5"
+                >
+                  <p className="text-sm font-medium text-gray-100">{item.title}</p>
+                  <p className="text-xs text-gray-500 mt-1">{item.detail}</p>
+                </li>
               ))}
-            </div>
+            </ul>
+          ) : (
+            renderFields()
           )}
 
           <div className="flex justify-between pt-2">

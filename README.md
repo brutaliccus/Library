@@ -16,46 +16,67 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 - Home shelves: curated lists, trending, new releases (daily snapshots persist across restarts)
 - Genre hubs and series drill-down pages
 - Availability badges: in your library, in the indexer cache, and/or cached on debrid
+- Optional magnet browser extension — [browser-extension/README.md](browser-extension/README.md)
 
 ### Search & indexer cache
 - Cache-first search against a local torrent index (fast, no indexer hammering)
 - **Shipped warm cache** (~36 MB compressed seed) imported automatically on first boot so new installs are useful immediately
 - Live Prowlarr search when you need fresher results (SSE live-stream)
-- AudioBook Bay integration (RSS ingest + Jackett live search)
+- AudioBook Bay integration (RSS ingest + Jackett live search); Find Downloads auto-runs ABB search
 - Knaben RSS ingest (optional full crawl)
 - Anna's Archive ebook search and download (optional membership cookie)
 - Background scraper matches releases to catalog volumes and refreshes debrid "cached" badges
 
 ### Downloads & debrid
-- One-click requests through Real-Debrid and/or TorBox
+- One-click requests through Real-Debrid and/or TorBox (TorBox optional)
+- Provider pick: unique cache wins; both/neither → user preferred debrid
 - Server-wide defaults plus per-library-group API keys
-- Magnet -> debrid -> organized `Author/Title` folders -> library scan
 - Smart-stream from debrid without waiting for a full library ingest
 - Download pipeline with WebSocket progress on the Requests page
 
+### Audiobook pipeline (LibraForge)
+- Staging under `/audiobooks/.unorganized/` → Metadata → M4B (global queue, concurrency 1) → Chapter Forge (ASIN) → Folder Forge → ABS
+- Admin Quick Review: Files → Metadata → M4B → Chapters → Continue; Re-run; Open LibraForge
+- Reject deletes staging; staging file browser on quarantined requests  
+  Details: [docs/libraforge.md](docs/libraforge.md)
+
+### Ebook pipeline
+- Staging under `/ebooks/unorganized/` → identify → Author/Series/Title → Kavita  
+  Details: [docs/ebooks.md](docs/ebooks.md)
+
+### My Library
+- Tabs: Audiobooks / eBooks / My Collection / Downloads; Store nav; Continue shelves on My Library
+- ABS/local metadata is source of truth for series, author, genre, and sequence (Hardcover genres fill empty only)
+- Broad library search across metadata fields; shelf cache v6
+- Filter UI: By Genre / Series / Author above full-width dropdowns
+- Offline unlock (PIN/biometric), Save offline, Downloaded tab, offline My Library
+
 ### Libraries
-- Audiobookshelf: browse, play (proxied stream), progress sync, scan trigger
+- Audiobookshelf: browse, play (proxied stream), progress sync; scan = clean orphans (no metadata rewrite); ASIN protect
 - Kavita: ebook collections, covers, PDF/EPUB reader endpoints
 - Shared on-disk media across library groups; debrid credentials are group-scoped
 
 ### Listening & reading
 - Full audiobook player with mini-player, scrubbing, and media session controls
 - In-app ebook reader (PDF + EPUB) with reading progress
-- Offline audio cache and offline playback helpers (web + Android WebView)
-- Continue listening / continue reading on the home screen
+- Offline audio/ebook cache (web + Android WebView)
+- Continue listening / continue reading on My Library and home
 
 ### Accounts & library groups
 - JWT auth; first account becomes admin (fresh install only)
 - **Invite-only signup** — friends open `/join/CODE`, pick username/password, and join immediately (no admin approval)
+- Offline PIN onboarding for new accounts
 - Library groups with invite links (code + server URL for Android deep link)
-- Admins can still disable users and reset passwords
+- Admins: user cards + search, disable / reset password
 - Per-user preferred debrid provider and private mode
 
 ### Admin
-- First-run setup wizard at `/admin/setup` (libraries, Prowlarr, debrid, catalog APIs, scraper mode)
-- **Config** tab: edit runtime settings and API keys (DB override with env fallback)
+- First-run setup wizard at `/admin/setup` (libraries, pipelines, debrid, staging checklist, catalog, APK, scraper)
+- **Config** tab: runtime settings and API keys (DB override with env fallback), including LibraForge / ebook pipeline knobs
 - **Cache** tab: scraper enable/run, RSS vs deep-crawl tuning, debrid refresh, catalog relink
-- User management (disable / reset password), download monitoring, and integration health probes
+- All Requests: Requested by, cover → store, staging browser, Quick Review / Re-run / reject
+- Health: integration probes, Scan ABS & clean orphans, Open LibraForge
+- Push notifications (Disable → Enable to refresh a stuck browser subscription)
 - RSS-only scraper defaults (Pi-friendly); optional high-usage FlareSolverr crawls
 
 ### Notifications
@@ -66,8 +87,8 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 
 ### Android app
 - Capacitor APK with bundled UI — users enter their Library URL on sign-in (editable in Settings)
-- One prebuilt APK works with any self-hosted instance
-- Lock-screen / notification media controls
+- One prebuilt APK works with any self-hosted instance (GitHub Releases)
+- Lock-screen / notification media controls (±15s seek, idle resume)
 - Android Auto: Continue Listening and A-Z library browse  
   See [docs/android-app.md](docs/android-app.md)
 
@@ -116,10 +137,12 @@ flowchart TB
 | **Invite signup** | Open `/join/CODE` → username/password → account + library membership (no approval) |
 | **Catalog browse** | SPA -> `/api/books/*` -> Google Books / Open Library DB / Hardcover / NYT / ISBNdb |
 | **Release search** | SPA -> `/api/search` -> local indexer cache first; optional live Prowlarr / Jackett ABB / AA |
-| **Download** | SPA -> `/api/requests` -> Real-Debrid or TorBox -> files under `/audiobooks` or `/ebooks` -> ABS/Kavita scan -> WebSocket + push |
+| **Download (audio)** | SPA -> `/api/requests` -> RD/TorBox -> `/audiobooks/.unorganized` -> LibraForge (Metadata/M4B/Chapters/Folder) -> ABS scan -> WebSocket + push |
+| **Download (ebook)** | SPA -> `/api/requests` -> debrid/AA -> `/ebooks/unorganized` -> identify/organize -> Kavita scan |
 | **Scraper** | Background job (ABB/Knaben RSS by default) -> indexer cache -> catalog match -> debrid preload badges |
-| **Listen** | SPA -> `/api/stream/*` -> ABS proxy or debrid smart-stream; progress sync |
+| **Listen** | SPA -> `/api/stream/*` -> ABS proxy or debrid smart-stream; progress sync; offline cache |
 | **Read** | SPA -> `/api/library/reader/*` -> Kavita chapters / PDF; in-app `PdfViewer` / EPUB reader |
+| **My Library** | SPA -> `/api/library/*` -> ABS/Kavita local metadata (series/author/genre/sequence); broad search + shelf filters |
 
 ### Stack
 
@@ -190,9 +213,10 @@ App listens on **`http://127.0.0.1:8085`**.
 
 1. Open the site → create the **admin** account (only when the server has zero users)  
 2. **Onboarding** → create your library (name + debrid keys). That generates the invite link.  
-3. **`/admin/setup`** — libraries (ABS/Kavita), Prowlarr, catalog API keys, scraper mode  
-4. Share the **invite link** from Settings (`/join/CODE`). Friends open it (Android app if installed, otherwise the site), set username/password, and join — no approval step.  
-5. Anytime later: **Admin → Config**, **Admin → Cache**, and **Admin → Users** (disable / reset password)
+3. **`/admin/setup`** — ABS/Kavita, Prowlarr/Jackett/Flare, debrid (TorBox optional), LibraForge + ebook pipelines, staging checklist, catalog APIs, Android APK repo, scraper mode  
+4. Confirm folder conventions: ABS ignores `.unorganized`; Kavita excludes `unorganized`  
+5. Share the **invite link** from Settings (`/join/CODE`). Friends open it (Android app if installed, otherwise the site), set username/password + offline PIN, and join — no approval step.  
+6. Anytime later: **Admin → Config**, **Admin → Cache**, **Admin → Requests**, and **Admin → Users**
 
 ### Media mounts
 
@@ -205,6 +229,15 @@ Compose reads host paths from `.env`:
 | `OPENLIBRARY_HOST_DIR` | `./media/openlibrary` | `/openlibrary` |
 
 Point these at existing library folders if you already have them. In-container paths used by the app are `AUDIOBOOK_DIR=/audiobooks` and `EBOOK_DIR=/ebooks`.
+
+**Staging conventions**
+
+| Pipeline | Staging path | Library ignore |
+|----------|--------------|----------------|
+| Audiobooks (LibraForge) | `/audiobooks/.unorganized/req_{id}_…` | ABS skips dot folders (plus `.ignore`) |
+| Ebooks | `/ebooks/unorganized/req_{id}_…` | Kavita must exclude `unorganized` |
+
+Set `PUID`/`PGID` to `1000` when sharing the audiobook mount with LibraForge (avoids Permission denied on forge writes).
 
 ### Reverse proxy
 
@@ -228,12 +261,17 @@ Most integration keys can also be set in **Admin -> Config** (stored in the DB, 
 | Core | `SECRET_KEY`, `DATABASE_URL`, `APP_URL` |
 | Indexers | `PROWLARR_URL`, `PROWLARR_API_KEY`, `JACKETT_*`, `FLARESOLVERR_URL` |
 | Scraper | `ABB_RSS_ONLY`, `ABB_AUTHOR_CRAWL_ENABLED`, `ABB_LIVE_SEARCH_ENABLED`, Knaben crawl knobs |
-| Debrid | `REAL_DEBRID_API_TOKEN`, `TORBOX_API_TOKEN` |
+| Debrid | `REAL_DEBRID_API_TOKEN`, `TORBOX_API_TOKEN` (optional) |
 | Libraries | `ABS_URL`, `ABS_API_KEY`, `ABS_LIBRARY_ID`, `KAVITA_*` |
+| LibraForge | `LIBRAFORGE_URL`, `LIBRAFORGE_INTERNAL_URL`, `LIBRAFORGE_PIPELINE_ENABLED`, `LIBRAFORGE_MIN_SCORE`, `LIBRAFORGE_M4B_JOBS`, `LIBRAFORGE_NAMING_TEMPLATE` |
+| Ebooks | `EBOOK_PIPELINE_ENABLED`, `EBOOK_MIN_SCORE` |
 | Catalog | `HARDCOVER_API_KEY`, `NYT_API_KEY`, `ISBNDB_API_KEY`, `GOOGLE_BOOKS_API_KEY`, `AA_ACCOUNT_ID` |
+| Mobile | `ANDROID_APK_GITHUB_REPO`, `GITHUB_TOKEN` (optional rate-limit) |
 | VPN | `WIREGUARD_PRIVATE_KEY`, `WIREGUARD_ADDRESSES`, `MULLVAD_*`, `ABB_PROXY_URL` |
 | Push | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (`python scripts/generate_vapid.py`) |
-| Host mounts | `AUDIOBOOK_HOST_DIR`, `EBOOK_HOST_DIR`, `OPENLIBRARY_HOST_DIR`, `PUID`, `PGID`, `TZ` |
+| Host mounts | `AUDIOBOOK_HOST_DIR`, `EBOOK_HOST_DIR`, `OPENLIBRARY_HOST_DIR`, `PUID`/`PGID` (prefer `1000`), `TZ` |
+
+More detail: [docs/libraforge.md](docs/libraforge.md), [docs/ebooks.md](docs/ebooks.md), [docs/android-app.md](docs/android-app.md).
 
 ### Scraper modes
 
@@ -272,7 +310,8 @@ Expect multi-GB downloads and a multi-GB finished DB (much larger if you include
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/install_library.sh` | Full host bootstrap |
+| `scripts/install_library.sh` | Full host bootstrap (pipelines, staging dirs, PUID 1000, APK repo) |
+| `scripts/install_libraforge.sh` | Sibling LibraForge stack (shared `/audiobooks` mount) |
 | `scripts/generate_vapid.py` | Web Push keypair |
 | `scripts/backup_db.sh` / `install_backup_cron.sh` | DB backups |
 | `scripts/sync_jackett_env.sh` | Copy Jackett API key into `.env` |
@@ -283,7 +322,7 @@ Expect multi-GB downloads and a multi-GB finished DB (much larger if you include
 
 ### Health
 
-**Admin -> Health** probes Real-Debrid, TorBox, Audiobookshelf, Kavita, Prowlarr, Jackett, FlareSolverr, Mullvad, Knaben, Open Library catalog, NYT, and disk space.
+**Admin → Health** probes Real-Debrid, TorBox, Audiobookshelf, Kavita, LibraForge, Prowlarr, Jackett, FlareSolverr, Mullvad, Knaben, Open Library catalog, NYT, and disk space. **Scan ABS & clean orphans** runs scan + orphan cleanup only (no Quick Match / title rewrite). **Open LibraForge** uses `LIBRAFORGE_URL`.
 
 ---
 
@@ -340,6 +379,8 @@ Users enter their Library HTTPS URL in the app (not at build time). Details: [do
 ```
 app/                 FastAPI application (routers, services, models)
 frontend/            React SPA + Capacitor Android project
+browser-extension/   Magnet → request queue (Chrome/Brave MV3)
+docs/                LibraForge, ebooks, Android, Tailscale notes
 migrations/          Alembic schema versions
 seed/                Warm indexer-cache DB (gzipped; auto-imported on first boot)
 nginx/               Reverse-proxy examples

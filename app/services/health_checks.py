@@ -13,13 +13,42 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+_PLACEHOLDER_TOKENS = frozenset({
+    "your-prowlarr-api-key",
+    "your-real-debrid-api-token",
+    "your-torbox-api-token",
+    "your-audiobookshelf-api-key",
+    "your-library-id",
+    "your-kavita-api-key",
+    "your-nyt-api-key",
+})
+
 
 def _err(exc: BaseException) -> str:
     return str(exc)[:160]
 
 
+def _is_placeholder(value: str | None) -> bool:
+    v = (value or "").strip()
+    if not v:
+        return True
+    low = v.lower()
+    if low in _PLACEHOLDER_TOKENS or low.startswith("your-"):
+        return True
+    return False
+
+
+def _url_configured(url: str | None) -> bool:
+    return bool((url or "").strip())
+
+
 async def _probe_real_debrid() -> dict[str, Any]:
+    from app.services import debrid_tokens
     from app.services import real_debrid
+
+    token = (debrid_tokens.rd_token() or "").strip()
+    if _is_placeholder(token):
+        return {"configured": False, "connected": False, "error": "No API token"}
 
     try:
         info = await real_debrid.get_user_info()
@@ -61,11 +90,14 @@ async def _probe_abs() -> dict[str, Any]:
     from app.services import audiobookshelf
 
     settings = get_settings()
+    url = (settings.abs_url or "").strip()
+    if not _url_configured(url):
+        return {"configured": False, "connected": False, "url": None}
     ok = await audiobookshelf.health_check()
     return {
-        "configured": bool(settings.abs_url),
+        "configured": True,
         "connected": ok,
-        "url": settings.abs_url,
+        "url": url,
     }
 
 
@@ -73,11 +105,14 @@ async def _probe_kavita() -> dict[str, Any]:
     from app.services import kavita
 
     settings = get_settings()
+    url = (settings.kavita_url or "").strip()
+    if not _url_configured(url):
+        return {"configured": False, "connected": False, "url": None}
     ok = await kavita.health_check()
     return {
-        "configured": bool(settings.kavita_url),
+        "configured": True,
         "connected": ok,
-        "url": settings.kavita_url,
+        "url": url,
     }
 
 
@@ -85,7 +120,7 @@ async def _probe_prowlarr() -> dict[str, Any]:
     settings = get_settings()
     url = (settings.prowlarr_url or "").rstrip("/")
     key = (settings.prowlarr_api_key or "").strip()
-    if not url or not key:
+    if not url or _is_placeholder(key):
         return {
             "configured": False,
             "connected": False,
@@ -265,10 +300,10 @@ async def _probe_ol_catalog() -> dict[str, Any]:
         }
     if not path.is_file():
         return {
-            "configured": True,
+            "configured": False,
             "connected": False,
             "path": str(path),
-            "error": "Database file missing",
+            "error": "Database not built yet",
         }
     try:
         import aiosqlite

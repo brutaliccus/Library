@@ -232,35 +232,54 @@ Set-EnvKey $envPath "OPENLIBRARY_HOST_DIR" $OL_HOST
 
 if ($NonInteractive) {
     Write-Step "==> Skipping interactive integrations (configure in /admin/setup)"
-    Set-EnvKey $envPath "ABS_URL" "http://host.docker.internal:13378"
-    Set-EnvKey $envPath "KAVITA_URL" "http://host.docker.internal:5000"
 }
 else {
     Write-Step "==> Optional integrations (press Enter to skip)"
     $prowlarr = Read-Default "Prowlarr API key" ""
-    $absUrl = Read-Default "Audiobookshelf URL" "http://host.docker.internal:13378"
+    $absUrl = Read-Default "Audiobookshelf URL" ""
     $absKey = Read-Default "Audiobookshelf API key" ""
     $absLib = Read-Default "Audiobookshelf library ID" ""
-    $kavUrl = Read-Default "Kavita URL" "http://host.docker.internal:5000"
+    $kavUrl = Read-Default "Kavita URL" ""
     $kavKey = Read-Default "Kavita API key" ""
     $rd = Read-Default "Real-Debrid API token (server default)" ""
     $tor = Read-Default "TorBox API token (optional second debrid)" ""
     if ($prowlarr) { Set-EnvKey $envPath "PROWLARR_API_KEY" $prowlarr }
-    Set-EnvKey $envPath "ABS_URL" $absUrl
-    if ($absKey) { Set-EnvKey $envPath "ABS_API_KEY" $absKey }
-    if ($absLib) { Set-EnvKey $envPath "ABS_LIBRARY_ID" $absLib }
-    Set-EnvKey $envPath "KAVITA_URL" $kavUrl
-    if ($kavKey) { Set-EnvKey $envPath "KAVITA_API_KEY" $kavKey }
+    if ($absUrl) {
+        Set-EnvKey $envPath "ABS_URL" $absUrl
+        if ($absKey) { Set-EnvKey $envPath "ABS_API_KEY" $absKey }
+        if ($absLib) { Set-EnvKey $envPath "ABS_LIBRARY_ID" $absLib }
+    }
+    else {
+        Set-EnvKey $envPath "ABS_URL" ""
+        Set-EnvKey $envPath "ABS_API_KEY" ""
+        Set-EnvKey $envPath "ABS_LIBRARY_ID" ""
+    }
+    if ($kavUrl) {
+        Set-EnvKey $envPath "KAVITA_URL" $kavUrl
+        if ($kavKey) { Set-EnvKey $envPath "KAVITA_API_KEY" $kavKey }
+    }
+    else {
+        Set-EnvKey $envPath "KAVITA_URL" ""
+        Set-EnvKey $envPath "KAVITA_API_KEY" ""
+    }
     if ($rd) { Set-EnvKey $envPath "REAL_DEBRID_API_TOKEN" $rd }
+    else { Set-EnvKey $envPath "REAL_DEBRID_API_TOKEN" "" }
     if ($tor) { Set-EnvKey $envPath "TORBOX_API_TOKEN" $tor }
 }
 
 Write-Step "==> LibraForge / ebook pipelines"
-Set-EnvKey $envPath "LIBRAFORGE_URL" "http://127.0.0.1:5056"
-Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" "http://host.docker.internal:5056"
-Set-EnvKey $envPath "LIBRAFORGE_M4B_JOBS" "1"
-$lfOn = if ($NonInteractive) { -not $DisableLibraForgePipeline } else { Read-YesNo "Enable automated LibraForge audiobook pipeline?" $true }
+$lfOn = if ($NonInteractive) { -not $DisableLibraForgePipeline } else { Read-YesNo "Enable automated LibraForge audiobook pipeline?" $false }
 $ebOn = if ($NonInteractive) { -not $DisableEbookPipeline } else { Read-YesNo "Enable ebook organizer pipeline?" $true }
+if ($lfOn) {
+    Set-EnvKey $envPath "LIBRAFORGE_URL" "http://127.0.0.1:5056"
+    Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" "http://host.docker.internal:5056"
+    Set-EnvKey $envPath "LIBRAFORGE_M4B_JOBS" "1"
+}
+else {
+    Set-EnvKey $envPath "LIBRAFORGE_URL" ""
+    Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" ""
+    Set-EnvKey $envPath "LIBRAFORGE_M4B_JOBS" "1"
+}
 Set-EnvKey $envPath "LIBRAFORGE_PIPELINE_ENABLED" ($(if ($lfOn) { "true" } else { "false" }))
 Set-EnvKey $envPath "EBOOK_PIPELINE_ENABLED" ($(if ($ebOn) { "true" } else { "false" }))
 
@@ -366,6 +385,13 @@ $syncPs1 = Join-Path $TARGET "scripts\sync_jackett_env.ps1"
 if (Test-Path $syncPs1) {
     Write-Step "==> Syncing Jackett API key into .env"
     & powershell -ExecutionPolicy Bypass -File $syncPs1 -RepoRoot $TARGET
+    [void](Invoke-Compose @("compose", "up", "-d", "app"))
+}
+
+$prowlSyncPs1 = Join-Path $TARGET "scripts\sync_prowlarr_env.ps1"
+if (Test-Path $prowlSyncPs1) {
+    Write-Step "==> Syncing Prowlarr API key into .env"
+    & powershell -ExecutionPolicy Bypass -File $prowlSyncPs1 -RepoRoot $TARGET
     [void](Invoke-Compose @("compose", "up", "-d", "app"))
 }
 

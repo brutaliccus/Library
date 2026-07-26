@@ -145,7 +145,10 @@ REGISTRY: list[SettingDef] = [
         label="Audiobook LibraForge pipeline",
         env_attr="libraforge_pipeline_enabled",
         value_type="bool",
-        help="Land downloads in /audiobooks/.unorganized → Metadata → M4B (queue concurrency 1) → Chapter Forge (ASIN) → Folder Forge → ABS.",
+        help=(
+            "Land downloads in /audiobooks/.unorganized → Metadata → M4B → Chapter Forge (ASIN) → "
+            "Folder Forge → ABS. Cross-request M4B is serialized (concurrency 1) for auto + Quick Review."
+        ),
     ),
     SettingDef(
         key="config.libraforge_min_score",
@@ -155,6 +158,18 @@ REGISTRY: list[SettingDef] = [
         value_type="float",
         help="Below this confidence → quarantine for admin Quick Review.",
         placeholder="0.70",
+    ),
+    SettingDef(
+        key="config.libraforge_m4b_jobs",
+        group="pipeline",
+        label="LibraForge M4B jobs (per run)",
+        env_attr="libraforge_m4b_jobs",
+        value_type="int",
+        help=(
+            "ffmpeg/m4b-tool workers inside one encode (default 1 on Pi). "
+            "Separate from Library Site’s global M4B queue, which always runs one encode at a time."
+        ),
+        placeholder="1",
     ),
     SettingDef(
         key="config.ebook_pipeline_enabled",
@@ -632,9 +647,12 @@ async def setup_status() -> dict[str, Any]:
             "done": bool(lf_url and lf_internal),
             "required": False,
             "help": (
-                "Audiobooks: `.unorganized` → Metadata → M4B (queued, concurrency 1) → "
-                "Chapter Forge (ASIN) → Folder Forge → ABS. Ebooks: `unorganized` → identify → "
-                "Author/Series/Title → Kavita. Sibling stack install: docs/libraforge.md."
+                "Audiobooks: `.unorganized` → Metadata → M4B → Chapter Forge (ASIN) → Folder Forge → ABS. "
+                "M4B encodes share a global queue (concurrency 1) across auto-forge and Quick Review; "
+                "request cards show Queued for M4B vs Converting M4B. "
+                "`LIBRAFORGE_M4B_JOBS` is per-run workers (keep 1 on a Pi). "
+                "Ebooks: `unorganized` → identify → Author/Series/Title → Kavita. "
+                "Sibling stack: docs/libraforge.md."
             ),
         },
         {

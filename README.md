@@ -35,7 +35,9 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 - Download pipeline with WebSocket progress on the Requests page
 
 ### Audiobook pipeline (LibraForge)
-- Staging under `/audiobooks/.unorganized/` → Metadata → M4B (global queue, concurrency 1) → Chapter Forge (ASIN) → Folder Forge → ABS
+- Staging under `/audiobooks/.unorganized/` → Metadata → M4B → Chapter Forge (ASIN) → Folder Forge → ABS
+- M4B: Library Site runs a **global encode queue (concurrency 1)** shared by auto-forge, Quick Review, and continue-forge — waiters show request badge **Queued for M4B**, active encode shows **Converting M4B**
+- Per-run ffmpeg/m4b-tool workers: `LIBRAFORGE_M4B_JOBS=1` (default; keep at 1 on a Pi)
 - Admin Quick Review: Files → Metadata → M4B → Chapters → Continue; Re-run; Open LibraForge
 - Reject deletes staging; staging file browser on quarantined requests  
   Details: [docs/libraforge.md](docs/libraforge.md)
@@ -74,7 +76,7 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 - First-run setup wizard at `/admin/setup` (libraries, pipelines, debrid, staging checklist, catalog, APK, scraper)
 - **Config** tab: runtime settings and API keys (DB override with env fallback), including LibraForge / ebook pipeline knobs
 - **Cache** tab: scraper enable/run, RSS vs deep-crawl tuning, debrid refresh, catalog relink
-- All Requests: Requested by, cover → store, staging browser, Quick Review / Re-run / reject
+- All Requests: Requested by, cover → store, staging browser, Quick Review / Re-run / reject; M4B badge **Queued for M4B** vs **Converting M4B**
 - Health: integration probes, Scan ABS & clean orphans, Open LibraForge
 - Push notifications (Disable → Enable to refresh a stuck browser subscription)
 - RSS-only scraper defaults (Pi-friendly); optional high-usage FlareSolverr crawls
@@ -263,7 +265,7 @@ Most integration keys can also be set in **Admin -> Config** (stored in the DB, 
 | Scraper | `ABB_RSS_ONLY`, `ABB_AUTHOR_CRAWL_ENABLED`, `ABB_LIVE_SEARCH_ENABLED`, Knaben crawl knobs |
 | Debrid | `REAL_DEBRID_API_TOKEN`, `TORBOX_API_TOKEN` (optional) |
 | Libraries | `ABS_URL`, `ABS_API_KEY`, `ABS_LIBRARY_ID`, `KAVITA_*` |
-| LibraForge | `LIBRAFORGE_URL`, `LIBRAFORGE_INTERNAL_URL`, `LIBRAFORGE_PIPELINE_ENABLED`, `LIBRAFORGE_MIN_SCORE`, `LIBRAFORGE_M4B_JOBS`, `LIBRAFORGE_NAMING_TEMPLATE` |
+| LibraForge | `LIBRAFORGE_URL`, `LIBRAFORGE_INTERNAL_URL`, `LIBRAFORGE_PIPELINE_ENABLED`, `LIBRAFORGE_MIN_SCORE`, `LIBRAFORGE_NAMING_TEMPLATE`, `LIBRAFORGE_M4B_JOBS` (per-run workers; app also serializes cross-request M4B to 1) |
 | Ebooks | `EBOOK_PIPELINE_ENABLED`, `EBOOK_MIN_SCORE` |
 | Catalog | `HARDCOVER_API_KEY`, `NYT_API_KEY`, `ISBNDB_API_KEY`, `GOOGLE_BOOKS_API_KEY`, `AA_ACCOUNT_ID` |
 | Mobile | `ANDROID_APK_GITHUB_REPO`, `GITHUB_TOKEN` (optional rate-limit) |

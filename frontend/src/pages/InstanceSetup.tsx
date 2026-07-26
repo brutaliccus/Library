@@ -67,6 +67,11 @@ const FOLDER_CHECKS: Array<{ title: string; detail: string }> = [
       "Ebook staging is `/ebooks/unorganized/` (non-dot). Add `unorganized` to Kavita’s library ignore/exclude list so quarantine drops never appear as series.",
   },
   {
+    title: "M4B global encode queue",
+    detail:
+      "Library Site runs one M4B encode at a time (auto-forge + Quick Review share the slot). Request cards show Queued for M4B while waiting, Converting M4B when active. LIBRAFORGE_M4B_JOBS=1 is per-run workers — keep at 1 on a Pi.",
+  },
+  {
     title: "PUID 1000 for shared media",
     detail:
       "App and LibraForge should share UID 1000 (see PUID/PGID) so M4B / Folder Forge can write under staging and library folders.",

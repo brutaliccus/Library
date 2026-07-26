@@ -184,7 +184,29 @@ else
   c_green "RSS-only defaults written to .env"
 fi
 
-mkdir -p data prowlarr-config jackett-config
+mkdir -p data prowlarr-config jackett-config media/audiobooks media/ebooks media/openlibrary
+
+c_cyan "==> Mullvad VPN sidecar (optional)"
+c_yellow "gluetun is behind Docker Compose profile 'vpn' so fresh installs work without WireGuard keys."
+# Enable VPN if keys already present, or when the operator opts in now.
+_has_wg=false
+if grep -qE '^WIREGUARD_PRIVATE_KEY=.+' .env 2>/dev/null && grep -qE '^WIREGUARD_ADDRESSES=.+' .env 2>/dev/null; then
+  _has_wg=true
+fi
+if $_has_wg || yes_no "Enable Mullvad VPN sidecar (gluetun) now? (requires WireGuard keys in .env)" "n"; then
+  if ! $_has_wg; then
+    c_yellow "Add WIREGUARD_PRIVATE_KEY and WIREGUARD_ADDRESSES to .env (or Admin → Integrations), then re-run compose with the vpn profile."
+  fi
+  set_env COMPOSE_PROFILES "vpn"
+  set_env ABB_PROXY_URL "http://gluetun:8888"
+  c_green "COMPOSE_PROFILES=vpn — gluetun will start with the stack"
+else
+  set_env COMPOSE_PROFILES ""
+  set_env ABB_PROXY_URL ""
+  set_env WIREGUARD_PRIVATE_KEY ""
+  set_env WIREGUARD_ADDRESSES ""
+  c_green "VPN profile off — stack starts without gluetun (configure Mullvad later)."
+fi
 
 c_cyan "==> Starting Docker stack"
 c_yellow "First boot imports the shipped indexer cache seed (~150 MB decompressed) if the DB is empty."
@@ -209,12 +231,16 @@ if [[ -x scripts/sync_jackett_env.sh ]]; then
   docker compose up -d app || true
 fi
 
-if [[ -x scripts/install_backup_cron.sh ]]; then
-  bash scripts/install_backup_cron.sh || true
-fi
-
-if [[ -x scripts/install_ol_catalog_cron.sh ]]; then
-  bash scripts/install_ol_catalog_cron.sh || true
+# Host cron helpers are Linux-oriented; skip quietly on non-Linux.
+if [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
+  if [[ -x scripts/install_backup_cron.sh ]]; then
+    bash scripts/install_backup_cron.sh || true
+  fi
+  if [[ -x scripts/install_ol_catalog_cron.sh ]]; then
+    bash scripts/install_ol_catalog_cron.sh || true
+  fi
+else
+  c_yellow "Skipping host cron installers (non-Linux). Use Admin → Catalog schedule or Task Scheduler."
 fi
 
 c_green ""

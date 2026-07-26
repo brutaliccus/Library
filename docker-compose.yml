@@ -16,10 +16,11 @@ services:
       - ${OPENLIBRARY_HOST_DIR:-./media/openlibrary}:/openlibrary
     env_file: .env
     environment:
+      # Override via .env. Empty = no Mullvad proxy (ABB RSS/live Flare paths skip VPN).
+      # With VPN: COMPOSE_PROFILES=vpn and ABB_PROXY_URL=http://gluetun:8888
+      - ABB_PROXY_URL=${ABB_PROXY_URL:-}
       - FLARESOLVERR_URL=http://flaresolverr:8191
       - JACKETT_URL=http://audiobook-jackett:9117
-      # Only ABB Flare/RSS/live paths use this (see audiobookbay.py) â€” not the whole stack.
-      - ABB_PROXY_URL=http://gluetun:8888
       - PYTHONUNBUFFERED=1
     dns:
       - 1.1.1.1
@@ -27,15 +28,17 @@ services:
     depends_on:
       - prowlarr
       - flaresolverr
-      - gluetun
     restart: unless-stopped
 
-  # Mullvad WireGuard â€” HTTP proxy only. Jackett/Prowlarr/app stay on the LAN
-  # bridge; ABB FlareSolverr sessions attach to this proxy so only ABB egress
-  # pays the VPN latency.
+  # Mullvad WireGuard — HTTP proxy only. Optional: enable with COMPOSE_PROFILES=vpn
+  # (or docker compose --profile vpn up -d) after WireGuard keys are in .env.
+  # Jackett/Prowlarr/app stay on the LAN bridge; ABB FlareSolverr sessions attach to
+  # this proxy so only ABB egress pays the VPN latency.
   gluetun:
     image: qmcgaw/gluetun:v3.39.1
     container_name: audiobook-gluetun
+    profiles:
+      - vpn
     cap_add:
       - NET_ADMIN
     devices:
@@ -47,8 +50,8 @@ services:
     environment:
       - VPN_SERVICE_PROVIDER=mullvad
       - VPN_TYPE=wireguard
-      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
-      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES}
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:-}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES:-}
       - SERVER_COUNTRIES=${MULLVAD_COUNTRY:-USA}
       - HTTPPROXY=on
       - UPDATER_PERIOD=24h
@@ -91,11 +94,9 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
-    depends_on:
-      - gluetun
     restart: unless-stopped
 
-  # Normal bridge network â€” Knaben/other indexers are NOT slowed by Mullvad.
+  # Normal bridge network — Knaben/other indexers are NOT slowed by Mullvad.
   jackett:
     image: linuxserver/jackett:latest
     container_name: audiobook-jackett

@@ -171,16 +171,42 @@ flowchart TB
 
 ## Prerequisites
 
-- Docker Engine + Docker Compose plugin
-- A Real-Debrid and/or TorBox account
-- Audiobookshelf and/or Kavita reachable from the host
+- **Docker** with Compose v2
+  - Linux / Raspberry Pi: Docker Engine + Compose plugin
+  - Windows: [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/) (WSL2 backend recommended), running before install
+- Git (for clone)
+- Free host ports: **8085** (app), **9696** (Prowlarr), **8191** (FlareSolverr), **9117** (Jackett)
+- A Real-Debrid and/or TorBox account (can add after first boot)
+- Audiobookshelf and/or Kavita reachable from the host (optional at install time)
 - A public HTTPS hostname (or Tailscale Funnel) if you want off-LAN access and push/Android
+
+**Mullvad / gluetun is optional.** Fresh installs start without the VPN sidecar so the stack is healthy before you add WireGuard keys. Enable later with `COMPOSE_PROFILES=vpn` and `ABB_PROXY_URL=http://gluetun:8888` (see `.env.example`).
 
 ---
 
 ## Quick start
 
-### Install script
+### Windows (Docker Desktop)
+
+```powershell
+git clone https://github.com/brutaliccus/Library.git library
+cd library
+powershell -ExecutionPolicy Bypass -File .\scripts\install_library.ps1
+```
+
+Unattended (CI / test box):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_library.ps1 -Target "C:\dev\Library" -NonInteractive
+```
+
+Or from a one-liner after clone (script lives in the repo):
+
+```powershell
+.\scripts\install_library.ps1 -NonInteractive
+```
+
+### Linux / Raspberry Pi
 
 ```bash
 git clone https://github.com/brutaliccus/Library.git library
@@ -195,22 +221,30 @@ Or run the installer against a fresh target; it clones from this repo by default
 curl -fsSL https://raw.githubusercontent.com/brutaliccus/Library/main/scripts/install_library.sh | bash
 ```
 
-The script writes `.env`, creates media directories, applies **RSS-only** scraper defaults (unless you opt into deep crawls), builds the stack, waits for health, and can install a nightly DB backup cron.
+The installers write `.env`, create media/staging directories, apply **RSS-only** scraper defaults (unless you opt into deep crawls), build the stack, and wait for `/api/health`. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead.
 
-### Manual
+### Manual (any OS with Docker)
 
 ```bash
 git clone https://github.com/brutaliccus/Library.git library
 cd library
 cp .env.example .env
 # Edit APP_URL, SECRET_KEY, media paths, and any API keys you already have
-mkdir -p media/audiobooks media/ebooks media/openlibrary data
+mkdir -p media/audiobooks media/ebooks media/openlibrary data prowlarr-config jackett-config
+# Windows PowerShell: New-Item -ItemType Directory -Force media/audiobooks, media/ebooks, media/openlibrary, data, prowlarr-config, jackett-config
 docker compose up -d --build
 ```
 
-The image **builds the frontend in Docker** - you do not need Node on the host for production.
+The image **builds the frontend in Docker** — you do not need Node on the host for production.
 
 App listens on **`http://127.0.0.1:8085`**.
+
+| Service | Port |
+|---------|------|
+| Library app | `8085` → container `8080` |
+| Prowlarr | `9696` |
+| FlareSolverr | `8191` |
+| Jackett | `9117` |
 
 ### First-run wizard
 
@@ -313,11 +347,12 @@ Expect multi-GB downloads and a multi-GB finished DB (much larger if you include
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/install_library.sh` | Full host bootstrap (pipelines, staging dirs, PUID 1000, APK repo) |
+| `scripts/install_library.sh` | Full host bootstrap on Linux/Pi (pipelines, staging dirs, PUID 1000, APK repo) |
+| `scripts/install_library.ps1` | Same bootstrap for Windows + Docker Desktop (`-NonInteractive` supported) |
 | `scripts/install_libraforge.sh` | Sibling LibraForge stack (shared `/audiobooks` mount) |
 | `scripts/generate_vapid.py` | Web Push keypair |
-| `scripts/backup_db.sh` / `install_backup_cron.sh` | DB backups |
-| `scripts/sync_jackett_env.sh` | Copy Jackett API key into `.env` |
+| `scripts/backup_db.sh` / `install_backup_cron.sh` | DB backups (Linux cron) |
+| `scripts/sync_jackett_env.sh` / `.ps1` | Copy Jackett API key into `.env` (repo-relative) |
 | `scripts/sync_prowlarr_abb_indexer.sh` | Wire Prowlarr -> Jackett ABB |
 | `scripts/mullvad_register_wg.py` | Register Mullvad WireGuard keys |
 | `scripts/ol_import_dumps.py` / `refresh_ol_catalog.sh` | Open Library catalog |

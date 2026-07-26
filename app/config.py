@@ -155,9 +155,10 @@ class Settings(BaseSettings):
     jackett_url: str = "http://audiobook-jackett:9117"
     jackett_api_key: str = ""
     jackett_abb_timeout: int = 180
-    # HTTP/SOCKS proxy for ABB only (gluetun Mullvad). FlareSolverr ABB sessions
-    # and ABB live/RSS paths use this — Knaben/Jackett/other traffic does not.
-    abb_proxy_url: str = "http://gluetun:8888"
+    # HTTP/SOCKS proxy for ABB only (gluetun Mullvad). Empty = skip VPN proxy
+    # (fresh installs / no Mullvad). Set ABB_PROXY_URL=http://gluetun:8888 with
+    # COMPOSE_PROFILES=vpn when WireGuard keys are configured.
+    abb_proxy_url: str = ""
     # Optional env seed for Mullvad; prefer Admin → Integrations (stored in DB +
     # written to data/mullvad.env for gluetun). Never commit the real number.
     mullvad_account_number: str = ""

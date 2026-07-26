@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.routers.admin import (
     _diagnose_audible_redirect_url,
+    _humanize_audible_complete_error,
     _looks_like_audible_oauth_start_url,
     _looks_like_audible_oauth_url,
 )
@@ -64,6 +65,17 @@ def test_diagnose_maplanding_without_code():
     assert msg is not None
     assert "maplanding" in msg.lower()
     assert "authorization_code" in msg
+
+
+def test_humanize_invalid_value_register_error():
+    raw = (
+        "Audible registration failed: {'response': {'error': {'code': 'InvalidValue', "
+        "'message': 'One or more provided values are invalid.'}}}"
+    )
+    msg = _humanize_audible_complete_error(raw)
+    assert "InvalidValue" in msg
+    assert "Sign in" in msg
+    assert "do not retry Complete" in msg.lower() or "same URL" in msg
 
 
 def test_public_accounts_url(monkeypatch):

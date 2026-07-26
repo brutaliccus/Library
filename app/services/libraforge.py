@@ -119,7 +119,7 @@ async def auth_locales() -> dict[str, Any]:
 
 
 async def auth_login_start(*, locale: str = "us", flavor_name: str) -> dict[str, Any]:
-    """Start Audible OAuth — returns ``oauth_url`` for the admin to open."""
+    """Start Audible OAuth — returns ``oauth_url`` + ``login_session_id`` for PKCE complete."""
     return await _request(
         "POST",
         "/api/auth/login/start",
@@ -128,12 +128,20 @@ async def auth_login_start(*, locale: str = "us", flavor_name: str) -> dict[str,
     )
 
 
-async def auth_login_complete(*, redirect_url: str) -> dict[str, Any]:
+async def auth_login_complete(
+    *,
+    redirect_url: str,
+    login_session_id: str = "",
+) -> dict[str, Any]:
     """Finish Audible OAuth with the Amazon redirect URL; writes auth JSON on LibraForge."""
+    body: dict[str, Any] = {"redirect_url": redirect_url}
+    sid = (login_session_id or "").strip()
+    if sid:
+        body["login_session_id"] = sid
     return await _request(
         "POST",
         "/api/auth/login/complete",
-        json_body={"redirect_url": redirect_url},
+        json_body=body,
         timeout=60.0,
     )
 

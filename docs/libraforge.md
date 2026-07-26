@@ -97,6 +97,11 @@ Use a **dedicated** Audible account (not your main one). Library Site never stor
 Good paste shape (code redacted):
 `https://www.amazon.com/ap/maplanding?…&openid.oa2.authorization_code=REDACTED`
 
+Click **Sign in** only once per attempt. Each click creates a new PKCE login session; Completing
+with a dog-page URL from an older Amazon tab fails with Amazon `InvalidValue`. If that happens,
+start a **fresh** Sign in (do not retry Complete with the same URL — authorization codes are
+single-use).
+
 If Amazon never shows a login form (jumps straight to the dog page without `authorization_code`),
 retry the login URL in a private/incognito window. If the address bar shows `/ap/maplanding` with
 no query string, click the bar and Select all (Ctrl+A) before copying — some browsers hide the

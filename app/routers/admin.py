@@ -1771,10 +1771,30 @@ class AudibleLoginStartBody(BaseModel):
 
 class AudibleLoginCompleteBody(BaseModel):
     redirect_url: str
+    login_session_id: str = ""
 
 
 class AudibleDisconnectBody(BaseModel):
     force: bool = False
+
+
+def _humanize_audible_complete_error(detail: str) -> str:
+    """Prefer LibraForge's humanized register errors; map raw Amazon InvalidValue if needed."""
+    text = (detail or "").strip()
+    lower = text.lower()
+    if "invalidvalue" in lower or "one or more provided values are invalid" in lower:
+        if "amazon rejected device registration" in lower or "click sign in once" in lower:
+            return text
+        return (
+            "Amazon rejected device registration (InvalidValue). Usually the authorization "
+            "code does not match this Sign-in session — e.g. you clicked Sign in again after "
+            "opening Amazon, reused an old dog-page URL, or the code expired. Click Sign in "
+            "once, finish Amazon in that tab, then paste the dog-page address bar immediately "
+            "(do not retry Complete with the same URL)."
+        )
+    if text.startswith("Audible registration failed:"):
+        return text
+    return text
 
 
 def _lf_http_error(exc: Exception) -> HTTPException:
@@ -1785,7 +1805,8 @@ def _lf_http_error(exc: Exception) -> HTTPException:
         if "unreachable" in msg.lower():
             return HTTPException(status_code=502, detail=msg)
         if "HTTP 400" in msg:
-            return HTTPException(status_code=400, detail=msg.split(": ", 1)[-1])
+            detail = _humanize_audible_complete_error(msg.split(": ", 1)[-1])
+            return HTTPException(status_code=400, detail=detail)
         if "HTTP 404" in msg:
             return HTTPException(status_code=404, detail=msg.split(": ", 1)[-1])
         return HTTPException(status_code=502, detail=msg)
@@ -1898,6 +1919,7 @@ async def post_audible_login_start(
         )
     return {
         "oauth_url": oauth_url,
+        "login_session_id": str(data.get("login_session_id") or ""),
         "locale": (body.locale or "us").strip(),
         "flavor_name": name,
     }
@@ -1917,7 +1939,10 @@ async def post_audible_login_complete(
     if diagnose:
         raise HTTPException(status_code=400, detail=diagnose)
     try:
-        result = await lf.auth_login_complete(redirect_url=redirect)
+        result = await lf.auth_login_complete(
+            redirect_url=redirect,
+            login_session_id=(body.login_session_id or "").strip(),
+        )
     except LibraForgeError as e:
         raise _lf_http_error(e) from e
     summary = await lf.audible_auth_summary()

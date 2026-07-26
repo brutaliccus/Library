@@ -154,6 +154,7 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
   const [locale, setLocale] = useState("us");
   const [flavorName, setFlavorName] = useState("Metadata");
   const [oauthUrl, setOauthUrl] = useState("");
+  const [loginSessionId, setLoginSessionId] = useState("");
   const [redirectUrl, setRedirectUrl] = useState("");
 
   const { data, isLoading, isFetching, refetch } = useQuery({
@@ -182,11 +183,14 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
         locale,
         flavor_name: flavorName.trim() || "Metadata",
       });
-      return body as { oauth_url: string };
+      return body as { oauth_url: string; login_session_id?: string };
     },
     onSuccess: (body) => {
       const url = (body.oauth_url || "").trim();
+      const sessionId = (body.login_session_id || "").trim();
       setOauthUrl(url);
+      setLoginSessionId(sessionId);
+      setRedirectUrl("");
       if (!url) {
         toast("No OAuth URL returned from LibraForge", "error");
         return;
@@ -199,7 +203,10 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
         return;
       }
       openExternalUrl(url);
-      toast("Amazon sign-in opened — after login, paste the full address-bar URL below", "success");
+      toast(
+        "Amazon sign-in opened — finish in that tab, then paste the dog-page address bar below (ignore older Amazon tabs)",
+        "success",
+      );
     },
     onError: (err) => toast(apiError(err), "error"),
   });
@@ -209,14 +216,17 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
       const redirect = redirectUrl.trim();
       const diagnose = diagnoseAudibleRedirectPaste(redirect);
       if (diagnose) throw new Error(diagnose);
-      const { data: body } = await api.post("/admin/audible-auth/login/complete", {
+      const payload: { redirect_url: string; login_session_id?: string } = {
         redirect_url: redirect,
-      });
+      };
+      if (loginSessionId) payload.login_session_id = loginSessionId;
+      const { data: body } = await api.post("/admin/audible-auth/login/complete", payload);
       return body as AudibleAuthStatus & { ok?: boolean };
     },
     onSuccess: async () => {
       setRedirectUrl("");
       setOauthUrl("");
+      setLoginSessionId("");
       await qc.invalidateQueries({ queryKey: ["admin-audible-auth"] });
       await qc.invalidateQueries({ queryKey: ["admin-integrations"] });
       await qc.invalidateQueries({ queryKey: ["admin-setup-status"] });
@@ -321,6 +331,10 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
               Copy the <span className="text-gray-300">dog-page address bar</span> (must contain{" "}
               <code className="text-[11px] text-gray-300">openid.oa2.authorization_code</code>) —{" "}
               <span className="text-amber-200/90">not</span> the login link from step 1.
+            </li>
+            <li>
+              Click <span className="text-gray-300">Sign in</span> only once per attempt. Older Amazon
+              tabs from earlier clicks will fail Complete.
             </li>
           </ol>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">

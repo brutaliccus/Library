@@ -530,6 +530,13 @@ function UsersTab() {
   );
 }
 
+function catalogBookPath(volumeId: string | null | undefined, title: string): string {
+  if (volumeId && !String(volumeId).startsWith("rd:")) {
+    return `/book/${encodeURIComponent(volumeId)}`;
+  }
+  return `/search?q=${encodeURIComponent(title || "")}`;
+}
+
 function AllRequestsTab() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -642,7 +649,12 @@ function AllRequestsTab() {
             }`}
           >
             <div className="flex gap-3 sm:gap-4">
-              <div className="w-16 sm:w-20 h-24 sm:h-28 rounded-lg overflow-hidden bg-gray-900 shrink-0 border border-gray-700">
+              <Link
+                to={catalogBookPath(req.google_volume_id, req.title)}
+                className="w-16 sm:w-20 h-24 sm:h-28 rounded-lg overflow-hidden bg-gray-900 shrink-0 border border-gray-700 hover:border-gray-500 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/60"
+                title="Open store page"
+                aria-label={`Open store page for ${req.title || "request"}`}
+              >
                 {req.cover_url ? (
                   <CoverImage src={req.cover_url} alt="" className="w-full h-full object-cover" />
                 ) : (
@@ -650,7 +662,7 @@ function AllRequestsTab() {
                     <BookOpen size={22} />
                   </div>
                 )}
-              </div>
+              </Link>
               <div className="flex-1 min-w-0 flex flex-col">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">

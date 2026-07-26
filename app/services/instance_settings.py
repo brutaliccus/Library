@@ -496,7 +496,7 @@ GROUPS: list[dict[str, str]] = [
     {"id": "catalog", "label": "Catalog APIs"},
     {"id": "vpn", "label": "VPN / ABB proxy"},
     {"id": "notifications", "label": "Push notifications"},
-    {"id": "scraper", "label": "Scraper / discovery"},
+    {"id": "scraper", "label": "Discovery flags"},
     {"id": "storage", "label": "Storage / Paths"},
 ]
 

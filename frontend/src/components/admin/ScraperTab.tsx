@@ -560,7 +560,7 @@ export default function ScraperTab() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-3 flex-wrap">
-            <h2 className="text-lg font-semibold text-gray-100">Indexer Cache Scraper</h2>
+            <h2 className="text-lg font-semibold text-gray-100">Discovery cache</h2>
             <StatusBadge status={data.status} enabled={data.enabled} />
           </div>
           <p className="text-sm text-gray-400 mt-1">

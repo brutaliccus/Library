@@ -180,7 +180,7 @@ export default function InstanceSetup() {
   const next = async () => {
     await saveStep();
     if (stepIdx < steps.length - 1) setStepIdx((i) => i + 1);
-    else navigate("/admin?tab=config");
+    else navigate("/admin?tab=settings");
   };
 
   const renderFields = () => (
@@ -360,7 +360,7 @@ export default function InstanceSetup() {
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={() => navigate("/admin?tab=config")}
+                onClick={() => navigate("/admin?tab=settings")}
                 className="px-3 py-2 text-sm text-gray-400 hover:text-gray-200"
               >
                 Skip to Config

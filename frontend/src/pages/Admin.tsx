@@ -24,6 +24,11 @@ import {
   Search,
   X,
   Headphones,
+  KeyRound,
+  Workflow,
+  Menu,
+  Database,
+  type LucideIcon,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import ScraperTab from "../components/admin/ScraperTab";
@@ -43,7 +48,54 @@ import {
   requestListRefetchInterval,
 } from "../utils/requestProgress";
 
-type Tab = "users" | "requests" | "scraper" | "health" | "config";
+/** Canonical Admin sections (URL ?tab=). Legacy aliases remap in resolveTab. */
+type AdminTab =
+  | "overview"
+  | "requests"
+  | "users"
+  | "discovery"
+  | "catalog"
+  | "pipelines"
+  | "integrations"
+  | "settings";
+
+type NavItem = {
+  id: AdminTab;
+  label: string;
+  icon: LucideIcon;
+};
+
+type NavGroup = { label: string; items: NavItem[] };
+
+const ADMIN_NAV: NavGroup[] = [
+  {
+    label: "Operations",
+    items: [
+      { id: "overview", label: "Overview", icon: Activity },
+      { id: "requests", label: "Requests", icon: Download },
+      { id: "users", label: "Users", icon: Users },
+    ],
+  },
+  {
+    label: "Library",
+    items: [
+      { id: "discovery", label: "Discovery", icon: Radar },
+      { id: "catalog", label: "Catalog", icon: Database },
+    ],
+  },
+  {
+    label: "System",
+    items: [
+      { id: "pipelines", label: "Pipelines", icon: Workflow },
+      { id: "integrations", label: "Integrations", icon: KeyRound },
+      { id: "settings", label: "Settings", icon: Settings2 },
+    ],
+  },
+];
+
+const VALID_TABS = new Set<AdminTab>(
+  ADMIN_NAV.flatMap((g) => g.items.map((i) => i.id))
+);
 
 type AdminUser = {
   id: number;
@@ -82,51 +134,121 @@ function formatRelativeTime(iso: string | null | undefined): string {
   return new Date(iso).toLocaleDateString();
 }
 
-function resolveTab(raw: string | null): Tab {
+function resolveTab(raw: string | null): AdminTab {
   if (raw === "approvals") return "users";
-  if (
-    raw === "users" ||
-    raw === "requests" ||
-    raw === "scraper" ||
-    raw === "health" ||
-    raw === "config"
-  ) {
-    return raw;
+  if (raw === "health") return "overview";
+  if (raw === "scraper" || raw === "cache") return "discovery";
+  if (raw === "config") return "settings";
+  if (raw && VALID_TABS.has(raw as AdminTab)) return raw as AdminTab;
+  return "overview";
+}
+
+function tabLabel(tab: AdminTab): string {
+  for (const g of ADMIN_NAV) {
+    const hit = g.items.find((i) => i.id === tab);
+    if (hit) return hit.label;
   }
-  return "users";
+  return "Admin";
 }
 
 export default function AdminPage() {
-  const [searchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState<Tab>(resolveTab(searchParams.get("tab")));
-  const { state: pushState, error: pushError, subscribe: enablePush, unsubscribe: disablePush } = usePushNotifications();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<AdminTab>(() =>
+    resolveTab(searchParams.get("tab"))
+  );
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const settingsSection = searchParams.get("section") || undefined;
+  const { state: pushState, error: pushError, subscribe: enablePush, unsubscribe: disablePush } =
+    usePushNotifications();
 
-  const tabs: { id: Tab; label: string; icon: typeof Shield }[] = [
-    { id: "users", label: "Users", icon: Users },
-    { id: "requests", label: "Requests", icon: Download },
-    { id: "scraper", label: "Cache", icon: Radar },
-    { id: "config", label: "Config", icon: Settings2 },
-    { id: "health", label: "Health", icon: Activity },
-  ];
+  useEffect(() => {
+    setActiveTab(resolveTab(searchParams.get("tab")));
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = "";
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [mobileNavOpen]);
+
+  const selectTab = (id: AdminTab) => {
+    setActiveTab(id);
+    setMobileNavOpen(false);
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", id);
+    if (id !== "settings") next.delete("section");
+    setSearchParams(next, { replace: true });
+  };
+
+  const navList = (
+    <nav className="space-y-4" aria-label="Admin sections">
+      {ADMIN_NAV.map((group) => (
+        <div key={group.label}>
+          <p className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+            {group.label}
+          </p>
+          <div className="space-y-0.5">
+            {group.items.map(({ id, label, icon: Icon }) => {
+              const active = activeTab === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => selectTab(id)}
+                  className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors flex items-center gap-2.5 ${
+                    active
+                      ? "bg-brand-600/20 text-brand-300 font-medium"
+                      : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+                  }`}
+                >
+                  <Icon size={16} className="shrink-0 opacity-80" />
+                  <span className="truncate">{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </nav>
+  );
 
   return (
-    <div
-      className={`w-full mx-auto min-w-0 overflow-x-hidden pt-[calc(2rem+env(safe-area-inset-top,0px))] pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))] ${
-        activeTab === "config" ? "max-w-6xl" : "max-w-5xl"
-      }`}
-    >
-      <h1 className="text-2xl font-bold text-gray-100 mb-6 flex items-center gap-2">
-        <Shield size={24} />
-        Admin Panel
-      </h1>
+    <div className="w-full max-w-6xl mx-auto min-w-0 overflow-x-hidden pt-[calc(2rem+env(safe-area-inset-top,0px))] pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))]">
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold text-gray-100 flex items-center gap-2">
+            <Shield size={24} className="shrink-0" />
+            Admin
+          </h1>
+          <p className="text-xs text-gray-500 mt-1 lg:hidden">{tabLabel(activeTab)}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setMobileNavOpen(true)}
+          className="lg:hidden shrink-0 inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-gray-200 border border-gray-700 transition-colors"
+          aria-label="Open admin menu"
+        >
+          <Menu size={16} />
+          Menu
+        </button>
+      </div>
 
       {pushState !== "unsupported" && pushState !== "unavailable" && pushState !== "subscribed" && (
-        <div className="mb-6 p-4 bg-gray-800/60 border border-gray-700 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="mb-4 p-4 bg-gray-800/60 border border-gray-700 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-center gap-3">
             <Bell size={20} className="text-amber-400 shrink-0" />
             <div>
               <p className="text-sm font-medium text-gray-100">Admin push notifications</p>
-              <p className="text-xs text-gray-500">Get notified when members join via invite, plus download status and errors</p>
+              <p className="text-xs text-gray-500">
+                Get notified when members join via invite, plus download status and errors
+              </p>
               {pushError && <p className="text-xs text-red-400 mt-1">{pushError}</p>}
             </div>
           </div>
@@ -141,14 +263,15 @@ export default function AdminPage() {
       )}
 
       {pushState === "subscribed" && (
-        <div className="mb-6 p-3 bg-emerald-900/20 border border-emerald-800/50 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="mb-4 p-3 bg-emerald-900/20 border border-emerald-800/50 rounded-xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-sm text-emerald-400">
               <Bell size={16} />
               Push notifications enabled for admin alerts
             </div>
             <p className="text-xs text-gray-500 mt-1">
-              Browser only (not the Android APK). If quarantine alerts stop, Disable then Enable to refresh the subscription.
+              Browser only (not the Android APK). If quarantine alerts stop, Disable then Enable to
+              refresh the subscription.
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -169,36 +292,71 @@ export default function AdminPage() {
       )}
 
       <div className="mb-4">
-        <Link
-          to="/admin/setup"
-          className="text-xs text-brand-400 hover:text-brand-300"
-        >
+        <Link to="/admin/setup" className="text-xs text-brand-400 hover:text-brand-300">
           Open instance setup wizard →
         </Link>
       </div>
 
-      <div className="grid grid-cols-5 gap-0.5 mb-6 bg-gray-900 rounded-lg p-0.5 w-full">
-        {tabs.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id)}
-            className={`flex items-center justify-center gap-1 px-1 sm:px-2 py-2 rounded-md text-[10px] sm:text-xs font-medium transition-colors min-w-0 ${
-              activeTab === id
-                ? "bg-gray-800 text-brand-400 shadow-sm"
-                : "text-gray-400 hover:text-gray-200"
-            }`}
-          >
-            <Icon size={12} className="shrink-0 hidden sm:block" />
-            <span className="truncate">{label}</span>
-          </button>
-        ))}
-      </div>
+      {mobileNavOpen && (
+        <div
+          className="fixed inset-0 z-50 lg:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Admin menu"
+        >
+          <div className="absolute inset-0 bg-black/60" onClick={() => setMobileNavOpen(false)} />
+          <div className="absolute left-0 top-0 bottom-0 w-72 max-w-[85vw] bg-gray-900 border-r border-gray-800 overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] drawer-slide-in">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-semibold text-gray-200">Admin</h3>
+              <button
+                type="button"
+                onClick={() => setMobileNavOpen(false)}
+                className="p-1 text-gray-500 hover:text-gray-300 transition-colors"
+                aria-label="Close menu"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            {navList}
+          </div>
+        </div>
+      )}
 
-      {activeTab === "users" && <UsersTab />}
-      {activeTab === "requests" && <AllRequestsTab />}
-      {activeTab === "scraper" && <ScraperTab />}
-      {activeTab === "config" && <ConfigTab />}
-      {activeTab === "health" && <HealthTab />}
+      <div className="flex gap-6 items-start min-w-0">
+        <aside className="hidden lg:block w-52 shrink-0 sticky top-[4.5rem] max-h-[calc(100vh-5rem)] overflow-y-auto pr-2 scrollbar-hide">
+          {navList}
+        </aside>
+
+        <div className="flex-1 min-w-0">
+          {activeTab === "overview" && <HealthTab />}
+          {activeTab === "requests" && <AllRequestsTab />}
+          {activeTab === "users" && <UsersTab />}
+          {activeTab === "discovery" && <ScraperTab />}
+          {activeTab === "catalog" && (
+            <ConfigTab
+              lockedGroup="catalog"
+              title="Catalog"
+              description="Catalog API keys (Hardcover, NYT, ISBNdb, OpenRouter, Google Books) plus the local Open Library catalog build, update, and schedule controls."
+            />
+          )}
+          {activeTab === "pipelines" && (
+            <ConfigTab
+              lockedGroup="pipeline"
+              title="Pipelines"
+              description="LibraForge and ebook pipeline toggles, scores, and M4B-related settings. Monitor LibraForge status under Overview; review quarantines under Requests."
+            />
+          )}
+          {activeTab === "integrations" && <IntegrationsPanel />}
+          {activeTab === "settings" && (
+            <ConfigTab
+              omitGroups={["pipeline", "catalog"]}
+              initialGroup={settingsSection}
+              title="Settings"
+              description="Core instance settings, libraries, indexers, debrid defaults, VPN, notifications, Android, discovery flags, and storage paths. Pipeline and Catalog APIs are under their own Admin sections."
+            />
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -902,6 +1060,16 @@ function HealthTab() {
 
   return (
     <div className="space-y-4 min-w-0">
+      <div>
+        <h2 className="text-lg font-semibold text-gray-100 flex items-center gap-2">
+          <Activity size={18} />
+          Overview
+        </h2>
+        <p className="text-xs text-gray-500 mt-1 max-w-xl">
+          Service health, disk, and library scans. API keys and OpenRouter live under Integrations;
+          Open Library catalog build/schedule under Catalog.
+        </p>
+      </div>
       <div className="flex flex-wrap gap-2">
         <button
           onClick={() => refetch()}
@@ -914,7 +1082,7 @@ function HealthTab() {
           title="Runs a full Audiobookshelf library scan and waits for it to finish (up to a few minutes), then removes library rows whose files are missing. Does not Quick Match Audible or rewrite titles to folder names."
           onClick={() => fixMetadata.mutate()}
           disabled={fixMetadata.isPending}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-900/50 text-purple-300 text-sm rounded-lg hover:bg-purple-900/70 border border-purple-800/50 disabled:opacity-50"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-900/40 text-brand-300 text-sm rounded-lg hover:bg-brand-900/60 border border-brand-800/50 disabled:opacity-50"
         >
           <Wrench size={14} className={fixMetadata.isPending ? "animate-spin" : ""} />
           {fixMetadata.isPending ? "Waiting for ABS scan…" : "Scan ABS & clean orphans"}
@@ -1063,7 +1231,6 @@ function HealthTab() {
           ]}
         />
         <KavitaEbookDebug />
-        <IntegrationsCard />
         <HealthCard
           title="LibraForge"
           configured={svc("libraforge").configured !== false}
@@ -1233,7 +1400,7 @@ interface IntegrationsResponse {
   };
 }
 
-function IntegrationsCard() {
+function IntegrationsPanel() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [nytKey, setNytKey] = useState("");
@@ -1333,8 +1500,18 @@ function IntegrationsCard() {
   const mullvad = data?.mullvad;
 
   return (
-    <div className="md:col-span-2 bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-5">
-      <h3 className="font-semibold text-gray-100">Integrations</h3>
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-lg font-semibold text-gray-100 flex items-center gap-2">
+          <KeyRound size={18} />
+          Integrations
+        </h2>
+        <p className="text-xs text-gray-500 mt-1 max-w-xl">
+          Catalog and assist API keys with OpenRouter usage. Real-Debrid / TorBox / indexer URLs
+          are under Settings → Debrid and Indexers. Open Library dump scheduling is under Catalog.
+        </p>
+      </div>
+    <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-5">
 
       <div className="space-y-2 text-sm">
         <div className="flex items-center justify-between">
@@ -1630,6 +1807,7 @@ function IntegrationsCard() {
             "Only AudioBook Bay Flare/RSS/search egress via Mullvad. The rest of the stack stays on your LAN."}
         </p>
       </div>
+    </div>
     </div>
   );
 }

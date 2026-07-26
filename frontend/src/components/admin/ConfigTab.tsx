@@ -99,13 +99,35 @@ interface ConfigResponse {
   settings: ConfigSetting[];
 }
 
-export default function ConfigTab() {
+export type ConfigTabProps = {
+  /** Pin to one settings group and hide the section rail (Admin Pipelines / Catalog). */
+  lockedGroup?: string;
+  /** Hide groups from the section rail when they are promoted elsewhere in Admin. */
+  omitGroups?: string[];
+  /** Initial group when unlocked (e.g. deep-link ?section=). */
+  initialGroup?: string;
+  /** Override page title when locked or embedded. */
+  title?: string;
+  /** Override page description. */
+  description?: string;
+};
+
+export default function ConfigTab({
+  lockedGroup,
+  omitGroups = [],
+  initialGroup,
+  title,
+  description,
+}: ConfigTabProps = {}) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
-  const [activeGroup, setActiveGroup] = useState<string>("libraries");
+  const [activeGroup, setActiveGroup] = useState<string>(
+    lockedGroup || initialGroup || "libraries"
+  );
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const locked = Boolean(lockedGroup);
 
   const { data, isLoading } = useQuery({
     queryKey: ["admin-config"],
@@ -217,7 +239,7 @@ export default function ConfigTab() {
   });
 
   useEffect(() => {
-    if (!mobileNavOpen) return;
+    if (!mobileNavOpen || locked) return;
     document.body.style.overflow = "hidden";
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setMobileNavOpen(false);
@@ -227,9 +249,22 @@ export default function ConfigTab() {
       document.body.style.overflow = "";
       window.removeEventListener("keydown", onKey);
     };
-  }, [mobileNavOpen]);
+  }, [mobileNavOpen, locked]);
 
-  const groups = data?.groups || [];
+  useEffect(() => {
+    if (lockedGroup) setActiveGroup(lockedGroup);
+  }, [lockedGroup]);
+
+  useEffect(() => {
+    if (locked || !initialGroup) return;
+    setActiveGroup(initialGroup);
+  }, [initialGroup, locked]);
+
+  const omitSet = useMemo(() => new Set(omitGroups), [omitGroups]);
+  const groups = useMemo(
+    () => (data?.groups || []).filter((g) => !omitSet.has(g.id)),
+    [data?.groups, omitSet]
+  );
   const settings = data?.settings || [];
   const byGroup = useMemo(() => {
     const map: Record<string, ConfigSetting[]> = {};
@@ -240,11 +275,12 @@ export default function ConfigTab() {
   }, [settings]);
 
   useEffect(() => {
+    if (locked) return;
     if (!groups.length) return;
     if (!groups.some((g) => g.id === activeGroup)) {
       setActiveGroup(groups[0].id);
     }
-  }, [groups, activeGroup]);
+  }, [groups, activeGroup, locked]);
 
   const dirtyKeys = Object.keys(drafts).filter((k) => {
     const original = settings.find((s) => s.key === k);
@@ -265,10 +301,11 @@ export default function ConfigTab() {
   }, [dirtyKeys, settings]);
 
   const saveGroup = () => {
+    const groupId = lockedGroup || activeGroup;
     const updates: Record<string, string> = {};
     for (const key of dirtyKeys) {
       const def = settings.find((s) => s.key === key);
-      if (!def || def.group !== activeGroup) continue;
+      if (!def || def.group !== groupId) continue;
       updates[key] = drafts[key] ?? "";
     }
     if (!Object.keys(updates).length) {
@@ -299,8 +336,16 @@ export default function ConfigTab() {
     return <p className="text-sm text-gray-500">Loading configuration…</p>;
   }
 
-  const current = byGroup[activeGroup] || [];
-  const activeLabel = groups.find((g) => g.id === activeGroup)?.label || "Section";
+  const effectiveGroup = lockedGroup || activeGroup;
+  const current = byGroup[effectiveGroup] || [];
+  const activeLabel =
+    (data?.groups || []).find((g) => g.id === effectiveGroup)?.label || "Section";
+  const heading = title || (locked ? activeLabel : "Instance configuration");
+  const blurb =
+    description ||
+    (locked
+      ? "Values override .env when set. Secrets show only a hint until you enter a new value."
+      : "Runtime settings and paths. Catalog APIs and pipeline toggles live under Catalog and Pipelines. Secrets for NYT / OpenRouter / Mullvad are under Integrations.");
 
   const navList = (
     <nav className="space-y-0.5" aria-label="Config sections">
@@ -309,7 +354,7 @@ export default function ConfigTab() {
       </p>
       {groups.map((g) => {
         const dirty = dirtyByGroup[g.id] || 0;
-        const active = activeGroup === g.id;
+        const active = effectiveGroup === g.id;
         return (
           <button
             key={g.id}
@@ -343,25 +388,27 @@ export default function ConfigTab() {
         <div>
           <h2 className="text-lg font-semibold text-gray-100 flex items-center gap-2">
             <Settings2 size={18} />
-            Instance configuration
+            {heading}
           </h2>
-          <p className="text-xs text-gray-500 mt-1 max-w-xl">
-            All runtime settings and API keys. Values override .env when set. Secrets show only a
-            hint until you enter a new value.
-          </p>
+          <p className="text-xs text-gray-500 mt-1 max-w-xl">{blurb}</p>
         </div>
         <button
           type="button"
-          onClick={saveAll}
-          disabled={save.isPending || dirtyKeys.length === 0}
+          onClick={locked ? saveGroup : saveAll}
+          disabled={
+            save.isPending ||
+            (locked ? !(dirtyByGroup[effectiveGroup] > 0) : dirtyKeys.length === 0)
+          }
           className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-brand-600 text-white text-sm font-medium hover:bg-brand-500 disabled:opacity-40"
         >
           <Save size={14} />
-          Save all changes{dirtyKeys.length ? ` (${dirtyKeys.length})` : ""}
+          {locked
+            ? `Save${dirtyByGroup[effectiveGroup] ? ` (${dirtyByGroup[effectiveGroup]})` : ""}`
+            : `Save all changes${dirtyKeys.length ? ` (${dirtyKeys.length})` : ""}`}
         </button>
       </div>
 
-      {mobileNavOpen && (
+      {!locked && mobileNavOpen && (
         <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-modal="true" aria-label="Config sections">
           <div className="absolute inset-0 bg-black/60" onClick={() => setMobileNavOpen(false)} />
           <div className="absolute left-0 top-0 bottom-0 w-72 max-w-[85vw] bg-gray-900 border-r border-gray-800 overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] drawer-slide-in">
@@ -382,41 +429,45 @@ export default function ConfigTab() {
       )}
 
       <div className="flex gap-6 items-start min-w-0">
-        <aside className="hidden lg:block w-52 shrink-0 sticky top-[4.5rem] max-h-[calc(100vh-5rem)] overflow-y-auto pr-2 scrollbar-hide">
-          {navList}
-        </aside>
+        {!locked && (
+          <aside className="hidden lg:block w-52 shrink-0 sticky top-[4.5rem] max-h-[calc(100vh-5rem)] overflow-y-auto pr-2 scrollbar-hide">
+            {navList}
+          </aside>
+        )}
 
         <div className="flex-1 min-w-0 space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
+          {!locked && (
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setMobileNavOpen(true)}
+                  className="lg:hidden shrink-0 inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
+                  title="Config sections"
+                  aria-label="Open config sections"
+                >
+                  <SlidersHorizontal size={16} />
+                  {dirtyKeys.length > 0 && (
+                    <span className="px-1.5 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
+                      {dirtyKeys.length}
+                    </span>
+                  )}
+                </button>
+                <h3 className="text-sm font-semibold text-gray-200 truncate">{activeLabel}</h3>
+              </div>
               <button
                 type="button"
-                onClick={() => setMobileNavOpen(true)}
-                className="lg:hidden shrink-0 inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
-                title="Config sections"
-                aria-label="Open config sections"
+                onClick={saveGroup}
+                disabled={save.isPending || !(dirtyByGroup[effectiveGroup] > 0)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-200 hover:border-gray-500 disabled:opacity-40 shrink-0"
               >
-                <SlidersHorizontal size={16} />
-                {dirtyKeys.length > 0 && (
-                  <span className="px-1.5 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
-                    {dirtyKeys.length}
-                  </span>
-                )}
+                <Save size={12} />
+                Save section
               </button>
-              <h3 className="text-sm font-semibold text-gray-200 truncate">{activeLabel}</h3>
             </div>
-            <button
-              type="button"
-              onClick={saveGroup}
-              disabled={save.isPending || !(dirtyByGroup[activeGroup] > 0)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-200 hover:border-gray-500 disabled:opacity-40 shrink-0"
-            >
-              <Save size={12} />
-              Save section
-            </button>
-          </div>
+          )}
 
-          {(activeGroup === "storage" || activeGroup === "catalog") && (
+          {(effectiveGroup === "storage" || effectiveGroup === "catalog") && (
             <OlCatalogPanel
               status={olQuery.data}
               loading={olQuery.isLoading}

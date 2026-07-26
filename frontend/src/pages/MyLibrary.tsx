@@ -1338,10 +1338,8 @@ export default function MyLibrary() {
         </div>
       ) : (
         <>
-          <ContinueShelves />
-
           {/* Tabs — single row; scroll horizontally on narrow screens */}
-          <div className="flex flex-nowrap gap-1 mb-6 bg-gray-800/50 p-1 rounded-lg overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-full">
+          <div className="flex flex-nowrap gap-1 mb-4 bg-gray-800/50 p-1 rounded-lg overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-full">
             <button
               onClick={() => setTab("abs")}
               className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
@@ -1383,11 +1381,17 @@ export default function MyLibrary() {
             </button>
           </div>
 
+          {/* Genre / Series / Author filters — above Continue when the tab supports them */}
+          {tab === "abs" && <FilterBar options={absFilterOptions} />}
+          {tab === "ebooks" && <FilterBar options={ebookFilterOptions} />}
+          {tab === "streams" && <FilterBar options={rdFilterOptions} />}
+
+          <ContinueShelves />
+
           {/* ABS Tab */}
           {tab === "abs" && (
             <div>
               {viewToggle(absView, setAbsView)}
-              <FilterBar options={absFilterOptions} />
 
               {absView === "all" && (
                 <div>
@@ -1489,7 +1493,6 @@ export default function MyLibrary() {
           {tab === "ebooks" && (
             <div>
               {viewToggle(ebookView, setEbookView)}
-              <FilterBar options={ebookFilterOptions} />
               {kavitaLoading && !kavitaCollection && <LibraryGridSkeleton />}
               {kavitaError && !kavitaCollection && (
                 <div className="text-center py-16">
@@ -1585,7 +1588,6 @@ export default function MyLibrary() {
           {tab === "streams" && (
             <div>
               {viewToggle(rdView, setRdView)}
-              <FilterBar options={rdFilterOptions} />
               {rdLoading && !rdLibrary && <LibraryGridSkeleton />}
               {!rdLoading && rdItemsSorted.length === 0 && (
                 <div className="text-center py-16">

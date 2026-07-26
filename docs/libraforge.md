@@ -74,13 +74,28 @@ From an allowed LAN/VPN IP, `https://forge.library.freiverse.com` should load; f
 Do **not** leave the forge host on Public / without an access list. It can rewrite tags and move files.
 ## Audible authentication
 
-Metadata Forge needs an **unencrypted** Audible auth JSON at `/auth/audible-metadata.json` (host: `/opt/stacks/libraforge/audible-auth/`). Use a **dedicated** Audible account (not your main one).
+Metadata Forge needs an **unencrypted** Audible auth JSON at `/auth/audible-metadata.json`.
 
-### Does this LibraForge have a browser login GUI?
+| Install | Host path |
+|---------|-----------|
+| Bundled-media (Library Site compose) | `./libraforge-auth/audible-metadata.json` |
+| Pi sibling LibraForge stack | `/opt/stacks/libraforge/audible-auth/audible-metadata.json` |
 
-**Yes** — the installed stack is upstream [coconautilus17/LibraForge](https://github.com/coconautilus17/LibraForge). Prefer **Settings → Accounts** for guided browser OAuth when available.
+Use a **dedicated** Audible account (not your main one). Library Site never stores this JSON in `.env` or the DB.
 
-### Practical path (auth file → Pi)
+### Preferred: Library Site GUI
+
+1. Open **`/admin/setup`** → **Audible account (metadata)**, or later **Admin → Integrations → Audible**.
+2. Pick marketplace + nickname → **Sign in to Audible** (opens Amazon OAuth).
+3. After Amazon finishes, paste the final redirect URL → **Complete sign-in**.
+
+Library Site proxies LibraForge’s `/api/auth/login/*` endpoints; the auth file is written only into the LibraForge `/auth` mount.
+
+### Alternative: LibraForge Settings → Accounts
+
+Upstream [coconautilus17/LibraForge](https://github.com/coconautilus17/LibraForge) also has **Settings → Accounts** (`/settings#accounts`). Same auth file; use either UI.
+
+### Fallback: audible-cli → copy file
 
 If you already have an unencrypted Audible auth JSON (e.g. from `audible-cli`):
 
@@ -93,21 +108,23 @@ If you already have an unencrypted Audible auth JSON (e.g. from `audible-cli`):
 
    Or with the library alone: use `Authenticator.from_login_external` (prints a URL; paste the final Amazon redirect URL back). See [Audible authorization docs](https://audible.readthedocs.io/en/latest/auth/authorization.html).
 
-2. Copy the generated auth file to the Pi (rename to the expected name if needed):
+2. Copy the generated auth file (rename to the expected name if needed):
 
    ```powershell
+   # Bundled-media Test Setup / local compose:
+   copy $env:USERPROFILE\.audible\*.json "C:\dev\Library Test Setup\libraforge-auth\audible-metadata.json"
+
+   # Pi sibling stack:
    scp $env:USERPROFILE\.audible\*.json pihole@192.168.68.76:/opt/stacks/libraforge/audible-auth/audible-metadata.json
    ```
 
-   Exact filename from quickstart may vary; LibraForge expects **`audible-metadata.json`** in that folder.
-
-3. Restart LibraForge:
+3. Restart LibraForge if it was already running without the file:
 
    ```powershell
-   ssh pihole@192.168.68.76 "cd /opt/stacks/libraforge && docker compose restart"
+   docker compose restart libraforge
    ```
 
-The auth directory is mounted into the container at `/auth`. Encrypted auth files are **not** supported by this UI.
+Encrypted auth files are **not** supported.
 
 ## Automated download pipeline (Library → LibraForge)
 

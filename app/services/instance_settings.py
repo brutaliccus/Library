@@ -789,6 +789,24 @@ async def setup_status() -> dict[str, Any]:
     )
     bundled_ready = bundled_media and bool(abs_url and abs_key) and bool(kav_url and kav_key)
 
+    # Soft probe: Audible auth lives in LibraForge's mounted /auth file, not Library .env.
+    audible_configured = False
+    audible_reachable = False
+    audible_name = ""
+    if lf_url or lf_internal:
+        try:
+            from app.services import libraforge as lf
+            from app.services.libraforge import LibraForgeError
+
+            status = await lf.auth_status()
+            audible_reachable = True
+            audible_configured = bool(status.get("auth_ok"))
+            audible_name = str(status.get("active_name") or "")
+        except LibraForgeError:
+            audible_reachable = False
+        except Exception:
+            audible_reachable = False
+
     steps = [
         {
             "id": "stack",
@@ -802,6 +820,21 @@ async def setup_status() -> dict[str, Any]:
                 "still allow external ABS/Kavita/LF URLs (Pi production). Soft health probes run "
                 "when you continue."
             ),
+        },
+        {
+            "id": "audible",
+            "label": "Audible account (metadata)",
+            "done": audible_configured,
+            "required": False,
+            "help": (
+                "Sign in once so Metadata Forge / Chapter Forge can look up Audible metadata and "
+                "chapters. Credentials are stored only in LibraForge's auth mount "
+                "(audible-metadata.json) - never in Library Site .env. Use a dedicated Audible "
+                "account when possible. Re-auth later under Admin -> Integrations."
+            ),
+            "audibleConfigured": audible_configured,
+            "audibleReachable": audible_reachable,
+            "audibleName": audible_name,
         },
         {
             "id": "indexers",
@@ -897,6 +930,11 @@ async def setup_status() -> dict[str, Any]:
             "libraforgePipelineEnabled": lf_on,
             "bundledMedia": bundled_media,
             "bundledReady": bundled_ready,
+        },
+        "audible": {
+            "configured": audible_configured,
+            "reachable": audible_reachable,
+            "activeName": audible_name,
         },
     }
 

@@ -35,6 +35,7 @@ import ScraperTab from "../components/admin/ScraperTab";
 import ConfigTab from "../components/admin/ConfigTab";
 import StagingFilesViewer from "../components/admin/StagingFilesViewer";
 import QuickReviewWizard from "../components/admin/QuickReviewWizard";
+import AudibleAuthPanel from "../components/admin/AudibleAuthPanel";
 import { usePushNotifications } from "../hooks/usePushNotifications";
 import { Link, useSearchParams } from "react-router-dom";
 import RequestStatusBadge from "../components/RequestStatus";
@@ -1398,6 +1399,16 @@ interface IntegrationsResponse {
     hint: string;
     note?: string;
   };
+  audible?: {
+    configured?: boolean;
+    reachable?: boolean;
+    auth_ok?: boolean;
+    active_name?: string;
+    status?: string;
+    note?: string;
+    libraforge_accounts_url?: string;
+    error?: string;
+  };
 }
 
 function IntegrationsPanel() {
@@ -1507,11 +1518,16 @@ function IntegrationsPanel() {
           Integrations
         </h2>
         <p className="text-xs text-gray-500 mt-1 max-w-xl">
-          Catalog and assist API keys with OpenRouter usage. Real-Debrid / TorBox / indexer URLs
-          are under Settings → Debrid and Indexers. Open Library dump scheduling is under Catalog.
+          Audible metadata login, catalog/assist API keys, and OpenRouter usage. Real-Debrid /
+          TorBox / indexer URLs are under Settings → Debrid and Indexers. Open Library dump
+          scheduling is under Catalog.
         </p>
       </div>
     <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-5">
+
+      <div className="space-y-2 text-sm border-b border-gray-700 pb-4">
+        <AudibleAuthPanel />
+      </div>
 
       <div className="space-y-2 text-sm">
         <div className="flex items-center justify-between">

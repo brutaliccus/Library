@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import api from "../api/client";
 import { useToast } from "../contexts/ToastContext";
+import AudibleAuthPanel from "../components/admin/AudibleAuthPanel";
 
 interface SetupStatus {
   complete: boolean;
@@ -26,6 +27,9 @@ interface SetupStatus {
     help: string;
     abbRssOnly?: boolean;
     knabenRssOnly?: boolean;
+    audibleConfigured?: boolean;
+    audibleReachable?: boolean;
+    audibleName?: string;
   }>;
   defaults: {
     abbRssOnly: boolean;
@@ -43,6 +47,11 @@ interface SetupStatus {
     libraforgePipelineEnabled?: boolean;
     bundledMedia?: boolean;
     bundledReady?: boolean;
+  };
+  audible?: {
+    configured?: boolean;
+    reachable?: boolean;
+    activeName?: string;
   };
 }
 
@@ -78,6 +87,7 @@ interface OlCatalogStatus {
 
 const STEP_GROUPS: Record<string, string[]> = {
   stack: ["libraries", "pipeline"],
+  audible: [],
   indexers: ["indexers"],
   debrid: ["debrid"],
   folders: ["storage"],
@@ -366,7 +376,7 @@ export default function InstanceSetup() {
       await save.mutateAsync(updates);
       return;
     }
-    if (step?.id === "folders" || step?.id === "openlibrary") {
+    if (step?.id === "folders" || step?.id === "openlibrary" || step?.id === "audible") {
       return;
     }
     const updates: Record<string, string> = {};
@@ -692,8 +702,8 @@ export default function InstanceSetup() {
           Instance setup
         </h1>
         <p className="text-sm text-gray-500 mt-2">
-          Configure the library stack (ABS / Kavita / LibraForge), indexers, and optional catalog.
-          Change anything later in Admin → Settings / Catalog / Pipelines.
+          Configure the library stack (ABS / Kavita / LibraForge), Audible metadata login,
+          indexers, and optional catalog. Change anything later in Admin → Settings / Integrations.
         </p>
       </div>
 
@@ -730,6 +740,13 @@ export default function InstanceSetup() {
 
           {step.id === "stack" ? (
             renderStack()
+          ) : step.id === "audible" ? (
+            <AudibleAuthPanel
+              compact
+              onStatusChange={() => {
+                void refetchStatus();
+              }}
+            />
           ) : step.id === "openlibrary" ? (
             renderOpenLibrary()
           ) : step.id === "scraper" ? (

@@ -1624,7 +1624,34 @@ async def _integrations_payload() -> dict:
                     "auto-registers WireGuard keys into data/mullvad.env â€” then "
                     "restart: docker compose up -d gluetun",
         },
+        "audible": await _audible_integrations_slice(),
     }
+
+
+async def _audible_integrations_slice() -> dict:
+    """Audible auth status for Integrations panel (proxied; never returns auth JSON)."""
+    from app.services import libraforge as lf
+
+    try:
+        return await lf.audible_auth_summary()
+    except Exception as e:
+        return {
+            "configured": False,
+            "reachable": False,
+            "auth_ok": False,
+            "active_name": "",
+            "activation_bytes_set": False,
+            "accounts": [],
+            "locales": {},
+            "auth_file": "/auth/audible-metadata.json",
+            "libraforge_accounts_url": lf.public_accounts_url(),
+            "error": str(e),
+            "status": "unreachable",
+            "note": (
+                "Metadata Forge / Chapter Forge need an Audible auth file on LibraForge "
+                "(/auth/audible-metadata.json)."
+            ),
+        }
 
 
 @router.get("/integrations")
@@ -1735,6 +1762,99 @@ async def get_setup_status(_admin: User = Depends(require_admin)):
     from app.services import instance_settings as inst
 
     return await inst.setup_status()
+
+
+class AudibleLoginStartBody(BaseModel):
+    locale: str = "us"
+    flavor_name: str = "Metadata"
+
+
+class AudibleLoginCompleteBody(BaseModel):
+    redirect_url: str
+
+
+class AudibleDisconnectBody(BaseModel):
+    force: bool = False
+
+
+def _lf_http_error(exc: Exception) -> HTTPException:
+    from app.services.libraforge import LibraForgeError
+
+    msg = str(exc)
+    if isinstance(exc, LibraForgeError):
+        if "unreachable" in msg.lower():
+            return HTTPException(status_code=502, detail=msg)
+        if "HTTP 400" in msg:
+            return HTTPException(status_code=400, detail=msg.split(": ", 1)[-1])
+        if "HTTP 404" in msg:
+            return HTTPException(status_code=404, detail=msg.split(": ", 1)[-1])
+        return HTTPException(status_code=502, detail=msg)
+    return HTTPException(status_code=500, detail=msg)
+
+
+@router.get("/audible-auth")
+async def get_audible_auth(_admin: User = Depends(require_admin)):
+    """Audible credential status via LibraForge (auth JSON never leaves LibraForge)."""
+    from app.services import libraforge as lf
+
+    return await lf.audible_auth_summary()
+
+
+@router.post("/audible-auth/login/start")
+async def post_audible_login_start(
+    body: AudibleLoginStartBody,
+    _admin: User = Depends(require_admin),
+):
+    """Start Audible OAuth through LibraForge — returns ``oauth_url`` to open in a browser."""
+    from app.services import libraforge as lf
+    from app.services.libraforge import LibraForgeError
+
+    name = (body.flavor_name or "").strip() or "Metadata"
+    try:
+        data = await lf.auth_login_start(locale=(body.locale or "us").strip(), flavor_name=name)
+    except LibraForgeError as e:
+        raise _lf_http_error(e) from e
+    return {
+        "oauth_url": data.get("oauth_url") or "",
+        "locale": (body.locale or "us").strip(),
+        "flavor_name": name,
+    }
+
+
+@router.post("/audible-auth/login/complete")
+async def post_audible_login_complete(
+    body: AudibleLoginCompleteBody,
+    _admin: User = Depends(require_admin),
+):
+    """Finish Audible OAuth with the Amazon redirect URL; LibraForge writes the auth file."""
+    from app.services import libraforge as lf
+    from app.services.libraforge import LibraForgeError
+
+    redirect = (body.redirect_url or "").strip()
+    if not redirect:
+        raise HTTPException(status_code=400, detail="Paste the final Amazon redirect URL.")
+    try:
+        result = await lf.auth_login_complete(redirect_url=redirect)
+    except LibraForgeError as e:
+        raise _lf_http_error(e) from e
+    summary = await lf.audible_auth_summary()
+    return {"ok": True, "login": result, **summary}
+
+
+@router.post("/audible-auth/disconnect")
+async def post_audible_disconnect(
+    body: AudibleDisconnectBody,
+    _admin: User = Depends(require_admin),
+):
+    """Disconnect the active Audible account on LibraForge (optional force skips deregister)."""
+    from app.services import libraforge as lf
+    from app.services.libraforge import LibraForgeError
+
+    try:
+        await lf.auth_disconnect(force=bool(body.force))
+    except LibraForgeError as e:
+        raise _lf_http_error(e) from e
+    return await lf.audible_auth_summary()
 
 
 @router.post("/setup-validate")

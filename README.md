@@ -74,10 +74,10 @@ Search books across Google Books, Open Library, Hardcover, NYT, and ISBNdb. Find
 
 ### Admin
 - Left-nav console grouped into **Operations**, **Library**, and **System** (legacy `?tab=` aliases still remap)
-- First-run setup wizard at `/admin/setup` (libraries, pipelines, debrid, staging checklist, catalog, APK, scraper)
+- First-run setup wizard at `/admin/setup` (libraries, Audible metadata login, indexers, debrid, staging checklist, catalog, APK, scraper)
 - **Operations**: Overview (health probes, Scan ABS & clean orphans, Open LibraForge), Requests, Users
 - **Library**: Discovery (scraper enable/run, RSS vs deep-crawl, debrid refresh, catalog relink), Catalog (API keys + Open Library build/update/schedule)
-- **System**: Pipelines (LibraForge / ebook toggles and scores), Integrations (debrid, VPN, OpenRouter, secrets), Settings (core, libraries, indexers, storage paths)
+- **System**: Pipelines (LibraForge / ebook toggles and scores), Integrations (Audible auth, VPN, OpenRouter, catalog secrets), Settings (core, libraries, indexers, storage paths)
 - All Requests: Requested by, cover → store, staging browser, Quick Review / Re-run / reject; M4B badge **Queued for M4B** vs **Converting M4B**
 - Push notifications (Disable → Enable to refresh a stuck browser subscription)
 - RSS-only scraper defaults (Pi-friendly); optional high-usage FlareSolverr crawls
@@ -272,10 +272,11 @@ Internal URLs used by the app container (written by installers): `http://audiobo
    - Only when `GET /api/auth/setup-required` reports `setup_required: true` (user count is 0).  
    - Reusing an existing `data/app.db` with users skips this step; delete `data/app.db` (+ `-wal`/`-shm`) for a clean first-run.  
 2. **Onboarding** → create your library (name + debrid keys). That generates the invite link.  
-3. **`/admin/setup`** — with bundled-media, Stack shows **Using bundled stack** (keys already synced); otherwise enter external ABS/Kavita/LF. Then indexers, debrid (TorBox optional), staging checklist, catalog APIs, Android APK repo, scraper mode  
+3. **`/admin/setup`** — with bundled-media, Stack shows **Using bundled stack** (keys already synced); otherwise enter external ABS/Kavita/LF. Then **Audible account** (optional but needed for Metadata/Chapter Forge — Sign in to Audible via LibraForge OAuth; auth file stays in `libraforge-auth/`), indexers, debrid (TorBox optional), staging checklist, catalog APIs, Android APK repo, scraper mode  
 4. Confirm folder conventions: ABS ignores `.unorganized`; Kavita excludes `unorganized` (bundled bootstrap sets Kavita exclude patterns)  
 5. Share the **invite link** from Settings (`/join/CODE`). Friends open it (Android app if installed, otherwise the site), set username/password + offline PIN, and join — no approval step.  
-6. Anytime later use the Admin left-nav: **Overview** / **Requests** / **Users**, **Discovery** / **Catalog** (Open Library build + schedule), **Pipelines**, **Integrations** (optional OpenRouter LLM assist — off by default: Metadata Forge / ebook identify retry, multi-book split, file prune, ASIN recovery; shows per-key credit usage), and **Settings**
+6. Anytime later use the Admin left-nav: **Overview** / **Requests** / **Users**, **Discovery** / **Catalog** (Open Library build + schedule), **Pipelines**, **Integrations** (Audible re-auth; optional OpenRouter LLM assist — off by default: Metadata Forge / ebook identify retry, multi-book split, file prune, ASIN recovery; shows per-key credit usage), and **Settings**  
+   See [docs/libraforge.md](docs/libraforge.md) for Audible auth details.
 
 ### Media mounts
 

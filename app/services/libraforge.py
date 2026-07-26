@@ -57,6 +57,31 @@ def public_chaptering_url() -> str:
     return f"{public}/forge#chaptering"
 
 
+def public_accounts_url() -> str:
+    """LibraForge Settings → Accounts (browser OAuth UI)."""
+    public = (settings.libraforge_url or "").strip().rstrip("/")
+    if not public:
+        return ""
+    return f"{public}/settings#accounts"
+
+
+def _error_detail(resp: httpx.Response) -> str:
+    text = (resp.text or "").strip()
+    if not text:
+        return f"HTTP {resp.status_code}"
+    try:
+        data = resp.json()
+    except Exception:
+        return text[:800]
+    if isinstance(data, dict):
+        detail = data.get("detail")
+        if isinstance(detail, dict):
+            return str(detail.get("message") or detail)[:800]
+        if detail is not None:
+            return str(detail)[:800]
+    return text[:800]
+
+
 async def _request(
     method: str,
     path: str,
@@ -71,12 +96,107 @@ async def _request(
     except httpx.HTTPError as e:
         raise LibraForgeError(f"LibraForge unreachable ({path}): {e}") from e
     if resp.status_code >= 400:
-        detail = (resp.text or "")[:800]
-        raise LibraForgeError(f"LibraForge {method} {path} â†’ HTTP {resp.status_code}: {detail}")
+        raise LibraForgeError(
+            f"LibraForge {method} {path} → HTTP {resp.status_code}: {_error_detail(resp)}"
+        )
     if not resp.content:
         return {}
     data = resp.json()
     return data if isinstance(data, dict) else {"data": data}
+
+
+async def auth_status() -> dict[str, Any]:
+    """Probe LibraForge Audible auth file status (no secrets returned)."""
+    return await _request("GET", "/api/auth/status", timeout=15.0)
+
+
+async def auth_accounts() -> dict[str, Any]:
+    return await _request("GET", "/api/auth/accounts", timeout=15.0)
+
+
+async def auth_locales() -> dict[str, Any]:
+    return await _request("GET", "/api/auth/locales", timeout=15.0)
+
+
+async def auth_login_start(*, locale: str = "us", flavor_name: str) -> dict[str, Any]:
+    """Start Audible OAuth — returns ``oauth_url`` for the admin to open."""
+    return await _request(
+        "POST",
+        "/api/auth/login/start",
+        json_body={"locale": locale, "flavor_name": flavor_name},
+        timeout=30.0,
+    )
+
+
+async def auth_login_complete(*, redirect_url: str) -> dict[str, Any]:
+    """Finish Audible OAuth with the Amazon redirect URL; writes auth JSON on LibraForge."""
+    return await _request(
+        "POST",
+        "/api/auth/login/complete",
+        json_body={"redirect_url": redirect_url},
+        timeout=60.0,
+    )
+
+
+async def auth_disconnect(*, force: bool = False) -> dict[str, Any]:
+    return await _request(
+        "POST",
+        "/api/auth/disconnect",
+        json_body={"force": force},
+        timeout=30.0,
+    )
+
+
+async def audible_auth_summary() -> dict[str, Any]:
+    """Admin-facing Audible credential status (proxied from LibraForge).
+
+    Credentials stay in LibraForge's mounted ``/auth/audible-metadata.json`` —
+    Library Site never stores the JSON.
+    """
+    summary: dict[str, Any] = {
+        "configured": False,
+        "reachable": False,
+        "auth_ok": False,
+        "active_name": "",
+        "activation_bytes_set": False,
+        "accounts": [],
+        "locales": {},
+        "auth_file": "/auth/audible-metadata.json",
+        "libraforge_accounts_url": public_accounts_url(),
+        "error": "",
+        "status": "not_configured",
+        "note": (
+            "Metadata Forge / Chapter Forge need an unencrypted Audible auth file at "
+            "LibraForge /auth/audible-metadata.json (host: libraforge-auth/). "
+            "Prefer a dedicated Audible account for metadata lookups."
+        ),
+    }
+    try:
+        status = await auth_status()
+        summary["reachable"] = True
+        summary["auth_ok"] = bool(status.get("auth_ok"))
+        summary["configured"] = bool(status.get("auth_ok"))
+        summary["active_name"] = str(status.get("active_name") or "")
+        summary["activation_bytes_set"] = bool(status.get("activation_bytes_set"))
+        summary["auth_file"] = str(status.get("auth_file") or summary["auth_file"])
+        try:
+            accounts = await auth_accounts()
+            summary["accounts"] = accounts.get("accounts") or []
+        except LibraForgeError:
+            summary["accounts"] = []
+        try:
+            locales = await auth_locales()
+            summary["locales"] = locales.get("locales") or {}
+        except LibraForgeError:
+            summary["locales"] = {}
+        if summary["configured"]:
+            summary["status"] = "configured"
+        else:
+            summary["status"] = "not_configured"
+    except LibraForgeError as e:
+        summary["error"] = str(e)
+        summary["status"] = "unreachable"
+    return summary
 
 
 async def get_scripts() -> dict[str, Any]:

@@ -154,9 +154,11 @@ async def _enrich_items_via_hardcover(
     concurrency: int = 8,
     budget_seconds: float = _ENRICH_BUDGET_SECONDS,
 ) -> list[dict]:
-    """Enrich library items with Hardcover *genres* only (taxonomy-mapped).
+    """Optionally fill *empty* genres from Hardcover (taxonomy-mapped).
 
-    Author and series stay on local ABS/Kavita/PC metadata — never overwritten.
+    Author, series, sequence, and any existing local genres stay on ABS/Kavita/PC
+    metadata — never overwritten. HC genre taxonomy is often wrong (Farseer→Romance,
+    DCC→Comedy), so it only fills when local genres normalized to nothing.
     Fail-open: any HC error/timeout returns the original items unchanged (or
     whatever finished before the budget). Never raises into collection handlers.
     """
@@ -170,6 +172,21 @@ async def _enrich_items_via_hardcover(
             title = (item.get(title_key) or "").strip()
             if not title:
                 return item
+            # Prefer already-normalized local genres; junk-only (Audiobook) → empty.
+            local_genres = _normalize_item_genres(item.get("genres") or [])
+            if not local_genres:
+                singular = (item.get("genre") or "").strip()
+                mapped = _map_to_toplevel(singular) if singular else None
+                if mapped:
+                    local_genres = [mapped]
+            if local_genres:
+                # Good local genres — never overwrite with Hardcover taxonomy.
+                if local_genres != (item.get("genres") or []):
+                    out = {**item, "genres": local_genres}
+                    if "genre" in item:
+                        out["genre"] = local_genres[0]
+                    return out
+                return item
             author = (item.get(author_key) or "").strip()
             hint = _series_hint_from_item(item)
             async with sem:
@@ -182,7 +199,6 @@ async def _enrich_items_via_hardcover(
             hc_genres = _normalize_item_genres(hc.get("genres") or [])
             if hc_genres:
                 out["genres"] = hc_genres
-                # Personal Collection uses singular genre for filters/UI.
                 if "genre" in item:
                     out["genre"] = hc_genres[0]
             return out
@@ -804,61 +820,58 @@ async def abs_item_detail(
     item_id: str,
     _user: User = Depends(get_current_user),
 ):
-    """Full metadata for one ABS item — powers the library book detail page."""
+    """Full metadata for one ABS item — powers the library book detail page.
+
+    Author / series / sequence / genres come from ABS (file / LibraForge) first.
+    Hardcover may fill only empty genres — never replaces local series or author.
+    """
     item = await audiobookshelf.get_library_item(item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
-    media = item.get("media", {})
-    meta = media.get("metadata", {})
-    series_list = meta.get("series", [])
-    if isinstance(series_list, dict):
-        series_list = [series_list]
-    title = meta.get("title") or ""
-    author = meta.get("authorName") or ""
-    abs_genres = _normalize_item_genres(meta.get("genres") or [])
-    abs_series = [
-        {"id": s.get("id", ""), "name": s.get("name", ""), "sequence": s.get("sequence", "")}
-        for s in series_list
-        if (s.get("name") or "").strip() and not is_junk_series_hint(s.get("name") or "")
-    ]
-    series_hint = ""
-    if abs_series:
-        series_hint = abs_series[0]["name"]
+    # Reuse collection normalizer so seriesName wins over mismatched series[].
+    normalized = audiobookshelf._normalize_abs_item(item)
+    title = normalized.get("title") or ""
+    author = (normalized.get("author") or "").strip()
+    abs_genres = _normalize_item_genres(normalized.get("genres") or [])
+    sname = (normalized.get("seriesName") or "").strip()
+    seq = str(normalized.get("sequence") or "").strip()
+    if sname:
+        out_series = [{"id": "", "name": sname, "sequence": seq}]
     else:
-        inferred = library_series_from_title(title)
-        if inferred and not is_junk_series_hint(inferred[0]):
-            series_hint = inferred[0]
+        out_series = [
+            s for s in (normalized.get("series") or [])
+            if (s.get("name") or "").strip() and not is_junk_series_hint(s.get("name") or "")
+        ]
 
-    try:
-        hc = await hardcover.match_library_book(
-            title=title, author=author, series_hint=series_hint,
-        )
-    except Exception:
-        logger.debug("Hardcover match failed for ABS item %s", item_id, exc_info=True)
-        hc = {}
+    genres = abs_genres
+    if not genres:
+        try:
+            hc = await hardcover.match_library_book(
+                title=title, author=author, series_hint=sname,
+            )
+            hc_genres = _normalize_item_genres((hc or {}).get("genres") or [])
+            if hc_genres:
+                genres = hc_genres
+        except Exception:
+            logger.debug("Hardcover match failed for ABS item %s", item_id, exc_info=True)
 
-    hc_author = (hc.get("author") or "").strip()
-    hc_genres = _normalize_item_genres(hc.get("genres") or [])
-    hc_series_name = (hc.get("seriesName") or "").strip()
-    hc_seq = str(hc.get("sequence") or "").strip()
-    if hc_series_name and not is_junk_series_hint(hc_series_name):
-        out_series = [{"id": "", "name": hc_series_name, "sequence": hc_seq}]
-    else:
-        out_series = abs_series
-
+    raw_meta = (item.get("media") or {}).get("metadata") or {}
     return {
-        "itemId": item.get("id", ""),
+        "itemId": item.get("id", "") or normalized.get("itemId", ""),
         "title": title,
-        "subtitle": meta.get("subtitle") or "",
-        "author": hc_author or author,
-        "narrator": meta.get("narratorName") or "",
-        "description": meta.get("description") or "",
-        "publisher": meta.get("publisher") or "",
-        "publishedYear": meta.get("publishedYear") or "",
-        "genres": hc_genres or abs_genres,
+        "subtitle": normalized.get("subtitle") or "",
+        "author": author,
+        "narrator": normalized.get("narrator") or "",
+        "description": normalized.get("description") or "",
+        "publisher": raw_meta.get("publisher") or "",
+        "publishedYear": raw_meta.get("publishedYear") or "",
+        "genres": genres,
         "series": out_series,
-        "duration": media.get("duration", 0) or 0,
-        "numTracks": media.get("numTracks", 0) or media.get("numAudioFiles", 0) or 0,
+        "seriesName": sname,
+        "sequence": seq,
+        "asin": normalized.get("asin") or "",
+        "duration": normalized.get("duration") or 0,
+        "numTracks": normalized.get("numTracks") or 0,
         "coverUrl": f"/api/stream/abs/proxy/cover/{item_id}",
     }
 
@@ -1034,6 +1047,45 @@ async def kavita_item_detail(
 
 
 
+def _search_tokens(q: str) -> list[str]:
+    """Split a library search query into casefolded tokens (drop empties)."""
+    return [t for t in re.split(r"\s+", (q or "").strip().casefold()) if t]
+
+
+def _metadata_search_blob(item: dict) -> str:
+    """Join searchable library metadata fields into one casefolded haystack."""
+    parts: list[str] = []
+    for key in (
+        "title", "subtitle", "author", "narrator", "seriesName", "asin", "description",
+        "genre",
+    ):
+        val = item.get(key)
+        if val:
+            parts.append(str(val))
+    for g in item.get("genres") or []:
+        if isinstance(g, str) and g.strip():
+            parts.append(g)
+        elif isinstance(g, dict):
+            label = g.get("name") or g.get("title") or g.get("tag") or ""
+            if label:
+                parts.append(str(label))
+    for s in item.get("series") or []:
+        if isinstance(s, dict) and s.get("name"):
+            parts.append(str(s["name"]))
+        elif isinstance(s, str) and s.strip():
+            parts.append(s)
+    # Snippet-sized description only (avoid huge payloads dominating match cost).
+    return " ".join(parts).casefold()
+
+
+def _tokens_match_metadata(item: dict, tokens: list[str]) -> bool:
+    """True when every query token appears somewhere in the item's metadata blob."""
+    if not tokens:
+        return False
+    blob = _metadata_search_blob(item)
+    return all(t in blob for t in tokens)
+
+
 @router.get("/search")
 async def search_library_unified(
     q: str = Query("", min_length=1),
@@ -1041,12 +1093,16 @@ async def search_library_unified(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Search across ABS, Kavita ebooks, and user's RD streaming library."""
+    """Search across ABS, Kavita ebooks, and user's RD streaming library.
+
+    Matches tokenized query against title, author, series, narrator, genres,
+    ASIN, subtitle, and description snippets (case-insensitive).
+    """
     hidden_titles = await _get_private_titles_for_others(user.id, db)
     results = []
     seen_abs_ids: set[str] = set()
     seen_kavita_ids: set[int] = set()
-    q_lower = q.lower()
+    tokens = _search_tokens(q)
 
     include_audiobooks = media in ("all", "audiobooks")
     include_ebooks = media in ("all", "ebooks")
@@ -1071,79 +1127,114 @@ async def search_library_unified(
             iid = item.get("itemId", "")
             if iid in seen_abs_ids:
                 continue
-            author = item.get("author", "")
             title = item.get("title", "")
             if _is_hidden(title, hidden_titles):
                 continue
-            if q_lower in author.lower() or q_lower in title.lower():
-                seen_abs_ids.add(iid)
-                results.append({
-                    "title": title,
-                    "author": author,
-                    "coverUrl": item.get("coverUrl", ""),
-                    "source": "abs",
-                    "itemId": iid,
-                })
+            if not _tokens_match_metadata(item, tokens):
+                continue
+            seen_abs_ids.add(iid)
+            results.append({
+                "title": title,
+                "author": item.get("author", ""),
+                "coverUrl": item.get("coverUrl", ""),
+                "source": "abs",
+                "itemId": iid,
+            })
 
     if include_ebooks:
-        kavita_series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS)
-        for s in kavita_series:
-            name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
-            if not name or _is_hidden(name, hidden_titles):
-                continue
-            author = (s.get("authors") or [{}])[0].get("name", "") if s.get("authors") else ""
-            if q_lower not in name.lower() and (not author or q_lower not in author.lower()):
-                continue
-            sid = s.get("id")
-            if sid in seen_kavita_ids:
-                continue
-            seen_kavita_ids.add(sid)
-            volumes = await kavita.get_series_volumes(sid)
-            book_num = kavita_ebook_match._book_number_from_text(name)
-            chapter_id = kavita_ebook_match._pick_chapter_id(volumes, book_num)
-            volume_id: int | None = None
-            for vol in volumes:
-                chapters = vol.get("chapters", [])
-                if chapters and chapters[0].get("id") == chapter_id:
-                    volume_id = vol.get("id")
-                    break
-                if chapter_id is None and chapters:
-                    chapter_id = chapters[0].get("id")
-                    volume_id = vol.get("id")
-                    break
-            author = (s.get("authors") or [{}])[0].get("name", "") if s.get("authors") else ""
-            cover_url = f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else ""
-            if cover_url and volume_id:
-                cover_url += f"&volumeId={volume_id}"
-            if cover_url and chapter_id:
-                cover_url += f"&chapterId={chapter_id}"
-            results.append({
-                "title": name,
-                "author": author,
-                "coverUrl": cover_url,
-                "source": "kavita",
-                "seriesId": sid,
-                "chapterId": chapter_id,
-            })
+        # Prefer collection items (seriesName / genres already stamped).
+        try:
+            coll = await kavita_collection(user=user, db=db)
+            ebook_items = coll.get("items") or []
+        except Exception:
+            logger.debug("Kavita collection for search failed; falling back", exc_info=True)
+            ebook_items = []
+
+        if ebook_items:
+            for item in ebook_items:
+                name = item.get("title") or ""
+                if not name or _is_hidden(name, hidden_titles):
+                    continue
+                sid = item.get("seriesId")
+                if sid in seen_kavita_ids:
+                    continue
+                if not _tokens_match_metadata(item, tokens):
+                    continue
+                seen_kavita_ids.add(sid)
+                results.append({
+                    "title": name,
+                    "author": item.get("author", ""),
+                    "coverUrl": item.get("coverUrl", ""),
+                    "source": "kavita",
+                    "seriesId": sid,
+                    "chapterId": item.get("chapterId"),
+                })
+        else:
+            kavita_series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS)
+            for s in kavita_series:
+                name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
+                if not name or _is_hidden(name, hidden_titles):
+                    continue
+                author = (s.get("authors") or [{}])[0].get("name", "") if s.get("authors") else ""
+                probe = {"title": name, "author": author}
+                if not _tokens_match_metadata(probe, tokens):
+                    continue
+                sid = s.get("id")
+                if sid in seen_kavita_ids:
+                    continue
+                seen_kavita_ids.add(sid)
+                volumes = await kavita.get_series_volumes(sid)
+                book_num = kavita_ebook_match._book_number_from_text(name)
+                chapter_id = kavita_ebook_match._pick_chapter_id(volumes, book_num)
+                volume_id: int | None = None
+                for vol in volumes:
+                    chapters = vol.get("chapters", [])
+                    if chapters and chapters[0].get("id") == chapter_id:
+                        volume_id = vol.get("id")
+                        break
+                    if chapter_id is None and chapters:
+                        chapter_id = chapters[0].get("id")
+                        volume_id = vol.get("id")
+                        break
+                cover_url = f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else ""
+                if cover_url and volume_id:
+                    cover_url += f"&volumeId={volume_id}"
+                if cover_url and chapter_id:
+                    cover_url += f"&chapterId={chapter_id}"
+                results.append({
+                    "title": name,
+                    "author": author,
+                    "coverUrl": cover_url,
+                    "source": "kavita",
+                    "seriesId": sid,
+                    "chapterId": chapter_id,
+                })
 
     # RD streaming library: include for "all" or "audiobooks"
     if media in ("all", "audiobooks"):
         stmt = (
             select(StreamingLibraryItem)
-            .where(
-                and_(
-                    StreamingLibraryItem.user_id == user.id,
-                    (
-                        StreamingLibraryItem.title.ilike(f"%{q}%")
-                        | StreamingLibraryItem.author.ilike(f"%{q}%")
-                    ),
-                )
-            )
+            .where(StreamingLibraryItem.user_id == user.id)
             .order_by(StreamingLibraryItem.updated_at.desc())
-            .limit(20)
+            .limit(200)
         )
         rows = (await db.execute(stmt)).scalars().all()
+        matched = 0
         for item in rows:
+            if matched >= 20:
+                break
+            probe = {
+                "title": item.title or "",
+                "author": item.author or "",
+                "genre": item.genre or "",
+                "seriesName": getattr(item, "series_name", None) or "",
+            }
+            if not _tokens_match_metadata(probe, tokens):
+                # Fallback substring on title/author for multi-word phrases.
+                ql = q.casefold()
+                if ql not in (item.title or "").casefold() and ql not in (item.author or "").casefold():
+                    continue
+            matched += 1
             results.append({
                 "title": item.title,
                 "author": item.author,

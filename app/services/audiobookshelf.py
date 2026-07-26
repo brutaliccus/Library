@@ -663,7 +663,13 @@ async def health_check() -> bool:
 
 
 def _normalize_abs_item(lib_item: dict, progress_map: dict | None = None) -> dict:
-    """Normalize a raw ABS library item into a consistent dict."""
+    """Normalize a raw ABS library item into a consistent dict.
+
+    Series source of truth: ``metadata.seriesName`` (LibraForge / embedded file
+    metadata) wins over ABS ``series[]`` relations. ABS can link Anne Rice books
+    to the wrong shared series graph (e.g. Mayfair Witches) even when the file
+    correctly says Vampire Chronicles.
+    """
     media = lib_item.get("media", {})
     meta = media.get("metadata", {})
     item_id = lib_item.get("id", "")
@@ -671,6 +677,9 @@ def _normalize_abs_item(lib_item: dict, progress_map: dict | None = None) -> dic
     author = meta.get("authorName") or ""
     genres = meta.get("genres", [])
     narrator = meta.get("narratorName") or ""
+    subtitle = str(meta.get("subtitle") or "").strip()
+    asin = str(meta.get("asin") or "").strip()
+    description = str(meta.get("description") or meta.get("summary") or "").strip()
     series_list = meta.get("series") or []
     if isinstance(series_list, dict):
         series_list = [series_list]
@@ -691,16 +700,20 @@ def _normalize_abs_item(lib_item: dict, progress_map: dict | None = None) -> dic
             "name": name,
             "sequence": seq,
         })
-    series_name = ""
-    sequence = ""
-    if series_info:
+    # Prefer embedded/LibraForge seriesName over ABS series[] relations.
+    series_name, sequence = parse_abs_series_label(meta.get("seriesName"))
+    if series_name:
+        # Keep ABS series id when the relation name matches the file label.
+        matched_id = ""
+        for s in series_info:
+            if (s.get("name") or "").strip().lower() == series_name.lower():
+                matched_id = s.get("id") or ""
+                sequence = sequence or str(s.get("sequence") or "").strip()
+                break
+        series_info = [{"id": matched_id, "name": series_name, "sequence": sequence}]
+    elif series_info:
         series_name = series_info[0]["name"]
         sequence = str(series_info[0].get("sequence") or "")
-    else:
-        # Folder Forge / Audible: series array is null; seriesName is "Series #N".
-        series_name, sequence = parse_abs_series_label(meta.get("seriesName"))
-        if series_name:
-            series_info = [{"id": "", "name": series_name, "sequence": sequence}]
     duration = media.get("duration", 0) or 0
     progress = 0.0
     is_finished = False
@@ -711,8 +724,11 @@ def _normalize_abs_item(lib_item: dict, progress_map: dict | None = None) -> dic
     return {
         "itemId": item_id,
         "title": title,
+        "subtitle": subtitle,
         "author": author,
         "narrator": narrator,
+        "asin": asin,
+        "description": description,
         "coverUrl": f"/api/stream/abs/proxy/cover/{item_id}" if item_id else "",
         "genres": genres,
         "series": series_info,

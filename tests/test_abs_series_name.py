@@ -49,7 +49,28 @@ def test_normalize_abs_item_flattens_series_name_string():
     assert out["series"] == [{"id": "", "name": "Dungeon Crawler Carl", "sequence": "1"}]
 
 
-def test_normalize_abs_item_prefers_series_array():
+def test_normalize_abs_item_prefers_series_name_over_array():
+    """LibraForge/file seriesName wins over mismatched ABS series[] (Mayfair bug)."""
+    raw = {
+        "id": "li_rice",
+        "addedAt": 1,
+        "media": {
+            "duration": 10,
+            "metadata": {
+                "title": "Blood Canticle",
+                "authorName": "Anne Rice",
+                "series": [{"id": "s1", "name": "Lives of the Mayfair Witches", "sequence": "3"}],
+                "seriesName": "The Vampire Chronicles #10",
+            },
+        },
+    }
+    out = _normalize_abs_item(raw)
+    assert out["seriesName"] == "The Vampire Chronicles"
+    assert out["sequence"] == "10"
+    assert out["series"][0]["name"] == "The Vampire Chronicles"
+
+
+def test_normalize_abs_item_falls_back_to_series_array():
     raw = {
         "id": "li_x",
         "addedAt": 1,
@@ -59,7 +80,7 @@ def test_normalize_abs_item_prefers_series_array():
                 "title": "Book",
                 "authorName": "A",
                 "series": [{"id": "s1", "name": "Real Series", "sequence": "2"}],
-                "seriesName": "Ignored #9",
+                "seriesName": "",
             },
         },
     }

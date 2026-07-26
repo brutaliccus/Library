@@ -1068,14 +1068,14 @@ export default function MyLibrary() {
   }: {
     options: { genres: string[]; series: string[]; authors: string[] };
   }) => (
-    <div className="flex flex-nowrap items-center gap-2 mb-4 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden -mx-0.5 px-0.5">
+    <div className="flex w-full flex-nowrap items-center gap-1.5 sm:gap-2 mb-4">
       <CompactFilterSelect
         label="Genre"
         value={filterGenre}
         options={options.genres}
         allLabel="All genres"
         onChange={setFilterGenre}
-        className="w-[7.25rem]"
+        className="flex-1 min-w-0"
       />
       <CompactFilterSelect
         label="Series"
@@ -1083,7 +1083,7 @@ export default function MyLibrary() {
         options={options.series}
         allLabel="All series"
         onChange={setFilterSeries}
-        className="w-[7.25rem]"
+        className="flex-1 min-w-0"
       />
       <CompactFilterSelect
         label="Author"
@@ -1091,7 +1091,7 @@ export default function MyLibrary() {
         options={options.authors}
         allLabel="All authors"
         onChange={setFilterAuthor}
-        className="w-[7.25rem]"
+        className="flex-1 min-w-0"
       />
       {(filterGenre || filterSeries || filterAuthor) && (
         <button
@@ -1110,12 +1110,12 @@ export default function MyLibrary() {
   );
 
   const viewToggle = (view: TabView, setView: (v: TabView) => void) => (
-    <div className="flex gap-1 mb-4 bg-gray-800/30 p-0.5 rounded-md w-fit flex-wrap">
+    <div className="flex w-full gap-1 mb-3 bg-gray-800/30 p-0.5 rounded-md">
       {(["all", "genre", "series", "author"] as const).map((v) => (
         <button
           key={v}
           onClick={() => setView(v)}
-          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+          className={`flex-1 min-w-0 px-1.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-medium transition-colors text-center whitespace-nowrap ${
             view === v ? "bg-gray-700 text-gray-100" : "text-gray-500 hover:text-gray-300"
           }`}
         >
@@ -1381,7 +1381,11 @@ export default function MyLibrary() {
             </button>
           </div>
 
-          {/* Genre / Series / Author filters — above Continue when the tab supports them */}
+          {/* Mode tabs (By Genre/Series/Author) above dropdown filters — full width */}
+          {tab === "abs" && viewToggle(absView, setAbsView)}
+          {tab === "ebooks" && viewToggle(ebookView, setEbookView)}
+          {tab === "streams" && viewToggle(rdView, setRdView)}
+
           {tab === "abs" && <FilterBar options={absFilterOptions} />}
           {tab === "ebooks" && <FilterBar options={ebookFilterOptions} />}
           {tab === "streams" && <FilterBar options={rdFilterOptions} />}
@@ -1391,8 +1395,6 @@ export default function MyLibrary() {
           {/* ABS Tab */}
           {tab === "abs" && (
             <div>
-              {viewToggle(absView, setAbsView)}
-
               {absView === "all" && (
                 <div>
                   {absLoading && !absCollection ? (
@@ -1492,7 +1494,6 @@ export default function MyLibrary() {
           {/* Ebooks Tab */}
           {tab === "ebooks" && (
             <div>
-              {viewToggle(ebookView, setEbookView)}
               {kavitaLoading && !kavitaCollection && <LibraryGridSkeleton />}
               {kavitaError && !kavitaCollection && (
                 <div className="text-center py-16">
@@ -1587,7 +1588,6 @@ export default function MyLibrary() {
           {/* My Collection Tab (personal / streaming collection) */}
           {tab === "streams" && (
             <div>
-              {viewToggle(rdView, setRdView)}
               {rdLoading && !rdLibrary && <LibraryGridSkeleton />}
               {!rdLoading && rdItemsSorted.length === 0 && (
                 <div className="text-center py-16">

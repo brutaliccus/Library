@@ -47,7 +47,7 @@ export default function CompactFilterSelect({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`${label}: ${display}`}
-        className={`flex items-center gap-1 px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200 hover:border-gray-600 transition-colors shrink-0 ${className}`}
+        className={`flex items-center gap-1 px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200 hover:border-gray-600 transition-colors ${className}`}
       >
         <span className="truncate min-w-0 flex-1 text-left">{display}</span>
         <ChevronDown size={12} className="text-gray-500 shrink-0" />

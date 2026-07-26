@@ -33,7 +33,7 @@ const queryClient = new QueryClient({
 // (stale-while-revalidate via each query's staleTime). Never auth tokens or
 // "continue listening" progress — only shelf/collection payloads.
 //
-// v5: origin-scoped keys so multi-library devices never mix catalogs.
+// v6: origin-scoped keys; busts stale Hardcover/Mayfair series shelf snapshots.
 const PERSIST_PREFIXES = [
   "trending-books",
   "new-releases",

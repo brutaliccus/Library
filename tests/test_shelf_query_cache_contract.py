@@ -15,14 +15,15 @@ ADMIN = ROOT / "frontend" / "src" / "pages" / "Admin.tsx"
 LIBRARY_ROUTER = ROOT / "app" / "routers" / "library.py"
 
 
-def test_persist_buster_is_v5_origin_scoped_and_clears_legacy():
+def test_persist_buster_is_v6_origin_scoped_and_clears_legacy():
     main = MAIN.read_text(encoding="utf-8")
     assert "shelfPersistKey" in main
     assert "clearLegacyShelfPersist" in main
     util = UTIL.read_text(encoding="utf-8")
-    assert 'SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v5:"' in util
-    assert "rq-shelf-cache-v4" in util  # legacy clear list
-    assert "rq-shelf-cache-v3" in util
+    assert 'SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v6:"' in util
+    assert "rq-shelf-cache-v5" in util  # legacy clear list
+    assert "rq-shelf-cache-v4" in util
+    assert 'rq-shelf-cache-v5:' in util  # origin-scoped prefix sweep
 
 
 def test_util_exports_orphan_merge_and_soft_refresh_helpers():

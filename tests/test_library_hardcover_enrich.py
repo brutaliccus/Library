@@ -94,14 +94,14 @@ def test_match_library_book_caches_empty():
     asyncio.run(_run())
 
 
-def test_enrich_items_maps_genres_only_keeps_local_author_series():
+def test_enrich_items_fills_empty_genres_keeps_local_author_series():
     async def _run():
         items = [
             {
                 "itemId": "a1",
                 "title": "The Gates of Sleep",
                 "author": "M. Lackey",
-                "genres": ["Audiobook"],
+                "genres": ["Audiobook"],  # junk → empty after normalize → HC may fill
                 "seriesName": "Elemental Masters",
                 "sequence": "3",
                 "series": [{"name": "Elemental Masters", "sequence": "3"}],
@@ -119,7 +119,7 @@ def test_enrich_items_maps_genres_only_keeps_local_author_series():
         ):
             out = await library_router._enrich_items_via_hardcover(items)
         assert len(out) == 1
-        # Genres enriched + taxonomy-mapped
+        # Genres enriched + taxonomy-mapped (local was junk-only)
         assert "Fantasy" in out[0]["genres"]
         assert "Audiobook" not in out[0]["genres"]
         assert "Fiction" not in out[0]["genres"]
@@ -127,6 +127,37 @@ def test_enrich_items_maps_genres_only_keeps_local_author_series():
         assert out[0]["author"] == "M. Lackey"
         assert out[0]["seriesName"] == "Elemental Masters"
         assert out[0]["sequence"] == "3"
+
+    asyncio.run(_run())
+
+
+def test_enrich_items_does_not_overwrite_local_genres():
+    async def _run():
+        items = [
+            {
+                "itemId": "f1",
+                "title": "Assassin's Apprentice",
+                "author": "Robin Hobb",
+                "genres": ["Fantasy"],
+                "seriesName": "The Farseer Trilogy",
+                "sequence": "1",
+            }
+        ]
+        match = {
+            "author": "Wrong",
+            "genres": ["Romance", "Comedy"],
+            "seriesName": "Wrong Series",
+            "sequence": "9",
+            "matchedTitle": "Assassin's Apprentice",
+        }
+        with patch.object(
+            hardcover, "match_library_book", new=AsyncMock(return_value=match)
+        ) as mb:
+            out = await library_router._enrich_items_via_hardcover(items)
+        assert out[0]["genres"] == ["Fantasy"]
+        assert out[0]["author"] == "Robin Hobb"
+        assert out[0]["seriesName"] == "The Farseer Trilogy"
+        mb.assert_not_called()
 
     asyncio.run(_run())
 

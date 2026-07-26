@@ -6,17 +6,19 @@
  * Soft-refresh (invalidate) is the default after scans/adds so phones never
  * blank the shelf for 30s. Hard purge remains for rare ASIN orphan wipes.
  *
- * Persist blobs are origin-scoped (v5) so multi-library devices never mix catalogs.
+ * Persist blobs are origin-scoped (v6) so multi-library devices never mix catalogs.
+ * v6 busts stale Mayfair/Hardcover series snapshots after ABS seriesName preference.
  */
 import type { QueryClient } from "@tanstack/react-query";
 import { currentOrigin } from "../api/libraryRegistry";
 
 /** Base prefix; use shelfPersistKey() for the active origin. */
-export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v5:";
+export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v6:";
 export const SHELF_PERSIST_LEGACY_KEYS = [
   "rq-shelf-cache-v2",
   "rq-shelf-cache-v3",
   "rq-shelf-cache-v4",
+  "rq-shelf-cache-v5",
 ] as const;
 
 /** Origin-scoped localStorage key for shelf query persistence. */
@@ -311,9 +313,9 @@ export function stripCollectionEntriesFromPersist(
   }
 }
 
-/** One-time drop of prior persist generations (ASIN-tainted shelf snapshots). */
+/** One-time drop of prior persist generations (ASIN / wrong-series snapshots). */
 export function clearLegacyShelfPersist(
-  storage: Pick<Storage, "removeItem"> = localStorage,
+  storage: Pick<Storage, "removeItem" | "key" | "length"> = localStorage,
 ): void {
   for (const key of SHELF_PERSIST_LEGACY_KEYS) {
     try {
@@ -321,5 +323,28 @@ export function clearLegacyShelfPersist(
     } catch {
       // ignore
     }
+  }
+  // Origin-scoped generations use `prefix + origin` (e.g. rq-shelf-cache-v5:https://…).
+  const originPrefixes = [
+    "rq-shelf-cache-v5:",
+    "rq-shelf-cache-v4:",
+    "rq-shelf-cache-v3:",
+  ] as const;
+  try {
+    const toRemove: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const k = storage.key(i);
+      if (!k) continue;
+      if (originPrefixes.some((p) => k.startsWith(p))) toRemove.push(k);
+    }
+    for (const k of toRemove) {
+      try {
+        storage.removeItem(k);
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // ignore
   }
 }

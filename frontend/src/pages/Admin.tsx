@@ -111,7 +111,7 @@ export default function AdminPage() {
 
   return (
     <div
-      className={`w-full mx-auto px-4 py-8 min-w-0 overflow-x-hidden ${
+      className={`w-full mx-auto min-w-0 overflow-x-hidden pt-[calc(2rem+env(safe-area-inset-top,0px))] pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))] ${
         activeTab === "config" ? "max-w-6xl" : "max-w-5xl"
       }`}
     >

@@ -179,3 +179,17 @@ select {
 .reader-content blockquote p {
   text-indent: 0 !important;
 }
+
+/* Left drawer open (genre sidebar / config sections) */
+@keyframes drawer-slide-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.drawer-slide-in {
+  animation: drawer-slide-in 0.2s ease-out;
+}

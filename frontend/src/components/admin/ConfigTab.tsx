@@ -7,9 +7,8 @@ import {
   Eye,
   EyeOff,
   Database,
-  Menu,
+  SlidersHorizontal,
   X,
-  ChevronDown,
 } from "lucide-react";
 import api from "../../api/client";
 import { useToast } from "../../contexts/ToastContext";
@@ -115,13 +114,15 @@ export default function ConfigTab() {
   });
 
   useEffect(() => {
-    if (mobileNavOpen) {
-      document.body.style.overflow = "hidden";
-    } else {
-      document.body.style.overflow = "";
-    }
+    if (!mobileNavOpen) return;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
     return () => {
       document.body.style.overflow = "";
+      window.removeEventListener("keydown", onKey);
     };
   }, [mobileNavOpen]);
 
@@ -257,37 +258,17 @@ export default function ConfigTab() {
         </button>
       </div>
 
-      {/* Mobile section picker */}
-      <div className="lg:hidden">
-        <button
-          type="button"
-          onClick={() => setMobileNavOpen(true)}
-          className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg border border-gray-800 bg-gray-900 text-sm text-gray-200"
-        >
-          <span className="inline-flex items-center gap-2 min-w-0">
-            <Menu size={16} className="text-gray-500 shrink-0" />
-            <span className="truncate">{activeLabel}</span>
-            {(dirtyByGroup[activeGroup] || 0) > 0 && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-400">
-                {dirtyByGroup[activeGroup]} unsaved
-              </span>
-            )}
-          </span>
-          <ChevronDown size={16} className="text-gray-500 shrink-0" />
-        </button>
-      </div>
-
       {mobileNavOpen && (
-        <div className="fixed inset-0 z-50 lg:hidden">
+        <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-modal="true" aria-label="Config sections">
           <div className="absolute inset-0 bg-black/60" onClick={() => setMobileNavOpen(false)} />
-          <div className="absolute left-0 top-0 bottom-0 w-72 max-w-[85vw] bg-gray-900 border-r border-gray-800 overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))]">
+          <div className="absolute left-0 top-0 bottom-0 w-72 max-w-[85vw] bg-gray-900 border-r border-gray-800 overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] drawer-slide-in">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-semibold text-gray-200">Config sections</h3>
               <button
                 type="button"
                 onClick={() => setMobileNavOpen(false)}
                 className="p-1 text-gray-500 hover:text-gray-300 transition-colors"
-                aria-label="Close"
+                aria-label="Close sections"
               >
                 <X size={18} />
               </button>
@@ -304,12 +285,28 @@ export default function ConfigTab() {
 
         <div className="flex-1 min-w-0 space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold text-gray-200">{activeLabel}</h3>
+            <div className="flex items-center gap-2 min-w-0">
+              <button
+                type="button"
+                onClick={() => setMobileNavOpen(true)}
+                className="lg:hidden shrink-0 inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
+                title="Config sections"
+                aria-label="Open config sections"
+              >
+                <SlidersHorizontal size={16} />
+                {dirtyKeys.length > 0 && (
+                  <span className="px-1.5 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
+                    {dirtyKeys.length}
+                  </span>
+                )}
+              </button>
+              <h3 className="text-sm font-semibold text-gray-200 truncate">{activeLabel}</h3>
+            </div>
             <button
               type="button"
               onClick={saveGroup}
               disabled={save.isPending || !(dirtyByGroup[activeGroup] > 0)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-200 hover:border-gray-500 disabled:opacity-40"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-200 hover:border-gray-500 disabled:opacity-40 shrink-0"
             >
               <Save size={12} />
               Save section

@@ -95,8 +95,9 @@ class Settings(BaseSettings):
     # + replace-cover (write_mode=overwrite). Below → quarantine for admin review.
     libraforge_min_score: float = 0.70
     libraforge_naming_template: str = "{author}/{series} [{edition}]/{title}/{filename}"
-    # Pi M4B jobs — keep low on Raspberry Pi; Windows :5057 is manual fallback for heavy books.
-    libraforge_m4b_jobs: int = 2
+    # Per-run ffmpeg/m4b-tool worker threads on Pi (not cross-request concurrency).
+    # Cross-request M4B is serialized by app.services.m4b_queue (concurrency 1).
+    libraforge_m4b_jobs: int = 1
     libraforge_metadata_timeout: float = 1800.0
     libraforge_m4b_timeout: float = 7200.0
     libraforge_organizer_timeout: float = 1800.0

@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.database import async_session
 from app.models import DownloadRequest, User
-from app.services import audiobookshelf, downloader, libraforge, push
+from app.services import audiobookshelf, downloader, libraforge, m4b_queue, push
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -1270,126 +1270,153 @@ async def run_forge_after_download(
     if await p._is_cancelled(request_id):
         return
 
-    # --- M4B (Pi LibraForge) ---
+    # --- M4B (Pi LibraForge; global queue concurrency 1) ---
     if start_step == "m4b":
         m4b_produced_new_file = False
         if needs_m4b_conversion(staging):
-            async with async_session() as db:
-                await p._update_status(db, request_id, "m4b_convert", "Converting to M4B on Pi…")
-
-            async def _on_m4b(state: dict[str, Any]) -> None:
-                await _forge_progress(request_id, user_id, "m4b_convert", state)
-
-            # LibraForge M4B only sees top-level audio in input_path (not recursive).
-            source_dirs = m4b_source_dirs(staging)
-            if not source_dirs:
-                source_dirs = [staging]
-            # Dual-format torrents (mp3/ + AAC/): one convert; wipe all sources after.
-            wipe_whole_staging = (
-                len(source_dirs) == 1
-                and source_dirs[0] != staging
-                and source_dirs[0].name.lower() in _FORMAT_DIR_NAMES
-            )
-
-            try:
-                for source_dir in source_dirs:
-                    if await p._is_cancelled(request_id):
-                        return
-                    if not needs_m4b_conversion(source_dir) and source_dir != staging:
-                        continue
-                    input_path = staging_path_for_libraforge(source_dir)
-                    loaded = await libraforge.m4b_load(input_path)
-                    meta = loaded.get("metadata") if isinstance(loaded.get("metadata"), dict) else {}
-                    if not isinstance(meta, dict):
-                        meta = {}
-                    # m4b-tool re-encodes; embedded covers from Metadata Forge are NOT
-                    # copied unless cover_url is passed for --cover. Pull from sidecar.
-                    if not str(meta.get("cover_url") or "").strip():
-                        cover = cover_url_from_staging(staging) or cover_url_from_staging(source_dir)
-                        if cover:
-                            meta = {**meta, "cover_url": cover}
-                    book_title = (
-                        str(meta.get("title") or "").strip()
-                        or clean_catalog_title(title)
-                        or title
-                        or source_dir.name
-                    )
-                    if not meta.get("title"):
-                        meta = {**meta, "title": book_title}
-                    safe_title = downloader.sanitize_filename(book_title) or source_dir.name
-                    # Keep Docker-style paths for LibraForge; output must sit next to
-                    # the parts being merged (LibraForge does not recurse into subdirs).
-                    default_out = f"{input_path.rstrip('/')}/{safe_title}.m4b"
-                    output_path = str(loaded.get("output_path") or default_out)
-                    out_parent = Path(output_path).parent.as_posix().rstrip("/")
-                    if out_parent != input_path.rstrip("/"):
-                        output_path = default_out
-                    logger.info(
-                        "M4B convert request %s: input=%s output=%s",
-                        request_id,
-                        input_path,
-                        output_path,
-                    )
-                    run_id = await libraforge.start_m4b_run(
-                        input_path,
-                        str(output_path),
-                        metadata=meta,
-                        jobs=settings.libraforge_m4b_jobs,
-                    )
-                    await _persist_staging(request_id, staging, run_id=run_id)
-                    report = await libraforge.wait_for_run(
-                        run_id,
-                        poll_seconds=5.0,
-                        timeout_seconds=settings.libraforge_m4b_timeout,
-                        on_progress=_on_m4b,
-                        should_abort=_abort_if_cancelled,
-                    )
-                    if libraforge.run_failed(report):
-                        detail = (
-                            report.get("phase_detail")
-                            or report.get("error")
-                            or report.get("status")
-                        )
-                        # Soft-fail: keep going to Folder Forge with source audio
-                        logger.warning(
-                            "M4B conversion failed for request %s — continuing with source files: %s",
-                            request_id,
-                            detail,
-                        )
-                        async with async_session() as db:
-                            await p._update_status(
-                                db,
-                                request_id,
-                                "m4b_convert",
-                                f"M4B conversion failed on Pi ({detail}); organizing source audio…"[:400],
-                            )
-                    else:
-                        m4b_produced_new_file = True
-                        # Never delete sources until convert succeeded.
-                        if wipe_whole_staging:
-                            _remove_source_audio_after_m4b(staging)
-                        else:
-                            _remove_source_audio_after_m4b(source_dir)
-            except libraforge.LibraForgeError as e:
-                if "cancelled" in str(e).lower():
-                    return
-                # Pi may be underpowered — note tradeoff, don't hard-fail the request
-                logger.warning(
-                    "M4B on Pi failed for request %s (%s). "
-                    "Heavy jobs can use Windows LibraForge :5057 manually.",
+            async def _on_m4b_queued(position: int, active_id: int | None) -> None:
+                detail = m4b_queue.format_queue_detail(position, active_id)
+                async with async_session() as db:
+                    await p._update_status(db, request_id, "m4b_convert", detail)
+                await p._report_progress(
                     request_id,
-                    e,
+                    user_id,
+                    "m4b_convert",
+                    detail,
+                    progress_percent=None,
                 )
+
+            async with m4b_queue.m4b_encode_slot(
+                request_id,
+                on_queued=_on_m4b_queued,
+            ):
+                if await p._is_cancelled(request_id):
+                    return
+
                 async with async_session() as db:
                     await p._update_status(
-                        db,
-                        request_id,
-                        "m4b_convert",
-                        f"M4B skipped (Pi error): {e}"[:400],
+                        db, request_id, "m4b_convert", "Converting to M4B on Pi…"
                     )
-            # Soft-fail must keep source audio; temps from failed merges are still safe to drop.
-            if not m4b_produced_new_file:
-                _cleanup_forge_temps(staging)
+                await p._report_progress(
+                    request_id,
+                    user_id,
+                    "m4b_convert",
+                    "Converting to M4B on Pi…",
+                )
+
+                async def _on_m4b(state: dict[str, Any]) -> None:
+                    await _forge_progress(request_id, user_id, "m4b_convert", state)
+
+                # LibraForge M4B only sees top-level audio in input_path (not recursive).
+                source_dirs = m4b_source_dirs(staging)
+                if not source_dirs:
+                    source_dirs = [staging]
+                # Dual-format torrents (mp3/ + AAC/): one convert; wipe all sources after.
+                wipe_whole_staging = (
+                    len(source_dirs) == 1
+                    and source_dirs[0] != staging
+                    and source_dirs[0].name.lower() in _FORMAT_DIR_NAMES
+                )
+
+                try:
+                    for source_dir in source_dirs:
+                        if await p._is_cancelled(request_id):
+                            return
+                        if not needs_m4b_conversion(source_dir) and source_dir != staging:
+                            continue
+                        input_path = staging_path_for_libraforge(source_dir)
+                        loaded = await libraforge.m4b_load(input_path)
+                        meta = loaded.get("metadata") if isinstance(loaded.get("metadata"), dict) else {}
+                        if not isinstance(meta, dict):
+                            meta = {}
+                        # m4b-tool re-encodes; embedded covers from Metadata Forge are NOT
+                        # copied unless cover_url is passed for --cover. Pull from sidecar.
+                        if not str(meta.get("cover_url") or "").strip():
+                            cover = cover_url_from_staging(staging) or cover_url_from_staging(source_dir)
+                            if cover:
+                                meta = {**meta, "cover_url": cover}
+                        book_title = (
+                            str(meta.get("title") or "").strip()
+                            or clean_catalog_title(title)
+                            or title
+                            or source_dir.name
+                        )
+                        if not meta.get("title"):
+                            meta = {**meta, "title": book_title}
+                        safe_title = downloader.sanitize_filename(book_title) or source_dir.name
+                        # Keep Docker-style paths for LibraForge; output must sit next to
+                        # the parts being merged (LibraForge does not recurse into subdirs).
+                        default_out = f"{input_path.rstrip('/')}/{safe_title}.m4b"
+                        output_path = str(loaded.get("output_path") or default_out)
+                        out_parent = Path(output_path).parent.as_posix().rstrip("/")
+                        if out_parent != input_path.rstrip("/"):
+                            output_path = default_out
+                        logger.info(
+                            "M4B convert request %s: input=%s output=%s",
+                            request_id,
+                            input_path,
+                            output_path,
+                        )
+                        run_id = await libraforge.start_m4b_run(
+                            input_path,
+                            str(output_path),
+                            metadata=meta,
+                            jobs=settings.libraforge_m4b_jobs,
+                        )
+                        await _persist_staging(request_id, staging, run_id=run_id)
+                        report = await libraforge.wait_for_run(
+                            run_id,
+                            poll_seconds=5.0,
+                            timeout_seconds=settings.libraforge_m4b_timeout,
+                            on_progress=_on_m4b,
+                            should_abort=_abort_if_cancelled,
+                        )
+                        if libraforge.run_failed(report):
+                            detail = (
+                                report.get("phase_detail")
+                                or report.get("error")
+                                or report.get("status")
+                            )
+                            # Soft-fail: keep going to Folder Forge with source audio
+                            logger.warning(
+                                "M4B conversion failed for request %s — continuing with source files: %s",
+                                request_id,
+                                detail,
+                            )
+                            async with async_session() as db:
+                                await p._update_status(
+                                    db,
+                                    request_id,
+                                    "m4b_convert",
+                                    f"M4B conversion failed on Pi ({detail}); organizing source audio…"[:400],
+                                )
+                        else:
+                            m4b_produced_new_file = True
+                            # Never delete sources until convert succeeded.
+                            if wipe_whole_staging:
+                                _remove_source_audio_after_m4b(staging)
+                            else:
+                                _remove_source_audio_after_m4b(source_dir)
+                except libraforge.LibraForgeError as e:
+                    if "cancelled" in str(e).lower():
+                        return
+                    # Pi may be underpowered — note tradeoff, don't hard-fail the request
+                    logger.warning(
+                        "M4B on Pi failed for request %s (%s). "
+                        "Heavy jobs can use Windows LibraForge :5057 manually.",
+                        request_id,
+                        e,
+                    )
+                    async with async_session() as db:
+                        await p._update_status(
+                            db,
+                            request_id,
+                            "m4b_convert",
+                            f"M4B skipped (Pi error): {e}"[:400],
+                        )
+                # Soft-fail must keep source audio; temps from failed merges are still safe to drop.
+                if not m4b_produced_new_file:
+                    _cleanup_forge_temps(staging)
         else:
             async with async_session() as db:
                 await p._update_status(db, request_id, "m4b_convert", "Already a single M4B — skipping convert")

@@ -967,7 +967,9 @@ async def post_quick_review_m4b(
 
     req.quarantine_reason = None
     await db.commit()
-    await _update_status(db, request_id, "m4b_convert", "Quick Review: converting to M4B…")
+    await _update_status(
+        db, request_id, "m4b_convert", "Queued for M4B (Quick Review)…"
+    )
     user_id = req.user_id
     title = req.title
     author = req.author
@@ -988,7 +990,7 @@ async def post_quick_review_m4b(
         "ok": True,
         "id": request_id,
         "status": "m4b_convert",
-        "message": "M4B conversion started — progress on the request card",
+        "message": "M4B enqueued — only one convert runs at a time; progress on the request card",
         "pipeline": state,
         "m4b_url": state.get("m4b_url"),
     }

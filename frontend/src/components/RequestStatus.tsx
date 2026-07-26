@@ -41,17 +41,27 @@ interface Props {
   detail?: string | null;
 }
 
+function isM4bQueued(status: string, detail?: string | null): boolean {
+  if (status !== "m4b_convert" || !detail) return false;
+  return /waiting in m4b queue|queued for m4b/i.test(detail);
+}
+
 export default function RequestStatusBadge({ status, detail }: Props) {
   const config = STATUS_CONFIG[status] || STATUS_CONFIG.pending;
   const Icon = config.icon;
+  const queued = isM4bQueued(status, detail);
+  const label = queued ? "Queued for M4B" : config.label;
+  const color = queued
+    ? "text-amber-300 bg-amber-900/30"
+    : config.color;
 
   return (
     <div className="flex items-center gap-2">
       <span
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${config.color}`}
+        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${color}`}
       >
         <Icon size={13} />
-        {config.label}
+        {label}
       </span>
       {detail && status !== "completed" && (
         <span className="text-xs text-gray-500 truncate max-w-[200px]">

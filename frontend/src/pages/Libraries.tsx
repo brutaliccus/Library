@@ -4,7 +4,7 @@ import {
   BookOpen,
   Library,
   LogIn,
-  Plus,
+  LogOut,
   Trash2,
   Pencil,
   Loader2,
@@ -51,8 +51,7 @@ export default function LibrariesPage() {
   );
 
   const [busyOrigin, setBusyOrigin] = useState<string | null>(null);
-  const [showAdd, setShowAdd] = useState(false);
-  const [showSignIn, setShowSignIn] = useState(false);
+  const [showAddOrSignIn, setShowAddOrSignIn] = useState(false);
   const [signInUrl, setSignInUrl] = useState("");
   const [signInEmail, setSignInEmail] = useState("");
   const [signInPassword, setSignInPassword] = useState("");
@@ -250,7 +249,7 @@ export default function LibrariesPage() {
       setInstanceUrl(origin);
       applyApiBaseUrl();
       navigate(`/join/${code}`, { replace: false });
-      setShowAdd(false);
+      setShowAddOrSignIn(false);
       setInviteInput("");
     } catch (err: any) {
       setAddError(err?.message || "Could not open invite");
@@ -277,7 +276,7 @@ export default function LibrariesPage() {
     setSignInBusy(true);
     try {
       await login(signInEmail.trim(), signInPassword, origin);
-      setShowSignIn(false);
+      setShowAddOrSignIn(false);
       if (shouldPromptOfflineUnlockSetup(origin, signInEmail.trim())) {
         setUnlockMode("setup");
         setUnlockAllowSkip(true);
@@ -301,8 +300,8 @@ export default function LibrariesPage() {
   return (
     <div className="min-h-screen bg-gray-950 px-4 py-8 pt-[calc(2rem+env(safe-area-inset-top,0px))] pb-[calc(2rem+env(safe-area-inset-bottom,0px))]">
       <div className="max-w-3xl mx-auto">
-        <div className="flex items-start justify-between gap-4 mb-8">
-          <div>
+        <div className="flex items-start justify-between gap-3 mb-8">
+          <div className="min-w-0">
             <div className="inline-flex items-center gap-2 text-brand-400 mb-2">
               <Library size={22} />
               <span className="text-sm font-medium uppercase tracking-wide">Your libraries</span>
@@ -319,7 +318,22 @@ export default function LibrariesPage() {
               </p>
             )}
           </div>
-          <div className="flex gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setAddError("");
+                setSignInError("");
+                setShowAddOrSignIn(true);
+              }}
+              disabled={!online}
+              className="inline-flex items-center justify-center gap-2 px-4 h-10 rounded-full border border-gray-700 text-gray-200 hover:bg-gray-800 disabled:opacity-40 text-sm font-medium"
+              title="Add or sign in to a library"
+            >
+              <LogIn size={16} />
+              <span className="hidden sm:inline">Add or sign in</span>
+              <span className="sm:hidden">Sign in</span>
+            </button>
             {user ? (
               <button
                 type="button"
@@ -327,9 +341,11 @@ export default function LibrariesPage() {
                   logout();
                   setTick((t) => t + 1);
                 }}
-                className="px-3 py-2 rounded-lg text-sm text-gray-300 border border-gray-700 hover:bg-gray-800"
+                className="p-2.5 rounded-lg text-gray-400 border border-gray-700 hover:bg-gray-800 hover:text-red-400 transition-colors"
+                title="Sign out"
+                aria-label="Sign out"
               >
-                Sign out
+                <LogOut size={18} />
               </button>
             ) : null}
           </div>
@@ -341,32 +357,10 @@ export default function LibrariesPage() {
             <p className="text-gray-200 font-medium">No libraries on this device</p>
             <p className="text-sm text-gray-500 mt-1 mb-5">
               {online
-                ? "Paste an invite link to join as a new member, or sign in if you already have an account on a library (admins don’t need an invite)."
+                ? "Use Add or sign in above — paste an invite link to join, or sign in if you already have an account (admins don’t need an invite)."
                 : "Connect once to join or sign in, then set up offline unlock for next time."}
             </p>
-            <div className="flex flex-wrap justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => setShowAdd(true)}
-                disabled={!online}
-                className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40"
-                title="Add library with invite"
-                aria-label="Add library with invite"
-              >
-                <Plus size={22} />
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowSignIn(true)}
-                disabled={!online}
-                className="inline-flex items-center justify-center gap-2 px-4 h-12 rounded-full border border-gray-700 text-gray-200 hover:bg-gray-800 disabled:opacity-40"
-                title="Sign in to existing library"
-              >
-                <LogIn size={18} />
-                Sign in
-              </button>
-            </div>
-            <p className="text-xs text-gray-600 mt-4">
+            <p className="text-xs text-gray-600">
               Or{" "}
               <Link to="/join" className="text-brand-400 hover:text-brand-300">
                 open join page
@@ -442,95 +436,91 @@ export default function LibrariesPage() {
                 </button>
               );
             })}
-            <button
-              type="button"
-              onClick={() => setShowAdd(true)}
-              disabled={!online}
-              className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-gray-700 aspect-[2/3] text-gray-400 hover:border-brand-600/50 hover:text-brand-300 hover:bg-gray-900/40 transition-colors disabled:opacity-40"
-              title="Add library"
-              aria-label="Add library"
-            >
-              <Plus size={28} />
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowSignIn(true)}
-              disabled={!online}
-              className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-gray-700 aspect-[2/3] text-gray-400 hover:border-brand-600/50 hover:text-brand-300 hover:bg-gray-900/40 transition-colors disabled:opacity-40"
-              title="Sign in to existing library"
-              aria-label="Sign in to existing library"
-            >
-              <LogIn size={28} />
-            </button>
           </div>
         )}
       </div>
 
-      {showSignIn && (
-        <Modal title="Sign in to a library" onClose={() => setShowSignIn(false)}>
-          <p className="text-xs text-gray-400 mb-3">
-            For accounts that already exist on a server (including admins). No invite code needed.
-          </p>
-          {signInError && (
-            <div className="mb-2 p-2 bg-red-900/30 text-red-400 text-xs rounded-lg">{signInError}</div>
-          )}
-          <label className="block text-[11px] text-gray-500 mb-1">Library URL</label>
-          <input
-            value={signInUrl}
-            onChange={(e) => setSignInUrl(e.target.value)}
-            placeholder="https://library.example.com"
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3"
-            autoComplete="url"
-          />
-          <label className="block text-[11px] text-gray-500 mb-1">Email or username</label>
-          <input
-            type="text"
-            value={signInEmail}
-            onChange={(e) => setSignInEmail(e.target.value)}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3"
-            autoComplete="username"
-          />
-          <label className="block text-[11px] text-gray-500 mb-1">Password</label>
-          <input
-            type="password"
-            value={signInPassword}
-            onChange={(e) => setSignInPassword(e.target.value)}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3"
-            autoComplete="current-password"
-          />
-          <button
-            type="button"
-            disabled={signInBusy}
-            onClick={() => void signInExisting()}
-            className="w-full flex items-center justify-center gap-2 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-500 disabled:opacity-50"
-          >
-            <LogIn size={14} />
-            {signInBusy ? "Signing in…" : "Sign in"}
-          </button>
-        </Modal>
-      )}
+      {showAddOrSignIn && (
+        <Modal title="Add or sign in" onClose={() => setShowAddOrSignIn(false)}>
+          <div className="space-y-4">
+            <section>
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+                Invite code
+              </h3>
+              <p className="text-xs text-gray-500 mb-2">
+                Paste a full invite link. The server address is taken from the link.
+              </p>
+              <input
+                value={inviteInput}
+                onChange={(e) => setInviteInput(e.target.value)}
+                placeholder="https://…/join/CODE"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-2"
+                autoFocus
+              />
+              {addError && <p className="text-xs text-red-400 mb-2">{addError}</p>}
+              <button
+                type="button"
+                disabled={addBusy || !online}
+                onClick={() => void addViaInvite()}
+                className="w-full py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-500 disabled:opacity-50"
+              >
+                {addBusy ? "Opening…" : "Continue with invite"}
+              </button>
+            </section>
 
-      {showAdd && (
-        <Modal title="Add library" onClose={() => setShowAdd(false)}>
-          <p className="text-xs text-gray-400 mb-3">
-            Paste a full invite link. The server address is taken from the link — no URL to type.
-          </p>
-          <input
-            value={inviteInput}
-            onChange={(e) => setInviteInput(e.target.value)}
-            placeholder="https://…/join/CODE"
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-2"
-            autoFocus
-          />
-          {addError && <p className="text-xs text-red-400 mb-2">{addError}</p>}
-          <button
-            type="button"
-            disabled={addBusy}
-            onClick={() => void addViaInvite()}
-            className="w-full py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-500 disabled:opacity-50"
-          >
-            {addBusy ? "Opening…" : "Continue"}
-          </button>
+            <div className="flex items-center gap-3 text-[11px] uppercase tracking-wide text-gray-600">
+              <div className="flex-1 h-px bg-gray-800" />
+              or
+              <div className="flex-1 h-px bg-gray-800" />
+            </div>
+
+            <section>
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+                Sign in
+              </h3>
+              <p className="text-xs text-gray-500 mb-2">
+                For accounts that already exist on a server (including admins). No invite needed.
+              </p>
+              {signInError && (
+                <div className="mb-2 p-2 bg-red-900/30 text-red-400 text-xs rounded-lg">
+                  {signInError}
+                </div>
+              )}
+              <label className="block text-[11px] text-gray-500 mb-1">Library URL</label>
+              <input
+                value={signInUrl}
+                onChange={(e) => setSignInUrl(e.target.value)}
+                placeholder="https://library.example.com"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3"
+                autoComplete="url"
+              />
+              <label className="block text-[11px] text-gray-500 mb-1">Email or username</label>
+              <input
+                type="text"
+                value={signInEmail}
+                onChange={(e) => setSignInEmail(e.target.value)}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3"
+                autoComplete="username"
+              />
+              <label className="block text-[11px] text-gray-500 mb-1">Password</label>
+              <input
+                type="password"
+                value={signInPassword}
+                onChange={(e) => setSignInPassword(e.target.value)}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 mb-3"
+                autoComplete="current-password"
+              />
+              <button
+                type="button"
+                disabled={signInBusy || !online}
+                onClick={() => void signInExisting()}
+                className="w-full flex items-center justify-center gap-2 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-500 disabled:opacity-50"
+              >
+                <LogIn size={14} />
+                {signInBusy ? "Signing in…" : "Sign in"}
+              </button>
+            </section>
+          </div>
         </Modal>
       )}
 

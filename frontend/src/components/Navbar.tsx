@@ -3,7 +3,7 @@ import { useAuth } from "../hooks/useAuth";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useState, FormEvent, useEffect } from "react";
-import { BookOpen, Home, List, Shield, LogOut, Search, Headphones, Library, LayoutGrid, SlidersHorizontal, Lock, Unlock, Settings } from "lucide-react";
+import { BookOpen, Store, List, Shield, LogOut, Search, Headphones, Library, LayoutGrid, SlidersHorizontal, Lock, Unlock, Settings } from "lucide-react";
 
 interface Props {
   onGenreToggle?: () => void;
@@ -50,7 +50,7 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
 
   const links = [
     { to: "/libraries", label: "Libraries", icon: LayoutGrid },
-    { to: "/", label: "Home", icon: Home, onlineOnly: true },
+    { to: "/", label: "Store", icon: Store, onlineOnly: true },
     { to: "/my-library", label: "My Library", icon: Library },
     { to: "/requests", label: "My Requests", icon: List, onlineOnly: true },
     ...(user.role === "admin"

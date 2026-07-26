@@ -19,13 +19,15 @@ import {
   Search,
   BookOpen,
   Headphones,
-  Radio,
+  Layers,
   ChevronLeft,
   ChevronRight,
   X,
   RefreshCw,
   Download,
 } from "lucide-react";
+import CompactFilterSelect from "../components/CompactFilterSelect";
+import ContinueShelves from "../components/ContinueShelves";
 import { getProgress, clearProgress } from "../utils/readingProgress";
 import { isBookCached } from "../utils/audioCache";
 import {
@@ -1066,37 +1068,31 @@ export default function MyLibrary() {
   }: {
     options: { genres: string[]; series: string[]; authors: string[] };
   }) => (
-    <div className="flex flex-wrap gap-2 mb-4">
-      <select
+    <div className="flex flex-nowrap items-center gap-2 mb-4 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden -mx-0.5 px-0.5">
+      <CompactFilterSelect
+        label="Genre"
         value={filterGenre}
-        onChange={(e) => setFilterGenre(e.target.value)}
-        className="px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200"
-      >
-        <option value="">All genres</option>
-        {options.genres.map((g) => (
-          <option key={g} value={g}>{g}</option>
-        ))}
-      </select>
-      <select
+        options={options.genres}
+        allLabel="All genres"
+        onChange={setFilterGenre}
+        className="w-[7.25rem]"
+      />
+      <CompactFilterSelect
+        label="Series"
         value={filterSeries}
-        onChange={(e) => setFilterSeries(e.target.value)}
-        className="px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200"
-      >
-        <option value="">All series</option>
-        {options.series.map((s) => (
-          <option key={s} value={s}>{s}</option>
-        ))}
-      </select>
-      <select
+        options={options.series}
+        allLabel="All series"
+        onChange={setFilterSeries}
+        className="w-[7.25rem]"
+      />
+      <CompactFilterSelect
+        label="Author"
         value={filterAuthor}
-        onChange={(e) => setFilterAuthor(e.target.value)}
-        className="px-2.5 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-200 max-w-[200px]"
-      >
-        <option value="">All authors</option>
-        {options.authors.map((a) => (
-          <option key={a} value={a}>{a}</option>
-        ))}
-      </select>
+        options={options.authors}
+        allLabel="All authors"
+        onChange={setFilterAuthor}
+        className="w-[7.25rem]"
+      />
       {(filterGenre || filterSeries || filterAuthor) && (
         <button
           type="button"
@@ -1105,9 +1101,9 @@ export default function MyLibrary() {
             setFilterSeries("");
             setFilterAuthor("");
           }}
-          className="px-2.5 py-1.5 text-xs text-gray-400 hover:text-gray-200"
+          className="px-2 py-1.5 text-xs text-gray-400 hover:text-gray-200 shrink-0"
         >
-          Clear filters
+          Clear
         </button>
       )}
     </div>
@@ -1268,7 +1264,7 @@ export default function MyLibrary() {
                     mediaFilter === m ? "bg-gray-700 text-gray-100" : "text-gray-500 hover:text-gray-300"
                   }`}
                 >
-                  {m === "all" ? "All" : m === "audiobooks" ? "Audiobooks" : "Ebooks"}
+                  {m === "all" ? "All" : m === "audiobooks" ? "Audiobooks" : "eBooks"}
                 </button>
               ))}
             </div>
@@ -1322,16 +1318,16 @@ export default function MyLibrary() {
                       ? "bg-emerald-900/40 text-emerald-400"
                       : r.source === "kavita"
                         ? "bg-amber-900/40 text-amber-400"
-                        : "bg-purple-900/40 text-purple-400"
+                        : "bg-teal-900/40 text-teal-400"
                   }`}>
-                    {r.source === "abs" ? "ABS" : r.source === "kavita" ? "Ebook" : "RD"}
+                    {r.source === "abs" ? "ABS" : r.source === "kavita" ? "eBook" : "Collection"}
                   </span>
                   {r.source === "abs" ? (
                     <Headphones size={16} className="text-gray-600 group-hover:text-emerald-400 transition-colors shrink-0" />
                   ) : r.source === "kavita" ? (
                     <BookOpen size={16} className="text-gray-600 group-hover:text-amber-400 transition-colors shrink-0" />
                   ) : (
-                    <Radio size={16} className="text-gray-600 group-hover:text-purple-400 transition-colors shrink-0" />
+                    <Layers size={16} className="text-gray-600 group-hover:text-brand-400 transition-colors shrink-0" />
                   )}
                 </button>
               ))}
@@ -1342,43 +1338,45 @@ export default function MyLibrary() {
         </div>
       ) : (
         <>
-          {/* Tabs */}
-          <div className="flex gap-1 mb-6 bg-gray-800/50 p-1 rounded-lg w-fit flex-wrap">
+          <ContinueShelves />
+
+          {/* Tabs — single row; scroll horizontally on narrow screens */}
+          <div className="flex flex-nowrap gap-1 mb-6 bg-gray-800/50 p-1 rounded-lg overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-full">
             <button
               onClick={() => setTab("abs")}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
                 tab === "abs" ? "bg-emerald-600 text-white" : "text-gray-400 hover:text-gray-200"
               }`}
             >
               <Headphones size={14} />
-              Audiobookshelf
+              Audiobooks
             </button>
             <button
               onClick={() => setTab("ebooks")}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
                 tab === "ebooks" ? "bg-amber-600 text-white" : "text-gray-400 hover:text-gray-200"
               }`}
             >
               <BookOpen size={14} />
-              Ebooks
+              eBooks
             </button>
             <button
               onClick={() => setTab("streams")}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                tab === "streams" ? "bg-purple-600 text-white" : "text-gray-400 hover:text-gray-200"
+              className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+                tab === "streams" ? "bg-teal-700 text-white" : "text-gray-400 hover:text-gray-200"
               }`}
             >
-              <Radio size={14} />
-              Personal Collection
+              <Layers size={14} />
+              My Collection
             </button>
             <button
               onClick={() => setTab("downloaded")}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
                 tab === "downloaded" ? "bg-brand-600 text-white" : "text-gray-400 hover:text-gray-200"
               }`}
             >
               <Download size={14} />
-              Downloaded
+              Downloads
               {downloadedItems.length > 0 && (
                 <span className="text-[10px] opacity-80">({downloadedItems.length})</span>
               )}
@@ -1583,7 +1581,7 @@ export default function MyLibrary() {
             </div>
           )}
 
-          {/* Personal Collection Tab */}
+          {/* My Collection Tab (personal / streaming collection) */}
           {tab === "streams" && (
             <div>
               {viewToggle(rdView, setRdView)}
@@ -1591,13 +1589,13 @@ export default function MyLibrary() {
               {rdLoading && !rdLibrary && <LibraryGridSkeleton />}
               {!rdLoading && rdItemsSorted.length === 0 && (
                 <div className="text-center py-16">
-                  <BookOpen className="mx-auto mb-4 text-gray-600" size={40} />
+                  <Layers className="mx-auto mb-4 text-gray-600" size={40} />
                   <h3 className="text-base font-semibold text-gray-300 mb-2">No items yet</h3>
                   <p className="text-sm text-gray-500 mb-4">
-                    Books you explicitly add to Personal Collection appear here — streams are not auto-added
+                    Books you explicitly add to My Collection appear here — streams are not auto-added
                   </p>
                   <button onClick={() => navigate("/")} className="px-5 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-500 transition-colors">
-                    Browse Books
+                    Browse Store
                   </button>
                 </div>
               )}
@@ -1741,8 +1739,8 @@ export default function MyLibrary() {
                             {item.source === "abs"
                               ? "Audiobook"
                               : item.source === "ebook"
-                                ? "Ebook"
-                                : "Personal Collection"}
+                                ? "eBook"
+                                : "My Collection"}
                           </p>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0">

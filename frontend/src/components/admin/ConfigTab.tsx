@@ -18,8 +18,15 @@ interface OlCatalogStatus {
   message?: string;
   catalog_ready?: boolean;
   catalog_size_bytes?: number;
+  catalog_mtime?: number | null;
+  catalog_works?: number | null;
+  catalog_authors?: number | null;
+  catalog_isbns?: number | null;
+  catalog_error?: string;
   catalog_path?: string;
   dumps_dir?: string;
+  dumps_present?: boolean;
+  dumps_size_bytes?: number;
   warnings?: string[];
   include_editions?: boolean;
   log_tail?: string;
@@ -493,13 +500,45 @@ function OlCatalogPanel({
         <p>
           Status:{" "}
           <span className="text-gray-200">
-            {loading ? "…" : status?.status || "idle"}
-            {status?.catalog_ready ? " · catalog ready" : ""}
+            {loading
+              ? "…"
+              : status?.catalog_ready
+                ? `${status?.status || "ready"} · catalog ready`
+                : status?.dumps_present
+                  ? `${status?.status || "idle"} · dumps only`
+                  : status?.status || "idle"}
           </span>
         </p>
-        <p>Size: {formatBytes(status?.catalog_size_bytes)}</p>
+        <p>DB size: {formatBytes(status?.catalog_size_bytes)}</p>
+        {(status?.dumps_size_bytes != null || status?.dumps_dir) && (
+          <p>Dumps size: {formatBytes(status?.dumps_size_bytes)}</p>
+        )}
+        {status?.catalog_ready &&
+          (status.catalog_works != null ||
+            status.catalog_authors != null ||
+            status.catalog_isbns != null) && (
+            <p>
+              Rows:{" "}
+              {[
+                status.catalog_works != null
+                  ? `${status.catalog_works.toLocaleString()} works`
+                  : null,
+                status.catalog_authors != null
+                  ? `${status.catalog_authors.toLocaleString()} authors`
+                  : null,
+                status.catalog_isbns != null
+                  ? `${status.catalog_isbns.toLocaleString()} isbns`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          )}
         {status?.catalog_path && <p className="break-all">DB: {status.catalog_path}</p>}
         {status?.dumps_dir && <p className="break-all">Dumps: {status.dumps_dir}</p>}
+        {status?.catalog_error && !status?.catalog_ready && (
+          <p className="text-amber-400/90 break-words">DB error: {status.catalog_error}</p>
+        )}
         {status?.message && <p className="text-gray-500 break-words">Last: {status.message}</p>}
       </div>
 

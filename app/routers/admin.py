@@ -1810,6 +1810,63 @@ def _looks_like_audible_oauth_url(url: str) -> bool:
     return u.count("&") >= 5 and "openid.oa2.code_challenge=" in u
 
 
+def _redirect_has_audible_auth_code(url: str) -> bool:
+    u = (url or "").strip()
+    return "openid.oa2.authorization_code=" in u
+
+
+def _looks_like_audible_oauth_start_url(url: str) -> bool:
+    """True when paste is the login/start URL, not the post-login redirect."""
+    u = (url or "").strip()
+    if not u or _redirect_has_audible_auth_code(u):
+        return False
+    if "/ap/signin" in u:
+        return True
+    if "openid.oa2.code_challenge=" in u:
+        return True
+    return (
+        "openid.oa2.response_type=code" in u
+        and "openid.return_to=" in u
+        and "openid.oa2.authorization_code=" not in u
+    )
+
+
+def _diagnose_audible_redirect_url(url: str) -> str | None:
+    """Return an error detail if the paste cannot complete login, else None."""
+    u = (url or "").strip()
+    if not u:
+        return (
+            "Paste the address-bar URL from the Amazon dog / Page Not Found page "
+            "after you finish signing in."
+        )
+    if _redirect_has_audible_auth_code(u):
+        return None
+    if _looks_like_audible_oauth_start_url(u):
+        return (
+            "That's the Amazon login page URL (it has code_challenge /ap/signin). "
+            "Open it, finish signing in, then copy the address bar from the dog/Page Not Found "
+            "page — it must include openid.oa2.authorization_code."
+        )
+    if "/ap/ext/oauth/2" in u:
+        return (
+            "That looks like Amazon's OAuth endpoint path, not the post-login redirect. "
+            "On the dog/Page Not Found page, Select all in the address bar (Ctrl+A) and copy — "
+            "the URL should be …/ap/maplanding?…&openid.oa2.authorization_code=…"
+        )
+    if "/ap/maplanding" in u:
+        return (
+            "That maplanding URL has no openid.oa2.authorization_code. "
+            "Copy the entire address bar (Ctrl+L, Ctrl+A, Ctrl+C). "
+            "If there is still no authorization_code, retry Sign in in a private/incognito window."
+        )
+    return (
+        "Redirect URL is missing openid.oa2.authorization_code. "
+        "After Amazon sign-in you should land on a Page Not Found / dog page — that is expected. "
+        "Copy the entire address bar (usually …/ap/maplanding?…), not the login link and not "
+        "just the path without query parameters."
+    )
+
+
 @router.post("/audible-auth/login/start")
 async def post_audible_login_start(
     body: AudibleLoginStartBody,
@@ -1856,18 +1913,9 @@ async def post_audible_login_complete(
     from app.services.libraforge import LibraForgeError
 
     redirect = (body.redirect_url or "").strip()
-    if not redirect:
-        raise HTTPException(status_code=400, detail="Paste the final Amazon redirect URL.")
-    if "openid.oa2.authorization_code=" not in redirect:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Redirect URL is missing openid.oa2.authorization_code. "
-                "After Amazon sign-in you should land on a Page Not Found / dog page — that is "
-                "expected. Copy the entire address bar (usually …/ap/maplanding?…), not just the "
-                "path without query parameters."
-            ),
-        )
+    diagnose = _diagnose_audible_redirect_url(redirect)
+    if diagnose:
+        raise HTTPException(status_code=400, detail=diagnose)
     try:
         result = await lf.auth_login_complete(redirect_url=redirect)
     except LibraForgeError as e:

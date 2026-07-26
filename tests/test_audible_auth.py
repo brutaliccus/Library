@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-from app.routers.admin import _looks_like_audible_oauth_url
+from app.routers.admin import (
+    _diagnose_audible_redirect_url,
+    _looks_like_audible_oauth_start_url,
+    _looks_like_audible_oauth_url,
+)
 from app.services.libraforge import (
     LibraForgeError,
     audible_auth_summary,
@@ -23,6 +27,11 @@ _SAMPLE_OAUTH = (
     "&pageId=amzn_audible_ios"
 )
 
+_SAMPLE_REDIRECT = (
+    "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=Atza%7Cexample"
+    "&openid.assoc_handle=amzn_audible_ios_us"
+)
+
 
 def test_looks_like_audible_oauth_url_accepts_full_pkce():
     assert _looks_like_audible_oauth_url(_SAMPLE_OAUTH) is True
@@ -35,6 +44,26 @@ def test_looks_like_audible_oauth_url_rejects_truncated():
     ) is False
     assert _looks_like_audible_oauth_url("https://www.amazon.com/ap/maplanding") is False
     assert _looks_like_audible_oauth_url("") is False
+
+
+def test_diagnose_rejects_oauth_start_url_as_complete_paste():
+    assert _looks_like_audible_oauth_start_url(_SAMPLE_OAUTH) is True
+    msg = _diagnose_audible_redirect_url(_SAMPLE_OAUTH)
+    assert msg is not None
+    assert "login page URL" in msg
+    assert "authorization_code" in msg
+
+
+def test_diagnose_accepts_maplanding_with_auth_code():
+    assert _diagnose_audible_redirect_url(_SAMPLE_REDIRECT) is None
+    assert _looks_like_audible_oauth_start_url(_SAMPLE_REDIRECT) is False
+
+
+def test_diagnose_maplanding_without_code():
+    msg = _diagnose_audible_redirect_url("https://www.amazon.com/ap/maplanding")
+    assert msg is not None
+    assert "maplanding" in msg.lower()
+    assert "authorization_code" in msg
 
 
 def test_public_accounts_url(monkeypatch):

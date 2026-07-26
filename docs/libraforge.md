@@ -90,11 +90,18 @@ Use a **dedicated** Audible account (not your main one). Library Site never stor
 3. Sign in with the Audible/Amazon account. Amazon then lands on a **Page Not Found / dog** page
    (“Sorry! We couldn't find that page”) at `/ap/maplanding` — **that is expected**, not a broken
    login link. Copy the **entire** address-bar URL (must include `openid.oa2.authorization_code=…`).
-4. Paste that URL → **Complete sign-in**.
+   Do **not** paste the login link (`/ap/signin?…&openid.oa2.code_challenge=…`) into Complete —
+   that is only for opening Amazon.
+4. Paste the **dog-page** URL → **Complete sign-in**.
+
+Good paste shape (code redacted):
+`https://www.amazon.com/ap/maplanding?…&openid.oa2.authorization_code=REDACTED`
 
 If Amazon never shows a login form (jumps straight to the dog page without `authorization_code`),
-retry the login URL in a private/incognito window. The admin UI also shows the raw OAuth URL with
-a copy button if the popup was blocked.
+retry the login URL in a private/incognito window. If the address bar shows `/ap/maplanding` with
+no query string, click the bar and Select all (Ctrl+A) before copying — some browsers hide the
+query visually. The admin UI also shows the raw OAuth **login** URL with Open/Copy if the popup
+was blocked; that link is never what Complete expects.
 
 Library Site proxies LibraForge’s `/api/auth/login/*` endpoints; the auth file is written only into the LibraForge `/auth` mount.
 

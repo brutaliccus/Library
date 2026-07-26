@@ -72,10 +72,63 @@ export function redirectHasAuthCode(url: string): boolean {
   try {
     const parsed = new URL(raw);
     if (parsed.searchParams.get("openid.oa2.authorization_code")) return true;
+    // Rare: some browsers put OAuth params in the hash.
+    if (parsed.hash && /openid\.oa2\.authorization_code=/.test(parsed.hash)) return true;
   } catch {
     /* fall through — pasted strings are sometimes messy */
   }
-  return /[?&]openid\.oa2\.authorization_code=/.test(raw);
+  return /[?#&]openid\.oa2\.authorization_code=/.test(raw);
+}
+
+/** True when the paste is the OAuth *start* URL (/ap/signin + code_challenge), not the redirect. */
+export function looksLikeAudibleOauthStartUrl(url: string): boolean {
+  const raw = (url || "").trim();
+  if (!raw || redirectHasAuthCode(raw)) return false;
+  if (/\/ap\/signin/i.test(raw)) return true;
+  if (/openid\.oa2\.code_challenge=/.test(raw)) return true;
+  return (
+    /openid\.oa2\.response_type=code/.test(raw) &&
+    /openid\.return_to=/.test(raw) &&
+    !/openid\.oa2\.authorization_code=/.test(raw)
+  );
+}
+
+/**
+ * Human-readable reason the paste cannot complete login, or null if it looks usable.
+ * Distinguishes “pasted the login link” from “dog page without auth code”.
+ */
+export function diagnoseAudibleRedirectPaste(url: string): string | null {
+  const raw = (url || "").trim();
+  if (!raw) {
+    return "Paste the address-bar URL from the Amazon dog / Page Not Found page after you finish signing in.";
+  }
+  if (redirectHasAuthCode(raw)) return null;
+  if (looksLikeAudibleOauthStartUrl(raw)) {
+    return (
+      "That's the Amazon login page URL (it has code_challenge /ap/signin). " +
+      "Open it, finish signing in, then copy the address bar from the dog/Page Not Found page — " +
+      "it must include openid.oa2.authorization_code."
+    );
+  }
+  if (/\/ap\/ext\/oauth\/2/i.test(raw)) {
+    return (
+      "That looks like Amazon's OAuth endpoint path, not the post-login redirect. " +
+      "On the dog/Page Not Found page, click the address bar, Select all (Ctrl+A), Copy — " +
+      "the URL should be …/ap/maplanding?…&openid.oa2.authorization_code=…"
+    );
+  }
+  if (/\/ap\/maplanding/i.test(raw)) {
+    return (
+      "That maplanding URL has no openid.oa2.authorization_code. " +
+      "Click the address bar and copy the entire URL (Ctrl+L, Ctrl+A, Ctrl+C). " +
+      "If there is still no authorization_code, retry Sign in in a private/incognito window."
+    );
+  }
+  return (
+    "That URL is missing openid.oa2.authorization_code. After Amazon sign-in, copy the entire " +
+    "address bar from the dog/Page Not Found page (usually …/ap/maplanding?…), not the login link " +
+    "and not just the page title."
+  );
 }
 
 /** Open via <a> so the full query string (including &) is preserved. */
@@ -154,11 +207,8 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
   const completeLogin = useMutation({
     mutationFn: async () => {
       const redirect = redirectUrl.trim();
-      if (!redirectHasAuthCode(redirect)) {
-        throw new Error(
-          "That URL is missing openid.oa2.authorization_code. After Amazon sign-in, copy the entire address bar (usually …/ap/maplanding?…), not just the Page Not Found page title.",
-        );
-      }
+      const diagnose = diagnoseAudibleRedirectPaste(redirect);
+      if (diagnose) throw new Error(diagnose);
       const { data: body } = await api.post("/admin/audible-auth/login/complete", {
         redirect_url: redirect,
       });
@@ -209,6 +259,9 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
   const chip = statusLabel(data);
   const locales = data?.locales || { us: "United States" };
   const accountsUrl = data?.libraforge_accounts_url || "";
+  const redirectHint = redirectUrl.trim()
+    ? diagnoseAudibleRedirectPaste(redirectUrl)
+    : null;
 
   return (
     <div className={compact ? "space-y-4" : "space-y-2 text-sm"}>
@@ -258,10 +311,18 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
 
       {data?.reachable && !(data.configured || data.auth_ok) && (
         <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
-          <p className="text-xs text-gray-400">
-            1) Nickname + marketplace → 2) Sign in at Amazon → 3) Paste the{" "}
-            <span className="text-gray-300">full</span> address-bar URL after Amazon finishes.
-          </p>
+          <ol className="text-xs text-gray-400 list-decimal list-inside space-y-1">
+            <li>Nickname + marketplace → <span className="text-gray-300">Sign in to Audible</span></li>
+            <li>
+              Sign in on Amazon. When you see the dog /{" "}
+              <span className="text-gray-300">Page Not Found</span> screen, that is expected.
+            </li>
+            <li>
+              Copy the <span className="text-gray-300">dog-page address bar</span> (must contain{" "}
+              <code className="text-[11px] text-gray-300">openid.oa2.authorization_code</code>) —{" "}
+              <span className="text-amber-200/90">not</span> the login link from step 1.
+            </li>
+          </ol>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <label className="block space-y-1">
               <span className="text-xs text-gray-500">Account nickname</span>
@@ -307,17 +368,22 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
               <p className="text-xs text-amber-100/90 inline-flex gap-2 items-start">
                 <AlertTriangle size={14} className="shrink-0 mt-0.5 text-amber-400" />
                 <span>
-                  After sign-in, Amazon shows a dog /{" "}
-                  <span className="text-amber-50">“Sorry! We couldn&apos;t find that page”</span>{" "}
-                  screen — that is expected (landing on{" "}
-                  <code className="text-[11px] text-gray-300">/ap/maplanding</code>). Copy the{" "}
-                  <span className="text-amber-50">entire</span> address bar URL (must include{" "}
-                  <code className="text-[11px] text-gray-300">openid.oa2.authorization_code</code>
-                  ). If you never see a login form, retry in a private window.
+                  This box is only the <span className="text-amber-50">login link to open</span> — do{" "}
+                  <span className="text-amber-50">not</span> paste it into Complete below. After
+                  Amazon finishes you should land on{" "}
+                  <code className="text-[11px] text-gray-300">/ap/maplanding</code> (dog / Page Not
+                  Found). Copy <span className="text-amber-50">that</span> address bar (Ctrl+L,
+                  Ctrl+A, Ctrl+C). Example shape:{" "}
+                  <code className="text-[11px] text-gray-300 break-all">
+                    https://www.amazon.com/ap/maplanding?…&amp;openid.oa2.authorization_code=REDACTED
+                  </code>
+                  . If you never see a login form, retry in a private window.
                 </span>
               </p>
               <label className="block space-y-1">
-                <span className="text-xs text-gray-500">Amazon login URL</span>
+                <span className="text-xs text-gray-500">
+                  Login link only — open in browser (do not paste into Complete)
+                </span>
                 <textarea
                   readOnly
                   value={oauthUrl}
@@ -332,32 +398,42 @@ export default function AudibleAuthPanel({ compact = false, onStatusChange }: Pr
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs text-brand-300 hover:text-brand-200 border border-brand-900/50 rounded-lg"
                 >
-                  <ExternalLink size={12} /> Open login URL
+                  <ExternalLink size={12} /> Open login link
                 </a>
                 <button
                   type="button"
                   onClick={() => void copyOauthUrl()}
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs text-gray-300 hover:text-white border border-gray-700 rounded-lg"
                 >
-                  <Copy size={12} /> Copy URL
+                  <Copy size={12} /> Copy login link
                 </button>
               </div>
             </div>
           )}
           <label className="block space-y-1">
-            <span className="text-xs text-gray-500">Paste final Amazon redirect URL</span>
+            <span className="text-xs text-gray-500">
+              Complete — paste dog-page address bar (must include authorization_code)
+            </span>
             <textarea
               value={redirectUrl}
               onChange={(e) => setRedirectUrl(e.target.value)}
               rows={compact ? 2 : 3}
               placeholder="https://www.amazon.com/ap/maplanding?…&openid.oa2.authorization_code=…"
-              className="w-full px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-gray-100 text-sm font-mono focus:outline-none focus:border-gray-500"
+              className={`w-full px-3 py-1.5 bg-gray-900 border rounded-lg text-gray-100 text-sm font-mono focus:outline-none ${
+                redirectHint ? "border-amber-700 focus:border-amber-500" : "border-gray-700 focus:border-gray-500"
+              }`}
             />
           </label>
+          {redirectHint && (
+            <p className="text-xs text-amber-200/90 inline-flex gap-2 items-start">
+              <AlertTriangle size={14} className="shrink-0 mt-0.5 text-amber-400" />
+              <span>{redirectHint}</span>
+            </p>
+          )}
           <button
             type="button"
             onClick={() => completeLogin.mutate()}
-            disabled={completeLogin.isPending || !redirectUrl.trim()}
+            disabled={completeLogin.isPending || !redirectUrl.trim() || Boolean(redirectHint)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-500 disabled:opacity-50"
           >
             {completeLogin.isPending && <Loader2 size={14} className="animate-spin" />}

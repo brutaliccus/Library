@@ -141,3 +141,91 @@ def test_status_ready_with_new_dumps_banner(ol_paths):
     assert "has not been built yet" not in status["message"]
     assert "New Open Library dumps available" in status["message"]
     assert "Catalog ready" in status["message"] or "Catalog DB ready" in status["message"]
+
+
+def test_schedule_build_persists_and_cancels(ol_paths):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    when = datetime.now(timezone.utc) + timedelta(hours=6)
+    status = asyncio.run(
+        ol_catalog_build.schedule_build(
+            scheduled_at=when,
+            include_editions=False,
+            force_download=True,
+        )
+    )
+    assert status["scheduled_build_at"]
+    assert status["scheduled_force_download"] is True
+    assert status["schedule_timezone"] == "browser_local"
+
+    # Survives a fresh status read (same JSON file).
+    again = ol_catalog_build.get_status()
+    assert again["scheduled_build_at"] == status["scheduled_build_at"]
+
+    cancelled = asyncio.run(ol_catalog_build.cancel_scheduled_build())
+    assert cancelled["scheduled_build_at"] is None
+
+
+def test_schedule_rejects_past(ol_paths):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    past = datetime.now(timezone.utc) - timedelta(minutes=1)
+    with pytest.raises(ValueError, match="future"):
+        asyncio.run(ol_catalog_build.schedule_build(scheduled_at=past))
+
+
+def test_tick_scheduled_build_starts_when_due(ol_paths, monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    started: list[dict] = []
+
+    async def _fake_start(**kwargs):
+        started.append(kwargs)
+        return {"status": "running", **kwargs}
+
+    notified: list[dict] = []
+
+    async def _notify(payload):
+        notified.append(payload)
+
+    monkeypatch.setattr(ol_catalog_build, "start_build", _fake_start)
+    monkeypatch.setattr("app.services.push.notify_admins_background", _notify)
+
+    due = datetime.now(timezone.utc) - timedelta(seconds=5)
+    asyncio.run(
+        ol_catalog_build.schedule_build(
+            scheduled_at=due + timedelta(hours=1),  # first write a future one
+            force_download=True,
+        )
+    )
+    # Force the on-disk time into the past without going through schedule_build validation.
+    path = ol_paths[0].parent / "ol_catalog_build.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["scheduled_build_at"] = due.isoformat().replace("+00:00", "Z")
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = asyncio.run(ol_catalog_build.tick_scheduled_build())
+    assert result is not None
+    assert started == [
+        {"include_editions": False, "skip_download": False, "force_download": True}
+    ]
+    assert len(notified) == 1
+    assert notified[0]["type"] == "ol_dumps_scheduled_start"
+    assert ol_catalog_build.get_status()["scheduled_build_at"] is None
+
+
+def test_tick_scheduled_build_noop_before_due(ol_paths, monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    async def _boom(**_kwargs):
+        raise AssertionError("should not start")
+
+    monkeypatch.setattr(ol_catalog_build, "start_build", _boom)
+    when = datetime.now(timezone.utc) + timedelta(hours=2)
+    asyncio.run(ol_catalog_build.schedule_build(scheduled_at=when, force_download=True))
+    assert asyncio.run(ol_catalog_build.tick_scheduled_build()) is None
+    assert ol_catalog_build.get_status()["scheduled_build_at"] is not None

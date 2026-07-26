@@ -20,6 +20,7 @@ settings = get_settings()
 
 _shelf_refresh_task: asyncio.Task | None = None
 _ol_dumps_check_task: asyncio.Task | None = None
+_ol_scheduled_build_task: asyncio.Task | None = None
 
 
 async def _daily_shelf_refresh_loop() -> None:
@@ -55,9 +56,22 @@ async def _ol_dumps_check_loop() -> None:
         await asyncio.sleep(24 * 3600)
 
 
+async def _ol_scheduled_build_loop() -> None:
+    """Fire a previously scheduled OL catalog update when due (no auto-schedule)."""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            from app.services import ol_catalog_build
+
+            await ol_catalog_build.tick_scheduled_build()
+        except Exception as e:
+            logger.warning("OL scheduled build loop error: %s", e)
+        await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _shelf_refresh_task, _ol_dumps_check_task
+    global _shelf_refresh_task, _ol_dumps_check_task, _ol_scheduled_build_task
     logger.info("Starting up -- initializing database")
     await init_db()
     try:
@@ -76,11 +90,14 @@ async def lifespan(app: FastAPI):
     start_scraper()
     _shelf_refresh_task = asyncio.create_task(_daily_shelf_refresh_loop())
     _ol_dumps_check_task = asyncio.create_task(_ol_dumps_check_loop())
+    _ol_scheduled_build_task = asyncio.create_task(_ol_scheduled_build_loop())
     yield
     if _shelf_refresh_task and not _shelf_refresh_task.done():
         _shelf_refresh_task.cancel()
     if _ol_dumps_check_task and not _ol_dumps_check_task.done():
         _ol_dumps_check_task.cancel()
+    if _ol_scheduled_build_task and not _ol_scheduled_build_task.done():
+        _ol_scheduled_build_task.cancel()
     stop_scraper()
     logger.info("Shutting down")
 

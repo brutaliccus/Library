@@ -6,7 +6,8 @@ takes a long time — operators must opt in explicitly.
 
 A separate lightweight check (HEAD/etag/size) can flag newer remote dumps and
 notify admins; download + rebuild only start from the Admin "Update catalog"
-button (or an explicit build with force_download).
+button, an explicit build with force_download, or a previously scheduled job
+(never auto-download without one of those).
 """
 from __future__ import annotations
 
@@ -30,9 +31,16 @@ _DEFAULT_IDLE_MESSAGE = "Open Library catalog has not been built yet."
 _MIN_READY_BYTES = 1024 * 1024
 # Don't re-probe openlibrary.org more often than this when Admin opens Config.
 _CHECK_THROTTLE_SECONDS = 6 * 3600
+_SCHEDULE_KEYS = (
+    "scheduled_build_at",
+    "scheduled_include_editions",
+    "scheduled_force_download",
+    "scheduled_created_at",
+)
 _proc: asyncio.subprocess.Process | None = None
 _lock = asyncio.Lock()
 _check_lock = asyncio.Lock()
+_schedule_lock = asyncio.Lock()
 
 
 def _status_path() -> Path:
@@ -67,6 +75,24 @@ def _write_status(data: dict[str, Any]) -> None:
     payload = {**data, "updated_at": time.time()}
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def _parse_scheduled_at(value: str | datetime) -> datetime:
+    """Parse an ISO datetime; naive values are treated as UTC."""
+    if isinstance(value, datetime):
+        when = value
+    else:
+        text = str(value).strip().replace("Z", "+00:00")
+        when = datetime.fromisoformat(text)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc)
+
+
+def _clear_schedule(data: dict[str, Any]) -> dict[str, Any]:
+    for key in _SCHEDULE_KEYS:
+        data.pop(key, None)
+    return data
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -292,6 +318,17 @@ def get_status() -> dict[str, Any]:
     status["new_dumps_available"] = new_dumps
     status["changed_dumps"] = list(status.get("changed_dumps") or [])
     status["dumps_checked_at"] = status.get("dumps_checked_at")
+    scheduled_at = status.get("scheduled_build_at")
+    status["scheduled_build_at"] = scheduled_at or None
+    status["scheduled_include_editions"] = bool(
+        status.get("scheduled_include_editions", False)
+    ) if scheduled_at else False
+    status["scheduled_force_download"] = bool(
+        status.get("scheduled_force_download", True)
+    ) if scheduled_at else False
+    status["scheduled_created_at"] = status.get("scheduled_created_at") if scheduled_at else None
+    # UI uses <input type="datetime-local"> in the admin browser's local timezone.
+    status["schedule_timezone"] = "browser_local"
     status["message"] = _reconcile_message(
         job=status,
         catalog=catalog,
@@ -307,7 +344,8 @@ def get_status() -> dict[str, Any]:
         "The finished catalog database is typically several GB (10-20+ GB if editions are included).",
         "On a Raspberry Pi this often takes many hours. Keep the container running until it finishes.",
         "Dumps download to OPENLIBRARY_HOST_DIR (/openlibrary); the catalog DB is written to the configured path (usually under ./data).",
-        "A daily check notifies admins when newer dumps are published; download only starts from Update catalog.",
+        "A daily check notifies admins when newer dumps are published; download only starts from Update catalog or a scheduled run.",
+        "Schedule times use your browser's local timezone; the server stores them as UTC.",
     ]
     return status
 
@@ -453,6 +491,7 @@ async def _run_build(
         cmd.append("--force-download")
 
     prev = _read_status()
+    # A started build supersedes any pending schedule.
     _write_status(
         {
             "status": "running",
@@ -539,10 +578,16 @@ async def start_build(
 
     ``force_download`` re-fetches dumps (Admin "Update catalog") even when local
     files exist. Normal builds still re-download when remote HEAD differs.
+    Starting a build clears any pending schedule.
     """
     async with _lock:
         if _proc is not None and _proc.returncode is None:
             return get_status()
+        # Drop schedule immediately so a restart mid-start does not double-fire.
+        cur = _read_status()
+        if cur.get("scheduled_build_at"):
+            _clear_schedule(cur)
+            _write_status(cur)
         asyncio.create_task(
             _run_build(
                 include_editions=include_editions,
@@ -553,3 +598,103 @@ async def start_build(
         # Give the task a tick to write running status
         await asyncio.sleep(0.05)
         return get_status()
+
+
+async def schedule_build(
+    *,
+    scheduled_at: str | datetime,
+    include_editions: bool = False,
+    force_download: bool = True,
+) -> dict[str, Any]:
+    """Persist a one-shot catalog update for a future UTC time.
+
+    Survives process restarts via ``ol_catalog_build.json``. Does not start a
+    build until ``tick_scheduled_build`` (or the due time after restart).
+    """
+    when = _parse_scheduled_at(scheduled_at)
+    now = datetime.now(timezone.utc)
+    if when <= now:
+        raise ValueError("Scheduled time must be in the future.")
+
+    async with _schedule_lock:
+        if _proc is not None and _proc.returncode is None:
+            raise ValueError("A catalog build is already running.")
+        cur = _read_status()
+        cur["scheduled_build_at"] = when.isoformat().replace("+00:00", "Z")
+        cur["scheduled_include_editions"] = bool(include_editions)
+        cur["scheduled_force_download"] = bool(force_download)
+        cur["scheduled_created_at"] = time.time()
+        _write_status(cur)
+        logger.info(
+            "OL catalog update scheduled for %s (force_download=%s)",
+            cur["scheduled_build_at"],
+            force_download,
+        )
+        return get_status()
+
+
+async def cancel_scheduled_build() -> dict[str, Any]:
+    """Clear any pending scheduled catalog update."""
+    async with _schedule_lock:
+        cur = _read_status()
+        if not cur.get("scheduled_build_at"):
+            return get_status()
+        _clear_schedule(cur)
+        _write_status(cur)
+        logger.info("OL catalog scheduled update cancelled")
+        return get_status()
+
+
+async def tick_scheduled_build() -> dict[str, Any] | None:
+    """If a scheduled update is due, start the force-download build path.
+
+    Returns status when a build was started, otherwise ``None``.
+    """
+    async with _schedule_lock:
+        cur = _read_status()
+        raw = cur.get("scheduled_build_at")
+        if not raw:
+            return None
+        try:
+            when = _parse_scheduled_at(str(raw))
+        except Exception:
+            logger.warning("Clearing invalid OL catalog schedule: %r", raw)
+            _clear_schedule(cur)
+            _write_status(cur)
+            return None
+        if datetime.now(timezone.utc) < when:
+            return None
+
+        include_editions = bool(cur.get("scheduled_include_editions", False))
+        force_download = bool(cur.get("scheduled_force_download", True))
+        # Clear before starting so a crash mid-start does not loop forever.
+        _clear_schedule(cur)
+        _write_status(cur)
+
+    try:
+        from app.services import push
+
+        await push.notify_admins_background(
+            {
+                "type": "ol_dumps_scheduled_start",
+                "title": "Open Library catalog update starting",
+                "body": (
+                    "The scheduled dump download + catalog rebuild is starting now. "
+                    "Progress is on Admin → Config."
+                ),
+                "url": "/admin?tab=config",
+            }
+        )
+    except Exception:
+        logger.warning("OL scheduled-start admin notify failed", exc_info=True)
+
+    logger.info(
+        "Starting scheduled OL catalog update (force_download=%s, editions=%s)",
+        force_download,
+        include_editions,
+    )
+    return await start_build(
+        include_editions=include_editions,
+        skip_download=False,
+        force_download=force_download,
+    )

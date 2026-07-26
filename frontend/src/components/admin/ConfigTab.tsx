@@ -9,6 +9,7 @@ import {
   Database,
   SlidersHorizontal,
   X,
+  CalendarClock,
 } from "lucide-react";
 import api from "../../api/client";
 import { useToast } from "../../contexts/ToastContext";
@@ -30,9 +31,49 @@ interface OlCatalogStatus {
   new_dumps_available?: boolean;
   changed_dumps?: string[];
   dumps_checked_at?: number | null;
+  scheduled_build_at?: string | null;
+  scheduled_include_editions?: boolean;
+  scheduled_force_download?: boolean;
+  schedule_timezone?: string;
   warnings?: string[];
   include_editions?: boolean;
   log_tail?: string;
+}
+
+/** Format a Date as `YYYY-MM-DDTHH:mm` in the browser's local timezone. */
+function toLocalDatetimeInput(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** Default suggestion: tomorrow at 12:00 AM local. */
+function defaultScheduleLocalValue(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(0, 0, 0, 0);
+  return toLocalDatetimeInput(d);
+}
+
+/** Convert datetime-local value (browser local) → ISO UTC for the API. */
+function localInputToIsoUtc(localValue: string): string {
+  const d = new Date(localValue);
+  if (Number.isNaN(d.getTime())) {
+    throw new Error("Invalid date/time");
+  }
+  return d.toISOString();
+}
+
+function formatScheduledLocal(isoUtc: string): string {
+  const d = new Date(isoUtc);
+  if (Number.isNaN(d.getTime())) return isoUtc;
+  return d.toLocaleString(undefined, {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 interface ConfigSetting {
@@ -81,7 +122,11 @@ export default function ConfigTab() {
       const { data } = await api.get("/admin/ol-catalog", { params: { check: true } });
       return data as OlCatalogStatus;
     },
-    refetchInterval: (q) => (q.state.data?.status === "running" ? 5000 : false),
+    refetchInterval: (q) => {
+      if (q.state.data?.status === "running") return 5000;
+      if (q.state.data?.scheduled_build_at) return 30000;
+      return false;
+    },
   });
 
   const olBuild = useMutation({
@@ -106,6 +151,47 @@ export default function ConfigTab() {
       const msg =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
         "Failed to start catalog build";
+      toast(String(msg), "error");
+    },
+  });
+
+  const olSchedule = useMutation({
+    mutationFn: async (opts: { scheduledAtIso: string; includeEditions?: boolean }) => {
+      const { data } = await api.post("/admin/ol-catalog/schedule", {
+        scheduled_at: opts.scheduledAtIso,
+        include_editions: Boolean(opts.includeEditions),
+        force_download: true,
+      });
+      return data as OlCatalogStatus;
+    },
+    onSuccess: (data) => {
+      void qc.invalidateQueries({ queryKey: ["admin-ol-catalog"] });
+      const when = data.scheduled_build_at
+        ? formatScheduledLocal(data.scheduled_build_at)
+        : "the chosen time";
+      toast(`Catalog update scheduled for ${when} (your local time)`, "success");
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Failed to schedule catalog update";
+      toast(String(msg), "error");
+    },
+  });
+
+  const olCancelSchedule = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.delete("/admin/ol-catalog/schedule");
+      return data as OlCatalogStatus;
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-ol-catalog"] });
+      toast("Scheduled catalog update cancelled", "success");
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Failed to cancel schedule";
       toast(String(msg), "error");
     },
   });
@@ -335,6 +421,7 @@ export default function ConfigTab() {
               status={olQuery.data}
               loading={olQuery.isLoading}
               building={olBuild.isPending || olQuery.data?.status === "running"}
+              scheduling={olSchedule.isPending || olCancelSchedule.isPending}
               onBuild={(includeEditions, forceDownload) => {
                 const editionsNote = includeEditions
                   ? "\n\nIncluding editions makes the download and final DB much larger (often 10-20+ GB)."
@@ -354,6 +441,24 @@ export default function ConfigTab() {
                     "\n\nContinue?"
                 );
                 if (ok) olBuild.mutate({ includeEditions, forceDownload });
+              }}
+              onSchedule={(localValue) => {
+                try {
+                  const iso = localInputToIsoUtc(localValue);
+                  const label = formatScheduledLocal(iso);
+                  const ok = window.confirm(
+                    `Schedule Open Library dump download + catalog rebuild for:\n\n${label}\n\n` +
+                      "(Time is in your browser's local timezone.)\n\n" +
+                      "Nothing downloads until then. Continue?"
+                  );
+                  if (ok) olSchedule.mutate({ scheduledAtIso: iso });
+                } catch {
+                  toast("Pick a valid date and time", "error");
+                }
+              }}
+              onCancelSchedule={() => {
+                const ok = window.confirm("Cancel the scheduled catalog update?");
+                if (ok) olCancelSchedule.mutate();
               }}
             />
           )}
@@ -473,16 +578,35 @@ function OlCatalogPanel({
   status,
   loading,
   building,
+  scheduling,
   onBuild,
+  onSchedule,
+  onCancelSchedule,
 }: {
   status?: OlCatalogStatus;
   loading: boolean;
   building: boolean;
+  scheduling: boolean;
   onBuild: (includeEditions: boolean, forceDownload?: boolean) => void;
+  onSchedule: (localDatetimeValue: string) => void;
+  onCancelSchedule: () => void;
 }) {
   const warnings = status?.warnings || [];
   const newDumps = Boolean(status?.new_dumps_available);
   const changed = (status?.changed_dumps || []).join(", ");
+  const scheduledAt = status?.scheduled_build_at || null;
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [scheduleLocal, setScheduleLocal] = useState(defaultScheduleLocalValue);
+
+  useEffect(() => {
+    if (scheduledAt) {
+      setScheduleLocal(toLocalDatetimeInput(new Date(scheduledAt)));
+      setPickerOpen(false);
+    }
+  }, [scheduledAt]);
+
+  const busy = building || scheduling;
+
   return (
     <div className="p-4 rounded-xl border border-amber-900/50 bg-amber-950/20 space-y-3">
       <div className="flex items-start gap-2">
@@ -498,25 +622,172 @@ function OlCatalogPanel({
       </div>
 
       {newDumps && (
-        <div className="rounded-lg border border-sky-700/50 bg-sky-950/40 p-3 space-y-2">
+        <div className="rounded-lg border border-sky-700/50 bg-sky-950/40 p-3 space-y-3">
           <p className="text-sm font-semibold text-sky-200 inline-flex items-center gap-1.5">
             <AlertTriangle size={14} />
             New Open Library dumps available
           </p>
           <p className="text-xs text-sky-100/80">
             Remote monthly dumps differ from the copies on disk
-            {changed ? ` (${changed})` : ""}. Download and rebuild is manual — use Update catalog
-            below. A daily check only notifies; it never auto-downloads.
+            {changed ? ` (${changed})` : ""}. Download and rebuild only start when you click Update
+            catalog or confirm a schedule — a daily check never auto-downloads.
           </p>
-          <button
-            type="button"
-            disabled={building}
-            onClick={() => onBuild(false, true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-sky-700 text-white text-sm font-medium hover:bg-sky-600 disabled:opacity-40"
-          >
-            <Database size={14} />
-            {building ? "Updating…" : "Update catalog"}
-          </button>
+
+          {scheduledAt && (
+            <div className="rounded-md border border-sky-600/40 bg-sky-900/40 px-3 py-2 space-y-2">
+              <p className="text-xs text-sky-100">
+                Scheduled for{" "}
+                <span className="font-semibold text-white">{formatScheduledLocal(scheduledAt)}</span>
+                <span className="text-sky-200/70"> (your local time)</span>
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setScheduleLocal(toLocalDatetimeInput(new Date(scheduledAt)));
+                    setPickerOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-sky-600/70 text-sky-100 text-sm hover:border-sky-400 disabled:opacity-40 min-h-10"
+                >
+                  <CalendarClock size={14} />
+                  Reschedule
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={onCancelSchedule}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-rose-700/60 text-rose-200 text-sm hover:border-rose-500 disabled:opacity-40 min-h-10"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onBuild(false, true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-sky-700 text-white text-sm font-medium hover:bg-sky-600 disabled:opacity-40 min-h-10"
+            >
+              <Database size={14} />
+              {building ? "Updating…" : "Update catalog"}
+            </button>
+            {!scheduledAt && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setScheduleLocal(defaultScheduleLocalValue());
+                  setPickerOpen((v) => !v);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-sky-600/70 text-sky-100 text-sm font-medium hover:border-sky-400 disabled:opacity-40 min-h-10"
+              >
+                <CalendarClock size={14} />
+                Schedule
+              </button>
+            )}
+          </div>
+
+          {pickerOpen && (
+            <div className="rounded-md border border-sky-700/50 bg-black/30 p-3 space-y-2">
+              <label className="block text-xs text-sky-100/90 space-y-1.5">
+                <span className="font-medium">Start download + rebuild at</span>
+                <input
+                  type="datetime-local"
+                  value={scheduleLocal}
+                  onChange={(e) => setScheduleLocal(e.target.value)}
+                  className="w-full min-h-11 px-3 py-2 rounded-lg bg-gray-950 border border-sky-800/60 text-sky-50 text-sm"
+                />
+              </label>
+              <p className="text-[11px] text-sky-200/60">
+                Uses your browser&apos;s local timezone. The server stores the time in UTC and starts
+                the same force-download path as Update catalog.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={busy || !scheduleLocal}
+                  onClick={() => onSchedule(scheduleLocal)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-sky-600 text-white text-sm font-medium hover:bg-sky-500 disabled:opacity-40 min-h-10"
+                >
+                  Confirm schedule
+                </button>
+                <button
+                  type="button"
+                  disabled={scheduling}
+                  onClick={() => setPickerOpen(false)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-600 text-gray-200 text-sm hover:border-gray-500 disabled:opacity-40 min-h-10"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!newDumps && scheduledAt && (
+        <div className="rounded-lg border border-sky-700/50 bg-sky-950/40 p-3 space-y-2">
+          <p className="text-xs text-sky-100">
+            Catalog update scheduled for{" "}
+            <span className="font-semibold text-white">{formatScheduledLocal(scheduledAt)}</span>
+            <span className="text-sky-200/70"> (your local time)</span>
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setScheduleLocal(toLocalDatetimeInput(new Date(scheduledAt)));
+                setPickerOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-sky-600/70 text-sky-100 text-sm hover:border-sky-400 disabled:opacity-40 min-h-10"
+            >
+              <CalendarClock size={14} />
+              Reschedule
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onCancelSchedule}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-rose-700/60 text-rose-200 text-sm hover:border-rose-500 disabled:opacity-40 min-h-10"
+            >
+              Cancel
+            </button>
+          </div>
+          {pickerOpen && (
+            <div className="rounded-md border border-sky-700/50 bg-black/30 p-3 space-y-2">
+              <label className="block text-xs text-sky-100/90 space-y-1.5">
+                <span className="font-medium">New start time</span>
+                <input
+                  type="datetime-local"
+                  value={scheduleLocal}
+                  onChange={(e) => setScheduleLocal(e.target.value)}
+                  className="w-full min-h-11 px-3 py-2 rounded-lg bg-gray-950 border border-sky-800/60 text-sky-50 text-sm"
+                />
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={busy || !scheduleLocal}
+                  onClick={() => onSchedule(scheduleLocal)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-sky-600 text-white text-sm font-medium hover:bg-sky-500 disabled:opacity-40 min-h-10"
+                >
+                  Confirm schedule
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPickerOpen(false)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-600 text-gray-200 text-sm min-h-10"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -546,12 +817,12 @@ function OlCatalogPanel({
               : status?.catalog_ready
                 ? `${status?.status || "ready"} · catalog ready${
                     newDumps ? " · update available" : ""
-                  }`
+                  }${scheduledAt ? " · scheduled" : ""}`
                 : status?.dumps_present
                   ? `${status?.status || "idle"} · dumps only${
                       newDumps ? " · update available" : ""
-                    }`
-                  : status?.status || "idle"}
+                    }${scheduledAt ? " · scheduled" : ""}`
+                  : `${status?.status || "idle"}${scheduledAt ? " · scheduled" : ""}`}
           </span>
         </p>
         <p>DB size: {formatBytes(status?.catalog_size_bytes)}</p>
@@ -591,9 +862,9 @@ function OlCatalogPanel({
         {!newDumps && status?.catalog_ready && (
           <button
             type="button"
-            disabled={building}
+            disabled={busy}
             onClick={() => onBuild(false, true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-sky-800/60 text-sky-200/90 text-xs hover:border-sky-600 disabled:opacity-40"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-sky-800/60 text-sky-200/90 text-xs hover:border-sky-600 disabled:opacity-40 min-h-10"
             title="Force re-download dumps and rebuild"
           >
             Download &amp; rebuild
@@ -601,18 +872,18 @@ function OlCatalogPanel({
         )}
         <button
           type="button"
-          disabled={building}
+          disabled={busy}
           onClick={() => onBuild(false)}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-700/80 text-white text-sm font-medium hover:bg-amber-600 disabled:opacity-40"
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-700/80 text-white text-sm font-medium hover:bg-amber-600 disabled:opacity-40 min-h-10"
         >
           <Database size={14} />
           {building ? "Building…" : "Generate catalog (recommended)"}
         </button>
         <button
           type="button"
-          disabled={building}
+          disabled={busy}
           onClick={() => onBuild(true)}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-amber-800/60 text-amber-200/90 text-xs hover:border-amber-600 disabled:opacity-40"
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-amber-800/60 text-amber-200/90 text-xs hover:border-amber-600 disabled:opacity-40 min-h-10"
         >
           Generate with editions (very large)
         </button>

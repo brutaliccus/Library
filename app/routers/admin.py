@@ -1777,6 +1777,19 @@ class OlCatalogBuildBody(BaseModel):
     force_download: bool = False
 
 
+class OlCatalogScheduleBody(BaseModel):
+    """Schedule a future force-download catalog update.
+
+    ``scheduled_at`` is ISO-8601. Prefer an explicit offset or ``Z`` (UTC).
+    Naive timestamps are treated as UTC. The Admin UI sends UTC derived from
+    the browser's local ``datetime-local`` value.
+    """
+
+    scheduled_at: str
+    include_editions: bool = False
+    force_download: bool = True
+
+
 @router.post("/ol-catalog/build")
 async def start_ol_catalog_build(
     body: OlCatalogBuildBody | None = None,
@@ -1795,3 +1808,33 @@ async def start_ol_catalog_build(
         skip_download=bool(opts.skip_download),
         force_download=bool(opts.force_download),
     )
+
+
+@router.post("/ol-catalog/schedule")
+async def schedule_ol_catalog_build(
+    body: OlCatalogScheduleBody,
+    _admin: User = Depends(require_admin),
+):
+    """Schedule a one-shot dump download + rebuild for a future time.
+
+    Persisted in ``ol_catalog_build.json`` (survives restarts). Does not run
+    until the due time; cancel with DELETE ``/ol-catalog/schedule``.
+    """
+    from app.services import ol_catalog_build
+
+    try:
+        return await ol_catalog_build.schedule_build(
+            scheduled_at=body.scheduled_at,
+            include_editions=bool(body.include_editions),
+            force_download=bool(body.force_download),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.delete("/ol-catalog/schedule")
+async def cancel_ol_catalog_schedule(_admin: User = Depends(require_admin)):
+    """Cancel a pending scheduled Open Library catalog update."""
+    from app.services import ol_catalog_build
+
+    return await ol_catalog_build.cancel_scheduled_build()

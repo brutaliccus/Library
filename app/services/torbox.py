@@ -25,6 +25,7 @@ so callers that derive filenames from links (audio filtering) keep working.
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import quote, unquote
 
@@ -38,6 +39,17 @@ settings = get_settings()
 BASE_URL = "https://api.torbox.app/v1/api"
 
 PSEUDO_SCHEME = "torbox://"
+
+# Terminal TorBox / qBittorrent states — safe to treat as hard failures.
+# Everything else (downloading, queued, stalled, metaDL, completed, cached, …)
+# is treated as still in progress — never a false-negative failure.
+_HARD_FAIL_STATES = frozenset({
+    "error",
+    "failed",
+    "missingfiles",
+    "dead",
+    "expired",
+})
 
 
 def _headers() -> dict[str, str]:
@@ -216,6 +228,26 @@ async def select_files(torrent_id: str, files: str = "all") -> None:
     return None
 
 
+def map_download_state(download_state: str | None, *, finished: bool) -> str:
+    """Map TorBox ``download_state`` (+ finished flags) to RD-like status.
+
+    downloading / queued / stalled / processing → not failed.
+    Only explicit hard-fail states → ``error``.
+    """
+    if finished:
+        return "downloaded"
+    tb_lower = (download_state or "").strip().lower()
+    compact = tb_lower.replace(" ", "").replace("_", "").replace("-", "")
+
+    if compact in _HARD_FAIL_STATES:
+        return "error"
+    if tb_lower == "queued":
+        return "queued"
+    # stalled (no seeds), metaDL, checkingResumeData, completed, cached, …
+    # and any unknown qBittorrent state: keep waiting (never false-fail)
+    return "downloading"
+
+
 def _normalize_info(raw: dict[str, Any]) -> dict[str, Any]:
     """Map a Torbox mylist entry onto the RD get_torrent_info shape."""
     files = []
@@ -228,18 +260,8 @@ def _normalize_info(raw: dict[str, Any]) -> dict[str, Any]:
         })
 
     finished = bool(raw.get("download_finished")) and bool(raw.get("download_present"))
-    tb_state = (raw.get("download_state") or "").lower()
-    if finished:
-        status = "downloaded"
-    elif tb_state in ("error", "failed"):
-        status = "error"
-    elif "stalled" in tb_state:
-        status = "downloading"
-    elif tb_state in ("downloading", "metadl", "checkingresumedata", "queued", "paused",
-                      "uploading", "completed", "cached", ""):
-        status = "queued" if tb_state == "queued" else "downloading"
-    else:
-        status = "downloading"
+    tb_state = raw.get("download_state") or ""
+    status = map_download_state(tb_state, finished=finished)
 
     progress = raw.get("progress")
     progress_pct = int(float(progress) * 100) if isinstance(progress, (int, float)) and progress <= 1 else int(progress or 0)
@@ -253,6 +275,7 @@ def _normalize_info(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(torrent_id),
         "status": status,
+        "download_state": tb_state,
         "progress": min(progress_pct, 100),
         "speed": raw.get("download_speed") or 0,
         "files": files,
@@ -278,22 +301,43 @@ async def get_torrent_info(torrent_id: str) -> dict[str, Any]:
             payload = payload[0] if payload else None
         if not isinstance(payload, dict):
             raise RuntimeError(f"Torbox torrent {torrent_id} not found")
-        return _normalize_info(payload)
+        info = _normalize_info(payload)
+        logger.info(
+            "Torbox torrent %s status=%s download_state=%r progress=%s",
+            torrent_id,
+            info.get("status"),
+            info.get("download_state") or "",
+            info.get("progress"),
+        )
+        return info
 
 
 async def poll_until_ready(
     torrent_id: str,
-    interval: float = 30,
-    timeout: float = 7200,
+    interval: float = 15,
+    timeout: float = 14400,
+    on_progress: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
+    """Poll until TorBox finishes. Accepts ``on_progress`` like Real-Debrid.
+
+    Non-cached downloads often take a long time — default timeout is 4h.
+    Active/queued/stalled states keep waiting; only hard-fail statuses abort.
+    """
     elapsed = 0.0
     while elapsed < timeout:
         info = await get_torrent_info(torrent_id)
+        if on_progress:
+            result = on_progress(info)
+            if asyncio.iscoroutine(result):
+                await result
         status = info.get("status")
         if status == "downloaded":
             return info
         if status == "error":
-            raise RuntimeError("Torbox torrent failed")
+            raw = info.get("download_state") or status
+            raise RuntimeError(
+                f"Torbox torrent failed with status: error (download_state={raw!r})"
+            )
         await asyncio.sleep(interval)
         elapsed += interval
     raise TimeoutError(f"Torbox torrent {torrent_id} did not complete within {timeout}s")

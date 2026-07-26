@@ -5,6 +5,7 @@ import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import httpx
 from sqlalchemy import select
@@ -40,18 +41,79 @@ def _debrid_progress_detail(
     progress = float(info.get("progress") or 0)
     speed = float(info.get("speed") or 0)
     speed_str = _format_speed(speed)
+    # TorBox raw download_state (e.g. "stalled (no seeds)", "metaDL")
+    raw_state = (info.get("download_state") or "").strip()
+    state_note = f" [{raw_state}]" if raw_state and raw_state.lower() != status else ""
     if status == "downloading":
-        detail = f"{label} downloading… {progress:.0f}%"
+        detail = f"{label} downloading… {progress:.0f}%{state_note}"
         if speed_str:
             detail += f" · {speed_str}"
         return detail, progress, speed
     if status == "queued":
-        return f"Queued on {label}…", 0.0, None
+        return f"Queued on {label}…{state_note}", 0.0, None
     if status == "magnet_conversion":
         return "Converting magnet link…", 0.0, None
     if status == "waiting_files_selection":
         return f"Selecting files on {label}…", 0.0, None
-    return f"{label}: {status}", progress if progress > 0 else None, speed if speed > 0 else None
+    return (
+        f"{label}: {status}{state_note}",
+        progress if progress > 0 else None,
+        speed if speed > 0 else None,
+    )
+
+
+def _is_hard_debrid_failure(exc: BaseException) -> bool:
+    """True only when the provider rejected/never created the torrent.
+
+    Soft/transient errors and in-progress poll failures must NOT trigger
+    Real-Debrid fallback (avoids orphaning an active TorBox download).
+    """
+    if isinstance(exc, TimeoutError):
+        # Timed out while waiting — torrent may still be downloading
+        return False
+    if isinstance(exc, (TypeError, ValueError)):
+        return False
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code if exc.response is not None else 0
+        # Auth / permanent rejection only
+        return code in (401, 403, 404)
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return False
+
+    msg = str(exc).lower()
+    soft_markers = (
+        "429",
+        "rate limit",
+        "timeout",
+        "timed out",
+        "temporarily",
+        "connection",
+        "cancelled",
+    )
+    if any(m in msg for m in soft_markers):
+        return False
+
+    hard_markers = (
+        "magnet_error",
+        "virus",
+        "dead",
+        "expired",
+        "rejected",
+        "unauthorized",
+        "forbidden",
+        "invalid token",
+        "401",
+        "403",
+        "no torrent id",
+        "failed with status: error",
+        "failed with status: magnet_error",
+        "failed with status: virus",
+        "failed with status: dead",
+        "createtorrent failed",
+        "addmagnet failed",
+        "torrent file rejected",
+    )
+    return any(m in msg for m in hard_markers)
 
 
 def _rd_progress_detail(info: dict) -> tuple[str, float | None, float | None]:
@@ -571,6 +633,39 @@ def _write_abs_metadata(book_dir: Path, *, author: str, series: str | None = Non
         logger.warning("Could not write metadata.json in %s: %s", book_dir, e)
 
 
+async def _fetch_torrent_info_with_retry(
+    client: Any,
+    torrent_id: str,
+    label: str,
+    *,
+    attempts: int = 5,
+    delay: float = 2.0,
+) -> dict:
+    """Newly created TorBox torrents can lag briefly in mylist."""
+    last_err: Exception | None = None
+    for i in range(attempts):
+        try:
+            return await client.get_torrent_info(torrent_id)
+        except Exception as e:
+            last_err = e
+            msg = str(e).lower()
+            retryable = "not found" in msg or isinstance(
+                e, (httpx.TimeoutException, httpx.TransportError)
+            )
+            if not retryable or i == attempts - 1:
+                raise
+            logger.info(
+                "%s torrent %s not ready yet (%s); retry %s/%s",
+                label,
+                torrent_id,
+                e,
+                i + 1,
+                attempts,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError(f"{label} torrent {torrent_id} unavailable: {last_err}")
+
+
 async def _resolve_debrid_torrent(
     db: AsyncSession,
     request_id: int,
@@ -596,11 +691,12 @@ async def _resolve_debrid_torrent(
         else:
             result = await client.add_torrent_file(link)
         torrent_id = result["id"]
+        # Persist immediately so a later soft failure cannot orphan + double-download
         await _update_status(
             db,
             request_id,
             "sent_to_rd",
-            f"Sent to {label}",
+            f"Sent to {label} (id={torrent_id})",
             rd_torrent_id=torrent_id,
             debrid_provider=provider,
         )
@@ -612,18 +708,35 @@ async def _resolve_debrid_torrent(
             torrent_id,
         )
 
-    info = await client.get_torrent_info(torrent_id)
+    info = await _fetch_torrent_info_with_retry(client, torrent_id, label)
     status = info.get("status")
+    raw_state = info.get("download_state")
+    if raw_state:
+        logger.info(
+            "Request %s: %s torrent %s status=%s download_state=%r",
+            request_id,
+            label,
+            torrent_id,
+            status,
+            raw_state,
+        )
 
     if status in ("magnet_error", "error", "virus", "dead"):
-        raise RuntimeError(f"{label} torrent failed with status: {status}")
+        detail = f"{label} torrent failed with status: {status}"
+        if raw_state:
+            detail += f" (download_state={raw_state!r})"
+        raise RuntimeError(detail)
 
     if status == "waiting_files_selection":
         await client.select_files(torrent_id)
 
     if status != "downloaded":
         await _update_status(
-            db, request_id, "downloading_rd", f"Waiting for {label} to finish"
+            db,
+            request_id,
+            "downloading_rd",
+            f"Waiting for {label} to finish"
+            + (f" [{raw_state}]" if raw_state else ""),
         )
 
         async def _on_progress(progress_info: dict) -> None:
@@ -639,12 +752,7 @@ async def _resolve_debrid_torrent(
                 progress_speed_bps=speed,
             )
 
-        try:
-            info = await client.poll_until_ready(torrent_id, on_progress=_on_progress)
-        except RuntimeError as e:
-            if "cancelled" in str(e).lower():
-                raise
-            raise
+        info = await client.poll_until_ready(torrent_id, on_progress=_on_progress)
     else:
         logger.info(
             "Request %s: %s torrent already downloaded, skipping poll",
@@ -746,45 +854,65 @@ async def process_download(request_id: int) -> None:
                     if "cancelled" in str(e).lower():
                         return
                     last_err = e
-                    logger.warning(
-                        "Request %s: %s failed (%s)%s",
-                        request_id,
-                        label,
-                        e,
-                        "; trying fallback" if idx < len(providers_to_try) - 1 else "",
-                    )
-                    if idx < len(providers_to_try) - 1:
-                        await _update_status(
-                            db,
-                            request_id,
-                            "pending",
-                            f"{label} failed — trying fallback…",
-                            clear_debrid_torrent=True,
-                        )
-                        torrent_id = None
-                        continue
-                    raise
                 except Exception as e:
                     last_err = e
-                    logger.warning(
-                        "Request %s: %s failed (%s)%s",
-                        request_id,
-                        label,
-                        e,
-                        "; trying fallback" if idx < len(providers_to_try) - 1 else "",
-                    )
-                    if idx < len(providers_to_try) - 1:
-                        await _update_status(
-                            db,
-                            request_id,
-                            "pending",
-                            f"{label} failed — trying fallback…",
-                            clear_debrid_torrent=True,
-                        )
-                        torrent_id = None
-                        continue
-                    raise
 
+                # Refresh — torrent id may have been persisted before the failure
+                refreshed = await db.execute(
+                    select(DownloadRequest).where(DownloadRequest.id == request_id)
+                )
+                req_row = refreshed.scalar_one_or_none()
+                created_id = getattr(req_row, "rd_torrent_id", None) if req_row else None
+                created_provider = (
+                    getattr(req_row, "debrid_provider", None) if req_row else None
+                )
+                job_created = bool(created_id) and (
+                    created_provider == provider
+                    or (created_provider is None and bool(try_id))
+                )
+                hard = last_err is not None and _is_hard_debrid_failure(last_err)
+                # If a job was created, only fall back on terminal provider status
+                # (error/dead/…) — never on timeouts, 429s, or poll API bugs while
+                # the torrent is still downloading/queued on TorBox.
+                terminal_after_create = hard and "failed with status" in str(
+                    last_err
+                ).lower()
+                can_fallback = idx < len(providers_to_try) - 1 and (
+                    terminal_after_create if job_created else hard
+                )
+                logger.warning(
+                    "Request %s: %s failed (%s)%s",
+                    request_id,
+                    label,
+                    last_err,
+                    "; trying fallback"
+                    if can_fallback
+                    else (
+                        "; keeping provider job (no fallback)"
+                        if job_created and not can_fallback
+                        else " (no fallback)"
+                    ),
+                )
+                if can_fallback:
+                    await _update_status(
+                        db,
+                        request_id,
+                        "pending",
+                        f"{label} failed — trying fallback…",
+                        clear_debrid_torrent=True,
+                    )
+                    torrent_id = None
+                    continue
+                raise RuntimeError(
+                    f"{label} failed"
+                    + (f" after job created (id={created_id})" if job_created else "")
+                    + f": {last_err}"
+                    + (
+                        ". Not falling back — job may still be downloading."
+                        if job_created
+                        else ""
+                    )
+                ) from last_err
             if torrent_info is None or client is None or active_provider is None:
                 raise RuntimeError(
                     f"No debrid provider could accept this download: {last_err}"

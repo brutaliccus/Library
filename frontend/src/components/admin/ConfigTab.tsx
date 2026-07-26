@@ -27,6 +27,9 @@ interface OlCatalogStatus {
   dumps_dir?: string;
   dumps_present?: boolean;
   dumps_size_bytes?: number;
+  new_dumps_available?: boolean;
+  changed_dumps?: string[];
+  dumps_checked_at?: number | null;
   warnings?: string[];
   include_editions?: boolean;
   log_tail?: string;
@@ -74,23 +77,30 @@ export default function ConfigTab() {
   const olQuery = useQuery({
     queryKey: ["admin-ol-catalog"],
     queryFn: async () => {
-      const { data } = await api.get("/admin/ol-catalog");
+      // Throttled remote dump probe when Config opens (no download).
+      const { data } = await api.get("/admin/ol-catalog", { params: { check: true } });
       return data as OlCatalogStatus;
     },
     refetchInterval: (q) => (q.state.data?.status === "running" ? 5000 : false),
   });
 
   const olBuild = useMutation({
-    mutationFn: async (includeEditions: boolean) => {
+    mutationFn: async (opts: { includeEditions: boolean; forceDownload?: boolean }) => {
       const { data } = await api.post("/admin/ol-catalog/build", {
-        include_editions: includeEditions,
+        include_editions: opts.includeEditions,
         skip_download: false,
+        force_download: Boolean(opts.forceDownload),
       });
       return data as OlCatalogStatus;
     },
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
       void qc.invalidateQueries({ queryKey: ["admin-ol-catalog"] });
-      toast("Open Library catalog build started", "success");
+      toast(
+        vars.forceDownload
+          ? "Open Library catalog update started (download + rebuild)"
+          : "Open Library catalog build started",
+        "success"
+      );
     },
     onError: (err: unknown) => {
       const msg =
@@ -325,19 +335,25 @@ export default function ConfigTab() {
               status={olQuery.data}
               loading={olQuery.isLoading}
               building={olBuild.isPending || olQuery.data?.status === "running"}
-              onBuild={(includeEditions) => {
+              onBuild={(includeEditions, forceDownload) => {
                 const editionsNote = includeEditions
                   ? "\n\nIncluding editions makes the download and final DB much larger (often 10-20+ GB)."
                   : "";
+                const updateNote = forceDownload
+                  ? "\n\nThis will re-download changed Open Library dumps, then rebuild the SQLite catalog."
+                  : "";
                 const ok = window.confirm(
-                  "Build the local Open Library catalog?\n\n" +
+                  (forceDownload
+                    ? "Update the local Open Library catalog?\n\n"
+                    : "Build the local Open Library catalog?\n\n") +
                     "This downloads multi-GB dump files and can take many hours on a Pi. " +
                     "The finished database is typically several GB. " +
                     "Keep the app running until it finishes." +
+                    updateNote +
                     editionsNote +
                     "\n\nContinue?"
                 );
-                if (ok) olBuild.mutate(includeEditions);
+                if (ok) olBuild.mutate({ includeEditions, forceDownload });
               }}
             />
           )}
@@ -462,9 +478,11 @@ function OlCatalogPanel({
   status?: OlCatalogStatus;
   loading: boolean;
   building: boolean;
-  onBuild: (includeEditions: boolean) => void;
+  onBuild: (includeEditions: boolean, forceDownload?: boolean) => void;
 }) {
   const warnings = status?.warnings || [];
+  const newDumps = Boolean(status?.new_dumps_available);
+  const changed = (status?.changed_dumps || []).join(", ");
   return (
     <div className="p-4 rounded-xl border border-amber-900/50 bg-amber-950/20 space-y-3">
       <div className="flex items-start gap-2">
@@ -478,6 +496,29 @@ function OlCatalogPanel({
           </p>
         </div>
       </div>
+
+      {newDumps && (
+        <div className="rounded-lg border border-sky-700/50 bg-sky-950/40 p-3 space-y-2">
+          <p className="text-sm font-semibold text-sky-200 inline-flex items-center gap-1.5">
+            <AlertTriangle size={14} />
+            New Open Library dumps available
+          </p>
+          <p className="text-xs text-sky-100/80">
+            Remote monthly dumps differ from the copies on disk
+            {changed ? ` (${changed})` : ""}. Download and rebuild is manual — use Update catalog
+            below. A daily check only notifies; it never auto-downloads.
+          </p>
+          <button
+            type="button"
+            disabled={building}
+            onClick={() => onBuild(false, true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-sky-700 text-white text-sm font-medium hover:bg-sky-600 disabled:opacity-40"
+          >
+            <Database size={14} />
+            {building ? "Updating…" : "Update catalog"}
+          </button>
+        </div>
+      )}
 
       <div className="rounded-lg border border-amber-800/40 bg-black/20 p-3 space-y-1.5">
         <p className="text-xs font-medium text-amber-300 inline-flex items-center gap-1">
@@ -503,9 +544,13 @@ function OlCatalogPanel({
             {loading
               ? "…"
               : status?.catalog_ready
-                ? `${status?.status || "ready"} · catalog ready`
+                ? `${status?.status || "ready"} · catalog ready${
+                    newDumps ? " · update available" : ""
+                  }`
                 : status?.dumps_present
-                  ? `${status?.status || "idle"} · dumps only`
+                  ? `${status?.status || "idle"} · dumps only${
+                      newDumps ? " · update available" : ""
+                    }`
                   : status?.status || "idle"}
           </span>
         </p>
@@ -543,6 +588,17 @@ function OlCatalogPanel({
       </div>
 
       <div className="flex flex-wrap gap-2">
+        {!newDumps && status?.catalog_ready && (
+          <button
+            type="button"
+            disabled={building}
+            onClick={() => onBuild(false, true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-sky-800/60 text-sky-200/90 text-xs hover:border-sky-600 disabled:opacity-40"
+            title="Force re-download dumps and rebuild"
+          >
+            Download &amp; rebuild
+          </button>
+        )}
         <button
           type="button"
           disabled={building}

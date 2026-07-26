@@ -213,6 +213,10 @@ if [[ -x scripts/install_backup_cron.sh ]]; then
   bash scripts/install_backup_cron.sh || true
 fi
 
+if [[ -x scripts/install_ol_catalog_cron.sh ]]; then
+  bash scripts/install_ol_catalog_cron.sh || true
+fi
+
 c_green ""
 c_green "Install complete."
 echo ""

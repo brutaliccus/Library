@@ -3,6 +3,10 @@
 Runs ``scripts/ol_import_dumps.py`` as a subprocess and exposes status for the
 Admin → Config UI. The finished DB is large (multi‑GB) and the dump download
 takes a long time — operators must opt in explicitly.
+
+A separate lightweight check (HEAD/etag/size) can flag newer remote dumps and
+notify admins; download + rebuild only start from the Admin "Update catalog"
+button (or an explicit build with force_download).
 """
 from __future__ import annotations
 
@@ -24,8 +28,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _STATUS_NAME = "ol_catalog_build.json"
 _DEFAULT_IDLE_MESSAGE = "Open Library catalog has not been built yet."
 _MIN_READY_BYTES = 1024 * 1024
+# Don't re-probe openlibrary.org more often than this when Admin opens Config.
+_CHECK_THROTTLE_SECONDS = 6 * 3600
 _proc: asyncio.subprocess.Process | None = None
 _lock = asyncio.Lock()
+_check_lock = asyncio.Lock()
 
 
 def _status_path() -> Path:
@@ -183,6 +190,7 @@ def _reconcile_message(
     dumps_present: bool,
     dumps_size: int,
     running: bool,
+    new_dumps_available: bool = False,
 ) -> str:
     """Pick an operator-facing message that cannot contradict catalog_ready."""
     if running:
@@ -194,24 +202,36 @@ def _reconcile_message(
         job_status in ("idle", "unknown", "")
         and (not job_message or job_message == _DEFAULT_IDLE_MESSAGE)
     )
+    update_note = "New Open Library dumps available — use Update catalog to download & rebuild."
 
     if catalog["ready"]:
         # Prefer a recent successful job message; otherwise describe the on-disk DB.
         if job_status == "done" and job_message and job_message != _DEFAULT_IDLE_MESSAGE:
-            return job_message
-        parts = [f"Catalog DB ready ({_fmt_bytes(int(catalog['size_bytes']))}"]
-        mtime = _fmt_mtime(catalog.get("mtime"))
-        if mtime:
-            parts[0] += f", modified {mtime}"
-        parts[0] += ")"
-        counts = []
-        for label, key in (("works", "works"), ("authors", "authors"), ("isbns", "isbns")):
-            formatted = _fmt_count(catalog.get(key))
-            if formatted is not None:
-                counts.append(f"{formatted} {label}")
-        if counts:
-            parts.append("; ".join(counts))
-        return " · ".join(parts) if len(parts) > 1 else parts[0]
+            base = job_message
+        else:
+            parts = [f"Catalog DB ready ({_fmt_bytes(int(catalog['size_bytes']))}"]
+            mtime = _fmt_mtime(catalog.get("mtime"))
+            if mtime:
+                parts[0] += f", modified {mtime}"
+            parts[0] += ")"
+            counts = []
+            for label, key in (("works", "works"), ("authors", "authors"), ("isbns", "isbns")):
+                formatted = _fmt_count(catalog.get(key))
+                if formatted is not None:
+                    counts.append(f"{formatted} {label}")
+            if counts:
+                parts.append("; ".join(counts))
+            base = " · ".join(parts) if len(parts) > 1 else parts[0]
+        if new_dumps_available:
+            return f"{base} · {update_note}"
+        return base
+
+    if new_dumps_available:
+        if dumps_present:
+            return (
+                f"Dumps present ({_fmt_bytes(dumps_size)}); {update_note}"
+            )
+        return update_note
 
     if job_status == "error" and job_message:
         return job_message
@@ -230,6 +250,19 @@ def _reconcile_message(
     return job_message
 
 
+def _dump_names(*, include_editions: bool | None = None) -> list[str]:
+    settings = get_settings()
+    editions = (
+        bool(include_editions)
+        if include_editions is not None
+        else bool(getattr(settings, "ol_catalog_include_editions", False))
+    )
+    names = ["authors", "works"]
+    if editions:
+        names.append("editions")
+    return names
+
+
 def get_status() -> dict[str, Any]:
     catalog = _catalog_stats()
     dumps_present, dumps_size = _dumps_stats()
@@ -245,6 +278,7 @@ def get_status() -> dict[str, Any]:
         # DB exists (e.g. built via cron) even though no Admin job status was written.
         status["status"] = "ready"
 
+    new_dumps = bool(status.get("new_dumps_available"))
     status["catalog_ready"] = bool(catalog["ready"])
     status["catalog_size_bytes"] = int(catalog["size_bytes"] or 0)
     status["catalog_mtime"] = catalog.get("mtime")
@@ -255,12 +289,16 @@ def get_status() -> dict[str, Any]:
     status["dumps_size_bytes"] = dumps_size
     status["catalog_path"] = get_settings().ol_catalog_db_path
     status["dumps_dir"] = get_settings().ol_dumps_dir
+    status["new_dumps_available"] = new_dumps
+    status["changed_dumps"] = list(status.get("changed_dumps") or [])
+    status["dumps_checked_at"] = status.get("dumps_checked_at")
     status["message"] = _reconcile_message(
         job=status,
         catalog=catalog,
         dumps_present=dumps_present,
         dumps_size=dumps_size,
         running=running,
+        new_dumps_available=new_dumps,
     )
     if catalog.get("error") and not catalog["ready"]:
         status["catalog_error"] = catalog["error"]
@@ -269,8 +307,91 @@ def get_status() -> dict[str, Any]:
         "The finished catalog database is typically several GB (10-20+ GB if editions are included).",
         "On a Raspberry Pi this often takes many hours. Keep the container running until it finishes.",
         "Dumps download to OPENLIBRARY_HOST_DIR (/openlibrary); the catalog DB is written to the configured path (usually under ./data).",
+        "A daily check notifies admins when newer dumps are published; download only starts from Update catalog.",
     ]
     return status
+
+
+def _persist_check_result(summary: dict[str, Any], *, notify_sent: bool = False) -> None:
+    cur = _read_status()
+    cur["dumps_checked_at"] = summary.get("checked_at")
+    cur["changed_dumps"] = list(summary.get("changed") or [])
+    cur["dumps_check_errors"] = summary.get("errors") or {}
+    cur["dumps_remote_signature"] = summary.get("signature")
+    cur["new_dumps_available"] = bool(summary.get("update_available"))
+    if notify_sent:
+        cur["dumps_notified_signature"] = summary.get("signature")
+        cur["dumps_notified_at"] = time.time()
+    if not summary.get("update_available"):
+        # Clear stale notify tracking when remote matches local again.
+        cur.pop("dumps_notified_signature", None)
+    _write_status(cur)
+
+
+async def check_for_updates(
+    *,
+    force: bool = False,
+    notify: bool = True,
+    include_editions: bool | None = None,
+) -> dict[str, Any]:
+    """HEAD-check remote dumps vs local files. Never downloads.
+
+    When newer dumps are found, sets ``new_dumps_available`` and (once per
+    remote signature) notifies admins via web push + WS ``admin_alert``.
+    """
+    async with _check_lock:
+        settings = get_settings()
+        cur = _read_status()
+        last = float(cur.get("dumps_checked_at") or 0)
+        if not force and last and (time.time() - last) < _CHECK_THROTTLE_SECONDS:
+            return get_status()
+
+        from app.services import ol_dumps
+
+        names = _dump_names(include_editions=include_editions)
+        # Run blocking urllib HEAD calls off the event loop.
+        summary = await asyncio.to_thread(
+            ol_dumps.check_dumps,
+            settings.ol_dumps_dir,
+            names=names,
+            ua=settings.open_library_user_agent,
+        )
+
+        notify_sent = False
+        if notify and summary.get("update_available"):
+            sig = summary.get("signature") or ""
+            already = cur.get("dumps_notified_signature")
+            if sig and sig != already:
+                try:
+                    from app.services import push
+
+                    changed = ", ".join(summary.get("changed") or []) or "dumps"
+                    await push.notify_admins_background(
+                        {
+                            "type": "ol_dumps_available",
+                            "title": "New Open Library dumps available",
+                            "body": (
+                                f"Remote dumps changed ({changed}). "
+                                "Open Admin → Config and click Update catalog to download & rebuild."
+                            ),
+                            "url": "/admin?tab=config",
+                        }
+                    )
+                    notify_sent = True
+                except Exception:
+                    logger.warning("OL dumps admin notify failed", exc_info=True)
+
+        _persist_check_result(summary, notify_sent=notify_sent)
+        status = get_status()
+        status["check"] = {
+            "update_available": summary.get("update_available"),
+            "changed": summary.get("changed"),
+            "missing": summary.get("missing"),
+            "unchanged": summary.get("unchanged"),
+            "errors": summary.get("errors"),
+            "notified": notify_sent,
+        }
+        return status
 
 
 async def _pump_output(proc: asyncio.subprocess.Process) -> None:
@@ -292,7 +413,12 @@ async def _pump_output(proc: asyncio.subprocess.Process) -> None:
         _write_status(cur)
 
 
-async def _run_build(*, include_editions: bool, skip_download: bool) -> None:
+async def _run_build(
+    *,
+    include_editions: bool,
+    skip_download: bool,
+    force_download: bool,
+) -> None:
     global _proc
     settings = get_settings()
     script = _PROJECT_ROOT / "scripts" / "ol_import_dumps.py"
@@ -323,15 +449,28 @@ async def _run_build(*, include_editions: bool, skip_download: bool) -> None:
         cmd.append("--no-editions")
     if skip_download:
         cmd.append("--skip-download")
+    elif force_download:
+        cmd.append("--force-download")
 
+    prev = _read_status()
     _write_status(
         {
             "status": "running",
-            "message": "Starting Open Library catalog build…",
+            "message": (
+                "Starting Open Library catalog update (re-download + rebuild)…"
+                if force_download and not skip_download
+                else "Starting Open Library catalog build…"
+            ),
             "include_editions": include_editions,
             "skip_download": skip_download,
+            "force_download": force_download,
             "command": cmd,
             "started_at": time.time(),
+            # Keep the banner visible until success; cleared below on done.
+            "new_dumps_available": bool(prev.get("new_dumps_available")),
+            "changed_dumps": list(prev.get("changed_dumps") or []),
+            "dumps_checked_at": prev.get("dumps_checked_at"),
+            "dumps_notified_signature": prev.get("dumps_notified_signature"),
         }
     )
     logger.info("Starting OL catalog build: %s", " ".join(cmd))
@@ -355,9 +494,12 @@ async def _run_build(*, include_editions: bool, skip_download: bool) -> None:
                     "include_editions": include_editions,
                     "finished_at": time.time(),
                     "exit_code": code,
+                    "new_dumps_available": False,
+                    "changed_dumps": [],
                 }
             )
         else:
+            prev_err = _read_status()
             _write_status(
                 {
                     "status": "error",
@@ -365,28 +507,48 @@ async def _run_build(*, include_editions: bool, skip_download: bool) -> None:
                     "include_editions": include_editions,
                     "finished_at": time.time(),
                     "exit_code": code,
+                    "new_dumps_available": bool(prev_err.get("new_dumps_available")),
+                    "changed_dumps": list(prev_err.get("changed_dumps") or []),
+                    "dumps_checked_at": prev_err.get("dumps_checked_at"),
+                    "dumps_notified_signature": prev_err.get("dumps_notified_signature"),
                 }
             )
     except Exception as e:
         logger.exception("OL catalog build failed")
+        prev_err = _read_status()
         _write_status(
             {
                 "status": "error",
                 "message": str(e),
                 "finished_at": time.time(),
+                "new_dumps_available": bool(prev_err.get("new_dumps_available")),
+                "changed_dumps": list(prev_err.get("changed_dumps") or []),
             }
         )
     finally:
         _proc = None
 
 
-async def start_build(*, include_editions: bool = False, skip_download: bool = False) -> dict[str, Any]:
-    """Start a build if none is running. Returns current status."""
+async def start_build(
+    *,
+    include_editions: bool = False,
+    skip_download: bool = False,
+    force_download: bool = False,
+) -> dict[str, Any]:
+    """Start a build if none is running. Returns current status.
+
+    ``force_download`` re-fetches dumps (Admin "Update catalog") even when local
+    files exist. Normal builds still re-download when remote HEAD differs.
+    """
     async with _lock:
         if _proc is not None and _proc.returncode is None:
             return get_status()
         asyncio.create_task(
-            _run_build(include_editions=include_editions, skip_download=skip_download)
+            _run_build(
+                include_editions=include_editions,
+                skip_download=skip_download,
+                force_download=force_download,
+            )
         )
         # Give the task a tick to write running status
         await asyncio.sleep(0.05)

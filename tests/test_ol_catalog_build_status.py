@@ -118,3 +118,26 @@ def test_tiny_db_not_ready(ol_paths):
     status = ol_catalog_build.get_status()
     assert status["catalog_ready"] is False
     assert status["catalog_size_bytes"] > 0
+
+
+def test_status_ready_with_new_dumps_banner(ol_paths):
+    db, _dumps = ol_paths
+    _write_minimal_catalog(db, works=5)
+    status_path = db.parent / "ol_catalog_build.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "message": "Catalog ready (1.2 GB).",
+                "new_dumps_available": True,
+                "changed_dumps": ["works"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    status = ol_catalog_build.get_status()
+    assert status["catalog_ready"] is True
+    assert status["new_dumps_available"] is True
+    assert "has not been built yet" not in status["message"]
+    assert "New Open Library dumps available" in status["message"]
+    assert "Catalog ready" in status["message"] or "Catalog DB ready" in status["message"]

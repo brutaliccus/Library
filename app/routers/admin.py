@@ -1747,16 +1747,34 @@ async def post_setup_defaults(_admin: User = Depends(require_admin)):
 
 
 @router.get("/ol-catalog")
-async def get_ol_catalog_status(_admin: User = Depends(require_admin)):
-    """Status of the local Open Library catalog DB / build job."""
+async def get_ol_catalog_status(
+    check: bool = False,
+    _admin: User = Depends(require_admin),
+):
+    """Status of the local Open Library catalog DB / build job.
+
+    Pass ``check=true`` to run a throttled lightweight remote dump probe
+    (no download). Daily background checks also set ``new_dumps_available``.
+    """
     from app.services import ol_catalog_build
 
+    if check:
+        return await ol_catalog_build.check_for_updates(force=False, notify=True)
     return ol_catalog_build.get_status()
+
+
+@router.post("/ol-catalog/check")
+async def check_ol_catalog_dumps(_admin: User = Depends(require_admin)):
+    """Force a HEAD/etag check for newer Open Library dumps (no download)."""
+    from app.services import ol_catalog_build
+
+    return await ol_catalog_build.check_for_updates(force=True, notify=True)
 
 
 class OlCatalogBuildBody(BaseModel):
     include_editions: bool = False
     skip_download: bool = False
+    force_download: bool = False
 
 
 @router.post("/ol-catalog/build")
@@ -1767,6 +1785,7 @@ async def start_ol_catalog_build(
     """Start (or report) a long-running Open Library dump import.
 
     Warning: multi-GB download and multi-hour build on a Pi. Opt-in only.
+    Set ``force_download`` (Update catalog) to re-fetch dumps then rebuild.
     """
     from app.services import ol_catalog_build
 
@@ -1774,4 +1793,5 @@ async def start_ol_catalog_build(
     return await ol_catalog_build.start_build(
         include_editions=bool(opts.include_editions),
         skip_download=bool(opts.skip_download),
+        force_download=bool(opts.force_download),
     )

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 _shelf_refresh_task: asyncio.Task | None = None
+_ol_dumps_check_task: asyncio.Task | None = None
 
 
 async def _daily_shelf_refresh_loop() -> None:
@@ -40,9 +41,23 @@ async def _daily_shelf_refresh_loop() -> None:
         await asyncio.sleep(3600)
 
 
+async def _ol_dumps_check_loop() -> None:
+    """Lightweight daily probe for newer Open Library dumps (notify only)."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            from app.services import ol_catalog_build
+
+            await ol_catalog_build.check_for_updates(force=True, notify=True)
+        except Exception as e:
+            logger.warning("OL dumps check loop error: %s", e)
+        # Once per day is enough — dumps publish monthly.
+        await asyncio.sleep(24 * 3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _shelf_refresh_task
+    global _shelf_refresh_task, _ol_dumps_check_task
     logger.info("Starting up -- initializing database")
     await init_db()
     try:
@@ -60,9 +75,12 @@ async def lifespan(app: FastAPI):
     await resume_interrupted_downloads()
     start_scraper()
     _shelf_refresh_task = asyncio.create_task(_daily_shelf_refresh_loop())
+    _ol_dumps_check_task = asyncio.create_task(_ol_dumps_check_loop())
     yield
     if _shelf_refresh_task and not _shelf_refresh_task.done():
         _shelf_refresh_task.cancel()
+    if _ol_dumps_check_task and not _ol_dumps_check_task.done():
+        _ol_dumps_check_task.cancel()
     stop_scraper()
     logger.info("Shutting down")
 

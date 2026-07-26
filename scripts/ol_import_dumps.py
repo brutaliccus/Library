@@ -46,11 +46,24 @@ except Exception:  # allow running outside the app env
     DEFAULT_UA = "LibrarySite/1.0 (+https://library.example.com)"
     DEFAULT_EDITIONS = True
 
-DUMP_URLS = {
-    "authors": "https://openlibrary.org/data/ol_dump_authors_latest.txt.gz",
-    "works": "https://openlibrary.org/data/ol_dump_works_latest.txt.gz",
-    "editions": "https://openlibrary.org/data/ol_dump_editions_latest.txt.gz",
-}
+try:
+    from app.services.ol_dumps import (
+        DUMP_URLS,
+        check_dumps,
+        head_remote,
+        save_meta,
+        should_redownload,
+    )
+except Exception:  # pragma: no cover - standalone / broken PYTHONPATH
+    DUMP_URLS = {
+        "authors": "https://openlibrary.org/data/ol_dump_authors_latest.txt.gz",
+        "works": "https://openlibrary.org/data/ol_dump_works_latest.txt.gz",
+        "editions": "https://openlibrary.org/data/ol_dump_editions_latest.txt.gz",
+    }
+    check_dumps = None  # type: ignore[assignment]
+    head_remote = None  # type: ignore[assignment]
+    save_meta = None  # type: ignore[assignment]
+    should_redownload = None  # type: ignore[assignment]
 
 BATCH = 5000
 
@@ -59,17 +72,54 @@ def log(msg: str) -> None:
     print(f"[ol-import] {msg}", flush=True)
 
 
-def _download(url: str, dest: Path, ua: str) -> None:
-    """Stream a dump to disk (follows the archive.org redirect)."""
-    if dest.exists() and dest.stat().st_size > 1024:
+def _download(url: str, dest: Path, ua: str, *, force: bool = False) -> None:
+    """Stream a dump to disk (follows the archive.org redirect).
+
+    Skips only when a local file exists *and* a lightweight HEAD/etag/size
+    check says the remote ``*_latest`` dump is unchanged. Pass ``force=True``
+    (Admin "Update catalog") to always re-download.
+    """
+    if should_redownload is not None:
+        if not should_redownload(dest, url, ua, force=force):
+            log(
+                f"skip download (remote unchanged: {dest.name}, "
+                f"{dest.stat().st_size/1e9:.2f} GB)"
+            )
+            return
+    elif not force and dest.exists() and dest.stat().st_size > 1024:
+        # Fallback without app.services.ol_dumps: legacy skip-if-exists.
         log(f"skip download (already have {dest.name}, {dest.stat().st_size/1e9:.2f} GB)")
         return
+
+    if dest.exists():
+        try:
+            dest.unlink()
+        except OSError:
+            pass
     tmp = dest.with_suffix(dest.suffix + ".part")
+    if tmp.exists():
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
     req = urllib.request.Request(url, headers={"User-Agent": ua})
     log(f"downloading {url}")
     start = time.time()
+    remote_meta: dict | None = None
     with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as fh:
         total = int(resp.headers.get("Content-Length") or 0)
+        if head_remote is not None:
+            try:
+                # Capture response headers for the sidecar after write.
+                remote_meta = {
+                    "etag": resp.headers.get("ETag") or resp.headers.get("Etag"),
+                    "content_length": total or None,
+                    "last_modified": resp.headers.get("Last-Modified"),
+                    "final_url": resp.geturl(),
+                    "source_url": url,
+                }
+            except Exception:
+                remote_meta = None
         done = 0
         last = 0.0
         while True:
@@ -84,6 +134,16 @@ def _download(url: str, dest: Path, ua: str) -> None:
                 log(f"  {done/1e9:.2f} GB{f' / {total/1e9:.2f} GB ({pct:.0f}%)' if total else ''}")
                 last = now
     tmp.replace(dest)
+    if save_meta is not None:
+        try:
+            if remote_meta is None and head_remote is not None:
+                remote_meta = head_remote(url, ua)
+            if remote_meta:
+                if not remote_meta.get("content_length"):
+                    remote_meta["content_length"] = dest.stat().st_size
+                save_meta(dest, remote_meta)
+        except Exception as e:
+            log(f"warning: could not save meta for {dest.name}: {e}")
     log(f"downloaded {dest.name} ({done/1e9:.2f} GB) in {time.time()-start:.0f}s")
 
 
@@ -405,6 +465,16 @@ def main() -> int:
     ap.add_argument("--dumps", default=DEFAULT_DUMPS)
     ap.add_argument("--ua", default=DEFAULT_UA)
     ap.add_argument("--skip-download", action="store_true")
+    ap.add_argument(
+        "--force-download",
+        action="store_true",
+        help="re-download dumps even when local files exist (Admin Update catalog)",
+    )
+    ap.add_argument(
+        "--check-only",
+        action="store_true",
+        help="lightweight HEAD check vs local dumps; print JSON and exit (no download/build)",
+    )
     ap.add_argument("--no-editions", action="store_true")
     ap.add_argument("--finalize-only", action="store_true",
                     help="finish indexes on existing ol_catalog.building and swap to ol_catalog.db")
@@ -432,9 +502,32 @@ def main() -> int:
     wanted = ["authors", "works"] + (["editions"] if with_editions else [])
     paths = {name: dumps_dir / f"ol_dump_{name}.txt.gz" for name in wanted}
 
+    if args.check_only:
+        if check_dumps is None:
+            log("ERROR: check-only requires app.services.ol_dumps")
+            return 1
+        summary = check_dumps(dumps_dir, names=wanted, ua=args.ua)
+        # Remotes may contain non-JSON-friendly values; keep a compact public view.
+        public = {
+            "update_available": summary["update_available"],
+            "changed": summary["changed"],
+            "missing": summary["missing"],
+            "unchanged": summary["unchanged"],
+            "errors": summary["errors"],
+            "checked_at": summary["checked_at"],
+            "signature": summary["signature"],
+        }
+        print(json.dumps(public, indent=2), flush=True)
+        return 0
+
     if not args.skip_download:
         for name in wanted:
-            _download(DUMP_URLS[name], paths[name], args.ua)
+            _download(
+                DUMP_URLS[name],
+                paths[name],
+                args.ua,
+                force=bool(args.force_download),
+            )
     for name in wanted:
         if not paths[name].exists():
             log(f"ERROR: dump missing: {paths[name]} (drop --skip-download to fetch)")

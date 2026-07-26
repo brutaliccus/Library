@@ -1427,6 +1427,33 @@ async def run_forge_after_download(
                     author = req_row.author
                     if not title:
                         title = req_row.title
+
+        # OpenRouter multi-book split (before single-book forge).
+        try:
+            from app.services import llm_assist
+
+            multi = await llm_assist.maybe_handle_multi_book(
+                request_id,
+                staging=staging,
+                user_id=user_id,
+                title=title or "",
+                author=author,
+            )
+            if multi in ("quarantined", "split"):
+                return
+        except Exception as e:
+            logger.warning(
+                "Multi-book assist soft-fail for request %s: %s", request_id, e
+            )
+
+        # Dual-format / sample prune suggestions (auto-delete only safe dupes).
+        try:
+            from app.services import llm_assist
+
+            await llm_assist.maybe_auto_prune_or_suggest(request_id, staging=staging)
+        except Exception as e:
+            logger.warning("File prune assist soft-fail for request %s: %s", request_id, e)
+
         seed_staging_metadata_hints(staging, title=title, author=author)
 
         # Score ≥ min_score means match identity is trusted — not that the
@@ -1440,6 +1467,20 @@ async def run_forge_after_download(
         )
         if not applied:
             return
+
+        # ASIN recovery when metadata applied but ASIN still missing.
+        try:
+            from app.services import llm_assist
+
+            await llm_assist.maybe_recover_asin(
+                request_id,
+                staging=staging,
+                title=title or "",
+                author=author,
+            )
+        except Exception as e:
+            logger.warning("ASIN assist soft-fail for request %s: %s", request_id, e)
+
         start_step = "m4b"
 
     if await p._is_cancelled(request_id):
@@ -1644,6 +1685,22 @@ async def run_forge_after_download(
 
     # --- Chapter Forge (Audible chapters → m4b markers) ---
     if start_step == "chapters":
+        if not extract_asin_from_staging(staging):
+            try:
+                from app.services import llm_assist
+
+                await llm_assist.maybe_recover_asin(
+                    request_id,
+                    staging=staging,
+                    title=title or "",
+                    author=author,
+                )
+            except Exception as e:
+                logger.warning(
+                    "ASIN assist (pre-chapter) soft-fail for request %s: %s",
+                    request_id,
+                    e,
+                )
         await _run_chapter_forge_step(
             request_id,
             staging=staging,

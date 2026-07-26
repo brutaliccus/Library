@@ -237,6 +237,14 @@ async def load_quick_review(
     review_url = libraforge.public_manual_review_url() or None
     applied = staging_has_applied_metadata(staging)
 
+    llm_assist_data = None
+    try:
+        from app.services import llm_assist
+
+        llm_assist_data = llm_assist.read_assist(staging) or None
+    except Exception:
+        llm_assist_data = None
+
     return {
         "request_id": req.id,
         "title": req.title,
@@ -244,6 +252,7 @@ async def load_quick_review(
         "status": req.status,
         "quarantine_reason": getattr(req, "quarantine_reason", None),
         "staging_path": staging_path_for_libraforge(staging),
+        "llm_assist": llm_assist_data,
         "manual_review_url": review_url,
         "targets": targets,
         "selected_relative_path": chosen_rel,

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
@@ -22,6 +22,42 @@ export type StagingEntry = {
   children: StagingEntry[] | null;
 };
 
+export type LlmPruneAction = {
+  path: string;
+  action: "keep" | "delete" | string;
+  reason?: string;
+  safe_duplicate?: boolean;
+};
+
+export type LlmAssistPayload = {
+  multi_book_split?: {
+    books?: {
+      title: string;
+      author?: string;
+      paths?: string[];
+      confidence?: number;
+    }[];
+    confidence?: number;
+    rationale?: string;
+    folder_based?: boolean;
+  };
+  multi_book_status?: string;
+  file_prune?: {
+    actions?: LlmPruneAction[];
+    confidence?: number;
+    rationale?: string;
+  };
+  file_prune_status?: string;
+  asin_recovery?: {
+    asin?: string;
+    confidence?: number;
+    rationale?: string;
+    verified?: boolean;
+  };
+  asin_status?: string;
+  [key: string]: unknown;
+};
+
 export type StagingTreeResponse = {
   request_id: number;
   title: string;
@@ -31,6 +67,7 @@ export type StagingTreeResponse = {
   entries: StagingEntry[];
   entry_count: number;
   truncated: boolean;
+  llm_assist?: LlmAssistPayload | null;
 };
 
 function formatSize(bytes: number | null | undefined): string {
@@ -155,16 +192,30 @@ export function StagingFilesPanel({ requestId, compact = false }: PanelProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => ["admin-staging-files", requestId] as const, [requestId]);
+  const [selectedDeletes, setSelectedDeletes] = useState<Set<string>>(new Set());
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey,
     queryFn: async () => {
-      const { data: body } = await api.get(`/admin/requests/${requestId}/staging-files`);
+      const { data: body } = await api.get(`/admin/requests/${requestId}/staging-files`, {
+        params: { suggest_prune: compact ? true : false },
+      });
       return body as StagingTreeResponse;
     },
     enabled: requestId > 0,
     refetchOnWindowFocus: false,
   });
+
+  const pruneActions = data?.llm_assist?.file_prune?.actions || [];
+  const deleteSuggestions = pruneActions.filter((a) => a.action === "delete");
+
+  useEffect(() => {
+    if (!deleteSuggestions.length) return;
+    setSelectedDeletes((prev) => {
+      if (prev.size > 0) return prev;
+      return new Set(deleteSuggestions.map((a) => a.path));
+    });
+  }, [data?.llm_assist?.file_prune]);
 
   const deleteMutation = useMutation({
     mutationFn: async (path: string) => {
@@ -182,6 +233,47 @@ export function StagingFilesPanel({ requestId, compact = false }: PanelProps) {
     },
   });
 
+  const applyPruneMutation = useMutation({
+    mutationFn: async (paths: string[]) => {
+      const { data: body } = await api.post(
+        `/admin/requests/${requestId}/llm-assist/apply-prune`,
+        { paths },
+      );
+      return body as { ok: boolean; deleted: string[] };
+    },
+    onSuccess: (body) => {
+      toast(`Removed ${body.deleted?.length || 0} file(s)`, "success");
+      setSelectedDeletes(new Set());
+      void queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (err: any) => {
+      toast(err.response?.data?.detail || "Apply prune failed", "error");
+    },
+  });
+
+  const applySplitMutation = useMutation({
+    mutationFn: async () => {
+      const { data: body } = await api.post(
+        `/admin/requests/${requestId}/llm-assist/apply-split`,
+      );
+      return body as { ok: boolean; child_ids: number[] };
+    },
+    onSuccess: (body) => {
+      const ids = body.child_ids || [];
+      toast(
+        ids.length
+          ? `Split into ${ids.length} requests: ${ids.map((i) => `#${i}`).join(", ")}`
+          : "Split applied",
+        "success",
+      );
+      void queryClient.invalidateQueries({ queryKey: ["admin-requests"] });
+      void queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (err: any) => {
+      toast(err.response?.data?.detail || "Apply split failed", "error");
+    },
+  });
+
   const handleDelete = (path: string, name: string, isDir: boolean) => {
     const message = isDir
       ? `Delete this folder and all contents?\n\n"${name}" will be removed from this request's quarantine/staging folder — not the final library.`
@@ -191,6 +283,11 @@ export function StagingFilesPanel({ requestId, compact = false }: PanelProps) {
     }
     deleteMutation.mutate(path);
   };
+
+  const split = data?.llm_assist?.multi_book_split;
+  const splitPending =
+    Boolean(split?.books && split.books.length >= 2) &&
+    data?.llm_assist?.multi_book_status !== "applied";
 
   return (
     <div className="space-y-3">
@@ -218,6 +315,128 @@ export function StagingFilesPanel({ requestId, compact = false }: PanelProps) {
           Prune redundant or unwanted files here, then continue to metadata matching.
         </p>
       )}
+
+      {splitPending && (
+        <div className="rounded-xl border border-amber-800/50 bg-amber-950/30 p-3 space-y-2">
+          <p className="text-sm text-amber-100 font-medium">
+            Multi-book split suggested
+            {split?.confidence != null
+              ? ` (${Math.round(Number(split.confidence) * 100)}% confidence)`
+              : ""}
+          </p>
+          {split?.rationale && (
+            <p className="text-xs text-amber-200/80">{split.rationale}</p>
+          )}
+          <ul className="text-xs text-gray-300 space-y-1">
+            {(split?.books || []).map((b, i) => (
+              <li key={`${b.title}-${i}`}>
+                <span className="text-gray-100">{b.title}</span>
+                {b.author ? ` — ${b.author}` : ""}
+                {b.paths?.length ? (
+                  <span className="text-gray-500"> · {b.paths.join(", ")}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={() => {
+              if (
+                !window.confirm(
+                  `Split this pack into ${(split?.books || []).length} child requests and start forge on each?`,
+                )
+              ) {
+                return;
+              }
+              applySplitMutation.mutate();
+            }}
+            disabled={applySplitMutation.isPending}
+            className="px-3 py-1.5 text-sm rounded-lg bg-amber-800/70 text-amber-50 hover:bg-amber-700/80 disabled:opacity-50"
+          >
+            {applySplitMutation.isPending ? "Applying…" : "Apply split"}
+          </button>
+        </div>
+      )}
+
+      {deleteSuggestions.length > 0 &&
+        data?.llm_assist?.file_prune_status !== "auto_applied" &&
+        data?.llm_assist?.file_prune_status !== "applied" && (
+          <div className="rounded-xl border border-teal-800/40 bg-teal-950/20 p-3 space-y-2">
+            <p className="text-sm text-teal-100 font-medium">
+              LLM prune suggestions
+              {data?.llm_assist?.file_prune?.confidence != null
+                ? ` (${Math.round(Number(data.llm_assist.file_prune.confidence) * 100)}%)`
+                : ""}
+            </p>
+            {data?.llm_assist?.file_prune?.rationale && (
+              <p className="text-xs text-teal-200/70">
+                {data.llm_assist.file_prune.rationale}
+              </p>
+            )}
+            <ul className="space-y-1.5 max-h-40 overflow-y-auto">
+              {deleteSuggestions.map((a) => (
+                <li key={a.path} className="flex items-start gap-2 text-xs text-gray-300">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 rounded border-gray-600 bg-gray-900 text-teal-500"
+                    checked={selectedDeletes.has(a.path)}
+                    onChange={(e) => {
+                      setSelectedDeletes((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(a.path);
+                        else next.delete(a.path);
+                        return next;
+                      });
+                    }}
+                  />
+                  <span className="min-w-0">
+                    <span className="font-mono text-gray-200 break-all">{a.path}</span>
+                    {a.reason ? (
+                      <span className="block text-gray-500">{a.reason}</span>
+                    ) : null}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={() => {
+                const paths = [...selectedDeletes];
+                if (!paths.length) {
+                  toast("Select at least one path to delete", "error");
+                  return;
+                }
+                if (!window.confirm(`Delete ${paths.length} selected staging path(s)?`)) {
+                  return;
+                }
+                applyPruneMutation.mutate(paths);
+              }}
+              disabled={applyPruneMutation.isPending || selectedDeletes.size === 0}
+              className="px-3 py-1.5 text-sm rounded-lg bg-teal-800/70 text-teal-50 hover:bg-teal-700/80 disabled:opacity-50"
+            >
+              {applyPruneMutation.isPending ? "Applying…" : "Apply selected deletes"}
+            </button>
+          </div>
+        )}
+
+      {data?.llm_assist?.asin_recovery?.asin &&
+        data.llm_assist.asin_status !== "applied" && (
+          <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-3 text-xs text-gray-400">
+            ASIN suggestion:{" "}
+            <span className="text-gray-200 font-mono">
+              {data.llm_assist.asin_recovery.asin}
+            </span>
+            {data.llm_assist.asin_recovery.confidence != null
+              ? ` · ${Math.round(Number(data.llm_assist.asin_recovery.confidence) * 100)}%`
+              : ""}
+            {data.llm_assist.asin_recovery.verified === false
+              ? " · not verified"
+              : data.llm_assist.asin_recovery.verified
+                ? " · verified"
+                : ""}
+            {" — use Chapters step to apply if correct."}
+          </div>
+        )}
 
       {isLoading && <p className="text-sm text-gray-500 py-6 text-center">Loading files…</p>}
       {error && (

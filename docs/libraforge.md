@@ -123,7 +123,17 @@ When `LIBRAFORGE_PIPELINE_ENABLED=true` (default), audiobook requests:
 
 If metadata score is below auto-apply threshold (or LibraForge is down), the request becomes **`quarantined`**: files stay in `.unorganized`, admins are notified, and Admin → Requests offers **Manual Review** (LibraForge), **Continue pipeline**, or **Reject / delete**.
 
-**Optional OpenRouter LLM assist** (Admin → Integrations, **off by default**): when Metadata Forge would quarantine and OpenRouter is enabled with an API key, Library asks the configured model (default `openai/gpt-4o-mini`) to identify the book. If confidence ≥ threshold (default `0.85`), staging hints are re-seeded (title/author/series/ASIN) and Metadata Forge runs **once** more without admin. Low confidence, missing key, timeouts, or API errors soft-fail to the normal quarantine path.
+**Optional OpenRouter LLM assist** (Admin → Integrations, **off by default**; no key → no LLM calls). Same confidence threshold (default `0.85`) and model for all paths. Soft-fails (timeouts/API/parse) keep the previous behavior.
+
+| Use case | Auto (confidence ≥ threshold) | Quick Review |
+| --- | --- | --- |
+| Metadata Forge fail | Identify → seed hints → one Forge retry | Quarantine with reason |
+| Multi-book pack | Clear folder groups → child requests + forge | Quarantine + **Apply split** |
+| Dual-format / samples | Delete safe duplicates only (never sole audio) | Files checklist → apply deletes |
+| Missing ASIN | Suggest + LibraForge verify → stamp for Chapter Forge | Suggestion shown; Chapters step to apply |
+| Ebook identify fail | Identify clues → retry organize | Quarantine |
+
+Integrations UI polls OpenRouter `GET /api/v1/key` for per-key **limit remaining**, **usage** (all-time / month / week / day), and optional key **limit** / reset. Full API keys are never logged.
 
 **Re-queue M4B for a book already in the library** (staging empty / request `completed`): do **not** hit Continue on the old request. In LibraForge M4B Tool, load `/audiobooks/{Author}/{Title}` (flat multi-file folder) and Create M4B. After success, delete leftover source parts manually if desired, then Scan ABS.
 

@@ -753,10 +753,12 @@ async def _staging_request_or_404(db: AsyncSession, request_id: int) -> Download
 @router.get("/download-requests/{request_id}/staging-files")
 async def list_request_staging_files(
     request_id: int,
+    suggest_prune: bool = False,
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """List the request's ``.unorganized`` staging tree (admin file browser)."""
+    from app.services import llm_assist
     from app.services.forge_pipeline import build_staging_tree, resolve_staging_dir
 
     req = await _staging_request_or_404(db, request_id)
@@ -764,13 +766,105 @@ async def list_request_staging_files(
         staging = resolve_staging_dir(req.staging_path or "")
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    if suggest_prune:
+        try:
+            # Reuse cached plan when present — avoid a new LLM call every Files open.
+            await llm_assist.maybe_auto_prune_or_suggest(
+                request_id,
+                staging=staging,
+                force_suggest=not bool(llm_assist.read_assist(staging).get("file_prune")),
+            )
+        except Exception:
+            logger.debug("Prune suggest on staging-files soft-fail", exc_info=True)
     tree = build_staging_tree(staging)
+    assist = llm_assist.read_assist(staging)
     return {
         "request_id": request_id,
         "title": req.title,
         "status": req.status,
+        "llm_assist": assist or None,
         **tree,
     }
+
+
+class LlmPruneApplyBody(BaseModel):
+    paths: list[str] | None = None  # None = apply plan deletes; else selected paths
+
+
+@router.post("/requests/{request_id}/llm-assist/apply-prune")
+@router.post("/download-requests/{request_id}/llm-assist/apply-prune")
+async def apply_llm_file_prune(
+    request_id: int,
+    body: LlmPruneApplyBody | None = None,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Apply OpenRouter file-prune suggestions (staging-only, path-safe)."""
+    from app.services import llm_assist
+    from app.services.forge_pipeline import resolve_staging_dir
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        staging = resolve_staging_dir(req.staging_path or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    paths = body.paths if body else None
+    deleted = llm_assist.apply_file_prune(staging, paths=paths, only_safe_duplicates=False)
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "llm_assist": llm_assist.read_assist(staging),
+    }
+
+
+@router.post("/requests/{request_id}/llm-assist/apply-split")
+@router.post("/download-requests/{request_id}/llm-assist/apply-split")
+async def apply_llm_multi_book_split(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Apply stored multi-book split plan → child requests + forge jobs."""
+    from app.services import llm_assist
+    from app.services.forge_pipeline import resolve_staging_dir
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        staging = resolve_staging_dir(req.staging_path or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    plan_raw = llm_assist.read_assist(staging).get("multi_book_split")
+    if not plan_raw:
+        raise HTTPException(status_code=400, detail="No multi-book split plan on this request")
+    try:
+        child_ids = await llm_assist.apply_multi_book_split(
+            request_id, staging=staging, spawn_forge=True
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Apply split failed for request %s", request_id)
+        raise HTTPException(status_code=500, detail=str(e)[:300]) from e
+    return {"ok": True, "child_ids": child_ids}
+
+
+@router.get("/requests/{request_id}/llm-assist")
+@router.get("/download-requests/{request_id}/llm-assist")
+async def get_llm_assist(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return staging ``llm_assist.json`` suggestions for Quick Review."""
+    from app.services import llm_assist
+    from app.services.forge_pipeline import resolve_staging_dir
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        staging = resolve_staging_dir(req.staging_path or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {"request_id": request_id, "llm_assist": llm_assist.read_assist(staging) or None}
 
 
 @router.delete("/requests/{request_id}/staging-files")
@@ -1480,6 +1574,12 @@ async def _integrations_payload() -> dict:
     or_enabled = await inst.get_effective_bool(openrouter.ENABLED_SETTING, False)
     or_model = await openrouter.get_model()
     or_threshold = await openrouter.get_confidence_threshold()
+    or_usage = None
+    if or_effective:
+        try:
+            or_usage = (await openrouter.fetch_key_usage()).to_dict()
+        except Exception:
+            or_usage = {"error": "Could not load usage"}
     mullvad_stored, mullvad_eff = await _resolve_mullvad_account()
     wg_key = await app_settings.get_setting("integrations.mullvad_wg_private_key", default="")
     wg_addr = await app_settings.get_setting("integrations.mullvad_wg_addresses", default="")
@@ -1507,8 +1607,11 @@ async def _integrations_payload() -> dict:
             "hint": _mask(or_effective),
             "model": or_model,
             "confidenceThreshold": or_threshold,
-            "note": "When Metadata Forge would quarantine, OpenRouter can identify "
-                    "the book and retry once if confidence is high enough. Off by default.",
+            "usage": or_usage,
+            "note": "OpenRouter LLM assist (off by default): Metadata Forge / ebook "
+                    "identify retry, multi-book split, file prune suggestions, and "
+                    "ASIN recovery. Requires an API key. Usage below is from "
+                    "OpenRouter GET /api/v1/key (per-key credits).",
         },
         "mullvad": {
             "configured": bool(mullvad_eff),
@@ -1527,6 +1630,17 @@ async def _integrations_payload() -> dict:
 @router.get("/integrations")
 async def get_integrations(_admin: User = Depends(require_admin)):
     return await _integrations_payload()
+
+
+@router.get("/integrations/openrouter-usage")
+async def get_openrouter_usage(_admin: User = Depends(require_admin)):
+    """Refresh OpenRouter per-key usage (GET /api/v1/key). Never returns the raw key."""
+    from app.services import openrouter
+
+    if not await openrouter.get_api_key():
+        return {"usage": {"error": "No API key configured"}}
+    usage = await openrouter.fetch_key_usage()
+    return {"usage": usage.to_dict()}
 
 
 @router.put("/integrations")

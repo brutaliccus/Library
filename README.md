@@ -218,7 +218,7 @@ App listens on **`http://127.0.0.1:8085`**.
 3. **`/admin/setup`** — ABS/Kavita, Prowlarr/Jackett/Flare, debrid (TorBox optional), LibraForge + ebook pipelines, staging checklist, catalog APIs, Android APK repo, scraper mode  
 4. Confirm folder conventions: ABS ignores `.unorganized`; Kavita excludes `unorganized`  
 5. Share the **invite link** from Settings (`/join/CODE`). Friends open it (Android app if installed, otherwise the site), set username/password + offline PIN, and join — no approval step.  
-6. Anytime later: **Admin → Config**, **Admin → Integrations** (optional OpenRouter LLM assist for Metadata Forge quarantine recovery — off by default), **Admin → Cache**, **Admin → Requests**, and **Admin → Users**
+6. Anytime later: **Admin → Config**, **Admin → Integrations** (optional OpenRouter LLM assist — off by default: Metadata Forge / ebook identify retry, multi-book split, file prune, ASIN recovery; shows per-key credit usage), **Admin → Cache**, **Admin → Requests**, and **Admin → Users**
 
 ### Media mounts
 

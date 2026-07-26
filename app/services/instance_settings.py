@@ -258,7 +258,8 @@ REGISTRY: list[SettingDef] = [
         label="OpenRouter LLM assist",
         env_attr="openrouter_enabled",
         value_type="bool",
-        help="When Metadata Forge fails, ask OpenRouter to identify the book and retry once. Off by default.",
+        help="LLM assist for Metadata Forge / ebook identify retry, multi-book split, "
+             "file prune, and ASIN recovery. Off by default — no calls without a key.",
     ),
     SettingDef(
         key="integrations.openrouter_api_key",
@@ -266,7 +267,7 @@ REGISTRY: list[SettingDef] = [
         label="OpenRouter API key",
         env_attr="openrouter_api_key",
         secret=True,
-        help="https://openrouter.ai/keys — used only for metadata-assist chat completions.",
+        help="https://openrouter.ai/keys — chat completions + GET /api/v1/key usage.",
     ),
     SettingDef(
         key="integrations.openrouter_model",
@@ -283,7 +284,7 @@ REGISTRY: list[SettingDef] = [
         env_attr="openrouter_confidence_threshold",
         value_type="float",
         placeholder="0.85",
-        help="Retry Metadata Forge only when LLM confidence ≥ this (0–1). Default 0.85.",
+        help="Auto-apply LLM actions only when confidence ≥ this (0–1). Default 0.85.",
     ),
     SettingDef(
         key="integrations.nyt_api_key",

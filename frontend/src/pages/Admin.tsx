@@ -1103,6 +1103,100 @@ function HealthTab() {
   );
 }
 
+type OpenRouterUsage = {
+  label?: string;
+  usage?: number | null;
+  usageDaily?: number | null;
+  usageWeekly?: number | null;
+  usageMonthly?: number | null;
+  limit?: number | null;
+  limitRemaining?: number | null;
+  limitReset?: string | null;
+  isFreeTier?: boolean | null;
+  error?: string | null;
+};
+
+function formatCredits(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+function OpenRouterUsageBlock({
+  usage,
+  onRefresh,
+}: {
+  usage?: OpenRouterUsage | null;
+  onRefresh: () => void;
+}) {
+  const { toast } = useToast();
+  const refresh = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.get("/admin/integrations/openrouter-usage");
+      return (data as { usage: OpenRouterUsage }).usage;
+    },
+    onSuccess: () => {
+      onRefresh();
+      toast("OpenRouter usage refreshed", "success");
+    },
+    onError: () => toast("Failed to refresh usage", "error"),
+  });
+
+  const u = refresh.data || usage;
+
+  return (
+    <div className="rounded-lg border border-gray-700/80 bg-gray-900/40 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-gray-400">
+          OpenRouter credits (per-key · GET /api/v1/key)
+        </span>
+        <button
+          type="button"
+          onClick={() => refresh.mutate()}
+          disabled={refresh.isPending}
+          className="text-xs px-2 py-1 rounded border border-gray-600 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+        >
+          {refresh.isPending ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+      {u?.error ? (
+        <p className="text-xs text-amber-400/90">{u.error}</p>
+      ) : (
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+          <dt className="text-gray-500">Limit remaining</dt>
+          <dd className="text-gray-200 text-right tabular-nums">
+            {u?.limitRemaining == null && u?.limit == null
+              ? "Unlimited / none set"
+              : formatCredits(u?.limitRemaining)}
+          </dd>
+          <dt className="text-gray-500">Key limit</dt>
+          <dd className="text-gray-200 text-right tabular-nums">
+            {u?.limit == null ? "—" : formatCredits(u.limit)}
+            {u?.limitReset ? ` · reset ${u.limitReset}` : ""}
+          </dd>
+          <dt className="text-gray-500">Usage (all time)</dt>
+          <dd className="text-gray-200 text-right tabular-nums">{formatCredits(u?.usage)}</dd>
+          <dt className="text-gray-500">Usage (month)</dt>
+          <dd className="text-gray-200 text-right tabular-nums">
+            {formatCredits(u?.usageMonthly)}
+          </dd>
+          <dt className="text-gray-500">Usage (week / day)</dt>
+          <dd className="text-gray-200 text-right tabular-nums">
+            {formatCredits(u?.usageWeekly)} / {formatCredits(u?.usageDaily)}
+          </dd>
+          {u?.label ? (
+            <>
+              <dt className="text-gray-500">Key label</dt>
+              <dd className="text-gray-400 text-right font-mono truncate" title={u.label}>
+                {u.label}
+              </dd>
+            </>
+          ) : null}
+        </dl>
+      )}
+    </div>
+  );
+}
+
 interface IntegrationsResponse {
   nyt?: { configured: boolean; overridden: boolean; hint: string };
   isbndb?: { configured: boolean; overridden: boolean; hint: string };
@@ -1115,6 +1209,7 @@ interface IntegrationsResponse {
     model: string;
     confidenceThreshold: number;
     note?: string;
+    usage?: OpenRouterUsage | null;
   };
   mullvad?: {
     configured: boolean;
@@ -1464,11 +1559,19 @@ function IntegrationsCard() {
         </button>
         <p className="text-xs text-gray-500">
           {openrouter?.note ||
-            "After Metadata Forge fails, OpenRouter can suggest title/author/ASIN and retry once when confidence is high. Default off — no calls without a key."}
+            "LLM assist (off by default): Metadata Forge / ebook identify retry, multi-book split, file prune, ASIN recovery. No calls without a key."}
           {" "}
           Current model: {openrouter?.model || "openai/gpt-4o-mini"}; threshold{" "}
           {openrouter?.confidenceThreshold ?? 0.85}.
         </p>
+        {openrouter?.configured && (
+          <OpenRouterUsageBlock
+            usage={openrouter.usage}
+            onRefresh={() =>
+              queryClient.invalidateQueries({ queryKey: ["admin-integrations"] })
+            }
+          />
+        )}
       </div>
 
       <div className="space-y-2 text-sm border-t border-gray-700 pt-4">

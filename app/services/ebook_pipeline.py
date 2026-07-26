@@ -498,6 +498,100 @@ async def _persist_staging(request_id: int, staging: Path) -> None:
         await db.commit()
 
 
+async def _ebook_llm_identify_retry(
+    *,
+    staging: Path,
+    title_hint: str,
+    author_hint: str,
+    google_volume_id: str | None,
+    prior_reason: str,
+    prior_meta: EbookMeta,
+) -> EbookMeta | None:
+    """OpenRouter identify → re-run catalog identify with seeded title/author.
+
+    Soft-fails to None when assist is off, low confidence, or API errors.
+    """
+    from app.services import llm_assist, openrouter
+
+    if not await openrouter.is_enabled():
+        return None
+
+    try:
+        hit = await llm_assist.ebook_identify_assist(
+            staging=staging,
+            title_hint=title_hint,
+            author_hint=author_hint,
+            prior_reason=prior_reason,
+        )
+    except Exception as e:
+        logger.warning("Ebook LLM assist unexpected error: %s", e)
+        return None
+
+    if not hit:
+        return None
+
+    threshold = await openrouter.get_confidence_threshold()
+    if hit.confidence < threshold:
+        logger.info(
+            "Ebook LLM assist low confidence (%.2f < %.2f) — quarantining",
+            hit.confidence,
+            threshold,
+        )
+        prior_meta.reason = (
+            f"{prior_reason} | AI assist confidence {hit.confidence:.2f} "
+            f"below {threshold:.2f}"
+            + (f" ({hit.rationale})" if hit.rationale else "")
+        )[:500]
+        return prior_meta
+
+    # Retry identify with LLM clues as stronger hints.
+    retry_title = hit.title or title_hint
+    retry_author = hit.author or author_hint
+    logger.info(
+        "Ebook LLM assist: title=%r author=%r confidence=%.2f — retrying identify",
+        retry_title,
+        retry_author,
+        hit.confidence,
+    )
+    try:
+        meta = await identify_ebook_metadata(
+            staging=staging,
+            title_hint=retry_title,
+            author_hint=retry_author,
+            google_volume_id=google_volume_id,
+        )
+    except Exception as e:
+        logger.warning("Ebook identify retry after LLM failed: %s", e)
+        # Fall back to LLM clues directly at the model's confidence.
+        return EbookMeta(
+            title=retry_title or "Unknown",
+            author=retry_author or "Unknown",
+            series=hit.series or None,
+            score=hit.confidence,
+            source="openrouter",
+            reason=hit.rationale or "OpenRouter ebook identify",
+        )
+
+    min_score = float(settings.ebook_min_score)
+    if meta.score < min_score and hit.confidence >= threshold:
+        # Trust high-confidence LLM clues when catalog still weak.
+        return EbookMeta(
+            title=retry_title or meta.title,
+            author=retry_author or meta.author,
+            series=hit.series or meta.series,
+            series_index=meta.series_index,
+            edition=meta.edition,
+            isbn13=meta.isbn13,
+            isbn10=meta.isbn10,
+            score=max(meta.score, hit.confidence),
+            source="openrouter",
+            cover_url=meta.cover_url,
+            ambiguous=False,
+            reason=hit.rationale or "OpenRouter ebook identify",
+        )
+    return meta
+
+
 async def _set_quarantine(request_id: int, reason: str, staging: Path) -> None:
     p = _pipeline()
     if await p._is_cancelled(request_id):
@@ -589,8 +683,21 @@ async def run_ebook_after_download(
             reason = meta.reason or f"Score {meta.score:.2f} below minimum {min_score:.2f}"
             if meta.ambiguous:
                 reason = meta.reason or "Ambiguous metadata matches"
-            await _set_quarantine(request_id, reason, staging)
-            return
+            # OpenRouter identify → retry organize clues (same toggle/threshold).
+            meta = await _ebook_llm_identify_retry(
+                staging=staging,
+                title_hint=title,
+                author_hint=author or "",
+                google_volume_id=google_volume_id,
+                prior_reason=reason,
+                prior_meta=meta,
+            )
+            if meta is None or meta.ambiguous or meta.score < min_score:
+                fail_reason = reason
+                if meta is not None and meta.reason:
+                    fail_reason = meta.reason
+                await _set_quarantine(request_id, fail_reason, staging)
+                return
 
         # Embed OPF tags on primary ebook while still in staging
         primary = pick_primary_ebook(staging)

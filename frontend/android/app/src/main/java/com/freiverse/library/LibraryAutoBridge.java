@@ -498,8 +498,20 @@ public final class LibraryAutoBridge {
     /**
      * Persist a browse folder so Android Auto can show Continue / Library while
      * the phone is locked and the WebView cannot hit the network.
+     *
+     * @param allowEmpty when false, refuse to overwrite a non-empty cache with
+     *     an empty list — locked-phone / data-restricted API failures often
+     *     look like "no titles" and used to wipe Continue + Library in AA.
      */
     public void putBrowseCache(String parentId, List<AutoBrowseNode> nodes) {
+        putBrowseCache(parentId, nodes, false);
+    }
+
+    public void putBrowseCache(
+        String parentId,
+        List<AutoBrowseNode> nodes,
+        boolean allowEmpty
+    ) {
         if (parentId == null || parentId.isEmpty()) {
             return;
         }
@@ -523,6 +535,18 @@ public final class LibraryAutoBridge {
                         o.put("iconUri", node.iconUri);
                     }
                     arr.put(o);
+                }
+            }
+            if (arr.length() == 0 && !allowEmpty) {
+                List<AutoBrowseNode> existing = getBrowseCache(parentId);
+                if (!existing.isEmpty()) {
+                    Log.i(
+                        TAG,
+                        "Keeping cached AA browse for "
+                            + parentId
+                            + " (refusing empty write)"
+                    );
+                    return;
                 }
             }
             ctx

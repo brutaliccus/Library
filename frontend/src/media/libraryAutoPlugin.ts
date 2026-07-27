@@ -50,6 +50,8 @@ interface LibraryAutoPlugin {
   cacheBrowseChildren(options: {
     parentId: string;
     children: BrowseChild[];
+    /** When true, allow clearing a non-empty native cache (live empty confirm). */
+    allowEmpty?: boolean;
   }): Promise<void>;
   bringToForeground(): Promise<void>;
   addListener(

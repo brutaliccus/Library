@@ -148,9 +148,11 @@ public class LibraryAutoPlugin extends Plugin
             LibraryAutoBridge.getInstance().ensureAppContext(ctx);
         }
         final String pid = parentId;
+        // Only clear a warm cache when JS confirms a live empty folder (not API fail).
+        boolean allowEmpty = call.getBoolean("allowEmpty", false);
         // Icons optional for cache — skip network bitmap fetch to keep this fast.
         List<AutoBrowseNode> nodes = parseBrowseChildrenSkipBitmaps(call.getArray("children"));
-        LibraryAutoBridge.getInstance().putBrowseCache(pid, nodes);
+        LibraryAutoBridge.getInstance().putBrowseCache(pid, nodes, allowEmpty);
         call.resolve();
     }
 

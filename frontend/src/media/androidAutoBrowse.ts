@@ -88,10 +88,18 @@ function letterBucket(title: string): string {
   return "#";
 }
 
-async function persistBrowseFolder(parentId: string, children: BrowseChild[]): Promise<void> {
+async function persistBrowseFolder(
+  parentId: string,
+  children: BrowseChild[],
+  opts?: { allowEmpty?: boolean }
+): Promise<void> {
   if (Capacitor.getPlatform() !== "android") return;
   try {
-    await LibraryAuto.cacheBrowseChildren({ parentId, children });
+    await LibraryAuto.cacheBrowseChildren({
+      parentId,
+      children,
+      allowEmpty: opts?.allowEmpty === true,
+    });
   } catch {
     /* plugin unavailable */
   }
@@ -126,8 +134,9 @@ async function getAllAbsItems(): Promise<ABSItem[]> {
       }
     }
   } catch {
-    // Offline / logged out — return stale cache if any
-    return absItemsCache ?? [];
+    // Offline / data-restricted — keep memory cache; never pretend "empty library".
+    if (absItemsCache) return absItemsCache;
+    throw new Error("ABS collection unavailable");
   }
 
   all.sort((a, b) => sortTitle(a.title).localeCompare(sortTitle(b.title)));
@@ -150,37 +159,35 @@ async function loadContinueListening(): Promise<BrowseChild[]> {
   rdHistPlayCache.clear();
   const children: BrowseChild[] = [];
 
-  try {
-    const [absRes, rdRes] = await Promise.all([
-      api.get("/stream/abs/in-progress"),
-      api.get("/stream/rd/history/in-progress"),
-    ]);
+  // Throw on failure so callers do not persist [] over a warm native cache
+  // (locked phone / restricted data often fails these APIs).
+  const [absRes, rdRes] = await Promise.all([
+    api.get("/stream/abs/in-progress"),
+    api.get("/stream/rd/history/in-progress"),
+  ]);
 
-    for (const item of (absRes.data?.items ?? []) as InProgressABS[]) {
-      if (item.isFinished) continue;
-      children.push({
-        mediaId: `${AA_PLAY_ABS_PREFIX}${item.itemId}`,
-        title: item.title,
-        subtitle: item.author || "Audiobookshelf",
-        browsable: false,
-        iconUri: coverUri(item.coverUrl, item.itemId),
-      });
-    }
+  for (const item of (absRes.data?.items ?? []) as InProgressABS[]) {
+    if (item.isFinished) continue;
+    children.push({
+      mediaId: `${AA_PLAY_ABS_PREFIX}${item.itemId}`,
+      title: item.title,
+      subtitle: item.author || "Audiobookshelf",
+      browsable: false,
+      iconUri: coverUri(item.coverUrl, item.itemId),
+    });
+  }
 
-    for (const item of (rdRes.data?.items ?? []) as RDHistoryItem[]) {
-      if (!item.tracks?.length) continue;
-      const mediaId = `${AA_PLAY_RD_HIST_PREFIX}${item.id}`;
-      rdHistPlayCache.set(mediaId, item);
-      children.push({
-        mediaId,
-        title: item.title,
-        subtitle: item.author || "Streaming",
-        browsable: false,
-        iconUri: coverUri(item.coverUrl),
-      });
-    }
-  } catch {
-    // ignore
+  for (const item of (rdRes.data?.items ?? []) as RDHistoryItem[]) {
+    if (!item.tracks?.length) continue;
+    const mediaId = `${AA_PLAY_RD_HIST_PREFIX}${item.id}`;
+    rdHistPlayCache.set(mediaId, item);
+    children.push({
+      mediaId,
+      title: item.title,
+      subtitle: item.author || "Streaming",
+      browsable: false,
+      iconUri: coverUri(item.coverUrl),
+    });
   }
 
   return children.slice(0, 24);
@@ -243,11 +250,16 @@ export async function prefetchAndroidAutoBrowseCache(force = false): Promise<voi
 
   prefetchInFlight = (async () => {
     try {
-      const continueChildren = await loadContinueListening();
-      await persistBrowseFolder(AA_CONTINUE, continueChildren);
+      try {
+        const continueChildren = await loadContinueListening();
+        // Live confirm — allow clearing Continue when nothing is in progress.
+        await persistBrowseFolder(AA_CONTINUE, continueChildren, { allowEmpty: true });
+      } catch (err) {
+        console.warn("Android Auto Continue prefetch skipped:", err);
+      }
 
       const libraryRoot = await loadLibraryRoot();
-      await persistBrowseFolder(AA_LIBRARY, libraryRoot);
+      await persistBrowseFolder(AA_LIBRARY, libraryRoot, { allowEmpty: true });
 
       const items = await getAllAbsItems();
       const byLetter = new Map<string, BrowseChild[]>();
@@ -359,12 +371,14 @@ export async function startAndroidAutoBrowseListener(): Promise<void> {
     async (event: { parentId: string; requestId: string }) => {
       try {
         const children = await loadBrowseChildren(event.parentId);
-        await persistBrowseFolder(event.parentId, children);
+        // Live success only — allowEmpty so a real empty Continue can clear stale rows.
+        await persistBrowseFolder(event.parentId, children, { allowEmpty: true });
         await LibraryAuto.resolveBrowseChildren({
           requestId: event.requestId,
           children,
         });
       } catch {
+        // API blocked / WebView thaw failed — native keeps prior cache.
         await LibraryAuto.resolveBrowseChildren({
           requestId: event.requestId,
           children: [],

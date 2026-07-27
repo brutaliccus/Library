@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.services.quick_review import (
     _enrich_selected_for_apply,
     _folder_title_hint,
     _looks_like_junk_title,
+    _stamp_cover_url_on_staging,
     list_staging_targets,
     merge_clues_with_catalog,
     resolve_apply_edit_mode,
@@ -122,3 +124,34 @@ def test_enrich_selected_injects_top_level_cover_into_full_mode():
         "https://images.example/cover.jpg"
     )
     assert override.get("cover_url") == "https://images.example/cover.jpg"
+
+
+def test_stamp_cover_overwrites_nested_stale_urls(tmp_path: Path):
+    """Matched metadata cover must replace torrent/stale nested cover_url values."""
+    staging = tmp_path / "req_cover"
+    staging.mkdir()
+    (staging / "libraforge.json").write_text(
+        json.dumps(
+            {
+                "marker": {
+                    "audible": {
+                        "title": "Timeline",
+                        "cover_url": "https://images.example/stale-torrent.jpg",
+                    }
+                },
+                "sidecar": {
+                    "book": {
+                        "title": "Timeline",
+                        "cover_url": "https://images.example/stale-sidecar.jpg",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    matched = "https://images.example/matched-audible.jpg"
+    _stamp_cover_url_on_staging(staging, matched)
+    data = json.loads((staging / "libraforge.json").read_text(encoding="utf-8"))
+    assert data["marker"]["audible"]["cover_url"] == matched
+    assert data["sidecar"]["book"]["cover_url"] == matched
+    assert data["cover_url"] == matched

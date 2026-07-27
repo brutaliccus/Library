@@ -577,18 +577,22 @@ def _stamp_cover_url_on_staging(staging: Path, cover_url: str) -> None:
         marker = data.get("marker")
         if isinstance(marker, dict):
             audible = marker.get("audible")
-            if isinstance(audible, dict) and not str(audible.get("cover_url") or "").strip():
-                audible["cover_url"] = cover_url
-                changed = True
-            elif not isinstance(audible, dict) and not str(marker.get("cover_url") or "").strip():
+            if isinstance(audible, dict):
+                if str(audible.get("cover_url") or "").strip() != cover_url:
+                    audible["cover_url"] = cover_url
+                    changed = True
+            elif str(marker.get("cover_url") or "").strip() != cover_url:
                 marker["cover_url"] = cover_url
                 changed = True
         sidecar = data.get("sidecar")
         if isinstance(sidecar, dict):
             book = sidecar.get("book")
-            if isinstance(book, dict) and not str(book.get("cover_url") or "").strip():
+            if isinstance(book, dict) and str(book.get("cover_url") or "").strip() != cover_url:
                 book["cover_url"] = cover_url
                 changed = True
+        if str(data.get("cover_url") or "").strip() != cover_url:
+            data["cover_url"] = cover_url
+            changed = True
         if changed:
             lf_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             stamped = True

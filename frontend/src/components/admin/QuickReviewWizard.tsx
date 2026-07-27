@@ -55,6 +55,25 @@ type QuickReviewLoad = {
   already_applied: boolean;
 };
 
+type ChapterRow = {
+  index: number;
+  title: string;
+  start: number;
+};
+
+type ChapterPreview = {
+  asin?: string;
+  chapters?: ChapterRow[];
+  chapter_count?: number;
+  current_chapters?: ChapterRow[];
+  current_chapter_count?: number;
+  backend?: string;
+  duration?: number | null;
+  status_detail?: string;
+  source_path?: string;
+  updated_at?: string;
+};
+
 type PipelineState = {
   has_metadata: boolean;
   needs_m4b: boolean;
@@ -67,12 +86,7 @@ type PipelineState = {
   manual_review_url?: string | null;
   status?: string;
   status_detail?: string | null;
-};
-
-type ChapterRow = {
-  index: number;
-  title: string;
-  start: number;
+  chapter_preview?: ChapterPreview | null;
 };
 
 type ChosenMeta = {
@@ -255,6 +269,14 @@ export default function QuickReviewWizard({
   const [chapterAsin, setChapterAsin] = useState("");
   const [previewChapters, setPreviewChapters] = useState<ChapterRow[]>([]);
   const [currentChapters, setCurrentChapters] = useState<ChapterRow[]>([]);
+  const [chapterCompareDetail, setChapterCompareDetail] = useState("");
+  const [chapterCompareMeta, setChapterCompareMeta] = useState<{
+    asin?: string;
+    chapterCount?: number;
+    currentCount?: number;
+    backend?: string;
+    updatedAt?: string;
+  }>({});
 
   const loadKey = useMemo(
     () => ["admin-quick-review", requestId, relativePath] as const,
@@ -313,6 +335,8 @@ export default function QuickReviewWizard({
       setChapterAsin("");
       setPreviewChapters([]);
       setCurrentChapters([]);
+      setChapterCompareDetail("");
+      setChapterCompareMeta({});
     }
   }, [open]);
 
@@ -338,7 +362,23 @@ export default function QuickReviewWizard({
     if (!pipeline) return;
     if (!pipeline.needs_m4b) setM4bDone(true);
     if (pipeline.asin && !chapterAsin) setChapterAsin(pipeline.asin);
-  }, [pipeline, chapterAsin]);
+    const prev = pipeline.chapter_preview;
+    if (!prev) return;
+    // Hydrate last compare from staging so refresh still shows results.
+    if (previewChapters.length === 0 && (prev.chapters?.length || 0) > 0) {
+      setPreviewChapters(prev.chapters || []);
+      setCurrentChapters(prev.current_chapters || []);
+      setChapterCompareDetail(prev.status_detail || "");
+      setChapterCompareMeta({
+        asin: prev.asin,
+        chapterCount: prev.chapter_count ?? prev.chapters?.length,
+        currentCount: prev.current_chapter_count ?? prev.current_chapters?.length,
+        backend: prev.backend,
+        updatedAt: prev.updated_at,
+      });
+      if (prev.asin && !chapterAsin) setChapterAsin(prev.asin);
+    }
+  }, [pipeline, chapterAsin, previewChapters.length]);
 
   const searchMutation = useMutation({
     mutationFn: async () => {
@@ -433,23 +473,41 @@ export default function QuickReviewWizard({
         chapters: ChapterRow[];
         current_chapters: ChapterRow[];
         chapter_count: number;
+        current_chapter_count?: number;
         asin: string;
+        backend?: string;
+        status_detail?: string;
       };
     },
     onSuccess: (data) => {
-      setPreviewChapters(data.chapters || []);
-      setCurrentChapters(data.current_chapters || []);
+      const audible = data.chapters || [];
+      const current = data.current_chapters || [];
+      setPreviewChapters(audible);
+      setCurrentChapters(current);
       if (data.asin) setChapterAsin(data.asin);
-      toast(
-        data.chapter_count
-          ? `Fetched ${data.chapter_count} Audible chapters — confirm to embed`
-          : "Preview returned no chapters",
-        data.chapter_count ? "success" : "info",
+      setChapterCompareDetail(
+        data.status_detail ||
+          (data.chapter_count
+            ? `Preview ASIN ${data.asin}: ${data.chapter_count} Audible chapters`
+            : "Preview returned no chapters"),
       );
+      setChapterCompareMeta({
+        asin: data.asin,
+        chapterCount: data.chapter_count ?? audible.length,
+        currentCount: data.current_chapter_count ?? current.length,
+        backend: data.backend || "audible-chapters",
+      });
+      // Toast is secondary — primary feedback is the in-panel compare below.
+      if (!audible.length) {
+        toast(data.status_detail || "Preview returned no chapters", "info");
+      }
       void queryClient.invalidateQueries({ queryKey: pipelineKey });
       void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
     },
-    onError: (err: any) => toast(err.response?.data?.detail || "Chapter preview failed", "error"),
+    onError: (err: any) => {
+      setChapterCompareDetail(err.response?.data?.detail || "Chapter preview failed");
+      toast(err.response?.data?.detail || "Chapter preview failed", "error");
+    },
   });
 
   const applyChaptersMutation = useMutation({
@@ -1113,6 +1171,49 @@ export default function QuickReviewWizard({
               )}
             </div>
 
+            {(chapterCompareDetail ||
+              chapterCompareMeta.asin ||
+              previewChapters.length > 0 ||
+              currentChapters.length > 0) && (
+              <div className="rounded-xl border border-teal-800/40 bg-teal-950/20 p-3 space-y-2">
+                <p className="text-xs font-medium text-teal-200">ASIN comparison</p>
+                <dl className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                  <div>
+                    <dt className="text-gray-500">Chosen ASIN</dt>
+                    <dd className="font-mono text-gray-100 tracking-wide">
+                      {chapterCompareMeta.asin || chapterAsin || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-500">Audible chapters</dt>
+                    <dd className="tabular-nums text-gray-100">
+                      {chapterCompareMeta.chapterCount ?? previewChapters.length}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-500">Current markers</dt>
+                    <dd className="tabular-nums text-gray-100">
+                      {chapterCompareMeta.currentCount ?? currentChapters.length}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-gray-500">Backend</dt>
+                    <dd className="text-gray-300 truncate">
+                      {chapterCompareMeta.backend || "audible-chapters"}
+                    </dd>
+                  </div>
+                </dl>
+                {chapterCompareDetail && (
+                  <p className="text-xs text-gray-300">{chapterCompareDetail}</p>
+                )}
+                {chapterCompareMeta.updatedAt && (
+                  <p className="text-[10px] text-gray-600">
+                    Last compare {new Date(chapterCompareMeta.updatedAt).toLocaleString()}
+                  </p>
+                )}
+              </div>
+            )}
+
             {(previewChapters.length > 0 || currentChapters.length > 0) && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[36vh] overflow-hidden">
                 <div className="rounded-lg border border-gray-700 overflow-hidden flex flex-col min-h-0">
@@ -1138,6 +1239,9 @@ export default function QuickReviewWizard({
                     Audible ({previewChapters.length})
                   </p>
                   <ul className="overflow-y-auto text-xs text-gray-300 px-2 py-1.5 space-y-1 flex-1">
+                    {previewChapters.length === 0 && (
+                      <li className="text-gray-600 py-2">No Audible chapters in last compare</li>
+                    )}
                     {previewChapters.slice(0, 80).map((ch) => (
                       <li key={`a-${ch.index}`} className="flex gap-2">
                         <span className="tabular-nums text-gray-500 shrink-0 w-10">

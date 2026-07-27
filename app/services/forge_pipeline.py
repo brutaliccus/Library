@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1719,11 +1720,11 @@ async def run_forge_after_download(
                         if not isinstance(meta, dict):
                             meta = {}
                         # m4b-tool re-encodes; embedded covers from Metadata Forge are NOT
-                        # copied unless cover_url is passed for --cover. Pull from sidecar.
-                        if not str(meta.get("cover_url") or "").strip():
-                            cover = cover_url_from_staging(staging) or cover_url_from_staging(source_dir)
-                            if cover:
-                                meta = {**meta, "cover_url": cover}
+                        # copied unless cover_url is passed for --cover. Always prefer the
+                        # matched metadata cover from staging over stale torrent art.
+                        cover = cover_url_from_staging(staging) or cover_url_from_staging(source_dir)
+                        if cover:
+                            meta = {**meta, "cover_url": cover}
                         book_title = (
                             str(meta.get("title") or "").strip()
                             or clean_catalog_title(title)
@@ -2171,6 +2172,7 @@ def detect_pipeline_state(staging: Path) -> dict[str, Any]:
         suggested = "chapters"
     else:
         suggested = "folder"
+    last_preview = read_chapter_preview(staging)
     return {
         "has_metadata": has_metadata,
         "needs_m4b": needs_m4b,
@@ -2181,6 +2183,7 @@ def detect_pipeline_state(staging: Path) -> dict[str, Any]:
         "m4b_url": libraforge.public_m4b_url() or None,
         "chaptering_url": libraforge.public_chaptering_url() or None,
         "manual_review_url": libraforge.public_manual_review_url() or None,
+        "chapter_preview": last_preview,
     }
 
 
@@ -2204,41 +2207,100 @@ def resolve_resume_from(
     return "m4b"
 
 
-def _extract_chapters_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
-    """Normalize chapter list from a LibraForge chaptering run report."""
+CHAPTER_PREVIEW_FILENAME = "chapter_preview.json"
+
+
+def _chapter_start_seconds(ch: dict[str, Any]) -> float:
+    start = ch.get("start")
+    if start is None:
+        start = ch.get("start_sec") or ch.get("startSeconds")
+    if start is None and ch.get("start_ms") is not None:
+        try:
+            return float(ch["start_ms"]) / 1000.0
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        return float(start or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_chapter_rows(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list) or not raw:
+        return []
     out: list[dict[str, Any]] = []
+    for i, ch in enumerate(raw):
+        if isinstance(ch, dict):
+            title = str(ch.get("title") or ch.get("name") or f"Chapter {i + 1}")
+            out.append({"index": i, "title": title, "start": _chapter_start_seconds(ch)})
+        elif isinstance(ch, str) and ch.strip():
+            out.append({"index": i, "title": ch.strip(), "start": 0.0})
+    return out
+
+
+def _extract_chapters_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize chapter list from a LibraForge chaptering run / load payload.
+
+    Audible-chapters runs nest the list under ``stats.chaptering_result.chapters``
+    (``stats.chapters`` is only a count). ``/api/chaptering/load`` nests under
+    ``result.chapters``.
+    """
+    if not isinstance(report, dict):
+        return []
     stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
+    nested_result = report.get("result") if isinstance(report.get("result"), dict) else {}
+    chaptering_result = (
+        stats.get("chaptering_result")
+        if isinstance(stats.get("chaptering_result"), dict)
+        else {}
+    )
     raw_lists = [
         report.get("chapters"),
         report.get("audible_chapters"),
-        stats.get("chapters_list"),
-        stats.get("chapters"),
         report.get("preview_chapters"),
+        nested_result.get("chapters"),
+        chaptering_result.get("chapters"),
+        stats.get("chapters_list"),
+        # stats.chapters is usually an int count — skip non-lists via normalize.
+        stats.get("chapters"),
     ]
     for raw in raw_lists:
-        if not isinstance(raw, list) or not raw:
-            continue
-        for i, ch in enumerate(raw):
-            if isinstance(ch, dict):
-                title = str(ch.get("title") or ch.get("name") or f"Chapter {i + 1}")
-                start = ch.get("start")
-                if start is None:
-                    start = ch.get("start_sec") or ch.get("startSeconds") or 0
-                try:
-                    start_f = float(start)
-                except (TypeError, ValueError):
-                    start_f = 0.0
-                out.append({"index": i, "title": title, "start": start_f})
-            elif isinstance(ch, str) and ch.strip():
-                out.append({"index": i, "title": ch.strip(), "start": 0.0})
-        if out:
-            return out
-    # Fallback: titles only from stats
+        rows = _normalize_chapter_rows(raw)
+        if rows:
+            return rows
     titles = stats.get("chapter_titles") if isinstance(stats, dict) else None
     if isinstance(titles, list):
-        for i, title in enumerate(titles):
-            out.append({"index": i, "title": str(title or f"Chapter {i + 1}"), "start": 0.0})
-    return out
+        return [
+            {"index": i, "title": str(title or f"Chapter {i + 1}"), "start": 0.0}
+            for i, title in enumerate(titles)
+        ]
+    return []
+
+
+def chapter_preview_path(staging: Path) -> Path:
+    return staging / CHAPTER_PREVIEW_FILENAME
+
+
+def read_chapter_preview(staging: Path) -> dict[str, Any] | None:
+    """Last Quick Review Chapter Forge compare payload (durable across refresh)."""
+    path = chapter_preview_path(staging)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_chapter_preview(staging: Path, payload: dict[str, Any]) -> None:
+    staging.mkdir(parents=True, exist_ok=True)
+    body = dict(payload)
+    body["updated_at"] = datetime.now(timezone.utc).isoformat()
+    chapter_preview_path(staging).write_text(
+        json.dumps(body, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 async def preview_audible_chapters(
@@ -2306,11 +2368,25 @@ async def preview_audible_chapters(
 
     audible = _extract_chapters_from_report(report)
     stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
+    chaptering_result = (
+        stats.get("chaptering_result")
+        if isinstance(stats.get("chaptering_result"), dict)
+        else {}
+    )
+    resolved_asin = (
+        normalize_asin(str(stats.get("asin") or chaptering_result.get("asin") or ""))
+        or asin_n
+    )
     chapters_n = 0
     try:
         chapters_n = int(stats.get("chapters") or len(audible) or 0)
     except (TypeError, ValueError):
         chapters_n = len(audible)
+    chapters_n = chapters_n or len(audible)
+    detail = (
+        f"Chapter preview ready (ASIN {resolved_asin}, "
+        f"{chapters_n} Audible / {len(current_chapters)} current)"
+    )
 
     # Return to quarantine so Continue / wizard remain available (no re-notify —
     # admin is already in Quick Review).
@@ -2319,7 +2395,7 @@ async def preview_audible_chapters(
             db,
             request_id,
             "quarantined",
-            f"Chapter preview ready (ASIN {asin_n}, {chapters_n} chapters)",
+            detail,
         )
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
         req_row = result.scalar_one_or_none()
@@ -2327,17 +2403,40 @@ async def preview_audible_chapters(
             req_row.quarantine_reason = "Quick Review: confirm Audible chapters then apply"
             await db.commit()
 
-    return {
+    payload = {
         "ok": True,
-        "asin": asin_n,
+        "asin": resolved_asin,
         "source_path": source_path,
         "chapters": audible,
-        "chapter_count": chapters_n or len(audible),
+        "chapter_count": chapters_n,
         "current_chapters": current_chapters,
+        "current_chapter_count": len(current_chapters),
+        "backend": str(stats.get("backend") or chaptering_result.get("backend") or "audible-chapters"),
+        "duration": stats.get("duration") or chaptering_result.get("duration"),
         "embedded_into": str(stats.get("embedded_into") or "").strip(),
-        "status_detail": f"Preview ASIN {asin_n}: {chapters_n or len(audible)} chapters",
+        "status_detail": detail,
         "user_id": user_id,
     }
+    try:
+        write_chapter_preview(
+            staging,
+            {
+                "asin": resolved_asin,
+                "chapters": audible,
+                "chapter_count": chapters_n,
+                "current_chapters": current_chapters,
+                "current_chapter_count": len(current_chapters),
+                "backend": payload["backend"],
+                "duration": payload.get("duration"),
+                "status_detail": detail,
+                "source_path": source_path,
+            },
+        )
+    except OSError:
+        logger.debug(
+            "Could not persist chapter preview for request %s", request_id, exc_info=True
+        )
+    return payload
 
 
 async def apply_audible_chapters(

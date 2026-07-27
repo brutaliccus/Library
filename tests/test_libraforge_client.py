@@ -27,13 +27,16 @@ from app.services.forge_pipeline import (
     needs_m4b_conversion,
     normalize_asin,
     primary_audio_for_chaptering,
+    read_chapter_preview,
     resolve_resume_from,
     resolve_staging_dir,
     safe_path_under_staging,
     seed_staging_metadata_hints,
     staging_has_applied_metadata,
+    write_chapter_preview,
     _cleanup_forge_temps,
     _cleanup_staging_after_folder_forge,
+    _extract_chapters_from_report,
     _remove_source_audio_after_m4b,
 )
 
@@ -496,6 +499,69 @@ def test_cover_url_from_staging_nested_marker_audible(tmp_path):
         encoding="utf-8",
     )
     assert cover_url_from_staging(staging) == "https://images.example/nested-cover.jpg"
+
+
+def test_extract_chapters_from_audible_chapters_run_report():
+    """LibraForge nests chapters under stats.chaptering_result (stats.chapters is a count)."""
+    report = {
+        "status": "completed",
+        "stats": {
+            "backend": "audible-chapters",
+            "asin": "B00TESTASIN",
+            "chapters": 3,
+            "chaptering_result": {
+                "asin": "B00TESTASIN",
+                "backend": "audible-chapters",
+                "chapters": [
+                    {"id": 1, "title": "Opening Credits", "start": 0.0, "end": 12.0},
+                    {"id": 2, "title": "Chapter 1", "start": 12.0, "end": 600.0},
+                    {"id": 3, "title": "Chapter 2", "start": 600.0, "end": 1200.0},
+                ],
+            },
+        },
+    }
+    rows = _extract_chapters_from_report(report)
+    assert len(rows) == 3
+    assert rows[0]["title"] == "Opening Credits"
+    assert rows[1]["start"] == 12.0
+
+
+def test_extract_chapters_from_chaptering_load_payload():
+    loaded = {
+        "asin": "B00TESTASIN",
+        "result": {
+            "chapters": [
+                {"title": "Intro", "start": 0},
+                {"title": "Part One", "start": 30.5},
+            ]
+        },
+    }
+    rows = _extract_chapters_from_report(loaded)
+    assert [r["title"] for r in rows] == ["Intro", "Part One"]
+    assert rows[1]["start"] == 30.5
+
+
+def test_chapter_preview_persist_roundtrip(tmp_path):
+    staging = tmp_path / "req_cf"
+    staging.mkdir()
+    write_chapter_preview(
+        staging,
+        {
+            "asin": "B00TESTASIN",
+            "chapters": [{"index": 0, "title": "Ch 1", "start": 0.0}],
+            "chapter_count": 1,
+            "current_chapters": [],
+            "current_chapter_count": 0,
+            "status_detail": "Preview ASIN B00TESTASIN: 1 chapters",
+        },
+    )
+    loaded = read_chapter_preview(staging)
+    assert loaded is not None
+    assert loaded["asin"] == "B00TESTASIN"
+    assert loaded["chapter_count"] == 1
+    assert loaded.get("updated_at")
+    state = detect_pipeline_state(staging)
+    assert state["chapter_preview"]["asin"] == "B00TESTASIN"
 
 
 def test_remove_source_audio_after_m4b(tmp_path):

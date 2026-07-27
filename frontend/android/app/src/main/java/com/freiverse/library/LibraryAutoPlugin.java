@@ -49,6 +49,8 @@ public class LibraryAutoPlugin extends Plugin
     private final List<PendingAction> pendingActions = new ArrayList<>();
     private String cachedArtworkUrl = null;
     private Bitmap cachedArtwork = null;
+    /** Drops stale async artwork loads when a newer syncPlayback wins the race. */
+    private int artworkLoadGeneration = 0;
 
     /** Sticky play/playmedia until retries exhaust or user pauses (not optimistic play). */
     private PendingAction stickyPlay = null;
@@ -309,10 +311,10 @@ public class LibraryAutoPlugin extends Plugin
         float playbackRate = call.getFloat("playbackRate", 1.0f);
 
         if (!active) {
+            artworkLoadGeneration++;
             cachedArtworkUrl = null;
-            if (cachedArtwork != null && !cachedArtwork.isRecycled()) {
-                cachedArtwork.recycle();
-            }
+            // Do not Bitmap.recycle() — MediaSession / notification may still
+            // hold the same instance until the next metadata push.
             cachedArtwork = null;
             cancelStickyPlay();
             LibraryAutoBridge.getInstance().clear();
@@ -399,6 +401,7 @@ public class LibraryAutoPlugin extends Plugin
         final String metaAlbum = album;
         final boolean metaPlaying = playing;
         final float metaRate = playbackRate;
+        final int loadGen = ++artworkLoadGeneration;
         new Thread(
             () -> {
                 try {
@@ -407,7 +410,10 @@ public class LibraryAutoPlugin extends Plugin
                         return;
                     }
                     mainHandler.post(
-                        () ->
+                        () -> {
+                            if (loadGen != artworkLoadGeneration) {
+                                return;
+                            }
                             LibraryAutoBridge.getInstance().update(
                                 metaTitle,
                                 metaArtist,
@@ -418,7 +424,8 @@ public class LibraryAutoPlugin extends Plugin
                                 durationMs,
                                 positionMs,
                                 metaRate
-                            )
+                            );
+                        }
                     );
                 } catch (IOException ex) {
                     Log.w(TAG, "Unable to load artwork", ex);
@@ -453,9 +460,8 @@ public class LibraryAutoPlugin extends Plugin
         Bitmap bitmap = urlToBitmap(url);
         if (bitmap != null) {
             synchronized (this) {
-                if (cachedArtwork != null && cachedArtwork != bitmap && !cachedArtwork.isRecycled()) {
-                    cachedArtwork.recycle();
-                }
+                // Drop the prior reference only — never recycle while the
+                // MediaSession / notification may still display it.
                 cachedArtworkUrl = url;
                 cachedArtwork = bitmap;
             }

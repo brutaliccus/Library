@@ -136,13 +136,11 @@ async function cachedResponseMeta(
   if (!resp) return null;
   const len = Number(resp.headers.get("content-length") || 0);
   if (len > 0) return { resp, size: len };
-  try {
-    const blob = await resp.clone().blob();
-    if (blob.size === 0) return null;
-    return { resp, size: blob.size };
-  } catch {
-    return null;
-  }
+  // Never materialize an unknown-size body just to measure it — on Android
+  // that clones a multi-hundred-MB track into RAM and OOMs mid-play. Writers
+  // in this module always set Content-Length; legacy entries fall back to
+  // network streaming via getCachedTrackObjectUrl → null.
+  return null;
 }
 
 /** Fast check (no blob read) — is the full track on disk? */
@@ -506,9 +504,10 @@ async function downloadTrack(
     state.contentType = chunk.contentType || state.contentType;
     if (chunk.totalFromRange) state.total = chunk.totalFromRange;
 
-    // Known-huge ranged downloads: stop before assemble thrash. Parts already
+    // Known-huge ranged downloads: stop before assemble thrash (including
+    // explicit Save Offline — assembling still OOMs Android). Parts already
     // written stay for resume diagnostics; playback keeps using the stream URL.
-    if (state.total != null && state.total > MAX_BLOB_PLAYBACK_BYTES && !opts?.force) {
+    if (state.total != null && state.total > MAX_BLOB_PLAYBACK_BYTES) {
       setLastError("Track too large for in-app cache while playing");
       return false;
     }

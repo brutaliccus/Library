@@ -157,43 +157,9 @@ public class LibraryAutoPlugin extends Plugin
     }
 
     private List<AutoBrowseNode> parseBrowseChildren(@Nullable JSArray children) {
-        List<AutoBrowseNode> nodes = new ArrayList<>();
-        if (children == null) {
-            return nodes;
-        }
-        try {
-            for (Object raw : children.toList()) {
-                if (!(raw instanceof JSONObject)) {
-                    continue;
-                }
-                JSONObject o = (JSONObject) raw;
-                String iconUri = o.optString("iconUri", null);
-                if (iconUri != null && iconUri.isEmpty()) {
-                    iconUri = null;
-                }
-                Bitmap iconBitmap = null;
-                if (iconUri != null) {
-                    try {
-                        iconBitmap = urlToBitmap(iconUri);
-                    } catch (IOException ex) {
-                        Log.w(TAG, "Browse icon load failed: " + iconUri, ex);
-                    }
-                }
-                nodes.add(
-                    new AutoBrowseNode(
-                        o.optString("mediaId", ""),
-                        o.optString("title", ""),
-                        o.optString("subtitle", ""),
-                        o.optBoolean("browsable", false),
-                        iconUri,
-                        iconBitmap
-                    )
-                );
-            }
-        } catch (JSONException ex) {
-            Log.w(TAG, "Failed to parse browse children", ex);
-        }
-        return nodes;
+        // Prefer iconUri over decoded bitmaps — loading every cover at full
+        // resolution while resolving a letter folder OOMs mid-playback.
+        return parseBrowseChildrenSkipBitmaps(children);
     }
 
     private List<AutoBrowseNode> parseBrowseChildrenSkipBitmaps(@Nullable JSArray children) {
@@ -344,6 +310,9 @@ public class LibraryAutoPlugin extends Plugin
 
         if (!active) {
             cachedArtworkUrl = null;
+            if (cachedArtwork != null && !cachedArtwork.isRecycled()) {
+                cachedArtwork.recycle();
+            }
             cachedArtwork = null;
             cancelStickyPlay();
             LibraryAutoBridge.getInstance().clear();
@@ -366,39 +335,97 @@ public class LibraryAutoPlugin extends Plugin
         String artist = call.getString("artist", "");
         String album = call.getString("album", "");
         double durationSec = call.getDouble("duration", 0.0);
+        final long positionMs = Math.round(positionSec * 1000);
+        final long durationMs = Math.round(durationSec * 1000);
 
-        Bitmap artwork = null;
+        String artworkSrc = null;
         try {
             JSArray artworkArray = call.getArray("artwork");
             if (artworkArray != null) {
                 List<JSONObject> artworkList = artworkArray.toList();
                 for (JSONObject artworkJson : artworkList) {
                     String src = artworkJson.optString("src", null);
-                    if (src != null) {
-                        artwork = getCachedArtwork(src);
+                    if (src != null && !src.isEmpty()) {
+                        artworkSrc = src;
                         break;
                     }
                 }
             }
-        } catch (JSONException | IOException ex) {
-            Log.w(TAG, "Unable to load artwork", ex);
+        } catch (JSONException ex) {
+            Log.w(TAG, "Unable to parse artwork", ex);
         }
 
+        // Fast path: cached art — never block the bridge on network decode.
+        if (artworkSrc != null && artworkSrc.equals(cachedArtworkUrl) && cachedArtwork != null) {
+            LibraryAutoBridge.getInstance().update(
+                title,
+                artist,
+                album,
+                cachedArtwork,
+                true,
+                playing,
+                durationMs,
+                positionMs,
+                playbackRate
+            );
+            ensurePlaybackService();
+            maybeConfirmStickyPlay(playing);
+            call.resolve();
+            return;
+        }
+
+        // Push metadata immediately without art; decode cover off-thread.
         LibraryAutoBridge.getInstance().update(
             title,
             artist,
             album,
-            artwork,
+            null,
             true,
             playing,
-            Math.round(durationSec * 1000),
-            Math.round(positionSec * 1000),
+            durationMs,
+            positionMs,
             playbackRate
         );
         ensurePlaybackService();
         maybeConfirmStickyPlay(playing);
-
         call.resolve();
+
+        if (artworkSrc == null) {
+            return;
+        }
+        final String loadUrl = artworkSrc;
+        final String metaTitle = title;
+        final String metaArtist = artist;
+        final String metaAlbum = album;
+        final boolean metaPlaying = playing;
+        final float metaRate = playbackRate;
+        new Thread(
+            () -> {
+                try {
+                    Bitmap artwork = getCachedArtwork(loadUrl);
+                    if (artwork == null) {
+                        return;
+                    }
+                    mainHandler.post(
+                        () ->
+                            LibraryAutoBridge.getInstance().update(
+                                metaTitle,
+                                metaArtist,
+                                metaAlbum,
+                                artwork,
+                                true,
+                                metaPlaying,
+                                durationMs,
+                                positionMs,
+                                metaRate
+                            )
+                    );
+                } catch (IOException ex) {
+                    Log.w(TAG, "Unable to load artwork", ex);
+                }
+            },
+            "library-artwork"
+        ).start();
     }
 
     /**
@@ -418,13 +445,20 @@ public class LibraryAutoPlugin extends Plugin
     }
 
     private Bitmap getCachedArtwork(String url) throws IOException {
-        if (url != null && url.equals(cachedArtworkUrl) && cachedArtwork != null) {
-            return cachedArtwork;
+        synchronized (this) {
+            if (url != null && url.equals(cachedArtworkUrl) && cachedArtwork != null) {
+                return cachedArtwork;
+            }
         }
         Bitmap bitmap = urlToBitmap(url);
         if (bitmap != null) {
-            cachedArtworkUrl = url;
-            cachedArtwork = bitmap;
+            synchronized (this) {
+                if (cachedArtwork != null && cachedArtwork != bitmap && !cachedArtwork.isRecycled()) {
+                    cachedArtwork.recycle();
+                }
+                cachedArtworkUrl = url;
+                cachedArtwork = bitmap;
+            }
         }
         return bitmap;
     }
@@ -665,11 +699,14 @@ public class LibraryAutoPlugin extends Plugin
         handler.resolve(data);
     }
 
+    private static final int MAX_ARTWORK_EDGE_PX = 512;
+
     private Bitmap urlToBitmap(String url) throws IOException {
         if (url == null || url.isEmpty() || url.startsWith("blob:")) {
             return null;
         }
 
+        byte[] bytes;
         if (url.startsWith("http")) {
             HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
             connection.setDoInput(true);
@@ -677,17 +714,85 @@ public class LibraryAutoPlugin extends Plugin
             connection.setReadTimeout(8000);
             connection.connect();
             try (InputStream inputStream = connection.getInputStream()) {
-                return BitmapFactory.decodeStream(inputStream);
+                bytes = readAllBytes(inputStream);
+            } finally {
+                connection.disconnect();
+            }
+        } else {
+            int base64Index = url.indexOf(";base64,");
+            if (base64Index == -1) {
+                return null;
+            }
+            String base64Data = url.substring(base64Index + 8);
+            bytes = Base64.decode(base64Data, Base64.DEFAULT);
+        }
+
+        if (bytes == null || bytes.length == 0) {
+            return null;
+        }
+
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return null;
+        }
+
+        BitmapFactory.Options opts = new BitmapFactory.Options();
+        opts.inSampleSize = calculateInSampleSize(
+            bounds.outWidth,
+            bounds.outHeight,
+            MAX_ARTWORK_EDGE_PX,
+            MAX_ARTWORK_EDGE_PX
+        );
+        opts.inPreferredConfig = Bitmap.Config.RGB_565;
+        Bitmap decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
+        if (decoded == null) {
+            return null;
+        }
+
+        int w = decoded.getWidth();
+        int h = decoded.getHeight();
+        int maxEdge = Math.max(w, h);
+        if (maxEdge <= MAX_ARTWORK_EDGE_PX) {
+            return decoded;
+        }
+        float scale = (float) MAX_ARTWORK_EDGE_PX / (float) maxEdge;
+        int nw = Math.max(1, Math.round(w * scale));
+        int nh = Math.max(1, Math.round(h * scale));
+        Bitmap scaled = Bitmap.createScaledBitmap(decoded, nw, nh, true);
+        if (scaled != decoded && !decoded.isRecycled()) {
+            decoded.recycle();
+        }
+        return scaled;
+    }
+
+    private static int calculateInSampleSize(int width, int height, int reqW, int reqH) {
+        int inSampleSize = 1;
+        if (height > reqH || width > reqW) {
+            int halfH = height / 2;
+            int halfW = width / 2;
+            while ((halfH / inSampleSize) >= reqH && (halfW / inSampleSize) >= reqW) {
+                inSampleSize *= 2;
             }
         }
+        return Math.max(1, inSampleSize);
+    }
 
-        int base64Index = url.indexOf(";base64,");
-        if (base64Index != -1) {
-            String base64Data = url.substring(base64Index + 8);
-            byte[] decoded = Base64.decode(base64Data, Base64.DEFAULT);
-            return BitmapFactory.decodeByteArray(decoded, 0, decoded.length);
+    private static byte[] readAllBytes(InputStream inputStream) throws IOException {
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        byte[] chunk = new byte[16 * 1024];
+        int n;
+        // Cap cover download — multi-MB covers are unnecessary for AA/notification.
+        final int maxBytes = 2 * 1024 * 1024;
+        int total = 0;
+        while ((n = inputStream.read(chunk)) != -1) {
+            total += n;
+            if (total > maxBytes) {
+                throw new IOException("Artwork exceeds 2MB download cap");
+            }
+            buffer.write(chunk, 0, n);
         }
-
-        return null;
+        return buffer.toByteArray();
     }
 }

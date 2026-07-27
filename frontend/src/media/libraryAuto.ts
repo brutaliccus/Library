@@ -18,6 +18,7 @@ let autoHandlersRegistered = false;
 let playHandlers: AutoPlayHandlers | null = null;
 
 let lastMetaKey = "";
+let lastChapterKey = "";
 let lastPosSyncAt = 0;
 let lastPlayingSynced: boolean | null = null;
 /** After AA/lock play, ignore stale playing=false syncs until audio catches up. */
@@ -144,6 +145,7 @@ export async function syncAndroidAutoPlayback(
   try {
     if (!np) {
       lastMetaKey = "";
+      lastChapterKey = "";
       lastPlayingSynced = null;
       ignorePausedSyncUntil = 0;
       await LibraryAuto.syncPlayback({ active: false, playing: false });
@@ -158,7 +160,10 @@ export async function syncAndroidAutoPlayback(
 
     const d = scope.duration;
     const pos = scope.position;
-    const metaKey = `${scope.label}|${np.title}|${np.author}|${np.coverUrl}|${trackIndex}|${trackLabel}|${d}`;
+    // Chapter label changes every few minutes — don't treat that as a full
+    // metadata/artwork reload (native decode + MediaSession binder thrash).
+    const metaKey = `${np.title}|${np.author}|${np.coverUrl}|${trackIndex}|${trackLabel}|${d}`;
+    const chapterKey = scope.label || "";
     const metaChanged = metaKey !== lastMetaKey;
     const now = Date.now();
     // Keep reporting playing while an AA/lock play is settling — React state often
@@ -168,12 +173,14 @@ export async function syncAndroidAutoPlayback(
     if (isPlaying) ignorePausedSyncUntil = 0;
     const playingChanged = lastPlayingSynced !== reportPlaying;
     const posDue = now - lastPosSyncAt >= POS_SYNC_INTERVAL_MS;
+    const chapterChanged = chapterKey !== lastChapterKey;
 
     // Never throttle play/pause — AA button state must track the phone immediately.
-    if (!metaChanged && !posDue && !playingChanged) return;
+    if (!metaChanged && !posDue && !playingChanged && !chapterChanged) return;
 
     if (metaChanged) lastMetaKey = metaKey;
-    if (posDue || playingChanged) lastPosSyncAt = now;
+    if (chapterChanged) lastChapterKey = chapterKey;
+    if (posDue || playingChanged || chapterChanged) lastPosSyncAt = now;
     lastPlayingSynced = reportPlaying;
 
     const safePos = isFinite(pos) ? Math.max(0, pos) : 0;
@@ -207,6 +214,21 @@ export async function syncAndroidAutoPlayback(
         position: safePos,
         playbackRate: Math.max(playbackRate, 0.25),
         artwork,
+      });
+      return;
+    }
+
+    // Chapter-only change: push title/artist text without re-sending artwork.
+    if (chapterChanged) {
+      await LibraryAuto.syncPlayback({
+        active: true,
+        playing: reportPlaying,
+        title: np.title || "Audiobook",
+        artist: scope.label || trackLabel || np.author || "",
+        album: np.author || "",
+        duration: isFinite(d) && d > 0 ? d : 0,
+        position: safePos,
+        playbackRate: Math.max(playbackRate, 0.25),
       });
       return;
     }

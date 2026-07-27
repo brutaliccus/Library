@@ -244,6 +244,14 @@ export async function loadBrowseChildren(parentId: string): Promise<BrowseChild[
  */
 export async function prefetchAndroidAutoBrowseCache(force = false): Promise<void> {
   if (Capacitor.getPlatform() !== "android") return;
+  // Avoid disk + MediaBrowser notify storms while audio is playing — the
+  // durable cache is already warm from the last foreground prefetch.
+  try {
+    const { isAudioPlaybackActive } = await import("../utils/mediaStorage");
+    if (isAudioPlaybackActive()) return;
+  } catch {
+    /* ignore */
+  }
   const now = Date.now();
   if (!force && now - lastPrefetchAt < PREFETCH_MIN_INTERVAL_MS) return;
   if (prefetchInFlight) return prefetchInFlight;

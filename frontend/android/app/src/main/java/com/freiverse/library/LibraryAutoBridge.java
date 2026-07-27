@@ -555,10 +555,18 @@ public final class LibraryAutoBridge {
                     return;
                 }
             }
-            ctx
-                .getSharedPreferences(BROWSE_PREFS, Context.MODE_PRIVATE)
+            SharedPreferences prefs =
+                ctx.getSharedPreferences(BROWSE_PREFS, Context.MODE_PRIVATE);
+            String prev = prefs.getString("node:" + parentId, null);
+            String next = arr.toString();
+            // Skip no-op writes — notifyChildrenChanged during playback can
+            // kick MediaBrowser clients into reloading every letter folder.
+            if (next.equals(prev)) {
+                return;
+            }
+            prefs
                 .edit()
-                .putString("node:" + parentId, arr.toString())
+                .putString("node:" + parentId, next)
                 .putLong("nodeAt:" + parentId, System.currentTimeMillis())
                 .apply();
             Log.i(TAG, "Cached AA browse parent=" + parentId + " count=" + arr.length());
@@ -858,9 +866,10 @@ public final class LibraryAutoBridge {
                 .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
                 .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
             // Never put a null bitmap — that clears cover art on many AA units.
-            if (artwork != null) {
+            // One bitmap key is enough; duplicating ALBUM_ART + DISPLAY_ICON
+            // copies the same pixels into the system binder payload twice.
+            if (artwork != null && !artwork.isRecycled()) {
                 metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork);
-                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, artwork);
             }
             session.setMetadata(metaBuilder.build());
         }

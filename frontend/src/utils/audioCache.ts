@@ -44,6 +44,13 @@ const PASS_RETRY_PARTIAL_MS = 2_000;
 const PART_PARAM = "audioCachePart";
 /** Chunk header carrying the full file size so resumes know the target. */
 const TOTAL_HEADER = "x-audio-total-size";
+/**
+ * Cap for in-memory blob URL playback / full-file assembly.
+ * Reading a multi-hundred-MB track into RAM freezes or OOM-kills Android
+ * WebView (and can lock the whole phone). Larger tracks keep streaming
+ * from the network; on-disk chunk parts are still useful for resume.
+ */
+const MAX_BLOB_PLAYBACK_BYTES = 32 * 1024 * 1024;
 
 export interface CacheableTrack {
   contentUrl: string;
@@ -163,6 +170,8 @@ async function objectUrlFromParts(storageKey: string): Promise<string | null> {
   const state = await loadExistingParts(cache, storageKey);
   if (state.nextIndex === 0) return null;
   if (state.total != null && state.offset < state.total) return null;
+  if (state.total != null && state.total > MAX_BLOB_PLAYBACK_BYTES) return null;
+  if (state.offset > MAX_BLOB_PLAYBACK_BYTES) return null;
 
   const parts: Blob[] = [];
   for (let i = 0; i < state.nextIndex; i++) {
@@ -173,7 +182,7 @@ async function objectUrlFromParts(storageKey: string): Promise<string | null> {
     parts.push(blob);
   }
   const full = new Blob(parts, { type: state.contentType });
-  if (full.size === 0) return null;
+  if (full.size === 0 || full.size > MAX_BLOB_PLAYBACK_BYTES) return null;
   return URL.createObjectURL(full);
 }
 
@@ -182,15 +191,21 @@ async function objectUrlFromParts(storageKey: string): Promise<string | null> {
  * Callers own the URL and must revoke it via URL.revokeObjectURL().
  *
  * Android WebView cannot read the Cache API through a service worker for
- * <audio> — this blob URL is the only offline playback path on native.
+ * <audio> — this blob URL is the only offline playback path on native for
+ * small/medium tracks. Skips very large files — reading a 200 MB blob into
+ * RAM freezes Android; those tracks keep streaming from the network.
  */
 export async function getCachedTrackObjectUrl(url: string): Promise<string | null> {
   if (!cacheSupported() || !url || !isCacheableUrl(url)) return null;
   try {
     const meta = await cachedResponseMeta(url);
     if (meta) {
+      if (meta.size > MAX_BLOB_PLAYBACK_BYTES) return null;
       const blob = await meta.resp.blob();
-      if (blob.size > 0) return URL.createObjectURL(blob);
+      if (blob.size > 0 && blob.size <= MAX_BLOB_PLAYBACK_BYTES) {
+        return URL.createObjectURL(blob);
+      }
+      return null;
     }
     return await objectUrlFromParts(cacheStorageKey(url));
   } catch {
@@ -377,15 +392,33 @@ async function assembleParts(
   cache: Cache,
   storageKey: string,
   partCount: number,
-  contentType: string
+  contentType: string,
+  knownTotal: number | null = null
 ): Promise<boolean> {
+  // Assembling a huge track doubles peak RAM (parts + full Blob) and freezes
+  // Android. Leave chunk parts on disk; playback will keep streaming.
+  if (knownTotal != null && knownTotal > MAX_BLOB_PLAYBACK_BYTES) {
+    console.warn(
+      `[audioCache] skip assemble — ${knownTotal} bytes exceeds blob playback cap`
+    );
+    return true;
+  }
+
   const parts: Blob[] = [];
+  let assembled = 0;
   for (let i = 0; i < partCount; i++) {
     const resp = await cache.match(partKey(storageKey, i));
     if (!resp) return false;
     try {
       const blob = await resp.blob();
       if (blob.size === 0) return false;
+      assembled += blob.size;
+      if (assembled > MAX_BLOB_PLAYBACK_BYTES) {
+        console.warn(
+          `[audioCache] skip assemble — assembled size exceeds blob playback cap`
+        );
+        return true;
+      }
       parts.push(blob);
     } catch {
       return false;
@@ -393,6 +426,7 @@ async function assembleParts(
   }
   const full = new Blob(parts, { type: contentType });
   if (full.size === 0) return false;
+  if (full.size > MAX_BLOB_PLAYBACK_BYTES) return true;
   try {
     await cache.put(
       storageKey,
@@ -449,6 +483,15 @@ async function downloadTrack(
     }
 
     if (chunk.status === 200) {
+      // Server ignored Range and sent the whole file. Holding a multi-hundred-MB
+      // body in RAM during playback freezes Android — abort this track.
+      if (chunk.blob.size > MAX_BLOB_PLAYBACK_BYTES) {
+        console.warn(
+          `[audioCache] refusing full-file cache of ${chunk.blob.size} bytes`
+        );
+        setLastError("Track too large for in-app cache while playing");
+        return false;
+      }
       await deleteParts(cache, storageKey, state.nextIndex);
       state.contentType = chunk.contentType || state.contentType;
       if (!(await putPart(cache, storageKey, 0, chunk.blob, state.contentType, chunk.blob.size))) {
@@ -462,6 +505,13 @@ async function downloadTrack(
 
     state.contentType = chunk.contentType || state.contentType;
     if (chunk.totalFromRange) state.total = chunk.totalFromRange;
+
+    // Known-huge ranged downloads: stop before assemble thrash. Parts already
+    // written stay for resume diagnostics; playback keeps using the stream URL.
+    if (state.total != null && state.total > MAX_BLOB_PLAYBACK_BYTES && !opts?.force) {
+      setLastError("Track too large for in-app cache while playing");
+      return false;
+    }
 
     if (!(await putPart(cache, storageKey, state.nextIndex, chunk.blob, state.contentType, state.total))) {
       return false;
@@ -478,7 +528,13 @@ async function downloadTrack(
     }
   }
 
-  const ok = await assembleParts(cache, storageKey, state.nextIndex, state.contentType);
+  const ok = await assembleParts(
+    cache,
+    storageKey,
+    state.nextIndex,
+    state.contentType,
+    state.total
+  );
   if (ok) setLastError(null);
   return ok;
 }

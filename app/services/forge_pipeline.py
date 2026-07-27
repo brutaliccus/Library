@@ -660,17 +660,43 @@ def _prune_empty_dirs(root: Path, *, stop_at: Path | None = None) -> int:
     return removed
 
 
-def _cleanup_staging_after_folder_forge(staging: Path) -> bool:
-    """After a successful Folder Forge move, wipe empty/junk ``req_*`` staging.
+def _path_under_staging_roots(path: Path) -> bool:
+    """True when ``path`` resolves under audiobook/ebook unorganized roots only."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in all_staging_roots():
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
-    Removes temps, then — when no audio remains — deletes the whole staging
-    tree (leftover covers/nfo/empty format dirs). Returns True if staging is gone.
+
+def _cleanup_staging_after_folder_forge(
+    staging: Path,
+    *,
+    force: bool = False,
+) -> bool:
+    """After successful Folder Forge (or finalize resume), wipe ``req_*`` staging.
+
+    Removes temps, then deletes the whole staging tree when no audio remains —
+    or when ``force=True`` (Folder Forge reported library moves; leftover samples
+    / extras must not linger). Never deletes outside staging roots. Soft-fail /
+    quarantine callers must not invoke this. Returns True if staging is gone.
     """
     if not staging.is_dir():
         return True
+    if not _path_under_staging_roots(staging):
+        logger.warning(
+            "Refusing staging cleanup outside unorganized roots: %s", staging
+        )
+        return False
     _cleanup_forge_temps(staging)
     leftover = _collect_audio(staging)
-    if leftover:
+    if leftover and not force:
         _prune_empty_dirs(staging)
         logger.warning(
             "Staging still has %d audio file(s) after Folder Forge: %s",
@@ -678,9 +704,15 @@ def _cleanup_staging_after_folder_forge(staging: Path) -> bool:
             staging,
         )
         return False
+    if leftover and force:
+        logger.info(
+            "Force-removing staging with %d leftover audio after Folder Forge moves: %s",
+            len(leftover),
+            staging,
+        )
     try:
         shutil.rmtree(staging)
-        logger.info("Removed empty staging after Folder Forge: %s", staging)
+        logger.info("Removed staging after Folder Forge: %s", staging)
         return True
     except OSError as e:
         logger.warning("Could not remove staging %s: %s", staging, e)
@@ -1952,7 +1984,8 @@ async def run_forge_after_download(
         # in staging means metadata was never applied (or tags are unusable).
         # Do not mark the request completed — quarantine for admin review.
         leftover_audio = _collect_audio(staging)
-        if leftover_audio and not libraforge.organizer_moved_files(report):
+        moved = libraforge.organizer_moved_files(report)
+        if leftover_audio and not moved:
             await _set_quarantine(
                 request_id,
                 (
@@ -1964,10 +1997,16 @@ async def run_forge_after_download(
             )
             return
 
-        # Wipe empty/junk req_* staging (temps, empty format dirs, leftover covers).
+        # Wipe req_* staging after successful organize (covers/nfo/empty format
+        # dirs; force=True also drops leftover samples when moves succeeded).
         # Soft-fail / quarantine paths above return before this runs.
-        _cleanup_staging_after_folder_forge(staging)
+        _cleanup_staging_after_folder_forge(staging, force=moved)
         start_step = "finalize"
+
+    elif start_step == "finalize":
+        # Continue-from-finalize (Folder Forge already done manually / prior run):
+        # drop empty/junk staging only — never force-wipe while audio remains.
+        _cleanup_staging_after_folder_forge(staging, force=False)
 
     if await p._is_cancelled(request_id):
         return
@@ -2006,12 +2045,24 @@ async def run_forge_after_download(
 
     audiobookshelf.invalidate_cache()
 
+    # Ensure unorganized leftovers are gone on E2E success. When Folder Forge
+    # reported moves, force-delete the req_* tree (samples/extras included).
+    # Otherwise only wipe empty/junk trees — never soft-fail audio.
+    if organizer_report and libraforge.organizer_moved_files(organizer_report):
+        delete_request_staging_tree(request_id, staging_path_for_libraforge(staging))
+    elif staging.is_dir():
+        _cleanup_staging_after_folder_forge(staging, force=False)
+
     async with async_session() as db:
         await p._update_status(db, request_id, "completed", "Ready in Audiobookshelf")
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
         req = result.scalar_one_or_none()
         if not req:
             return
+        # Clear staging_path after success (tree wiped when organize completed).
+        req.staging_path = None
+        req.quarantine_reason = None
+        await db.commit()
         user_result = await db.execute(select(User).where(User.id == req.user_id))
         user = user_result.scalar_one_or_none()
         username = user.username if user else "Unknown"

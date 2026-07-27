@@ -629,8 +629,11 @@ def test_cleanup_forge_temps_removes_tmpfiles_not_sources(tmp_path):
     assert (staging / "01.mp3").exists()
 
 
-def test_cleanup_staging_after_folder_forge_wipes_when_no_audio(tmp_path):
-    staging = tmp_path / "req_4_Book"
+def test_cleanup_staging_after_folder_forge_wipes_when_no_audio(tmp_path, monkeypatch):
+    from app.services import forge_pipeline
+
+    monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
+    staging = tmp_path / ".unorganized" / "req_4_Book"
     (staging / "mp3").mkdir(parents=True)
     (staging / "cover.jpg").write_bytes(b"jpg")
     (staging / "metadata.json").write_text("{}", encoding="utf-8")
@@ -639,10 +642,43 @@ def test_cleanup_staging_after_folder_forge_wipes_when_no_audio(tmp_path):
     assert not staging.exists()
 
 
-def test_cleanup_staging_after_folder_forge_keeps_leftover_audio(tmp_path):
-    staging = tmp_path / "req_5_Book"
-    staging.mkdir()
+def test_cleanup_staging_after_folder_forge_keeps_leftover_audio(tmp_path, monkeypatch):
+    from app.services import forge_pipeline
+
+    monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
+    staging = tmp_path / ".unorganized" / "req_5_Book"
+    staging.mkdir(parents=True)
     (staging / "leftover.mp3").write_bytes(b"still here")
 
     assert _cleanup_staging_after_folder_forge(staging) is False
     assert (staging / "leftover.mp3").exists()
+
+
+def test_cleanup_staging_after_folder_forge_force_wipes_leftover_audio(tmp_path, monkeypatch):
+    """After Folder Forge moves, leftover samples must not linger in .unorganized."""
+    from app.services import forge_pipeline
+
+    monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
+    staging = tmp_path / ".unorganized" / "req_6_Book"
+    staging.mkdir(parents=True)
+    (staging / "sample.mp3").write_bytes(b"sample")
+    (staging / "cover.jpg").write_bytes(b"jpg")
+    library = tmp_path / "Author" / "Book"
+    library.mkdir(parents=True)
+    (library / "Book.m4b").write_bytes(b"m4b")
+
+    assert _cleanup_staging_after_folder_forge(staging, force=True) is True
+    assert not staging.exists()
+    assert (library / "Book.m4b").exists()
+
+
+def test_cleanup_staging_refuses_outside_unorganized(tmp_path, monkeypatch):
+    from app.services import forge_pipeline
+
+    monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
+    library = tmp_path / "Author" / "Book"
+    library.mkdir(parents=True)
+    (library / "Book.m4b").write_bytes(b"m4b")
+
+    assert _cleanup_staging_after_folder_forge(library, force=True) is False
+    assert (library / "Book.m4b").exists()

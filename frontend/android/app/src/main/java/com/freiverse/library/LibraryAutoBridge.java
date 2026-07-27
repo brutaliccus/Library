@@ -28,6 +28,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /** Shared playback + browse state between the Capacitor web layer and Android Auto. */
 public final class LibraryAutoBridge {
@@ -45,7 +47,8 @@ public final class LibraryAutoBridge {
 
     private static final String TAG = "LibraryAutoBridge";
     private static final String PREFS = "library_auto_session";
-    private static final long BROWSE_TIMEOUT_MS = 12_000;
+    private static final String BROWSE_PREFS = "library_auto_browse";
+    private static final long BROWSE_TIMEOUT_MS = 8_000;
 
     public interface ActionListener {
         void onAction(String action, @Nullable Bundle extras);
@@ -57,13 +60,18 @@ public final class LibraryAutoBridge {
 
     private static final class PendingBrowse {
 
+        final String parentId;
+        /** Null when this is a background refresh after serving cache. */
+        @Nullable
         final MediaBrowserServiceCompat.Result<List<MediaBrowserCompat.MediaItem>> result;
         final Runnable timeout;
 
         PendingBrowse(
-            MediaBrowserServiceCompat.Result<List<MediaBrowserCompat.MediaItem>> result,
+            String parentId,
+            @Nullable MediaBrowserServiceCompat.Result<List<MediaBrowserCompat.MediaItem>> result,
             Runnable timeout
         ) {
+            this.parentId = parentId;
             this.result = result;
             this.timeout = timeout;
         }
@@ -131,11 +139,23 @@ public final class LibraryAutoBridge {
     public void attach(LibraryMediaBrowserService service, MediaSessionCompat session) {
         serviceRef = new WeakReference<>(service);
         sessionRef = new WeakReference<>(session);
-        Context app = service.getApplicationContext();
-        appContextRef = new WeakReference<>(app);
-        audioManager = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
-        restorePersistedSession(app);
+        ensureAppContext(service.getApplicationContext());
+        audioManager = (AudioManager) service.getApplicationContext()
+            .getSystemService(Context.AUDIO_SERVICE);
+        restorePersistedSession(service.getApplicationContext());
         refreshSession(true);
+    }
+
+    /** So JS can persist browse folders before MediaBrowserService has attached. */
+    public void ensureAppContext(Context context) {
+        if (context == null) {
+            return;
+        }
+        Context app = context.getApplicationContext();
+        appContextRef = new WeakReference<>(app);
+        if (audioManager == null) {
+            audioManager = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
+        }
     }
 
     public void setBrowseRequestEmitter(BrowseRequestEmitter emitter) {
@@ -475,37 +495,187 @@ public final class LibraryAutoBridge {
         return items;
     }
 
+    /**
+     * Persist a browse folder so Android Auto can show Continue / Library while
+     * the phone is locked and the WebView cannot hit the network.
+     */
+    public void putBrowseCache(String parentId, List<AutoBrowseNode> nodes) {
+        if (parentId == null || parentId.isEmpty()) {
+            return;
+        }
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return;
+        }
+        try {
+            JSONArray arr = new JSONArray();
+            if (nodes != null) {
+                for (AutoBrowseNode node : nodes) {
+                    if (node == null || node.mediaId.isEmpty()) {
+                        continue;
+                    }
+                    JSONObject o = new JSONObject();
+                    o.put("mediaId", node.mediaId);
+                    o.put("title", node.title);
+                    o.put("subtitle", node.subtitle != null ? node.subtitle : "");
+                    o.put("browsable", node.browsable);
+                    if (node.iconUri != null && !node.iconUri.isEmpty()) {
+                        o.put("iconUri", node.iconUri);
+                    }
+                    arr.put(o);
+                }
+            }
+            ctx
+                .getSharedPreferences(BROWSE_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString("node:" + parentId, arr.toString())
+                .putLong("nodeAt:" + parentId, System.currentTimeMillis())
+                .apply();
+            Log.i(TAG, "Cached AA browse parent=" + parentId + " count=" + arr.length());
+            // Late JS/API reply after a locked-phone empty browse — refresh AA.
+            notifyParentChanged(parentId);
+        } catch (Exception e) {
+            Log.w(TAG, "putBrowseCache failed for " + parentId, e);
+        }
+    }
+
+    public List<AutoBrowseNode> getBrowseCache(String parentId) {
+        List<AutoBrowseNode> nodes = new ArrayList<>();
+        if (parentId == null || parentId.isEmpty()) {
+            return nodes;
+        }
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return nodes;
+        }
+        String raw = ctx
+            .getSharedPreferences(BROWSE_PREFS, Context.MODE_PRIVATE)
+            .getString("node:" + parentId, null);
+        if (raw == null || raw.isEmpty()) {
+            return nodes;
+        }
+        try {
+            JSONArray arr = new JSONArray(raw);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.getJSONObject(i);
+                nodes.add(
+                    new AutoBrowseNode(
+                        o.optString("mediaId", ""),
+                        o.optString("title", ""),
+                        o.optString("subtitle", ""),
+                        o.optBoolean("browsable", false),
+                        o.optString("iconUri", null),
+                        null
+                    )
+                );
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "getBrowseCache failed for " + parentId, e);
+        }
+        return nodes;
+    }
+
     public void requestBrowseChildren(
         String parentId,
         MediaBrowserServiceCompat.Result<List<MediaBrowserCompat.MediaItem>> result
     ) {
-        result.detach();
-        final String requestId = UUID.randomUUID().toString();
+        List<AutoBrowseNode> cached = getBrowseCache(parentId);
+        BrowseRequestEmitter emitter = emitterRef.get();
 
+        // Locked phone / cold AA: serve durable cache immediately so Continue +
+        // Library are never empty when we previously synced them from JS.
+        if (!cached.isEmpty()) {
+            result.sendResult(toMediaItems(cached));
+            if (emitter != null) {
+                startBrowseRefresh(parentId, emitter);
+            }
+            return;
+        }
+
+        // No cache yet — wait for WebView (may be frozen; soft-wake happens in emitter).
+        result.detach();
+        if (emitter == null) {
+            Log.w(TAG, "AA browse with no cache and no JS emitter: " + parentId);
+            result.sendResult(new ArrayList<>());
+            return;
+        }
+
+        final String requestId = UUID.randomUUID().toString();
         Runnable timeout = () -> {
             PendingBrowse pending = pendingBrowses.remove(requestId);
-            if (pending != null) {
-                pending.result.sendResult(new ArrayList<>());
+            if (pending == null || pending.result == null) {
+                return;
             }
+            List<AutoBrowseNode> lateCache = getBrowseCache(parentId);
+            Log.w(
+                TAG,
+                "AA browse timeout parent="
+                    + parentId
+                    + " cached="
+                    + lateCache.size()
+            );
+            pending.result.sendResult(toMediaItems(lateCache));
         };
         mainHandler.postDelayed(timeout, BROWSE_TIMEOUT_MS);
-        pendingBrowses.put(requestId, new PendingBrowse(result, timeout));
+        pendingBrowses.put(requestId, new PendingBrowse(parentId, result, timeout));
+        emitter.emitBrowseRequest(parentId, requestId);
+    }
 
-        BrowseRequestEmitter emitter = emitterRef.get();
-        if (emitter != null) {
-            emitter.emitBrowseRequest(parentId, requestId);
-        } else {
-            timeout.run();
-        }
+    /** Background refresh after serving cache; updates prefs + notifies AA. */
+    private void startBrowseRefresh(String parentId, BrowseRequestEmitter emitter) {
+        final String requestId = UUID.randomUUID().toString();
+        Runnable timeout = () -> pendingBrowses.remove(requestId);
+        mainHandler.postDelayed(timeout, BROWSE_TIMEOUT_MS);
+        pendingBrowses.put(requestId, new PendingBrowse(parentId, null, timeout));
+        emitter.emitBrowseRequest(parentId, requestId);
     }
 
     public void resolveBrowseChildren(String requestId, List<AutoBrowseNode> nodes) {
         PendingBrowse pending = pendingBrowses.remove(requestId);
+        if (pending != null) {
+            mainHandler.removeCallbacks(pending.timeout);
+        }
+
+        String parentId = pending != null ? pending.parentId : null;
+        if (parentId != null && !parentId.isEmpty()) {
+            // Never wipe a good locked-phone cache with a failed/empty JS reply.
+            if (nodes != null && !nodes.isEmpty()) {
+                putBrowseCache(parentId, nodes);
+            } else {
+                List<AutoBrowseNode> existing = getBrowseCache(parentId);
+                if (existing.isEmpty()) {
+                    putBrowseCache(parentId, nodes != null ? nodes : new ArrayList<>());
+                } else {
+                    Log.i(TAG, "Keeping cached AA browse for " + parentId + " (live empty)");
+                }
+            }
+        }
+
         if (pending == null) {
             return;
         }
-        mainHandler.removeCallbacks(pending.timeout);
-        pending.result.sendResult(toMediaItems(nodes));
+        if (pending.result != null) {
+            List<AutoBrowseNode> toSend = nodes;
+            if ((toSend == null || toSend.isEmpty()) && parentId != null) {
+                List<AutoBrowseNode> cached = getBrowseCache(parentId);
+                if (!cached.isEmpty()) {
+                    toSend = cached;
+                }
+            }
+            pending.result.sendResult(toMediaItems(toSend));
+            return;
+        }
+        // Cache-first path: tell Android Auto the folder changed so it can reload.
+        if (parentId != null && !parentId.isEmpty() && nodes != null && !nodes.isEmpty()) {
+            notifyParentChanged(parentId);
+        }
+    }
+
+    private void notifyParentChanged(String parentId) {
+        LibraryMediaBrowserService service = serviceRef.get();
+        if (service != null) {
+            service.notifyChildrenChanged(parentId);
+        }
     }
 
     private List<MediaBrowserCompat.MediaItem> toMediaItems(List<AutoBrowseNode> nodes) {

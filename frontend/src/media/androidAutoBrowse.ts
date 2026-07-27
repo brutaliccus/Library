@@ -1,8 +1,13 @@
 /**
  * Android Auto browse tree — Continue Listening + alphabetical Library (A–Z jump).
+ *
+ * Live loads go through the WebView + API. When the phone is locked, Chromium is
+ * often frozen / Doze-throttled, so we also push a durable native cache that
+ * LibraryMediaBrowserService can serve without JS.
  */
 import api from "../api/client";
 import type { PluginListenerHandle } from "@capacitor/core";
+import { Capacitor } from "@capacitor/core";
 import { LibraryAuto, type BrowseChild } from "./libraryAutoPlugin";
 import { toAbsoluteArtworkUrl } from "./playerMediaSession";
 
@@ -57,6 +62,9 @@ let absItemsCacheAt = 0;
 const INDEX_TTL_MS = 5 * 60 * 1000;
 
 let browseListener: PluginListenerHandle | null = null;
+let prefetchInFlight: Promise<void> | null = null;
+let lastPrefetchAt = 0;
+const PREFETCH_MIN_INTERVAL_MS = 60_000;
 
 function coverUri(url?: string, absItemId?: string): string | undefined {
   if (url?.trim()) {
@@ -78,6 +86,15 @@ function letterBucket(title: string): string {
   const ch = t[0]?.toUpperCase() ?? "";
   if (ch >= "A" && ch <= "Z") return ch;
   return "#";
+}
+
+async function persistBrowseFolder(parentId: string, children: BrowseChild[]): Promise<void> {
+  if (Capacitor.getPlatform() !== "android") return;
+  try {
+    await LibraryAuto.cacheBrowseChildren({ parentId, children });
+  } catch {
+    /* plugin unavailable */
+  }
 }
 
 async function getAllAbsItems(): Promise<ABSItem[]> {
@@ -214,6 +231,46 @@ export async function loadBrowseChildren(parentId: string): Promise<BrowseChild[
   return [];
 }
 
+/**
+ * Warm the native browse cache while the app is foregrounded / networked so
+ * Android Auto still has Continue + Library when the phone is locked later.
+ */
+export async function prefetchAndroidAutoBrowseCache(force = false): Promise<void> {
+  if (Capacitor.getPlatform() !== "android") return;
+  const now = Date.now();
+  if (!force && now - lastPrefetchAt < PREFETCH_MIN_INTERVAL_MS) return;
+  if (prefetchInFlight) return prefetchInFlight;
+
+  prefetchInFlight = (async () => {
+    try {
+      const continueChildren = await loadContinueListening();
+      await persistBrowseFolder(AA_CONTINUE, continueChildren);
+
+      const libraryRoot = await loadLibraryRoot();
+      await persistBrowseFolder(AA_LIBRARY, libraryRoot);
+
+      const items = await getAllAbsItems();
+      const byLetter = new Map<string, BrowseChild[]>();
+      for (const item of items) {
+        const letter = letterBucket(item.title);
+        const list = byLetter.get(letter) ?? [];
+        list.push(absItemToChild(item));
+        byLetter.set(letter, list);
+      }
+      for (const [letter, children] of byLetter) {
+        await persistBrowseFolder(`${AA_LIBRARY_LETTER_PREFIX}${letter}`, children);
+      }
+      lastPrefetchAt = Date.now();
+    } catch (err) {
+      console.warn("Android Auto browse prefetch failed:", err);
+    } finally {
+      prefetchInFlight = null;
+    }
+  })();
+
+  return prefetchInFlight;
+}
+
 export interface AutoPlayHandlers {
   playABS: (itemId: string) => Promise<void>;
   playRD: (
@@ -292,13 +349,17 @@ export async function handlePlayMediaId(
 }
 
 export async function startAndroidAutoBrowseListener(): Promise<void> {
-  if (browseListener) return;
+  if (browseListener) {
+    void prefetchAndroidAutoBrowseCache();
+    return;
+  }
 
   browseListener = await LibraryAuto.addListener(
     "browseRequest",
     async (event: { parentId: string; requestId: string }) => {
       try {
         const children = await loadBrowseChildren(event.parentId);
+        await persistBrowseFolder(event.parentId, children);
         await LibraryAuto.resolveBrowseChildren({
           requestId: event.requestId,
           children,
@@ -311,6 +372,8 @@ export async function startAndroidAutoBrowseListener(): Promise<void> {
       }
     }
   );
+
+  void prefetchAndroidAutoBrowseCache(true);
 }
 
 export async function stopAndroidAutoBrowseListener(): Promise<void> {

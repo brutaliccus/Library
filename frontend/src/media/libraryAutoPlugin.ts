@@ -46,6 +46,11 @@ interface LibraryAutoPlugin {
     requestId: string;
     children: BrowseChild[];
   }): Promise<void>;
+  /** Persist a browse folder natively for locked-phone Android Auto. */
+  cacheBrowseChildren(options: {
+    parentId: string;
+    children: BrowseChild[];
+  }): Promise<void>;
   bringToForeground(): Promise<void>;
   addListener(
     eventName: "browseRequest",

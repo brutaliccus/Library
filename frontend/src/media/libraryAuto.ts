@@ -5,6 +5,7 @@ import { MEDIA_SKIP_SECONDS, toAbsoluteArtworkUrl } from "./playerMediaSession";
 import { LibraryAuto, type LibraryAutoAction } from "./libraryAutoPlugin";
 import {
   handlePlayMediaId,
+  prefetchAndroidAutoBrowseCache,
   startAndroidAutoBrowseListener,
   type AutoPlayHandlers,
 } from "./androidAutoBrowse";
@@ -53,6 +54,8 @@ export async function registerAndroidAutoHandlers(
     if (play) playHandlers = play;
 
     await startAndroidAutoBrowseListener();
+    // Keep native Continue/Library warm whenever handlers register (app open).
+    void prefetchAndroidAutoBrowseCache();
 
     if (autoHandlersRegistered) return;
 

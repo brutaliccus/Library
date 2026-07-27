@@ -11,6 +11,7 @@ import android.os.SystemClock;
 import android.util.Base64;
 import android.util.Log;
 import android.webkit.WebView;
+import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
 import com.getcapacitor.Bridge;
 import com.getcapacitor.JSArray;
@@ -71,6 +72,10 @@ public class LibraryAutoPlugin extends Plugin
     @Override
     public void load() {
         super.load();
+        Context ctx = getContext();
+        if (ctx != null) {
+            LibraryAutoBridge.getInstance().ensureAppContext(ctx);
+        }
         LibraryAutoBridge.getInstance().addActionListener(this);
         LibraryAutoBridge.getInstance().setBrowseRequestEmitter(this);
     }
@@ -99,6 +104,10 @@ public class LibraryAutoPlugin extends Plugin
 
     @Override
     public void emitBrowseRequest(String parentId, String requestId) {
+        // Locked / Doze: thaw timers so the browse listener can answer (or at
+        // least so a later refresh lands). Native cache covers the empty case.
+        softWakeWebView();
+        acquirePlayWakeLock();
         JSObject data = new JSObject();
         data.put("parentId", parentId);
         data.put("requestId", requestId);
@@ -115,48 +124,106 @@ public class LibraryAutoPlugin extends Plugin
 
         final String rid = requestId;
         new Thread(() -> {
-            List<AutoBrowseNode> nodes = new ArrayList<>();
-            try {
-                JSArray children = call.getArray("children");
-                if (children != null) {
-                    for (Object raw : children.toList()) {
-                        if (!(raw instanceof JSONObject)) {
-                            continue;
-                        }
-                        JSONObject o = (JSONObject) raw;
-                        String iconUri = o.optString("iconUri", null);
-                        if (iconUri != null && iconUri.isEmpty()) {
-                            iconUri = null;
-                        }
-                        Bitmap iconBitmap = null;
-                        if (iconUri != null) {
-                            try {
-                                iconBitmap = urlToBitmap(iconUri);
-                            } catch (IOException ex) {
-                                Log.w(TAG, "Browse icon load failed: " + iconUri, ex);
-                            }
-                        }
-                        nodes.add(
-                            new AutoBrowseNode(
-                                o.optString("mediaId", ""),
-                                o.optString("title", ""),
-                                o.optString("subtitle", ""),
-                                o.optBoolean("browsable", false),
-                                iconUri,
-                                iconBitmap
-                            )
-                        );
-                    }
-                }
-            } catch (JSONException ex) {
-                Log.w(TAG, "Failed to parse browse children", ex);
-            }
-
+            List<AutoBrowseNode> nodes = parseBrowseChildren(call.getArray("children"));
             new Handler(Looper.getMainLooper()).post(() -> {
                 LibraryAutoBridge.getInstance().resolveBrowseChildren(rid, nodes);
                 call.resolve();
             });
         }).start();
+    }
+
+    /**
+     * Proactive persist of Continue / Library folders while the app is awake so
+     * Android Auto can browse with the phone locked (no live JS/API required).
+     */
+    @PluginMethod
+    public void cacheBrowseChildren(PluginCall call) {
+        String parentId = call.getString("parentId");
+        if (parentId == null || parentId.isEmpty()) {
+            call.reject("parentId required");
+            return;
+        }
+        Context ctx = getContext();
+        if (ctx != null) {
+            LibraryAutoBridge.getInstance().ensureAppContext(ctx);
+        }
+        final String pid = parentId;
+        // Icons optional for cache — skip network bitmap fetch to keep this fast.
+        List<AutoBrowseNode> nodes = parseBrowseChildrenSkipBitmaps(call.getArray("children"));
+        LibraryAutoBridge.getInstance().putBrowseCache(pid, nodes);
+        call.resolve();
+    }
+
+    private List<AutoBrowseNode> parseBrowseChildren(@Nullable JSArray children) {
+        List<AutoBrowseNode> nodes = new ArrayList<>();
+        if (children == null) {
+            return nodes;
+        }
+        try {
+            for (Object raw : children.toList()) {
+                if (!(raw instanceof JSONObject)) {
+                    continue;
+                }
+                JSONObject o = (JSONObject) raw;
+                String iconUri = o.optString("iconUri", null);
+                if (iconUri != null && iconUri.isEmpty()) {
+                    iconUri = null;
+                }
+                Bitmap iconBitmap = null;
+                if (iconUri != null) {
+                    try {
+                        iconBitmap = urlToBitmap(iconUri);
+                    } catch (IOException ex) {
+                        Log.w(TAG, "Browse icon load failed: " + iconUri, ex);
+                    }
+                }
+                nodes.add(
+                    new AutoBrowseNode(
+                        o.optString("mediaId", ""),
+                        o.optString("title", ""),
+                        o.optString("subtitle", ""),
+                        o.optBoolean("browsable", false),
+                        iconUri,
+                        iconBitmap
+                    )
+                );
+            }
+        } catch (JSONException ex) {
+            Log.w(TAG, "Failed to parse browse children", ex);
+        }
+        return nodes;
+    }
+
+    private List<AutoBrowseNode> parseBrowseChildrenSkipBitmaps(@Nullable JSArray children) {
+        List<AutoBrowseNode> nodes = new ArrayList<>();
+        if (children == null) {
+            return nodes;
+        }
+        try {
+            for (Object raw : children.toList()) {
+                if (!(raw instanceof JSONObject)) {
+                    continue;
+                }
+                JSONObject o = (JSONObject) raw;
+                String iconUri = o.optString("iconUri", null);
+                if (iconUri != null && iconUri.isEmpty()) {
+                    iconUri = null;
+                }
+                nodes.add(
+                    new AutoBrowseNode(
+                        o.optString("mediaId", ""),
+                        o.optString("title", ""),
+                        o.optString("subtitle", ""),
+                        o.optBoolean("browsable", false),
+                        iconUri,
+                        null
+                    )
+                );
+            }
+        } catch (JSONException ex) {
+            Log.w(TAG, "Failed to parse browse children for cache", ex);
+        }
+        return nodes;
     }
 
     @PluginMethod

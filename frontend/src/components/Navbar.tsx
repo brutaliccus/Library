@@ -3,7 +3,7 @@ import { useAuth } from "../hooks/useAuth";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useState, FormEvent, useEffect } from "react";
-import { BookOpen, Store, List, Shield, LogOut, Search, Headphones, Library, LayoutGrid, SlidersHorizontal, Lock, Unlock, Settings } from "lucide-react";
+import { BookOpen, Compass, Download, Shield, LogOut, Search, Headphones, Library, LayoutGrid, SlidersHorizontal, Lock, Unlock, Settings } from "lucide-react";
 
 interface Props {
   onGenreToggle?: () => void;
@@ -50,18 +50,24 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
 
   const links = [
     { to: "/my-library", label: "My Library", icon: Library },
-    { to: "/", label: "Store", icon: Store, onlineOnly: true },
-    { to: "/requests", label: "Requests", icon: List, onlineOnly: true },
+    { to: "/", label: "Browse", icon: Compass, onlineOnly: true },
+    { to: "/downloads", label: "Downloads", icon: Download, onlineOnly: true },
     { to: "/libraries", label: "Libraries", icon: LayoutGrid },
     ...(user.role === "admin"
       ? [{ to: "/admin", label: "Admin", icon: Shield, onlineOnly: true }]
       : []),
   ];
 
-  const isActive = (path: string) =>
-    path === "/"
-      ? location.pathname === "/"
-      : location.pathname.startsWith(path);
+  const isActive = (path: string) => {
+    if (path === "/") return location.pathname === "/";
+    if (path === "/downloads") {
+      return (
+        location.pathname.startsWith("/downloads") ||
+        location.pathname.startsWith("/requests")
+      );
+    }
+    return location.pathname.startsWith(path);
+  };
 
   const handleSearch = (e: FormEvent) => {
     e.preventDefault();
@@ -101,6 +107,16 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
         )}
 
         <div className="flex items-center gap-1">
+          {onlineOnly && (
+            <Link
+              to="/search"
+              className="sm:hidden flex items-center justify-center p-2 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
+              title="Search"
+              aria-label="Search books"
+            >
+              <Search size={16} />
+            </Link>
+          )}
           {onGenreToggle && onlineOnly && (
             <button
               onClick={onGenreToggle}

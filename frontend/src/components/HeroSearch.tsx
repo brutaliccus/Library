@@ -20,10 +20,10 @@ export default function HeroSearch() {
         Find your next read
       </h1>
       <p className="text-gray-400 mb-8">
-        Search books you can download — matched against our indexer cache
+        Search the catalog to find books for your library
       </p>
       <p className="text-xs text-gray-500 mb-4">
-        Catalog powered by Open Library. Only books with cached torrents show by default.
+        Catalog powered by Open Library. Use “Available downloads only” on search results to narrow to cached releases.
       </p>
       <form onSubmit={handleSubmit} className="relative max-w-xl mx-auto">
         <Search

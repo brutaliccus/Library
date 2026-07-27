@@ -3,6 +3,8 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import api from "../api/client";
 import HeroSearch from "../components/HeroSearch";
 import BookCarousel from "../components/BookCarousel";
+import BadgeLegend from "../components/BadgeLegend";
+import ContinueShelves from "../components/ContinueShelves";
 import GenreSidebar from "../components/GenreSidebar";
 import type { Genre } from "../components/GenreSidebar";
 import { Loader2 } from "lucide-react";
@@ -14,6 +16,13 @@ interface HomeShelf {
   genre?: string;
   listName?: string;
   source?: string;
+  books: BookSummary[];
+}
+
+interface PersonalizedShelf {
+  id: string;
+  title: string;
+  subtitle?: string;
   books: BookSummary[];
 }
 
@@ -38,6 +47,32 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
   });
 
   const shelfSentinelRef = useRef<HTMLDivElement>(null);
+
+  const { data: settingsData } = useQuery({
+    queryKey: ["user-settings"],
+    queryFn: async () => {
+      const { data } = await api.get("/auth/settings");
+      return data as { private_mode?: boolean };
+    },
+    staleTime: 5 * 60 * 1000,
+  });
+  const privateMode = !!settingsData?.private_mode;
+
+  const { data: personalizedData, isLoading: personalizedLoading } = useQuery({
+    queryKey: ["personalized-shelves"],
+    queryFn: async () => {
+      try {
+        const { data } = await api.get("/books/personalized-shelves");
+        return data as { shelves: PersonalizedShelf[]; disabled?: boolean };
+      } catch {
+        return { shelves: [] as PersonalizedShelf[] };
+      }
+    },
+    enabled: !privateMode,
+    staleTime: 15 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
 
   const { data: trendingData, isLoading: trendingLoading } = useQuery({
     queryKey: ["trending-books"],
@@ -134,10 +169,13 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
     return () => io.disconnect();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
+  const personalizedShelves = personalizedData?.shelves || [];
+
   return (
     <div className="pb-12">
       <div className="max-w-3xl mx-auto px-4 lg:px-6">
         <HeroSearch />
+        <BadgeLegend />
       </div>
 
       <div className="flex px-4 lg:px-6 gap-6">
@@ -151,6 +189,22 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
         )}
 
         <div className="flex-1 min-w-0">
+          <ContinueShelves />
+
+          {!privateMode && personalizedShelves.length > 0 && (
+            <div className="mb-8 space-y-8">
+              {personalizedShelves.map((shelf) => (
+                <BookCarousel
+                  key={shelf.id}
+                  title={shelf.title}
+                  subtitle={shelf.subtitle}
+                  books={shelf.books || []}
+                  isLoading={personalizedLoading}
+                />
+              ))}
+            </div>
+          )}
+
           <div className="mb-8">
             <BookCarousel
               title="Trending"

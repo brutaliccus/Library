@@ -852,7 +852,7 @@ function AllRequestsTab() {
                       <p className="text-sm text-gray-400 truncate mt-0.5">{req.author}</p>
                     )}
                   </div>
-                  <RequestStatusBadge status={req.status} detail={null} />
+                  <RequestStatusBadge status={req.status} detail={null} plainLanguage={false} />
                 </div>
                 <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-gray-500">
                   <span>{new Date(req.created_at).toLocaleString()}</span>

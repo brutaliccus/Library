@@ -212,7 +212,7 @@ export default function RequestsPage() {
     <div className="max-w-4xl mx-auto px-4 py-8">
       <h1 className="text-2xl font-bold text-gray-100 mb-6 flex items-center gap-2">
         <List size={24} />
-        My Requests
+        My Downloads
       </h1>
 
       {pushState !== "unsupported" && pushState !== "unavailable" && pushState !== "subscribed" && (

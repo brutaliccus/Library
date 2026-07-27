@@ -189,6 +189,11 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
         if (mediaSession == null) {
             return;
         }
+        // Idempotent: repeated startForeground from ~1 Hz position syncs has
+        // crashed NotificationManager / system_server on some OEMs.
+        if (foregroundActive) {
+            return;
+        }
         Notification notification = buildNotification();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(

@@ -58,3 +58,13 @@ export function npKey(np: NowPlaying): string {
     ? `abs:${np.sessionId ?? np.itemId ?? ""}`
     : `rd:${np.streamHistoryId ?? ""}`;
 }
+
+/** Item in the Up Next play queue. */
+export interface UpNextItem {
+  source: "abs" | "rd";
+  id: string | number;
+  title: string;
+  author: string;
+  coverUrl: string;
+  streamHistoryId?: number;
+}

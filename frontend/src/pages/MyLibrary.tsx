@@ -17,7 +17,7 @@ import {
   Trash2,
   Loader2,
   Search,
-  Store,
+  Compass,
   BookOpen,
   Headphones,
   Layers,
@@ -26,6 +26,9 @@ import {
   X,
   RefreshCw,
   Download,
+  ListMusic,
+  Heart,
+  CheckCircle2,
 } from "lucide-react";
 import CompactFilterSelect from "../components/CompactFilterSelect";
 import ContinueShelves from "../components/ContinueShelves";
@@ -141,7 +144,7 @@ interface KavitaItem {
   source: "kavita";
 }
 
-type Tab = "abs" | "streams" | "ebooks" | "downloaded";
+type Tab = "abs" | "collection" | "ebooks" | "downloaded" | "want" | "finished";
 type MediaFilter = "all" | "audiobooks" | "ebooks";
 type TabView = "all" | "genre" | "series" | "author";
 
@@ -279,7 +282,7 @@ export default function MyLibrary() {
   const [tab, setTab] = useState<Tab>(() => savedUi?.tab ?? "abs");
   const [absView, setAbsView] = useState<TabView>(() => savedUi?.absView ?? "all");
   const [ebookView, setEbookView] = useState<TabView>(() => savedUi?.ebookView ?? "all");
-  const [rdView, setRdView] = useState<TabView>(() => savedUi?.rdView ?? "all");
+  const [collectionView, setCollectionView] = useState<TabView>(() => savedUi?.collectionView ?? "all");
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>(() => savedUi?.mediaFilter ?? "all");
   const [filterGenre, setFilterGenre] = useState(() => savedUi?.filterGenre ?? "");
   const [filterSeries, setFilterSeries] = useState(() => savedUi?.filterSeries ?? "");
@@ -311,7 +314,7 @@ export default function MyLibrary() {
         tab,
         absView,
         ebookView,
-        rdView,
+        collectionView,
         mediaFilter,
         filterGenre,
         filterSeries,
@@ -324,7 +327,7 @@ export default function MyLibrary() {
       tab,
       absView,
       ebookView,
-      rdView,
+      collectionView,
       mediaFilter,
       filterGenre,
       filterSeries,
@@ -421,6 +424,55 @@ export default function MyLibrary() {
     refetchOnWindowFocus: false,
     structuralSharing: false,
     enabled: !!user && sessionReady,
+  });
+
+  const { data: wantAlertsData, isLoading: wantLoading } = useQuery({
+    queryKey: ["availability-alerts"],
+    queryFn: async () => {
+      const { data } = await api.get("/books/availability-alerts");
+      return data as {
+        alerts: Array<{
+          volumeId: string;
+          title: string;
+          author: string;
+          coverUrl: string;
+          createdAt?: string | null;
+        }>;
+      };
+    },
+    enabled: !!user && sessionReady && tab === "want",
+    staleTime: 60 * 1000,
+  });
+
+  const { data: streamHistoryFinished } = useQuery({
+    queryKey: ["stream-history-finished"],
+    queryFn: async () => {
+      const { data } = await api.get("/stream/rd/history");
+      return data as {
+        items: Array<{
+          id: number;
+          title: string;
+          author: string;
+          coverUrl: string;
+          progressSeconds: number;
+          totalSeconds: number;
+          status: string;
+        }>;
+      };
+    },
+    enabled: !!user && sessionReady && tab === "finished",
+    staleTime: 60 * 1000,
+  });
+
+  const removeAlertMutation = useMutation({
+    mutationFn: async (volumeId: string) => {
+      await api.delete(`/books/availability-alerts/${encodeURIComponent(volumeId)}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["availability-alerts"] });
+      toast("Removed from Want list", "info");
+    },
+    onError: () => toast("Failed to remove alert", "error"),
   });
 
   const libraryTitles = useMemo(() => {
@@ -903,6 +955,19 @@ export default function MyLibrary() {
     [filteredAbsItems]
   );
 
+  const finishedAbsItems = useMemo(() => {
+    return allAbsItems.filter((item) => item.isFinished || (item.progress || 0) >= 0.95);
+  }, [allAbsItems]);
+
+  const finishedRdItems = useMemo(() => {
+    const items = streamHistoryFinished?.items || [];
+    return items.filter((h) => {
+      if (h.status === "finished") return true;
+      if (h.totalSeconds > 0 && h.progressSeconds / h.totalSeconds >= 0.95) return true;
+      return false;
+    });
+  }, [streamHistoryFinished]);
+
   const allEbookItems = useMemo(() => {
     const items = [...(kavitaCollection?.items || [])];
     return items.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
@@ -963,7 +1028,7 @@ export default function MyLibrary() {
     [filteredEbookItems]
   );
 
-  const rdItemsSorted = useMemo(() => {
+  const collectionItemsSorted = useMemo(() => {
     const items = [...(rdLibrary?.items || [])];
     return items.sort((a, b) => {
       const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
@@ -972,11 +1037,11 @@ export default function MyLibrary() {
     });
   }, [rdLibrary]);
 
-  const rdFilterOptions = useMemo(() => {
+  const collectionFilterOptions = useMemo(() => {
     const genres = new Set<string>();
     const authors = new Set<string>();
     const series = new Set<string>();
-    for (const item of rdItemsSorted) {
+    for (const item of collectionItemsSorted) {
       if (item.genre) genres.add(item.genre);
       (item.genres || []).forEach((g) => g && genres.add(g));
       if (item.author) authors.add(item.author);
@@ -988,10 +1053,10 @@ export default function MyLibrary() {
       series: Array.from(series).sort((a, b) => a.localeCompare(b)),
       authors: Array.from(authors).sort(),
     };
-  }, [rdItemsSorted]);
+  }, [collectionItemsSorted]);
 
-  const filteredRdItems = useMemo(() => {
-    const filtered = rdItemsSorted.filter((item) => {
+  const filteredCollectionItems = useMemo(() => {
+    const filtered = collectionItemsSorted.filter((item) => {
       const itemGenres = item.genres?.length ? item.genres : (item.genre ? [item.genre] : []);
       if (filterGenre && !itemGenres.includes(filterGenre) && (item.genre || "Uncategorized") !== filterGenre) {
         return false;
@@ -1008,29 +1073,29 @@ export default function MyLibrary() {
       const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
       return tb - ta;
     });
-  }, [rdItemsSorted, filterGenre, filterSeries, filterAuthor, cachedRdIds]);
+  }, [collectionItemsSorted, filterGenre, filterSeries, filterAuthor, cachedRdIds]);
 
-  const rdByGenre = useMemo(() => {
+  const collectionByGenre = useMemo(() => {
     const groups: Record<string, LibraryItem[]> = {};
-    for (const item of filteredRdItems) {
+    for (const item of filteredCollectionItems) {
       const gs = item.genres?.length ? item.genres : [item.genre || "Uncategorized"];
       for (const g of gs) (groups[g] ??= []).push(item);
     }
     return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
-  }, [filteredRdItems]);
+  }, [filteredCollectionItems]);
 
-  const rdByAuthor = useMemo(() => {
+  const collectionByAuthor = useMemo(() => {
     const groups: Record<string, LibraryItem[]> = {};
-    for (const item of filteredRdItems) {
+    for (const item of filteredCollectionItems) {
       const a = item.author || "Unknown Author";
       (groups[a] ??= []).push(item);
     }
     return Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b)));
-  }, [filteredRdItems]);
+  }, [filteredCollectionItems]);
 
   const rdSeriesLocal = useMemo(
-    () => groupItemsByLocalSeries(filteredRdItems, (i) => i.id),
-    [filteredRdItems]
+    () => groupItemsByLocalSeries(filteredCollectionItems, (i) => i.id),
+    [filteredCollectionItems]
   );
 
   const handlePersonalCollectionNavigate = useCallback(
@@ -1226,10 +1291,20 @@ export default function MyLibrary() {
             onClick={() => navigate("/")}
             disabled={offline}
             className="inline-flex items-center justify-center p-2.5 bg-brand-600 text-white rounded-lg hover:bg-brand-500 transition-colors disabled:opacity-50"
-            title={offline ? "Unavailable offline" : "Store search"}
-            aria-label="Store search"
+            title={offline ? "Unavailable offline" : "Browse"}
+            aria-label="Browse"
           >
-            <Store size={16} />
+            <Compass size={16} />
+          </button>
+          <button
+            type="button"
+            disabled={offline}
+            onClick={() => navigate("/history")}
+            className="inline-flex items-center justify-center p-2.5 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 transition-colors disabled:opacity-50"
+            title="Listening history"
+            aria-label="Listening history"
+          >
+            <ListMusic size={16} />
           </button>
         </div>
       </div>
@@ -1287,9 +1362,9 @@ export default function MyLibrary() {
                 eBooks
               </button>
               <button
-                onClick={() => setTab("streams")}
+                onClick={() => setTab("collection")}
                 className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  tab === "streams" ? "bg-teal-700 text-white" : "text-gray-400 hover:text-gray-200"
+                  tab === "collection" ? "bg-teal-700 text-white" : "text-gray-400 hover:text-gray-200"
                 }`}
               >
                 <Layers size={14} />
@@ -1307,15 +1382,33 @@ export default function MyLibrary() {
                   <span className="text-[10px] opacity-80">({downloadedItems.length})</span>
                 )}
               </button>
+              <button
+                onClick={() => setTab("want")}
+                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  tab === "want" ? "bg-rose-700 text-white" : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <Heart size={14} />
+                Want
+              </button>
+              <button
+                onClick={() => setTab("finished")}
+                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  tab === "finished" ? "bg-violet-700 text-white" : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <CheckCircle2 size={14} />
+                Finished
+              </button>
             </div>
 
             {tab === "abs" && viewToggle(absView, setAbsView)}
             {tab === "ebooks" && viewToggle(ebookView, setEbookView)}
-            {tab === "streams" && viewToggle(rdView, setRdView)}
+            {tab === "collection" && viewToggle(collectionView, setCollectionView)}
 
             {tab === "abs" && <FilterBar options={absFilterOptions} />}
             {tab === "ebooks" && <FilterBar options={ebookFilterOptions} />}
-            {tab === "streams" && <FilterBar options={rdFilterOptions} />}
+            {tab === "collection" && <FilterBar options={collectionFilterOptions} />}
           </>
         )}
       </div>
@@ -1440,7 +1533,7 @@ export default function MyLibrary() {
                       ))}
                     </div>
                   ) : (
-                    <EmptyABS onBrowse={() => navigate("/")} />
+                    <EmptyABS onBrowse={() => navigate("/")} onDownloads={() => navigate("/downloads")} />
                   )}
                 </div>
               )}
@@ -1463,7 +1556,7 @@ export default function MyLibrary() {
                         />
                       ))}
                       {Object.keys(absByGenre).length === 0 && (
-                        <EmptyABS onBrowse={() => navigate("/")} />
+                        <EmptyABS onBrowse={() => navigate("/")} onDownloads={() => navigate("/downloads")} />
                       )}
                     </>
                   )}
@@ -1606,24 +1699,24 @@ export default function MyLibrary() {
           )}
 
           {/* My Collection Tab (personal / streaming collection) */}
-          {tab === "streams" && (
+          {tab === "collection" && (
             <div>
               {rdLoading && !rdLibrary && <LibraryGridSkeleton />}
-              {!rdLoading && rdItemsSorted.length === 0 && (
+              {!rdLoading && collectionItemsSorted.length === 0 && (
                 <div className="text-center py-16">
                   <Layers className="mx-auto mb-4 text-gray-600" size={40} />
                   <h3 className="text-base font-semibold text-gray-300 mb-2">No items yet</h3>
                   <p className="text-sm text-gray-500 mb-4">
-                    Books you explicitly add to My Collection appear here — streams are not auto-added
+                    Books you add from Browse or your library appear here — keep this short list for quick access
                   </p>
                   <button onClick={() => navigate("/")} className="px-5 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-500 transition-colors">
-                    Browse Store
+                    Browse
                   </button>
                 </div>
               )}
-              {rdView === "all" && filteredRdItems.length > 0 && (
+              {collectionView === "all" && filteredCollectionItems.length > 0 && (
                 <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2">
-                  {filteredRdItems.map((item) => (
+                  {filteredCollectionItems.map((item) => (
                     <RDCard
                       key={item.id}
                       item={item}
@@ -1638,7 +1731,7 @@ export default function MyLibrary() {
                   ))}
                 </div>
               )}
-              {rdView === "genre" && Object.entries(rdByGenre).map(([genre, items]) => (
+              {collectionView === "genre" && Object.entries(collectionByGenre).map(([genre, items]) => (
                 <div key={genre} className="mb-6">
                   <h3 className="text-sm font-semibold text-gray-300 mb-3">{genre}</h3>
                   <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2">
@@ -1658,7 +1751,7 @@ export default function MyLibrary() {
                   </div>
                 </div>
               ))}
-              {rdView === "series" && (
+              {collectionView === "series" && (
                 rdSeriesLocal.length > 0 ? (
                   rdSeriesLocal.map((s) => (
                     <div key={s.id || s.name} className="mb-6">
@@ -1689,7 +1782,7 @@ export default function MyLibrary() {
                   </p>
                 )
               )}
-              {rdView === "author" && Object.entries(rdByAuthor).map(([author, items]) => (
+              {collectionView === "author" && Object.entries(collectionByAuthor).map(([author, items]) => (
                 <div key={author} className="mb-6">
                   <h3 className="text-sm font-semibold text-gray-300 mb-3">{author}</h3>
                   <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2">
@@ -1817,6 +1910,157 @@ export default function MyLibrary() {
                       </div>
                     );
                   })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === "want" && (
+            <div>
+              {wantLoading && (
+                <p className="text-sm text-gray-500 flex items-center gap-2 py-8 justify-center">
+                  <Loader2 size={16} className="animate-spin" /> Loading Want list…
+                </p>
+              )}
+              {!wantLoading && (wantAlertsData?.alerts?.length ?? 0) === 0 && (
+                <div className="text-center py-16">
+                  <Heart className="mx-auto mb-4 text-gray-600" size={40} />
+                  <h3 className="text-base font-semibold text-gray-300 mb-2">Want list is empty</h3>
+                  <p className="text-sm text-gray-500 mb-4 max-w-md mx-auto">
+                    On a Browse book page, tap Notify me when available to watch for downloads.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => navigate("/")}
+                    className="text-sm text-brand-400 hover:text-brand-300"
+                  >
+                    Browse catalog
+                  </button>
+                </div>
+              )}
+              {!wantLoading && (wantAlertsData?.alerts?.length ?? 0) > 0 && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+                  {wantAlertsData!.alerts.map((alert) => (
+                    <div
+                      key={alert.volumeId}
+                      className="rounded-lg border border-gray-800 bg-gray-900/50 overflow-hidden flex flex-col"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          persistLibraryUi();
+                          navigate(`/book/${encodeURIComponent(alert.volumeId)}`);
+                        }}
+                        className="text-left flex-1"
+                      >
+                        {alert.coverUrl ? (
+                          <CoverImage
+                            src={alert.coverUrl}
+                            alt=""
+                            className="w-full aspect-[2/3] object-cover"
+                          />
+                        ) : (
+                          <div className="w-full aspect-[2/3] bg-gray-800 flex items-center justify-center">
+                            <BookOpen size={24} className="text-gray-600" />
+                          </div>
+                        )}
+                        <div className="p-2">
+                          <p className="text-xs font-medium text-gray-100 line-clamp-2">{alert.title}</p>
+                          {alert.author && (
+                            <p className="text-[10px] text-gray-500 truncate mt-0.5">{alert.author}</p>
+                          )}
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removeAlertMutation.mutate(alert.volumeId)}
+                        disabled={removeAlertMutation.isPending}
+                        className="mx-2 mb-2 px-2 py-1 text-[11px] rounded-md text-gray-400 hover:text-red-300 hover:bg-gray-800 transition-colors"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === "finished" && (
+            <div>
+              {finishedAbsItems.length === 0 && finishedRdItems.length === 0 ? (
+                <div className="text-center py-16">
+                  <CheckCircle2 className="mx-auto mb-4 text-gray-600" size={40} />
+                  <h3 className="text-base font-semibold text-gray-300 mb-2">No finished books yet</h3>
+                  <p className="text-sm text-gray-500 max-w-md mx-auto">
+                    Titles you finish (≈95%+ or marked finished) show up here.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-8">
+                  {finishedAbsItems.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+                        <Headphones size={14} className="text-emerald-400" />
+                        Library ({finishedAbsItems.length})
+                      </h3>
+                      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2">
+                        {finishedAbsItems.map((item) => (
+                          <ABSBookCard
+                            key={item.itemId}
+                            itemId={item.itemId}
+                            title={item.title}
+                            author={item.author}
+                            coverUrl={item.coverUrl}
+                            duration={item.duration}
+                            progress={item.progress}
+                            onNavigate={() => {
+                              persistLibraryUi();
+                              navigate(`/library/book/${encodeURIComponent(item.itemId)}`);
+                            }}
+                            seriesName={localSeriesName(item)}
+                            sequence={item.sequence}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {finishedRdItems.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+                        <ListMusic size={14} className="text-teal-400" />
+                        Streams ({finishedRdItems.length})
+                      </h3>
+                      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2">
+                        {finishedRdItems.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => navigate("/")}
+                            className="text-left group"
+                          >
+                            <div className="aspect-[2/3] rounded-lg overflow-hidden bg-gray-800 mb-1.5">
+                              {item.coverUrl ? (
+                                <CoverImage
+                                  src={item.coverUrl}
+                                  alt=""
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                                />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center text-gray-600">
+                                  <Headphones size={20} />
+                                </div>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-gray-200 line-clamp-2 leading-snug">{item.title}</p>
+                            {item.author && (
+                              <p className="text-[10px] text-gray-500 truncate">{item.author}</p>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -2059,18 +2303,21 @@ function RDCard({ item, isResolving, onPlay, onResolve, onRemove, onNavigate, un
         titleClassName="hover:text-brand-400 transition-colors"
         onTitleClick={onNavigate}
       >
-        <div className="flex gap-1 mt-0.5">
-          {canPlay ? (
-            <button onClick={onPlay} className="flex-1 flex items-center justify-center gap-0.5 py-1 bg-brand-600 text-white text-[9px] font-medium rounded hover:bg-brand-500 transition-colors">
-              <Play size={8} /> Play
+        <div className="flex gap-1 mt-0.5 items-center">
+          {canPlay && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onPlay(); }}
+              className="flex-1 flex items-center justify-center gap-0.5 py-1 bg-emerald-700 text-white text-[9px] font-medium rounded hover:bg-emerald-600 transition-colors"
+              title="Listen"
+            >
+              <Play size={8} /> Listen
             </button>
-          ) : item.magnetLink ? (
-            <button onClick={onResolve} disabled={isResolving || unavailable} className="flex-1 flex items-center justify-center gap-0.5 py-1 bg-brand-600 text-white text-[9px] font-medium rounded hover:bg-brand-500 disabled:opacity-50 transition-colors">
-              {isResolving ? <Loader2 size={8} className="animate-spin" /> : <Play size={8} />}
-              {isResolving ? "..." : "Stream"}
-            </button>
-          ) : null}
-          <button onClick={onRemove} className="p-1 text-gray-600 hover:text-red-400 transition-colors" title="Remove">
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); onRemove(); }}
+            className="p-1 text-gray-600 hover:text-red-400 transition-colors"
+            title="Remove from My Collection"
+          >
             <Trash2 size={10} />
           </button>
         </div>
@@ -2095,15 +2342,24 @@ function LibraryGridSkeleton({ count = 18 }: { count?: number }) {
   );
 }
 
-function EmptyABS({ onBrowse }: { onBrowse: () => void }) {
+function EmptyABS({ onBrowse, onDownloads }: { onBrowse: () => void; onDownloads?: () => void }) {
   return (
     <div className="text-center py-16">
       <Headphones className="mx-auto mb-4 text-gray-600" size={40} />
-      <h3 className="text-base font-semibold text-gray-300 mb-2">No audiobooks on your server</h3>
-      <p className="text-sm text-gray-500 mb-4">Request books to add them to your Audiobookshelf library</p>
-      <button onClick={onBrowse} className="px-5 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-500 transition-colors">
-        Browse Books
-      </button>
+      <h3 className="text-base font-semibold text-gray-300 mb-2">No audiobooks yet</h3>
+      <p className="text-sm text-gray-500 mb-4 max-w-md mx-auto">
+        Find a book in Browse → Get audiobook → track it under Downloads → Listen here.
+      </p>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <button onClick={onBrowse} className="px-5 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-500 transition-colors">
+          Browse
+        </button>
+        {onDownloads && (
+          <button onClick={onDownloads} className="px-5 py-2 bg-gray-800 text-gray-200 border border-gray-700 rounded-lg text-sm font-medium hover:bg-gray-700 transition-colors">
+            Downloads
+          </button>
+        )}
+      </div>
     </div>
   );
 }

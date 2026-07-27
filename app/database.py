@@ -193,6 +193,7 @@ async def init_db():
             await _add_column_if_missing(conn, "stream_history", "hidden", "BOOLEAN DEFAULT 0")
             await _add_column_if_missing(conn, "abs_play_tracking", "hidden", "BOOLEAN DEFAULT 0")
             await _add_column_if_missing(conn, "users", "preferred_debrid", "VARCHAR(16) DEFAULT 'rd'")
+            await _add_column_if_missing(conn, "users", "play_queue_json", "TEXT")
             await _add_column_if_missing(conn, "stream_history", "debrid_provider", "VARCHAR(16) DEFAULT 'rd'")
             await _add_column_if_missing(conn, "streaming_library", "debrid_provider", "VARCHAR(16) DEFAULT 'rd'")
             await _add_column_if_missing(conn, "download_requests", "debrid_provider", "VARCHAR(16)")

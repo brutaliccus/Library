@@ -6,13 +6,14 @@ import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import {
-  ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store, Trash2,
+  ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store, Trash2, ListPlus,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
 import Modal from "../components/Modal";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
+import type { AbsChapter } from "../types/player";
 
 interface ABSItemDetail {
   itemId: string;
@@ -37,12 +38,21 @@ function formatDuration(secs: number): string {
   return `${m}m`;
 }
 
+function formatChapterTime(s: number): string {
+  if (!s || !isFinite(s)) return "0:00";
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+
 export default function LibraryBookDetail() {
   const { itemId: rawItemId } = useParams<{ itemId: string }>();
   const itemId = rawItemId ? decodeURIComponent(rawItemId) : undefined;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { playABS } = usePlayer();
+  const { playABS, addToUpNext } = usePlayer();
   const { toast } = useToast();
   const { user } = useAuth();
   const online = useOnlineStatus();
@@ -62,6 +72,17 @@ export default function LibraryBookDetail() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const { data: chaptersData } = useQuery({
+    queryKey: ["abs-chapters", itemId],
+    queryFn: async () => {
+      const { data } = await api.get(`/stream/abs/${encodeURIComponent(itemId!)}/chapters`);
+      return data as { chapters: AbsChapter[] };
+    },
+    enabled: !!itemId && online,
+    staleTime: 10 * 60 * 1000,
+    retry: 1,
+  });
+
   const { data: ebookMatch } = useQuery({
     queryKey: ["ebook-match-lib", item?.title, item?.author],
     queryFn: async () => {
@@ -77,11 +98,11 @@ export default function LibraryBookDetail() {
     staleTime: 5 * 60 * 1000,
   });
 
-  const handlePlay = async () => {
+  const handlePlay = async (startAt?: number) => {
     if (!item) return;
     setPlayLoading(true);
     try {
-      await playABS(item.itemId);
+      await playABS(item.itemId, startAt != null ? { startAt } : undefined);
     } catch (err) {
       const msg =
         err instanceof Error && err.message.startsWith("Offline")
@@ -91,6 +112,18 @@ export default function LibraryBookDetail() {
     } finally {
       setPlayLoading(false);
     }
+  };
+
+  const handleAddToUpNext = () => {
+    if (!item) return;
+    addToUpNext({
+      source: "abs",
+      id: item.itemId,
+      title: item.title,
+      author: item.author || "",
+      coverUrl: item.coverUrl || "",
+    });
+    toast(`Added "${item.title}" to Up Next`, "success");
   };
 
   const handleViewInStore = async () => {
@@ -205,12 +238,20 @@ export default function LibraryBookDetail() {
     <>
       <button
         type="button"
-        onClick={handlePlay}
+        onClick={() => void handlePlay()}
         disabled={playLoading}
         className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
       >
         {playLoading ? <Loader2 size={16} className="animate-spin" /> : <Headphones size={16} />}
         Listen
+      </button>
+      <button
+        type="button"
+        onClick={handleAddToUpNext}
+        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors"
+      >
+        <ListPlus size={16} />
+        Add to Up Next
       </button>
       {ebookMatch?.chapterId ? (
         <button
@@ -230,7 +271,7 @@ export default function LibraryBookDetail() {
         className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
       >
         {storeLoading ? <Loader2 size={16} className="animate-spin" /> : <Store size={16} />}
-        View in Store
+        View in Browse
       </button>
       {isAdmin && (
         <button
@@ -309,6 +350,29 @@ export default function LibraryBookDetail() {
                 className="text-gray-300 text-sm leading-relaxed prose prose-invert prose-sm max-w-none"
                 dangerouslySetInnerHTML={{ __html: item.description }}
               />
+            </div>
+          )}
+
+          {(chaptersData?.chapters?.length ?? 0) > 0 && (
+            <div className="mt-8">
+              <h2 className="text-lg font-semibold text-gray-100 mb-3">Chapters</h2>
+              <ul className="space-y-1 max-h-80 overflow-y-auto pr-1">
+                {chaptersData!.chapters.map((ch) => (
+                  <li key={`${ch.id}-${ch.start}`}>
+                    <button
+                      type="button"
+                      onClick={() => void handlePlay(ch.start)}
+                      disabled={playLoading}
+                      className="w-full text-left flex items-start gap-3 px-3 py-2 rounded-lg text-gray-300 hover:bg-gray-800 hover:text-white transition-colors disabled:opacity-50"
+                    >
+                      <span className="text-xs tabular-nums text-gray-500 shrink-0 pt-0.5">
+                        {formatChapterTime(ch.start)}
+                      </span>
+                      <span className="text-sm flex-1 leading-snug">{ch.title}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </div>

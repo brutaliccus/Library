@@ -41,9 +41,31 @@ import {
   type PlaybackPosition,
   type RDResumeInfo,
   type Track,
+  type UpNextItem,
 } from "../types/player";
 
-export type { Track, AbsChapter, NowPlaying, RDResumeInfo };
+export type { Track, AbsChapter, NowPlaying, RDResumeInfo, UpNextItem };
+
+const UP_NEXT_STORAGE_KEY = "player-up-next";
+
+function loadUpNextLocal(): UpNextItem[] {
+  try {
+    const raw = localStorage.getItem(UP_NEXT_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as UpNextItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveUpNextLocal(items: UpNextItem[]) {
+  try {
+    localStorage.setItem(UP_NEXT_STORAGE_KEY, JSON.stringify(items));
+  } catch {
+    /* ignore */
+  }
+}
 
 /** Capacitor WebView is https://localhost — relative /api/stream URLs must hit the library host. */
 function withAbsoluteMediaUrls(np: NowPlaying): NowPlaying {
@@ -85,7 +107,7 @@ interface PlayerState {
 }
 
 interface PlayerActions {
-  playABS: (itemId: string) => Promise<void>;
+  playABS: (itemId: string, opts?: { startAt?: number }) => Promise<void>;
   playRD: (
     tracks: Track[],
     title: string,
@@ -110,6 +132,10 @@ interface PlayerActions {
   skipChapterPrev: () => void;
   /** Next chapter or next file track */
   skipChapterNext: () => void;
+  upNext: UpNextItem[];
+  addToUpNext: (item: UpNextItem) => void;
+  removeFromUpNext: (index: number) => void;
+  clearUpNext: () => void;
 }
 
 type PlayerContextType = PlayerState & PlayerActions;
@@ -178,6 +204,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const suppressPauseIntentRef = useRef(false);
   /** Resume after a transient system pause while play intent is still true. */
   const resumeAfterTransientPauseRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const playNextAbsRef = useRef<(itemId: string) => Promise<void>>(async () => {});
+  const playNextRdRef = useRef<(historyId: number) => Promise<void>>(async () => {});
   const [state, setState] = useState<PlayerState>({
     nowPlaying: null,
     isPlaying: false,
@@ -193,6 +221,54 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     sleepTimerSecondsRemaining: null,
     sleepTimerPresetMinutes: null,
   });
+  const [upNext, setUpNext] = useState<UpNextItem[]>(() => loadUpNextLocal());
+  const upNextRef = useRef(upNext);
+  upNextRef.current = upNext;
+
+  const persistUpNext = useCallback((items: UpNextItem[]) => {
+    setUpNext(items);
+    saveUpNextLocal(items);
+    void api.put("/stream/play-queue", { items }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { data } = await api.get("/stream/play-queue");
+        const items = (data as { items?: UpNextItem[] })?.items;
+        if (!cancelled && Array.isArray(items) && items.length > 0) {
+          setUpNext(items);
+          saveUpNextLocal(items);
+        }
+      } catch {
+        /* localStorage already loaded */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const addToUpNext = useCallback(
+    (item: UpNextItem) => {
+      const next = [...upNextRef.current, item].slice(0, 50);
+      persistUpNext(next);
+    },
+    [persistUpNext]
+  );
+
+  const removeFromUpNext = useCallback(
+    (index: number) => {
+      const next = upNextRef.current.filter((_, i) => i !== index);
+      persistUpNext(next);
+    },
+    [persistUpNext]
+  );
+
+  const clearUpNext = useCallback(() => {
+    persistUpNext([]);
+  }, [persistUpNext]);
 
   const setPlayIntent = useCallback((want: boolean) => {
     playIntentRef.current = want;
@@ -544,6 +620,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         } else if (np.source === "abs" && np.itemId) {
           void clearAbsBookCache(np.itemId);
         }
+        // Up Next auto-advance intentionally disabled: rapid playABS/playRD
+        // cascades were thrashing Android MediaSession/startForeground and
+        // rebooting some devices. Queue remains for manual "play next".
       }
     };
 
@@ -630,7 +709,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [state.sleepTimerEndAt, getAudio]);
 
   const playABS = useCallback(
-    async (itemId: string) => {
+    async (itemId: string, opts?: { startAt?: number }) => {
       probeAbortRef.current?.abort();
       retryCountRef.current = 0;
       setPlayIntent(true);
@@ -653,10 +732,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           absChapters: manifest.absChapters,
         });
 
-        const startOffset = local?.time ?? 0;
+        let startOffset = opts?.startAt ?? local?.time ?? 0;
         let trackIdx = local?.trackIndex ?? 0;
         let localStart = local?.trackLocal ?? 0;
-        if (local == null && startOffset > 0) {
+        if (opts?.startAt != null) {
+          trackIdx = 0;
+          localStart = opts.startAt;
+          for (let i = 0; i < np.tracks.length; i++) {
+            const t = np.tracks[i];
+            if (opts.startAt >= t.startOffset && opts.startAt < t.startOffset + t.duration) {
+              trackIdx = i;
+              localStart = opts.startAt - t.startOffset;
+              break;
+            }
+          }
+        } else if (local == null && startOffset > 0) {
           for (let i = 0; i < np.tracks.length; i++) {
             const t = np.tracks[i];
             if (startOffset >= t.startOffset && startOffset < t.startOffset + t.duration) {
@@ -707,8 +797,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         // Prefer local offline progress when it's newer than ABS (listened offline).
         const local = getOfflineProgress(progressKeyForAbs(itemId));
-        let startOffset = data.startOffset || 0;
-        if (local && local.updatedAt > Date.now() - 7 * 24 * 60 * 60 * 1000 && local.time > startOffset + 5) {
+        let startOffset = opts?.startAt ?? (data.startOffset || 0);
+        if (
+          opts?.startAt == null &&
+          local &&
+          local.updatedAt > Date.now() - 7 * 24 * 60 * 60 * 1000 &&
+          local.time > startOffset + 5
+        ) {
           startOffset = local.time;
         }
 
@@ -723,7 +818,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
         let trackIdx = 0;
         let localStart = startOffset;
-        if (local && Math.abs(local.time - startOffset) < 2) {
+        if (opts?.startAt == null && local && Math.abs(local.time - startOffset) < 2) {
           trackIdx = Math.min(Math.max(0, local.trackIndex), np.tracks.length - 1);
           localStart = Math.max(0, local.trackLocal);
         } else {
@@ -889,6 +984,39 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     [loadTrack, probeAllTracks, setPlayIntent]
   );
 
+  playNextAbsRef.current = (itemId: string) => playABS(itemId);
+  playNextRdRef.current = async (historyId: number) => {
+    try {
+      const { data } = await api.get("/stream/rd/history");
+      const items = (data as { items?: Array<{
+        id: number;
+        title: string;
+        author: string;
+        coverUrl: string;
+        tracks: Track[];
+        progressSeconds: number;
+        currentTrackIndex: number;
+        trackPositionSeconds: number;
+      }> })?.items || [];
+      const hit = items.find((i) => i.id === historyId);
+      if (!hit?.tracks?.length) return;
+      playRD(
+        hit.tracks,
+        hit.title,
+        hit.author,
+        hit.coverUrl,
+        hit.id,
+        {
+          startAt: hit.progressSeconds || 0,
+          trackIndex: hit.currentTrackIndex || 0,
+          trackPositionSeconds: hit.trackPositionSeconds || 0,
+        }
+      );
+    } catch (err) {
+      console.warn("[player] play next RD failed", err);
+    }
+  };
+
   const togglePlay = useCallback(() => {
     const audio = getAudio();
     if (audio.paused) {
@@ -914,11 +1042,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       void (async () => {
         try {
           const { loadAaResumeSnapshot } = await import("../media/aaResumeSnapshot");
-          const { LibraryAuto } = await import("../media/libraryAuto");
+          const { bringToForegroundSafe } = await import("../media/libraryAuto");
           const snap = loadAaResumeSnapshot();
           if (!snap) return;
           try {
-            await LibraryAuto.bringToForeground();
+            await bringToForegroundSafe();
           } catch {
             /* ignore */
           }
@@ -966,26 +1094,29 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const attemptPlay = (retriesLeft: number) => {
       audio.play().catch((err) => {
         const name = err instanceof Error ? err.name : "";
-        // Locked / frozen WebView — wake and retry (AA after long idle / call).
+        // Locked / frozen WebView — wake at most once per attempt chain, then
+        // retry without spam-starting Activities (that path rebooted some OEMs).
         if (name === "NotAllowedError" || retriesLeft > 0) {
-          void import("../media/libraryAuto")
-            .then(({ LibraryAuto }) => LibraryAuto.bringToForeground())
-            .catch(() => {})
-            .finally(() => {
-              if (retriesLeft > 0) {
-                // Back off — deep-idle thaw often needs >1s; native also redelivers.
-                const delay = retriesLeft >= 4 ? 500 : retriesLeft >= 2 ? 900 : 1_400;
-                setTimeout(() => attemptPlay(retriesLeft - 1), delay);
-              } else {
-                reloadAtPosition();
-              }
-            });
+          const shouldWake = retriesLeft === 2 && name === "NotAllowedError";
+          const wake = shouldWake
+            ? import("../media/libraryAuto")
+                .then(({ bringToForegroundSafe }) => bringToForegroundSafe())
+                .catch(() => {})
+            : Promise.resolve();
+          void wake.finally(() => {
+            if (retriesLeft > 0) {
+              const delay = retriesLeft >= 2 ? 900 : 1_400;
+              setTimeout(() => attemptPlay(retriesLeft - 1), delay);
+            } else {
+              reloadAtPosition();
+            }
+          });
           return;
         }
         reloadAtPosition();
       });
     };
-    attemptPlay(6);
+    attemptPlay(2);
   }, [getAudio, playABS, playRD, setPlayIntent]);
 
   const pause = useCallback(() => {
@@ -1213,6 +1344,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setSleepTimer,
     skipChapterPrev,
     skipChapterNext,
+    upNext,
+    addToUpNext,
+    removeFromUpNext,
+    clearUpNext,
   };
 
   return (

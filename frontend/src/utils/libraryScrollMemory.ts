@@ -1,6 +1,6 @@
 /** Persist My Library UI + window scroll across detail navigations (session only). */
 
-export type LibraryTab = "abs" | "streams" | "ebooks" | "downloaded";
+export type LibraryTab = "abs" | "collection" | "ebooks" | "downloaded" | "want" | "finished";
 export type LibraryTabView = "all" | "genre" | "series" | "author";
 export type LibraryMediaFilter = "all" | "audiobooks" | "ebooks";
 
@@ -8,7 +8,7 @@ export interface LibraryScrollMemory {
   tab: LibraryTab;
   absView: LibraryTabView;
   ebookView: LibraryTabView;
-  rdView: LibraryTabView;
+  collectionView: LibraryTabView;
   mediaFilter: LibraryMediaFilter;
   filterGenre: string;
   filterSeries: string;
@@ -19,7 +19,7 @@ export interface LibraryScrollMemory {
 
 const STORAGE_KEY = "my-library:scroll-ui";
 
-const TABS: LibraryTab[] = ["abs", "streams", "ebooks", "downloaded"];
+const TABS: LibraryTab[] = ["abs", "collection", "ebooks", "downloaded", "want", "finished"];
 const VIEWS: LibraryTabView[] = ["all", "genre", "series", "author"];
 const FILTERS: LibraryMediaFilter[] = ["all", "audiobooks", "ebooks"];
 
@@ -33,17 +33,32 @@ function isMediaFilter(v: unknown): v is LibraryMediaFilter {
   return typeof v === "string" && (FILTERS as string[]).includes(v);
 }
 
+function migrateTab(raw: unknown): LibraryTab | null {
+  if (raw === "streams") return "collection";
+  if (isTab(raw)) return raw;
+  return null;
+}
+
 export function loadLibraryScrollMemory(): LibraryScrollMemory | null {
   try {
     const raw = sessionStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<LibraryScrollMemory>;
-    if (!isTab(parsed.tab)) return null;
+    const parsed = JSON.parse(raw) as Partial<LibraryScrollMemory> & {
+      rdView?: LibraryTabView;
+      tab?: unknown;
+    };
+    const tab = migrateTab(parsed.tab);
+    if (!tab) return null;
+    const collectionView = isView(parsed.collectionView)
+      ? parsed.collectionView
+      : isView(parsed.rdView)
+        ? parsed.rdView
+        : "all";
     return {
-      tab: parsed.tab,
+      tab,
       absView: isView(parsed.absView) ? parsed.absView : "all",
       ebookView: isView(parsed.ebookView) ? parsed.ebookView : "all",
-      rdView: isView(parsed.rdView) ? parsed.rdView : "all",
+      collectionView,
       mediaFilter: isMediaFilter(parsed.mediaFilter) ? parsed.mediaFilter : "all",
       filterGenre: typeof parsed.filterGenre === "string" ? parsed.filterGenre : "",
       filterSeries: typeof parsed.filterSeries === "string" ? parsed.filterSeries : "",

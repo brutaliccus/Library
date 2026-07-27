@@ -1148,6 +1148,113 @@ async def home_curated_shelves(
         return payload
 
 
+@router.get("/personalized-shelves")
+async def personalized_shelves(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    booksPerShelf: int = Query(12, ge=1, le=20),
+):
+    """Shelves like “More by {author}” based on recent listens. Honors private mode."""
+    if getattr(user, "private_mode", False):
+        return {"shelves": [], "disabled": True, "reason": "private_mode"}
+
+    from app.models import ABSPlayTracking, StreamHistory
+
+    cache_key = f"personalized:{user.id}:{booksPerShelf}"
+    cached = _shelf_get(cache_key)
+    if cached is not None:
+        return cached
+
+    authors: list[str] = []
+    seed_titles: list[str] = []
+
+    abs_rows = (
+        await db.execute(
+            select(ABSPlayTracking)
+            .where(
+                ABSPlayTracking.user_id == user.id,
+                ABSPlayTracking.hidden.is_(False),
+            )
+            .order_by(ABSPlayTracking.last_played_at.desc())
+            .limit(12)
+        )
+    ).scalars().all()
+    for row in abs_rows:
+        a = (row.author or "").strip()
+        if a and a not in authors:
+            authors.append(a)
+        t = (row.title or "").strip()
+        if t and t not in seed_titles:
+            seed_titles.append(t)
+
+    rd_rows = (
+        await db.execute(
+            select(StreamHistory)
+            .where(StreamHistory.user_id == user.id, StreamHistory.hidden.is_(False))
+            .order_by(StreamHistory.updated_at.desc())
+            .limit(12)
+        )
+    ).scalars().all()
+    for row in rd_rows:
+        a = (row.author or "").strip()
+        if a and a not in authors:
+            authors.append(a)
+        t = (row.title or "").strip()
+        if t and t not in seed_titles:
+            seed_titles.append(t)
+
+    shelves: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for author in authors[:3]:
+        try:
+            result = await google_books.search_volumes(
+                f'inauthor:"{author}"',
+                max_results=booksPerShelf,
+                start_index=0,
+            )
+            books = await _apply_availability_filter(result.get("books") or [], False)
+            books = [b for b in books if b.get("id") and b["id"] not in seen_ids]
+            for b in books:
+                seen_ids.add(b["id"])
+            if books:
+                shelves.append({
+                    "id": f"author:{author.lower()}",
+                    "title": f"More by {author}",
+                    "subtitle": "Based on your recent listens",
+                    "books": books[:booksPerShelf],
+                })
+        except Exception as e:
+            logger.warning("personalized author shelf failed for %s: %s", author, e)
+
+    if seed_titles and len(shelves) < 4:
+        seed = seed_titles[0]
+        try:
+            result = await google_books.search_volumes(
+                seed,
+                max_results=booksPerShelf,
+                start_index=0,
+            )
+            books = await _apply_availability_filter(result.get("books") or [], False)
+            books = [b for b in books if b.get("id") and b["id"] not in seen_ids]
+            for b in books:
+                seen_ids.add(b["id"])
+            if books:
+                shelves.append({
+                    "id": f"because:{seed[:40].lower()}",
+                    "title": f"Because you listened to {seed}",
+                    "subtitle": "Similar titles in the catalog",
+                    "books": books[:booksPerShelf],
+                })
+        except Exception as e:
+            logger.warning("personalized because-shelf failed: %s", e)
+
+    payload = {"shelves": shelves, "disabled": False}
+    if shelves:
+        _shelf_put(cache_key, payload)
+    return payload
+
+
 @router.get("/curated-slugs")
 async def list_curated_slugs(_user: User = Depends(get_current_user)):
     """Slugs that ShelfPage should load via /curated rather than genre browse."""

@@ -29,8 +29,11 @@ import Settings from "./pages/Settings";
 import Onboarding from "./pages/Onboarding";
 import JoinInvite from "./pages/JoinInvite";
 import LibrariesPage from "./pages/Libraries";
+import ListeningHistory from "./pages/ListeningHistory";
+import ListenRoute from "./pages/ListenRoute";
 import OfflineBanner from "./components/OfflineBanner";
 import OfflineUnlockSetupPrompt from "./components/OfflineUnlockSetupPrompt";
+import CoachMarks from "./components/CoachMarks";
 import { useLibraryGroup } from "./hooks/useLibraryGroup";
 import { useThemeSync } from "./theme/useThemeSync";
 import { useOnlineStatus } from "./hooks/useOnlineStatus";
@@ -185,6 +188,7 @@ export default function App() {
       {user && !user.mustChangePassword && !user.mustSetEmail && (
         <OfflineUnlockSetupPrompt />
       )}
+      {user && !user.mustChangePassword && !user.mustSetEmail && <CoachMarks />}
       {expanded && <PlayerPage />}
       <ThemeSync />
       <DeepLinkNavigator />
@@ -322,10 +326,30 @@ export default function App() {
           }
         />
         <Route
-          path="/requests"
+          path="/downloads"
           element={
             <ProtectedRoute>
               <RequestsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/requests"
+          element={<Navigate to="/downloads" replace />}
+        />
+        <Route
+          path="/history"
+          element={
+            <ProtectedRoute>
+              <ListeningHistory />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/listen"
+          element={
+            <ProtectedRoute>
+              <ListenRoute />
             </ProtectedRoute>
           }
         />

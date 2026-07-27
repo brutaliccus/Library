@@ -77,7 +77,9 @@ export default function BookDetailPage() {
   const [absLoading, setAbsLoading] = useState(false);
   const [smartStreamLoading, setSmartStreamLoading] = useState(false);
   const [smartStreamDetail, setSmartStreamDetail] = useState("");
+  const [showSecondaryActions, setShowSecondaryActions] = useState(false);
   const pollRef = useRef(false);
+  const downloadPanelRef = useRef<HTMLDivElement>(null);
 
   const { data: book, isLoading, error } = useQuery({
     queryKey: ["book-detail", volumeId],
@@ -275,10 +277,10 @@ export default function BookDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["library-check", volumeId] });
       queryClient.invalidateQueries({ queryKey: ["streaming-library"] });
-      toast("Added to your library!", "success");
+      toast("Added to My Collection", "success");
     },
     onError: (err: any) => {
-      toast(err.response?.data?.detail || "Failed to add to library", "error");
+      toast(err.response?.data?.detail || "Failed to add to My Collection", "error");
     },
   });
 
@@ -370,6 +372,11 @@ export default function BookDetailPage() {
     }
   }, [book, catalogSeriesName, seriesIndex, playRD, toast, queryClient]);
 
+  const focusDownloads = useCallback(() => {
+    downloadPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.dispatchEvent(new CustomEvent("open-find-downloads"));
+  }, []);
+
   if (isLoading) {
     return (
       <div className="max-w-5xl mx-auto px-4 py-8">
@@ -431,66 +438,87 @@ export default function BookDetailPage() {
     const base = compact
       ? "inline-flex items-center justify-center gap-1 px-2 py-2.5 text-xs font-medium rounded-lg w-full min-h-[2.75rem]"
       : "inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg";
+    const secondary = compact
+      ? "inline-flex items-center justify-center gap-1 px-2 py-2 text-xs font-medium rounded-lg w-full min-h-[2.5rem] bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
+      : "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
 
-    return (
+    const primaryPlay = absMatch ? (
+      <button
+        onClick={() => handleListen(absMatch.itemId)}
+        disabled={absLoading}
+        className={`${base} bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50`}
+      >
+        {absLoading ? <Loader2 size={compact ? 14 : 16} className="animate-spin" /> : <Headphones size={compact ? 14 : 16} />}
+        Listen
+      </button>
+    ) : canRead ? (
+      <button
+        onClick={() => navigate(`/read/${readChapterId}`)}
+        className={`${base} bg-amber-600 text-white hover:bg-amber-500 transition-colors`}
+      >
+        <BookOpen size={compact ? 14 : 16} />
+        Read
+      </button>
+    ) : (
+      <button
+        onClick={focusDownloads}
+        className={`${base} bg-emerald-600 text-white hover:bg-emerald-500 transition-colors`}
+      >
+        <Headphones size={compact ? 14 : 16} />
+        {compact ? "Get audio" : "Get audiobook"}
+      </button>
+    );
+
+    const secondaryRow = (
       <>
-        {absMatch && (
-          <button
-            onClick={() => handleListen(absMatch.itemId)}
-            disabled={absLoading}
-            className={`${base} bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50`}
-          >
-            {absLoading ? <Loader2 size={compact ? 14 : 16} className="animate-spin" /> : <Headphones size={compact ? 14 : 16} />}
-            Listen
-          </button>
-        )}
-        {canRead && (
+        {absMatch && canRead && (
           <button
             onClick={() => navigate(`/read/${readChapterId}`)}
-            className={`${base} bg-amber-600 text-white hover:bg-amber-500 transition-colors`}
+            className={secondary}
           >
             <BookOpen size={compact ? 14 : 16} />
             Read
           </button>
         )}
-        <button
-          onClick={handleSmartStream}
-          disabled={smartStreamLoading}
-          className={`${base} bg-purple-600 text-white hover:bg-purple-500 transition-colors disabled:opacity-50`}
-        >
-          {smartStreamLoading ? <Loader2 size={compact ? 14 : 16} className="animate-spin" /> : <Play size={compact ? 14 : 16} />}
-          Stream
-        </button>
-        {libraryCheck?.inLibrary ? (
-          <span
-            className={`${base} bg-gray-800 text-gray-300 border border-gray-700 justify-center`}
+        {!absMatch && (
+          <button
+            onClick={handleSmartStream}
+            disabled={smartStreamLoading}
+            className={secondary}
+            title="Play now while not in your library"
           >
+            {smartStreamLoading ? <Loader2 size={compact ? 14 : 16} className="animate-spin" /> : <Play size={compact ? 14 : 16} />}
+            Stream
+          </button>
+        )}
+        {libraryCheck?.inLibrary ? (
+          <span className={`${secondary} cursor-default justify-center`}>
             <Check size={compact ? 14 : 16} className="text-brand-400 shrink-0" />
-            {compact ? "Saved" : "In Personal Collection"}
+            {compact ? "Saved" : "In My Collection"}
           </span>
         ) : (
           <button
             onClick={() => addToLibMutation.mutate()}
             disabled={addToLibMutation.isPending}
-            className={`${base} bg-brand-600 text-white hover:bg-brand-500 transition-colors disabled:opacity-50`}
+            className={secondary}
           >
             {addToLibMutation.isPending ? (
               <Loader2 size={compact ? 14 : 16} className="animate-spin" />
             ) : (
               <Library size={compact ? 14 : 16} />
             )}
-            {compact ? "Add" : "+ to Personal Collection"}
+            {compact ? "Add" : "+ to My Collection"}
           </button>
         )}
         {availability?.available === false && (
           <button
             onClick={() => notifyMutation.mutate(!alertStatus?.watching)}
             disabled={notifyMutation.isPending}
-            className={`${base} ${
+            className={`${secondary} ${
               alertStatus?.watching
-                ? "bg-amber-900/40 text-amber-200 border border-amber-700/50 hover:bg-amber-900/60"
-                : "bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 hover:border-gray-600"
-            } transition-colors disabled:opacity-50`}
+                ? "bg-amber-900/40 text-amber-200 border-amber-700/50"
+                : ""
+            }`}
           >
             {notifyMutation.isPending ? (
               <Loader2 size={compact ? 14 : 16} className="animate-spin" />
@@ -501,12 +529,44 @@ export default function BookDetailPage() {
             )}
             {compact
               ? alertStatus?.watching
-                ? "Watching"
-                : "Notify"
+                ? "Wanted"
+                : "Want"
               : alertStatus?.watching
-                ? "Cancel notify"
-                : "Notify me when available"}
+                ? "Remove from Want"
+                : "Add to Want"}
           </button>
+        )}
+        {absMatch && (
+          <button onClick={focusDownloads} className={secondary}>
+            Get audiobook
+          </button>
+        )}
+      </>
+    );
+
+    return (
+      <>
+        {primaryPlay}
+        {!absMatch && !canRead && (
+          <p className={`${compact ? "col-span-2 text-[10px]" : "w-full text-xs"} text-gray-500`}>
+            Or stream now while waiting for a full library copy
+          </p>
+        )}
+        {compact ? (
+          <>
+            <button
+              type="button"
+              onClick={() => setShowSecondaryActions((v) => !v)}
+              className={`${base} bg-gray-800 text-gray-300 border border-gray-700`}
+            >
+              More
+            </button>
+            {showSecondaryActions && secondaryRow}
+          </>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2 w-full mt-1">
+            {secondaryRow}
+          </div>
         )}
       </>
     );
@@ -567,7 +627,7 @@ export default function BookDetailPage() {
       {!absMatch && absData && !smartStreamLoading && !globalLibCheck?.inLibrary && (
         <p className="mt-2 text-xs text-gray-500 flex items-center gap-1.5">
           <Headphones size={13} />
-          Not in your Audiobookshelf library
+          Not in your audiobook library yet
         </p>
       )}
     </>
@@ -611,7 +671,7 @@ export default function BookDetailPage() {
 
           {noticesBlock}
 
-          <div className="mt-6 mb-6">
+          <div className="mt-6 mb-6" ref={downloadPanelRef}>
             <DownloadPanel
               title={book.title}
               subtitle={book.subtitle}

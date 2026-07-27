@@ -62,6 +62,8 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     # Updated by client heartbeat while the SPA is open/focused.
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # JSON array of Up Next queue items (client-synced play queue).
+    play_queue_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     download_requests: Mapped[list["DownloadRequest"]] = relationship(back_populates="user")
 

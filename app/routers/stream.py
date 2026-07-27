@@ -16,7 +16,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse, Response
 from jose import JWTError, jwt
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -203,6 +203,104 @@ async def get_stream_history(
     )
     rows = (await db.execute(stmt)).scalars().all()
     return {"items": [_serialize_history(h) for h in rows]}
+
+
+@router.get("/history")
+async def get_listening_history(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(50, ge=1, le=100),
+):
+    """Aggregated recent listens from ABS play tracking + RD StreamHistory."""
+    items: list[dict] = []
+
+    abs_rows = (
+        await db.execute(
+            select(ABSPlayTracking)
+            .where(
+                ABSPlayTracking.user_id == user.id,
+                ABSPlayTracking.hidden.is_(False),
+            )
+            .order_by(ABSPlayTracking.last_played_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    for row in abs_rows:
+        items.append({
+            "id": f"abs:{row.abs_item_id}",
+            "source": "abs",
+            "itemId": row.abs_item_id,
+            "title": row.title or "Audiobook",
+            "author": row.author or "",
+            "coverUrl": f"/api/stream/abs/proxy/cover/{row.abs_item_id}",
+            "progressSeconds": 0,
+            "totalSeconds": 0,
+            "progress": 0,
+            "status": "played",
+            "updatedAt": row.last_played_at.isoformat() if row.last_played_at else "",
+        })
+
+    rd_rows = (
+        await db.execute(
+            select(StreamHistory)
+            .where(StreamHistory.user_id == user.id, StreamHistory.hidden.is_(False))
+            .order_by(StreamHistory.updated_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    for h in rd_rows:
+        prog = 0.0
+        if h.total_seconds and h.total_seconds > 0:
+            prog = min(1.0, float(h.progress_seconds or 0) / float(h.total_seconds))
+        items.append({
+            "id": f"rd:{h.id}",
+            "source": "rd",
+            "streamHistoryId": h.id,
+            "title": h.title,
+            "author": h.author or "",
+            "coverUrl": h.cover_url or "",
+            "progressSeconds": h.progress_seconds or 0,
+            "totalSeconds": h.total_seconds or 0,
+            "progress": round(prog, 3),
+            "status": h.status or "",
+            "updatedAt": h.updated_at.isoformat() if h.updated_at else "",
+        })
+
+    def _sort_key(it: dict) -> str:
+        return it.get("updatedAt") or ""
+
+    items.sort(key=_sort_key, reverse=True)
+    return {"items": items[:limit]}
+
+
+class PlayQueueBody(BaseModel):
+    items: list[dict] = Field(default_factory=list)
+
+
+@router.get("/play-queue")
+async def get_play_queue(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    raw = getattr(user, "play_queue_json", None) or "[]"
+    try:
+        items = json.loads(raw)
+        if not isinstance(items, list):
+            items = []
+    except Exception:
+        items = []
+    return {"items": items}
+
+
+@router.put("/play-queue")
+async def put_play_queue(
+    body: PlayQueueBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    user.play_queue_json = json.dumps(body.items[:50])
+    await db.commit()
+    return {"items": body.items[:50]}
 
 
 @router.get("/rd/history/in-progress")

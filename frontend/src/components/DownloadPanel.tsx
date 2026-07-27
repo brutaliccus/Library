@@ -16,7 +16,7 @@ interface Props {
   subtitle?: string;
   seriesName?: string;
   seriesIndex?: string;
-  /** Google Books / catalog volume id for Personal Collection + in-library badges */
+  /** Google Books / catalog volume id for My Collection + in-library badges */
   googleVolumeId?: string;
 }
 
@@ -28,6 +28,24 @@ interface SearchResponse {
   totalFetched?: number;
   hiddenCount?: number;
   matchCounts?: { exact: number; likely: number; weak: number };
+}
+
+/** Prefer cached/debrid hits, audiobook/m4b titles, seeders, and reasonable size. */
+function scoreRelease(r: SearchResult): number {
+  let score = 0;
+  if (r.rdCached || r.torboxCached) score += 1000;
+  const title = `${r.title || ""} ${r.formatInfo || ""} ${r.fileExtension || ""}`.toLowerCase();
+  if (/\bm4b\b/.test(title) || (r.fileExtension || "").toLowerCase() === "m4b") score += 200;
+  if (r.mediaType === "audiobook" || /audiobook/.test(title)) score += 120;
+  if (r.matchTier === "exact") score += 80;
+  else if (r.matchTier === "likely") score += 40;
+  score += Math.min(150, (r.seeders || 0) * 2);
+  score += Math.min(50, (r.matchScore || 0) / 2);
+  const sizeGb = (r.size || 0) / (1024 ** 3);
+  if (sizeGb > 0.05 && sizeGb < 3.5) score += 40;
+  else if (sizeGb >= 3.5 && sizeGb < 6) score += 10;
+  else if (sizeGb >= 6) score -= 30;
+  return score;
 }
 
 function SearchProgressBar({ phase, progress }: { phase: string; progress: number }) {
@@ -66,6 +84,7 @@ export default function DownloadPanel({
   const [searchPhase, setSearchPhase] = useState("");
   const [searchProgress, setSearchProgress] = useState(0);
   const [showWeakMatches, setShowWeakMatches] = useState(false);
+  const [showAllReleases, setShowAllReleases] = useState(false);
   const [liveSearch, setLiveSearch] = useState(false);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState(false);
@@ -392,10 +411,18 @@ export default function DownloadPanel({
     setModalOpen(true);
     setLiveError(false);
     setShowWeakMatches(false);
+    setShowAllReleases(false);
     setResultFilter("");
     // Auto-run live ABB/indexer search with the default (or current) term on open.
     void runLiveStream(effectiveAbbQuery || undefined);
   };
+
+  useEffect(() => {
+    const onOpen = () => handleFindDownloads();
+    window.addEventListener("open-find-downloads", onOpen);
+    return () => window.removeEventListener("open-find-downloads", onOpen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- open with latest handlers
+  }, [effectiveAbbQuery]);
 
   const handleAbbSearch = () => {
     if (liveLoading) return;
@@ -422,6 +449,12 @@ export default function DownloadPanel({
     }
     return list;
   }, [relevanceFiltered, mediaFilter, resultFilter]);
+
+  const rankedResults = useMemo(() => {
+    return [...filteredResults].sort((a, b) => scoreRelease(b) - scoreRelease(a));
+  }, [filteredResults]);
+
+  const recommended = rankedResults[0] || null;
 
   const handleRequest = async (result: SearchResult, index: number, mediaTypeOverride: string) => {
     const isAA = result.source === "annas_archive";
@@ -638,7 +671,7 @@ export default function DownloadPanel({
                 {!liveSearch && indexerResults.length > 0 && (
                   <span>Loaded from indexer cache. </span>
                 )}
-                Showing {filteredResults.length} result{filteredResults.length !== 1 ? "s" : ""}
+                {rankedResults.length} ranked result{rankedResults.length !== 1 ? "s" : ""}
                 {matchCounts && (matchCounts.exact > 0 || matchCounts.likely > 0) && (
                   <span className="text-gray-500">
                     {" "}({matchCounts.exact} best match{matchCounts.exact !== 1 ? "es" : ""}
@@ -657,7 +690,9 @@ export default function DownloadPanel({
                     : `Show ${weakHiddenCount + hiddenCount} more results (other books / lower match)`}
                 </button>
               )}
-              <p className="text-xs text-gray-500">Sorted by match to this book, then seeders</p>
+              <p className="text-xs text-gray-500">
+                Recommended first (cached / m4b / seeders), then all releases
+              </p>
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="relative flex-1 min-w-0">
@@ -696,12 +731,12 @@ export default function DownloadPanel({
             </div>
             {resultFilter.trim() && (
               <p className="text-xs text-gray-500">
-                {filteredResults.length} match{filteredResults.length !== 1 ? "es" : ""} for “
+                {rankedResults.length} match{rankedResults.length !== 1 ? "es" : ""} for “
                 {resultFilter.trim()}”
-                {filteredResults.length === 0 ? " — try another filter" : ""}
+                {rankedResults.length === 0 ? " — try another filter" : ""}
               </p>
             )}
-            {filteredResults.length === 0 ? (
+            {rankedResults.length === 0 ? (
               <div className="text-center py-8 text-gray-500">
                 <p>
                   {resultFilter.trim()
@@ -711,25 +746,81 @@ export default function DownloadPanel({
                       : `No ${mediaFilter}s found`}
                 </p>
               </div>
+            ) : !showAllReleases && recommended ? (
+              <div className="space-y-3">
+                <p className="text-xs font-medium text-emerald-400/90 uppercase tracking-wider">
+                  Best match
+                </p>
+                {(() => {
+                  const result = recommended;
+                  const origIdx = combinedResults.indexOf(result);
+                  const known = streamHistoryData?.known || {};
+                  const histEntry =
+                    known[result.magnetUrl || ""] || known[result.downloadUrl || ""] || null;
+                  return (
+                    <ResultCard
+                      key={`${result.title}-${result.indexer}-${result.size}-rec`}
+                      result={result}
+                      onRequest={(r, typeOverride) => handleRequest(r, origIdx, typeOverride)}
+                      onStream={(r) => handleStream(r, origIdx)}
+                      requesting={requestingIdx === origIdx}
+                      streaming={streamingIdx === origIdx}
+                      streamProgress={streamingIdx === origIdx ? streamProgress : null}
+                      streamHistory={histEntry}
+                    />
+                  );
+                })()}
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    type="button"
+                    disabled={requestingIdx != null || streamingIdx != null}
+                    onClick={() => {
+                      const mt = recommended.mediaType || "audiobook";
+                      void handleRequest(recommended, combinedResults.indexOf(recommended), mt);
+                    }}
+                    className="flex-1 px-4 py-2.5 rounded-lg bg-brand-600 text-white text-sm font-semibold hover:bg-brand-500 disabled:opacity-50 transition-colors"
+                  >
+                    Get recommended
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAllReleases(true)}
+                    className="flex-1 px-4 py-2.5 rounded-lg bg-gray-800 text-gray-200 text-sm font-medium border border-gray-700 hover:bg-gray-700 transition-colors"
+                  >
+                    Show all releases ({rankedResults.length})
+                  </button>
+                </div>
+              </div>
             ) : (
-              filteredResults.map((result) => {
-                const origIdx = combinedResults.indexOf(result);
-                const known = streamHistoryData?.known || {};
-                const histEntry =
-                  known[result.magnetUrl || ""] || known[result.downloadUrl || ""] || null;
-                return (
-                  <ResultCard
-                    key={`${result.title}-${result.indexer}-${result.size}-${origIdx}`}
-                    result={result}
-                    onRequest={(r, typeOverride) => handleRequest(r, origIdx, typeOverride)}
-                    onStream={(r) => handleStream(r, origIdx)}
-                    requesting={requestingIdx === origIdx}
-                    streaming={streamingIdx === origIdx}
-                    streamProgress={streamingIdx === origIdx ? streamProgress : null}
-                    streamHistory={histEntry}
-                  />
-                );
-              })
+              <>
+                {showAllReleases && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllReleases(false)}
+                    className="text-xs text-brand-400 hover:text-brand-300 text-left w-fit"
+                  >
+                    Show recommended only
+                  </button>
+                )}
+                {rankedResults.map((result) => {
+                  const origIdx = combinedResults.indexOf(result);
+                  const known = streamHistoryData?.known || {};
+                  const histEntry =
+                    known[result.magnetUrl || ""] || known[result.downloadUrl || ""] || null;
+                  return (
+                    <ResultCard
+                      key={`${result.title}-${result.indexer}-${result.size}-${origIdx}`}
+                      result={result}
+                      onRequest={(r, typeOverride) => handleRequest(r, origIdx, typeOverride)}
+                      onStream={(r) => handleStream(r, origIdx)}
+                      requesting={requestingIdx === origIdx}
+                      streaming={streamingIdx === origIdx}
+                      streamProgress={streamingIdx === origIdx ? streamProgress : null}
+                      streamHistory={histEntry}
+                    />
+                  );
+                })}
+              </>
             )}
           </div>
         )}

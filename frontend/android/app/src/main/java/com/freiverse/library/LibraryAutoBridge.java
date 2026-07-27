@@ -102,6 +102,8 @@ public final class LibraryAutoBridge {
     private long positionMs = 0;
     private float playbackSpeed = 1.0f;
     private long lastNotificationUpdateMs = 0;
+    private long lastPersistSessionMs = 0;
+    private static final long PERSIST_SESSION_MIN_INTERVAL_MS = 15_000;
 
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest;
@@ -215,7 +217,11 @@ public final class LibraryAutoBridge {
         this.positionMs = Math.max(0, positionMs);
         this.playbackSpeed = playbackSpeed > 0 ? playbackSpeed : 1.0f;
         refreshSession(false);
-        persistSession();
+        long now = System.currentTimeMillis();
+        if (now - lastPersistSessionMs >= PERSIST_SESSION_MIN_INTERVAL_MS) {
+            lastPersistSessionMs = now;
+            persistSession();
+        }
     }
 
     /** Drop stale paused syncs while an optimistic play is still settling. */
@@ -750,6 +756,7 @@ public final class LibraryAutoBridge {
         if (ctx == null) {
             return;
         }
+        lastPersistSessionMs = System.currentTimeMillis();
         SharedPreferences.Editor ed = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit();
         if (!active) {
             ed.clear().apply();

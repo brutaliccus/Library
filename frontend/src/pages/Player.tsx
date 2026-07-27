@@ -64,6 +64,9 @@ export default function PlayerPage() {
     setSleepTimer,
     skipChapterPrev,
     skipChapterNext,
+    upNext,
+    removeFromUpNext,
+    clearUpNext,
   } = usePlayer();
 
   const [chaptersMenuOpen, setChaptersMenuOpen] = useState(false);
@@ -379,6 +382,58 @@ export default function PlayerPage() {
                   </ul>
                 </div>
               )}
+
+              <div className="mt-6 border-t border-gray-800 pt-4">
+                <div className="flex items-center justify-between px-2 mb-2">
+                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Up Next ({upNext.length})
+                  </h3>
+                  {upNext.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => clearUpNext()}
+                      className="text-[11px] text-gray-500 hover:text-gray-300"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                {upNext.length === 0 ? (
+                  <p className="text-sm text-gray-600 px-2 py-2">
+                    Add titles from library details to play them after this book.
+                  </p>
+                ) : (
+                  <ul className="space-y-1">
+                    {upNext.map((item, i) => (
+                      <li
+                        key={`${item.source}-${item.id}-${i}`}
+                        className="flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-gray-800/80"
+                      >
+                        <CoverImage
+                          src={item.coverUrl}
+                          alt=""
+                          className="w-8 h-12 rounded object-cover shrink-0"
+                          fallback={<div className="w-8 h-12 rounded bg-gray-800 shrink-0" />}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm text-gray-200 truncate">{item.title}</p>
+                          {item.author && (
+                            <p className="text-[11px] text-gray-500 truncate">{item.author}</p>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeFromUpNext(i)}
+                          className="p-1.5 text-gray-500 hover:text-red-300"
+                          aria-label="Remove from Up Next"
+                        >
+                          <X size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </div>
           </aside>
         </>

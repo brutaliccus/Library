@@ -24,6 +24,21 @@ let lastPlayingSynced: boolean | null = null;
 let ignorePausedSyncUntil = 0;
 const POS_SYNC_INTERVAL_MS = 1_000;
 const PAUSED_SYNC_GRACE_MS = 2_500;
+/** Cap Activity wakes — startActivity storms rebooted some OEM devices. */
+let lastBringToForegroundAt = 0;
+const BRING_TO_FOREGROUND_COOLDOWN_MS = 8_000;
+
+/** Cooldown-guarded Activity wake used by JS retry / AA paths. */
+export async function bringToForegroundSafe(): Promise<void> {
+  const now = Date.now();
+  if (now - lastBringToForegroundAt < BRING_TO_FOREGROUND_COOLDOWN_MS) return;
+  lastBringToForegroundAt = now;
+  try {
+    await LibraryAuto.bringToForeground();
+  } catch {
+    /* plugin unavailable */
+  }
+}
 
 function markOptimisticPlaying(): void {
   lastPlayingSynced = true;
@@ -37,7 +52,7 @@ async function withWebViewReady(fn: () => void): Promise<void> {
     // Native soft-wakes WebView timers + sticky-retries play after deep idle.
     // Do not stack another sleep here — that delayed audio.play() and widened
     // the native-focus vs WebView-focus race.
-    void LibraryAuto.bringToForeground();
+    void bringToForegroundSafe();
   } catch {
     /* native only */
   }

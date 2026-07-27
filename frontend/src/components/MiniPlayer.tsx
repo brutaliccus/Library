@@ -23,6 +23,8 @@ function formatCountdown(sec: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+
 export default function MiniPlayer() {
   const {
     nowPlaying,
@@ -31,9 +33,11 @@ export default function MiniPlayer() {
     buffering,
     volume,
     currentTrackIndex,
+    playbackRate,
     togglePlay,
     seekRelative,
     seek,
+    setPlaybackRate,
     setVolume,
     setExpanded,
     dismissPlayer,
@@ -105,6 +109,19 @@ export default function MiniPlayer() {
         />
 
         <div className="flex items-center gap-1 shrink-0">
+          <select
+            value={playbackRate}
+            onChange={(e) => setPlaybackRate(parseFloat(e.target.value))}
+            className="text-[11px] bg-gray-800 border border-gray-700 text-gray-200 rounded px-1.5 py-1 max-w-[3.5rem] focus:outline-none focus:ring-1 focus:ring-brand-500"
+            title="Playback speed"
+            aria-label="Playback speed"
+          >
+            {SPEED_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}x
+              </option>
+            ))}
+          </select>
           <select
             value={sleepTimerPresetMinutes ?? ""}
             onChange={(e) => {

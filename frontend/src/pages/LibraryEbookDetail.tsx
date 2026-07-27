@@ -185,7 +185,7 @@ export default function LibraryEbookDetail() {
         className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
       >
         {storeLoading ? <Loader2 size={16} className="animate-spin" /> : <Store size={16} />}
-        View in Store
+        View in Browse
       </button>
       {isAdmin && (
         <button

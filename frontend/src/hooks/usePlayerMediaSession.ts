@@ -143,7 +143,12 @@ export function usePlayerMediaSession(
     };
   }, []);
 
-  // Web metadata (title / artist / artwork).
+  // Keep a ref so interval-based position syncs don't re-subscribe every tick.
+  const stateSnapRef = useRef(state);
+  stateSnapRef.current = state;
+
+  // Web metadata (title / artist / artwork) — do NOT depend on currentTime;
+  // timeupdate would rebuild MediaMetadata (and artwork) several times/sec.
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
     if (!state.nowPlaying) {
@@ -176,7 +181,8 @@ export function usePlayerMediaSession(
     } catch {
       /* invalid artwork URL etc */
     }
-  }, [state.nowPlaying, state.currentTrackIndex, state.currentTime]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: skip currentTime
+  }, [state.nowPlaying, state.currentTrackIndex]);
 
   // Web playback state — prefer wantPlaying so brief buffers/pauses don't flip
   // lock-screen controls to paused and fight a resume in progress.
@@ -185,43 +191,50 @@ export function usePlayerMediaSession(
     navigator.mediaSession.playbackState = state.wantPlaying ? "playing" : "paused";
   }, [state.wantPlaying, state.nowPlaying]);
 
-  // Web position state (progress bar on lock screens that support it).
+  // Web + native position sync on a timer (not every timeupdate → React render).
   useEffect(() => {
-    if (!("mediaSession" in navigator) || !state.nowPlaying) return;
-    const ms = navigator.mediaSession as MediaSession & {
-      setPositionState?: (state: MediaPositionState | null) => void;
+    const syncPosition = () => {
+      const s = stateSnapRef.current;
+      if (!s.nowPlaying) return;
+
+      if ("mediaSession" in navigator) {
+        const ms = navigator.mediaSession as MediaSession & {
+          setPositionState?: (state: MediaPositionState | null) => void;
+        };
+        if (typeof ms.setPositionState === "function") {
+          const scope = playbackScope(s.nowPlaying, s.currentTime, s.currentTrackIndex);
+          const d = scope.duration;
+          const pos = scope.position;
+          if (isFinite(d) && d > 0) {
+            try {
+              ms.setPositionState({
+                duration: d,
+                playbackRate: Math.max(s.playbackRate, 0.25),
+                position: Math.min(Math.max(pos, 0), d),
+              });
+            } catch {
+              /* invalid combo during seeks */
+            }
+          }
+        }
+      }
+
+      void syncNativeMediaSession(
+        s.nowPlaying,
+        s.wantPlaying || s.isPlaying,
+        s.currentTime,
+        s.currentTrackIndex,
+        s.playbackRate,
+        s.buffering
+      );
     };
-    if (typeof ms.setPositionState !== "function") return;
 
-    const scope = playbackScope(
-      state.nowPlaying,
-      state.currentTime,
-      state.currentTrackIndex
-    );
-    const d = scope.duration;
-    const pos = scope.position;
-    if (!isFinite(d) || d <= 0) return;
+    syncPosition();
+    const id = window.setInterval(syncPosition, 2000);
+    return () => window.clearInterval(id);
+  }, [state.nowPlaying?.itemId, state.nowPlaying?.streamHistoryId, state.currentTrackIndex]);
 
-    try {
-      ms.setPositionState({
-        duration: d,
-        playbackRate: Math.max(state.playbackRate, 0.25),
-        position: Math.min(Math.max(pos, 0), d),
-      });
-    } catch {
-      /* invalid combo during seeks */
-    }
-  }, [
-    state.currentTime,
-    state.currentTrackIndex,
-    state.playbackRate,
-    state.nowPlaying,
-    state.isPlaying,
-  ]);
-
-  // Native (Android Auto + plugin) metadata/state/position sync.
-  // Sync wantPlaying (intent) so AA/lock screen don't get a stale paused tick
-  // between transport play and the audio element "playing" event.
+  // Native metadata / play-state changes (immediate — not throttled to the interval).
   useEffect(() => {
     void syncNativeMediaSession(
       state.nowPlaying,
@@ -235,7 +248,6 @@ export function usePlayerMediaSession(
     state.nowPlaying,
     state.wantPlaying,
     state.isPlaying,
-    state.currentTime,
     state.currentTrackIndex,
     state.playbackRate,
     state.buffering,

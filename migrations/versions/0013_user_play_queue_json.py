@@ -17,10 +17,24 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    cols = {
+        row[1]
+        for row in bind.execute(sa.text("PRAGMA table_info(users)")).fetchall()
+    }
+    if "play_queue_json" in cols:
+        return
     with op.batch_alter_table("users") as batch:
         batch.add_column(sa.Column("play_queue_json", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
+    cols = {
+        row[1]
+        for row in bind.execute(sa.text("PRAGMA table_info(users)")).fetchall()
+    }
+    if "play_queue_json" not in cols:
+        return
     with op.batch_alter_table("users") as batch:
         batch.drop_column("play_queue_json")

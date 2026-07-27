@@ -80,6 +80,27 @@ def test_merge_keeps_good_loaded_title():
     assert merged["clues"]["author"] == "Stephen King"
 
 
+def test_merge_prefers_catalog_author_when_tag_is_narrator():
+    """Jurassic Park: album_artist=Scott Brick, catalog author=Michael Crichton."""
+    loaded = {
+        "queries": ["Jurassic Park Scott Brick"],
+        "metadata": {
+            "title": "Jurassic Park: A Novel",
+            "author": "Scott Brick",
+            "narrator": "",
+        },
+    }
+    merged = merge_clues_with_catalog(
+        loaded,
+        request_title="Jurassic Park",
+        request_author="Michael Crichton",
+        folder_hint="Jurassic Park",
+    )
+    assert merged["clues"]["author"] == "Michael Crichton"
+    assert merged["clues"]["narrator"] == "Scott Brick"
+    assert "michael crichton" in merged["clues"]["query"].lower()
+
+
 def test_list_staging_targets_and_resolve(tmp_path):
     staging = tmp_path / "req_9_Timeline"
     staging.mkdir()

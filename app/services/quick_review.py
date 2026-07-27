@@ -135,7 +135,12 @@ def merge_clues_with_catalog(
     request_author: str | None,
     folder_hint: str = "",
 ) -> dict[str, Any]:
-    """Prefer catalog / folder title over junk chapter filenames (Tape1, etc.)."""
+    """Prefer catalog / folder title over junk chapter filenames (Tape1, etc.).
+
+    When the embedded author tag conflicts with the catalog author (common when
+    the narrator was written into album_artist), prefer the catalog author and
+    keep the tag value as narrator if narrator is empty.
+    """
     meta = dict(loaded.get("metadata") or {})
     catalog_title = clean_catalog_title(request_title or "") or (request_title or "").strip()
     catalog_author = (request_author or "").strip()
@@ -157,10 +162,21 @@ def merge_clues_with_catalog(
     if _looks_like_junk_title(title):
         title = folder_hint or catalog_title or title
 
+    narrator = str(meta.get("narrator") or "").strip()
     author = loaded_author or catalog_author
+    if (
+        catalog_author
+        and loaded_author
+        and not narrator
+        and _authors_conflict(loaded_author, catalog_author)
+    ):
+        # Narrator-as-author pattern (empty narrator + conflicting album_artist).
+        # Prefer catalog author; keep the tag value as narrator for search/scoring.
+        narrator = loaded_author
+        author = catalog_author
+
     series = str(meta.get("series") or "").strip()
     sequence = str(meta.get("sequence") or "").strip()
-    narrator = str(meta.get("narrator") or "").strip()
 
     queries = [str(q) for q in (loaded.get("queries") or []) if str(q).strip()]
     preferred = _build_query(title=title, author=author, series=series, sequence=sequence)
@@ -190,6 +206,29 @@ def merge_clues_with_catalog(
         "clues": clues,
         "provider_hint": _provider_hint_from_meta({**meta, **clues}),
     }
+
+
+def _authors_conflict(left: str, right: str) -> bool:
+    """True when two author credits look like different people (no name overlap)."""
+    from difflib import SequenceMatcher
+
+    def norm(value: str) -> str:
+        cleaned = re.sub(r"[^\w\s]", " ", (value or "").lower())
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    a = norm(left)
+    b = norm(right)
+    if not a or not b or a == b:
+        return False
+    if a in b or b in a:
+        return False
+    if SequenceMatcher(None, a, b).ratio() >= 0.70:
+        return False
+    tokens_a = {t for t in a.split() if len(t) >= 3}
+    tokens_b = {t for t in b.split() if len(t) >= 3}
+    if tokens_a & tokens_b:
+        return False
+    return True
 
 
 async def load_quick_review(
@@ -469,6 +508,50 @@ async def apply_quick_review(
     except libraforge.LibraForgeError as e:
         raise QuickReviewError(str(e)) from e
 
+    # Force-seed ABS metadata.json from the applied match so post-M4B Metadata
+    # Forge rematch reads catalog author/ASIN even if embedded tags lag.
+    preview = result.get("metadata_preview") if isinstance(result.get("metadata_preview"), dict) else {}
+    seed_title = str(
+        (preview or {}).get("title")
+        or enriched.get("title")
+        or selected_result.get("title")
+        or req.title
+        or ""
+    ).strip()
+    seed_author = str(
+        (preview or {}).get("author")
+        or enriched.get("author")
+        or ""
+    ).strip()
+    if not seed_author:
+        authors_list = enriched.get("authors")
+        if isinstance(authors_list, list):
+            seed_author = ", ".join(str(a).strip() for a in authors_list if str(a).strip())
+    seed_asin = str(
+        (preview or {}).get("asin")
+        or enriched.get("asin")
+        or selected_result.get("asin")
+        or ""
+    ).strip()
+    seed_series = str((preview or {}).get("series") or enriched.get("series") or "").strip()
+    try:
+        from app.services.forge_pipeline import seed_staging_metadata_hints
+
+        seed_staging_metadata_hints(
+            staging,
+            title=seed_title,
+            author=seed_author or None,
+            asin=seed_asin or None,
+            series=seed_series or None,
+            force=True,
+        )
+    except Exception as e:
+        logger.warning(
+            "Could not seed metadata.json after Quick Review apply for %s: %s",
+            req.id,
+            e,
+        )
+
     applied = staging_has_applied_metadata(staging)
     if not applied:
         status = str(result.get("status") or "").lower()
@@ -483,7 +566,6 @@ async def apply_quick_review(
 
     # Persist cover_url where Continue→M4B can recover it (ABS metadata.json
     # omits cover_url; nested libraforge paths are handled by cover_url_from_staging).
-    preview = result.get("metadata_preview") if isinstance(result.get("metadata_preview"), dict) else {}
     applied_cover = str(
         (preview or {}).get("cover_url") or cover or ""
     ).strip()
@@ -498,24 +580,8 @@ async def apply_quick_review(
     # Refresh Requests UI cover/title/author from the matched Audible metadata.
     from app.services.forge_pipeline import refresh_request_display_metadata
 
-    preview_title = str(
-        (preview or {}).get("title")
-        or enriched.get("title")
-        or selected_result.get("title")
-        or ""
-    ).strip()
-    authors_list = enriched.get("authors")
-    if isinstance(authors_list, list):
-        authors_joined = ", ".join(str(a).strip() for a in authors_list if str(a).strip())
-    else:
-        authors_joined = ""
-    preview_author = str(
-        (preview or {}).get("author")
-        or enriched.get("author")
-        or authors_joined
-        or selected_result.get("author")
-        or ""
-    ).strip()
+    preview_title = seed_title
+    preview_author = seed_author
     try:
         await refresh_request_display_metadata(
             req.id,
@@ -547,6 +613,7 @@ async def apply_quick_review(
         "cover_url": applied_cover or None,
         "warning": result.get("warning"),
         "manual_review_url": libraforge.public_manual_review_url() or None,
+
     }
 
 

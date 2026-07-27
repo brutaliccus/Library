@@ -585,7 +585,12 @@ async def identify_book(context: dict[str, Any]) -> BookIdentification | None:
         "asin (Audible ASIN like B0XXXXXXXX or empty string), "
         "confidence (number 0-1), rationale (short string). "
         "Prefer well-known published titles. If unsure, lower confidence. "
-        "Never invent an ASIN you are not reasonably sure about."
+        "Never invent an ASIN you are not reasonably sure about. "
+        "IMPORTANT: scene rips often put the narrator in the author/artist tag "
+        "and leave narrator empty. When title + duration strongly match a known "
+        "edition, do NOT lower confidence just because the file author looks like "
+        "a narrator — return the real book author (e.g. Michael Crichton) and "
+        "treat the tag author as the narrator."
     )
     data = await _chat_json(system, context, max_tokens=600, log_label="identify")
     identification = parse_identification(data)

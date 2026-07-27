@@ -324,6 +324,95 @@ def seed_staging_metadata_hints(
         logger.warning("Could not seed metadata.json in %s: %s", target_dir, e)
 
 
+def _reseed_staging_hints_from_applied(
+    staging: Path,
+    *,
+    title: str = "",
+    author: str | None = None,
+) -> None:
+    """After M4B, force-seed metadata.json from the best applied marker / ABS file.
+
+    New .m4b files often lack the manually_applied marker that lived next to the
+    source mp3. Seeding author/ASIN here lets LibraForge rematch with catalog
+    identity instead of narrator-as-author tags.
+    """
+    hint_title = ""
+    hint_author = ""
+    hint_asin = ""
+    hint_series = ""
+
+    for marker in list(staging.rglob("libraforge.json")) + list(
+        staging.rglob("*.libraforge.json")
+    ):
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        m = data.get("marker") if isinstance(data.get("marker"), dict) else {}
+        audible = m.get("audible") if isinstance(m.get("audible"), dict) else {}
+        book = data.get("book") if isinstance(data.get("book"), dict) else {}
+        if not book and isinstance(data.get("sidecar"), dict):
+            book = data["sidecar"].get("book") if isinstance(data["sidecar"].get("book"), dict) else {}
+        for source in (audible, book, m, data):
+            if not isinstance(source, dict):
+                continue
+            if not hint_title:
+                hint_title = str(
+                    source.get("chosen_title")
+                    or source.get("title")
+                    or ""
+                ).strip()
+            if not hint_author:
+                hint_author = str(source.get("author") or "").strip()
+            if not hint_asin:
+                hint_asin = normalize_asin(source.get("asin"))
+            if not hint_series:
+                hint_series = str(source.get("series") or "").strip()
+        if hint_asin or (hint_title and hint_author):
+            break
+
+    if not hint_asin or not hint_title:
+        for meta_path in staging.rglob("metadata.json"):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            if not hint_title:
+                hint_title = str(meta.get("title") or "").strip()
+            if not hint_author:
+                authors = meta.get("authors")
+                if isinstance(authors, list) and authors:
+                    hint_author = str(authors[0] or "").strip()
+                if not hint_author:
+                    hint_author = str(meta.get("author") or "").strip()
+            if not hint_asin:
+                hint_asin = normalize_asin(meta.get("asin"))
+            if not hint_series:
+                hint_series = str(meta.get("series") or "").strip()
+            if hint_asin or (hint_title and hint_author):
+                break
+
+    if not hint_title:
+        hint_title = (title or "").strip()
+    if not hint_author:
+        hint_author = (author or "").strip()
+    if not hint_title and not hint_author and not hint_asin:
+        return
+
+    seed_staging_metadata_hints(
+        staging,
+        title=hint_title,
+        author=hint_author or None,
+        asin=hint_asin or None,
+        series=hint_series or None,
+        force=True,
+    )
+
+
 def collect_staging_llm_context(staging: Path) -> dict[str, Any]:
     """File names/sizes + partial tags for OpenRouter metadata assist."""
     files: list[dict[str, Any]] = []
@@ -1156,10 +1245,12 @@ async def _apply_metadata_forge(
 
 
 def staging_has_applied_metadata(staging: Path) -> bool:
-    """True when staging contains LibraForge apply markers / ABS metadata with ASIN.
+    """True when staging contains LibraForge *write* evidence (not mere seeds).
 
-    Used as a second gate after the API report claims a write, so we do not
-    continue to M4B/Folder Forge on a match-only / dry-run result.
+    Seeded ``metadata.json`` (catalog / LLM hints) often includes an ASIN before
+    any tags are written. Treating that as applied made Quick Review skip real
+    Apply and let the pipeline continue with narrator-as-author tags intact.
+    Require an applied / manually_applied marker (or backup applied_tags).
     """
     if not staging.is_dir():
         return False
@@ -1177,15 +1268,20 @@ def staging_has_applied_metadata(staging: Path) -> bool:
         applied_tags = backup.get("applied_tags") if isinstance(backup.get("applied_tags"), dict) else {}
         if applied_tags.get("asin") or applied_tags.get("title"):
             return True
-    for meta_path in staging.rglob("metadata.json"):
+    # Per-file companions: Book.mp3.libraforge.json
+    for marker in staging.rglob("*.libraforge.json"):
         try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            data = json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(meta, dict):
+        if not isinstance(data, dict):
             continue
-        asin = str(meta.get("asin") or "").strip()
-        if asin:
+        m = data.get("marker") if isinstance(data.get("marker"), dict) else data
+        if m.get("applied") is True or m.get("manually_applied") is True:
+            return True
+        backup = data.get("backup") if isinstance(data.get("backup"), dict) else {}
+        applied_tags = backup.get("applied_tags") if isinstance(backup.get("applied_tags"), dict) else {}
+        if applied_tags.get("asin") or applied_tags.get("title"):
             return True
     return False
 
@@ -1854,6 +1950,16 @@ async def run_forge_after_download(
         if m4b_produced_new_file:
             if await p._is_cancelled(request_id):
                 return
+            # Re-seed catalog/LLM/QR author+ASIN next to the new .m4b so rematch
+            # does not fall back to narrator-as-author embedded tags alone.
+            try:
+                _reseed_staging_hints_from_applied(staging, title=title, author=author)
+            except Exception as e:
+                logger.warning(
+                    "Could not reseed metadata hints after M4B for request %s: %s",
+                    request_id,
+                    e,
+                )
             logger.info(
                 "Re-applying Metadata Forge after M4B for request %s (cover/tags persist)",
                 request_id,

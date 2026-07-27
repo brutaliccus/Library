@@ -258,14 +258,15 @@ def test_staging_has_applied_metadata_marker(tmp_path):
     assert staging_has_applied_metadata(staging)
 
 
-def test_staging_has_applied_metadata_asin(tmp_path):
+def test_staging_has_applied_metadata_asin_alone_is_not_enough(tmp_path):
+    """Seeded metadata.json ASIN must not count as applied write evidence."""
     staging = tmp_path / "req_147"
     staging.mkdir()
     (staging / "metadata.json").write_text(
         json.dumps({"title": "The Gunslinger", "asin": "B019NNU7XE"}),
         encoding="utf-8",
     )
-    assert staging_has_applied_metadata(staging)
+    assert not staging_has_applied_metadata(staging)
 
 
 def test_normalize_asin_filters_sentinels():

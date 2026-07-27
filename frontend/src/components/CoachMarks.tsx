@@ -53,12 +53,12 @@ export default function CoachMarks() {
   const isLast = step >= STEPS.length - 1;
 
   return (
-    <div className="fixed inset-0 z-[200] flex items-end sm:items-center justify-center p-4 bg-black/75">
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] px-[max(1rem,env(safe-area-inset-left,0px))] bg-black/75">
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="coach-marks-title"
-        className="w-full max-w-md rounded-2xl border border-gray-700 bg-gray-900 shadow-2xl shadow-black/50 p-5"
+        className="w-full max-w-md rounded-2xl border border-gray-700 bg-gray-900 shadow-2xl shadow-black/50 p-5 max-h-[min(90dvh,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)-2rem))] overflow-y-auto"
       >
         <div className="flex items-start justify-between gap-3 mb-4">
           <div className="flex items-center gap-3 min-w-0">

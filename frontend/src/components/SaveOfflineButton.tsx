@@ -57,7 +57,7 @@ export default function SaveOfflineButton({ target, className = "", size = "md" 
       } else if (target.kind === "rd") {
         setState(await rdDownloadState(target));
       } else {
-        setState(await ebookDownloadState(target.chapterId, target.isPdf ?? true));
+        setState(await ebookDownloadState(target.chapterId));
       }
     } catch {
       setState("idle");
@@ -96,7 +96,10 @@ export default function SaveOfflineButton({ target, className = "", size = "md" 
           onProgress: (done, total) => setProgress(`${done}/${total}`),
         });
       } else {
-        await downloadEbookOffline(target);
+        await downloadEbookOffline({
+          ...target,
+          onProgress: (done, total) => setProgress(`${done}/${total}`),
+        });
       }
       setState("downloaded");
       toast("Saved offline", "success");

@@ -243,6 +243,8 @@ export async function clearEbookCache(chapterId: number): Promise<void> {
         .filter((req) => new URL(req.url).pathname.startsWith(prefix))
         .map((req) => cache.delete(req))
     );
+    const { clearEbookPageCache } = await import("./ebookPageCache");
+    await clearEbookPageCache(chapterId);
     notifyCacheUpdated();
   } catch {
     // Best-effort

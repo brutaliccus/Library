@@ -174,7 +174,6 @@ export default function LibraryEbookDetail() {
             title: item.title,
             author: item.author,
             coverUrl: item.coverUrl,
-            isPdf: true,
           }}
         />
       )}

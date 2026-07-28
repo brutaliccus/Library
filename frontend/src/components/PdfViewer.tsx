@@ -346,33 +346,48 @@ export default function PdfViewer({ chapterId, page, onReady }: PdfViewerProps) 
   useEffect(() => {
     if (!native) return;
     let cancelled = false;
-    const task = getDocument({
-      url: readerFileUrlForChapter(chapterId, true),
-      withCredentials: true,
-      wasmUrl: `${PDFJS_ASSETS}/wasm/`,
-      cMapUrl: `${PDFJS_ASSETS}/cmaps/`,
-      cMapPacked: true,
-      standardFontDataUrl: `${PDFJS_ASSETS}/standard_fonts/`,
-      iccUrl: `${PDFJS_ASSETS}/iccs/`,
-      isOffscreenCanvasSupported: false,
-    });
-    void task.promise
-      .then((doc) => {
+    let objectUrl: string | null = null;
+    let task: ReturnType<typeof getDocument> | null = null;
+    void (async () => {
+      objectUrl = await getCachedEbookObjectUrl(chapterId, true);
+      if (cancelled) {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        return;
+      }
+      task = getDocument({
+        url: objectUrl || readerFileUrlForChapter(chapterId, true),
+        withCredentials: !objectUrl,
+        disableRange: !!objectUrl,
+        disableStream: !!objectUrl,
+        wasmUrl: `${PDFJS_ASSETS}/wasm/`,
+        cMapUrl: `${PDFJS_ASSETS}/cmaps/`,
+        cMapPacked: true,
+        standardFontDataUrl: `${PDFJS_ASSETS}/standard_fonts/`,
+        iccUrl: `${PDFJS_ASSETS}/iccs/`,
+        isOffscreenCanvasSupported: false,
+      });
+      try {
+        const doc = await task.promise;
         if (!cancelled) {
           setPageCount(doc.numPages);
           onReady?.(doc.numPages);
-          void doc.cleanup();
-        } else {
-          void doc.cleanup();
         }
-      })
-      .catch(() => {
+        void doc.cleanup();
+      } catch {
         // Native iframe can still show the file; page count stays 0.
-      });
+      }
+    })();
     return () => {
       cancelled = true;
+      if (objectUrl) {
+        try {
+          URL.revokeObjectURL(objectUrl);
+        } catch {
+          /* ignore */
+        }
+      }
       try {
-        task.destroy();
+        task?.destroy();
       } catch {
         // ignore
       }

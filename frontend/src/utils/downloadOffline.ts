@@ -17,6 +17,7 @@ import {
   getAbsOfflineManifest,
   getEbookOfflineManifest,
   getRdOfflineManifest,
+  isEbookOfflineReady,
   removeAbsOfflineManifest,
   removeEbookOfflineManifest,
   removeRdOfflineManifest,
@@ -24,7 +25,11 @@ import {
   saveEbookOfflineManifest,
   saveRdOfflineManifest,
 } from "./offlinePlayback";
+import { cacheAllEbookPages } from "./ebookPageCache";
 import type { AbsChapter, Track } from "../types/player";
+
+/** Kavita MangaFormat Pdf = 4 */
+const KAVITA_PDF_FORMAT = 4;
 
 export type OfflineDownloadKind = "abs" | "rd" | "ebook";
 
@@ -135,14 +140,8 @@ export async function rdDownloadState(opts: {
   return "idle";
 }
 
-export async function ebookDownloadState(
-  chapterId: number,
-  isPdf = true
-): Promise<"downloaded" | "idle"> {
-  const m = getEbookOfflineManifest(chapterId);
-  const pdf = m?.isPdf ?? isPdf;
-  if (await isEbookCached(chapterId, pdf)) return "downloaded";
-  return "idle";
+export async function ebookDownloadState(chapterId: number): Promise<"downloaded" | "idle"> {
+  return (await isEbookOfflineReady(chapterId)) ? "downloaded" : "idle";
 }
 
 export async function downloadAbsOffline(
@@ -209,19 +208,63 @@ export async function downloadEbookOffline(opts: {
   author?: string;
   coverUrl?: string;
   isPdf?: boolean;
+  onProgress?: (done: number, total: number) => void;
 }): Promise<void> {
-  const isPdf = opts.isPdf ?? true;
+  let isPdf = opts.isPdf;
+  let pages = 0;
+  let title = opts.title;
+  try {
+    const { data } = await api.get(`/library/reader/${opts.chapterId}/book-info`);
+    if (typeof data?.seriesFormat === "number") {
+      isPdf = data.seriesFormat === KAVITA_PDF_FORMAT;
+    }
+    if (typeof data?.pages === "number") pages = data.pages;
+    if (data?.bookTitle || data?.seriesName) {
+      title = data.bookTitle || data.seriesName || title;
+    }
+  } catch {
+    /* keep caller hint */
+  }
+  if (isPdf == null) isPdf = true;
+
   saveEbookOfflineManifest({
     chapterId: opts.chapterId,
-    title: opts.title,
+    title,
     author: opts.author || "",
     coverUrl: opts.coverUrl || "",
     isPdf,
+    pages: pages || undefined,
+    pagesCached: false,
   });
-  const ok = await cacheBookEbook(opts.chapterId, isPdf, { immediate: true });
-  if (!ok && !(await isEbookCached(opts.chapterId, isPdf))) {
-    throw new Error("Ebook download failed — try again while online");
+
+  if (isPdf) {
+    const ok = await cacheBookEbook(opts.chapterId, true, { immediate: true });
+    if (!ok && !(await isEbookCached(opts.chapterId, true))) {
+      throw new Error("Ebook download failed — try again while online");
+    }
+    return;
   }
+
+  // EPUB: cache source file (optional re-open) + all HTML pages for the reader.
+  void cacheBookEbook(opts.chapterId, false, { immediate: true });
+  if (pages <= 0) {
+    throw new Error("Could not determine ebook page count — try again while online");
+  }
+  const pagesOk = await cacheAllEbookPages(opts.chapterId, pages, {
+    onProgress: opts.onProgress,
+  });
+  if (!pagesOk) {
+    throw new Error("Ebook download incomplete — try again while online");
+  }
+  saveEbookOfflineManifest({
+    chapterId: opts.chapterId,
+    title,
+    author: opts.author || "",
+    coverUrl: opts.coverUrl || "",
+    isPdf: false,
+    pages,
+    pagesCached: true,
+  });
 }
 
 export async function removeAbsOffline(itemId: string): Promise<void> {

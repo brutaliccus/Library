@@ -1,11 +1,13 @@
 /** Bump when fetch/caching behavior changes so old caches are dropped. */
-const CACHE_VERSION = 11;
+const CACHE_VERSION = 12;
 const CACHE_NAME = `audiobook-library-v${CACHE_VERSION}`;
 /** Downloaded audiobook tracks (populated by the app, served here). Survives
  * SW updates — cleared per-book when a book is finished or progress cleared. */
 const AUDIO_CACHE = "audio-tracks-v1";
 /** Downloaded ebook files (PDF/EPUB source) for offline re-read. */
 const EBOOK_CACHE = "ebook-files-v1";
+/** Cached EPUB HTML pages + resources for offline reader. */
+const EBOOK_PAGES_CACHE = "ebook-pages-v1";
 
 self.addEventListener("install", () => {
   // Wait for the user to tap "Update" (SKIP_WAITING) before taking over.
@@ -18,7 +20,13 @@ self.addEventListener("activate", (event) => {
       .then((keys) =>
         Promise.all(
           keys
-            .filter((key) => key !== CACHE_NAME && key !== AUDIO_CACHE && key !== EBOOK_CACHE)
+            .filter(
+              (key) =>
+                key !== CACHE_NAME &&
+                key !== AUDIO_CACHE &&
+                key !== EBOOK_CACHE &&
+                key !== EBOOK_PAGES_CACHE
+            )
             .map((key) => caches.delete(key))
         )
       )
@@ -122,6 +130,16 @@ function isEbookReaderUrl(url) {
   }
 }
 
+/** EPUB page HTML or in-book resources cached for offline open. */
+function isEbookPageOrResourceUrl(url) {
+  try {
+    const path = new URL(url).pathname;
+    return /^\/api\/library\/reader\/\d+\/(book-page|resources)$/.test(path);
+  } catch {
+    return false;
+  }
+}
+
 /** Normalize cache keys (pathname only, no query/hash). */
 function normalizeCacheUrl(url) {
   try {
@@ -211,6 +229,15 @@ async function ebookCacheFirst(request) {
   });
 }
 
+/** Serve cached ebook page HTML / resources (query-sensitive keys). */
+async function ebookPagesCacheFirst(request) {
+  const cache = await caches.open(EBOOK_PAGES_CACHE);
+  let cached = await cache.match(request.url);
+  if (!cached) cached = await cache.match(request);
+  if (cached) return cached.clone();
+  return fetch(request);
+}
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") {
@@ -231,6 +258,11 @@ self.addEventListener("fetch", (event) => {
 
   if (isEbookReaderUrl(request.url)) {
     event.respondWith(ebookCacheFirst(request));
+    return;
+  }
+
+  if (isEbookPageOrResourceUrl(request.url)) {
+    event.respondWith(ebookPagesCacheFirst(request));
     return;
   }
 

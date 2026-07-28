@@ -11,6 +11,7 @@ import type { AbsChapter, Track } from "../types/player";
 import { currentOrigin } from "../api/libraryRegistry";
 import { isBookCached } from "./audioCache";
 import { isEbookCached } from "./ebookCache";
+import { areEbookPagesCached } from "./ebookPageCache";
 import { isLikelyOffline as networkOffline } from "./networkStatus";
 
 const MANIFEST_PREFIX = "offline-playback-manifests-v2:";
@@ -50,6 +51,10 @@ export interface EbookOfflineManifest {
   author: string;
   coverUrl: string;
   isPdf: boolean;
+  /** Kavita page count (EPUB chapters / PDF pages when known). */
+  pages?: number;
+  /** EPUB: true when book-page HTML (+ resources) are fully cached. */
+  pagesCached?: boolean;
   updatedAt: number;
 }
 
@@ -303,8 +308,15 @@ export async function isRdOfflineReady(opts: {
 
 export async function isEbookOfflineReady(chapterId: number): Promise<boolean> {
   const m = getEbookOfflineManifest(chapterId);
-  if (!m) return isEbookCached(chapterId, true);
-  return isEbookCached(chapterId, m.isPdf);
+  if (!m) {
+    // Legacy: PDF-only probe when no manifest exists.
+    return isEbookCached(chapterId, true);
+  }
+  if (m.isPdf) return isEbookCached(chapterId, true);
+  // EPUB needs Kavita HTML pages offline — source .epub alone is not enough.
+  if (m.pagesCached) return true;
+  if (await areEbookPagesCached(chapterId, m.pages)) return true;
+  return false;
 }
 
 /** Downloaded items that are fully present in the Cache API. */
@@ -327,7 +339,7 @@ export async function listDownloadedItems(): Promise<
     } else if (m.source === "rd") {
       if (await isBookCached(m.tracks)) out.push({ ...m, cached: true });
     } else if (m.source === "ebook") {
-      if (await isEbookCached(m.chapterId, m.isPdf)) out.push({ ...m, cached: true });
+      if (await isEbookOfflineReady(m.chapterId)) out.push({ ...m, cached: true });
     }
   }
   return out;

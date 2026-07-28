@@ -4,7 +4,16 @@ import api from "../api/client";
 import { toAbsoluteUrl } from "../api/instanceUrl";
 import PdfViewer from "../components/PdfViewer";
 import { cacheBookEbook } from "../utils/ebookCache";
-import { saveEbookOfflineManifest } from "../utils/offlinePlayback";
+import {
+  cacheEbookPageHtml,
+  getCachedEbookPage,
+} from "../utils/ebookPageCache";
+import {
+  getEbookOfflineManifest,
+  isEbookOfflineReady,
+  saveEbookOfflineManifest,
+} from "../utils/offlinePlayback";
+import { isLikelyOffline, isNetworkError } from "../utils/networkStatus";
 import { getProgress, saveProgress } from "../utils/readingProgress";
 import {
   ChevronLeft,
@@ -15,6 +24,9 @@ import {
   Minimize2,
   Settings,
 } from "lucide-react";
+
+/** Kavita MangaFormat: Pdf = 4 */
+const KAVITA_PDF_FORMAT = 4;
 
 const READER_SETTINGS_KEY = "ereader-settings";
 
@@ -100,6 +112,7 @@ export default function Ereader() {
   const [contentHeight, setContentHeight] = useState(0);
   const [pdfPageCount, setPdfPageCount] = useState(0);
   const pageCache = useRef<Map<number, string>>(new Map());
+  const pageObjectUrls = useRef<string[]>([]);
 
   const contentRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -109,6 +122,17 @@ export default function Ereader() {
   const showChrome = !fullscreen || !chromeHidden;
 
   const cid = chapterId ? parseInt(chapterId, 10) : NaN;
+
+  const revokePageObjectUrls = useCallback(() => {
+    for (const u of pageObjectUrls.current) {
+      try {
+        URL.revokeObjectURL(u);
+      } catch {
+        /* ignore */
+      }
+    }
+    pageObjectUrls.current = [];
+  }, []);
 
   const setSettings = useCallback((s: ReaderSettings | ((prev: ReaderSettings) => ReaderSettings)) => {
     setSettingsState((prev) => {
@@ -122,25 +146,48 @@ export default function Ereader() {
     setPdfPageCount(total);
   }, []);
 
+  const applyProgressRestore = useCallback((chapter: number) => {
+    const prog = getProgress(chapter);
+    if (prog) {
+      setPage(prog.page);
+      setViewportPage(prog.viewportPage);
+      pendingRestore.current = { page: prog.page, viewportPage: prog.viewportPage };
+    } else {
+      setPage(0);
+      setViewportPage(0);
+      pendingRestore.current = null;
+    }
+  }, []);
+
   const loadBookInfo = useCallback(async () => {
     if (!cid || isNaN(cid)) return;
     try {
       const { data } = await api.get(`/library/reader/${cid}/book-info`);
       setBookInfo(data);
-      const prog = getProgress(cid);
-      if (prog) {
-        setPage(prog.page);
-        setViewportPage(prog.viewportPage);
-        pendingRestore.current = { page: prog.page, viewportPage: prog.viewportPage };
-      } else {
-        setPage(0);
-        setViewportPage(0);
-        pendingRestore.current = null;
-      }
+      applyProgressRestore(cid);
+      setError(null);
     } catch (e: unknown) {
-      setError("Failed to load book");
+      // Offline / unreachable: hydrate from Save-offline manifest (same idea as audio).
+      const manifest = getEbookOfflineManifest(cid);
+      const ready = manifest ? await isEbookOfflineReady(cid) : false;
+      if (manifest && ready && (isLikelyOffline() || isNetworkError(e))) {
+        setBookInfo({
+          bookTitle: manifest.title,
+          seriesName: manifest.title,
+          pages: manifest.pages || (manifest.isPdf ? 0 : 1),
+          seriesFormat: manifest.isPdf ? KAVITA_PDF_FORMAT : 3,
+        });
+        applyProgressRestore(cid);
+        setError(null);
+        return;
+      }
+      setError(
+        ready
+          ? "Failed to load book"
+          : "Failed to load book — save this ebook while online to read offline"
+      );
     }
-  }, [cid]);
+  }, [cid, applyProgressRestore]);
 
   const loadChapters = useCallback(async () => {
     if (!cid || isNaN(cid)) return;
@@ -157,6 +204,7 @@ export default function Ereader() {
       if (!cid || isNaN(cid)) return;
       const cached = pageCache.current.get(p);
       if (cached) {
+        revokePageObjectUrls();
         setContent(cached);
         setViewportPage(0);
         setLoading(false);
@@ -169,28 +217,47 @@ export default function Ereader() {
           responseType: "text",
         });
         pageCache.current.set(p, data);
+        revokePageObjectUrls();
         setContent(data);
         setViewportPage(0);
-      } catch {
-        setError("Failed to load page");
+        void cacheEbookPageHtml(cid, p, data);
+      } catch (e: unknown) {
+        const offlinePage = await getCachedEbookPage(cid, p);
+        if (offlinePage) {
+          pageCache.current.set(p, offlinePage.html);
+          revokePageObjectUrls();
+          pageObjectUrls.current = offlinePage.objectUrls;
+          setContent(offlinePage.html);
+          setViewportPage(0);
+          setError(null);
+        } else {
+          setError(
+            isLikelyOffline() || isNetworkError(e)
+              ? "Page not available offline — re-save this ebook while online"
+              : "Failed to load page"
+          );
+        }
       } finally {
         setLoading(false);
       }
     },
-    [cid]
+    [cid, revokePageObjectUrls]
   );
 
   // Prefetch next pages in background
   const prefetchPages = useCallback(
     (current: number) => {
-      if (!cid || isNaN(cid) || !bookInfo || bookInfo.seriesFormat === 4) return;
+      if (!cid || isNaN(cid) || !bookInfo || bookInfo.seriesFormat === KAVITA_PDF_FORMAT) return;
       const total = bookInfo.pages ?? 0;
       for (let i = 1; i <= 2; i++) {
         const next = current + i;
         if (next < total && !pageCache.current.has(next)) {
           api
             .get(`/library/reader/${cid}/book-page`, { params: { page: next }, responseType: "text" })
-            .then(({ data }) => pageCache.current.set(next, data))
+            .then(({ data }) => {
+              pageCache.current.set(next, data);
+              void cacheEbookPageHtml(cid, next, data);
+            })
             .catch(() => {});
         }
       }
@@ -213,24 +280,30 @@ export default function Ereader() {
     if (cid && !isNaN(cid)) {
       pageCache.current.clear();
       setPdfPageCount(0);
+      revokePageObjectUrls();
     }
-  }, [cid]);
+  }, [cid, revokePageObjectUrls]);
+
+  useEffect(() => () => revokePageObjectUrls(), [revokePageObjectUrls]);
 
   useEffect(() => {
     if (!bookInfo || !cid || isNaN(cid)) return;
-    const isPdf = bookInfo.seriesFormat === 4;
+    if (isLikelyOffline()) return;
+    const isPdf = bookInfo.seriesFormat === KAVITA_PDF_FORMAT;
     saveEbookOfflineManifest({
       chapterId: cid,
       title: bookInfo.bookTitle || bookInfo.seriesName || "Ebook",
       author: "",
       coverUrl: toAbsoluteUrl(`/api/library/reader/cover/chapter/${cid}`),
       isPdf,
+      pages: bookInfo.pages,
+      pagesCached: isPdf ? undefined : getEbookOfflineManifest(cid)?.pagesCached,
     });
     void cacheBookEbook(cid, isPdf);
   }, [bookInfo, cid]);
 
   useEffect(() => {
-    if (bookInfo?.seriesFormat === 4) {
+    if (bookInfo?.seriesFormat === KAVITA_PDF_FORMAT) {
       setError(null);
       setLoading(false);
       return;
@@ -242,7 +315,7 @@ export default function Ereader() {
   }, [bookInfo, page, loadPage, prefetchPages]);
 
   useEffect(() => {
-    if (bookInfo?.seriesFormat === 4 || loading) return;
+    if (bookInfo?.seriesFormat === KAVITA_PDF_FORMAT || loading) return;
     if (bookInfo) {
       prefetchPages(page);
     }
@@ -419,7 +492,7 @@ export default function Ereader() {
   };
 
   const flatToc = flattenChapters(chapters);
-  const isPdf = bookInfo?.seriesFormat === 4;
+  const isPdf = bookInfo?.seriesFormat === KAVITA_PDF_FORMAT;
   const totalKavitaPages = isPdf
     ? pdfPageCount || bookInfo?.pages || 0
     : bookInfo?.pages ?? 0;

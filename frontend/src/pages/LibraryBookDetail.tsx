@@ -174,9 +174,18 @@ export default function LibraryBookDetail() {
           if (next.length) genres[g] = next;
         }
         const ungrouped = drop(data.ungrouped);
-        const totalItems =
-          Object.values(genres).reduce((n, b) => n + b.length, 0) + ungrouped.length;
-        return { ...data, genres, ungrouped, totalItems };
+        const ids = new Set<string>();
+        for (const bucket of Object.values(genres)) {
+          for (const it of bucket) {
+            const id = (it?.itemId || "").trim();
+            if (id) ids.add(id);
+          }
+        }
+        for (const it of ungrouped) {
+          const id = (it?.itemId || "").trim();
+          if (id) ids.add(id);
+        }
+        return { ...data, genres, ungrouped, totalItems: ids.size };
       });
       void softRefreshLibraryCollectionQueries(queryClient);
       toast("Audiobook deleted from library", "success");

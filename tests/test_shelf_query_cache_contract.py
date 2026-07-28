@@ -88,3 +88,22 @@ def test_merge_abs_prune_and_upsert_semantics():
     upserted = {**cached, **fresh}
     assert set(upserted) == {"a", "b", "c"}
     assert upserted["b"] == 20
+
+
+def test_abs_collection_total_items_is_unique_not_genre_slots():
+    """My Library subtitle must count unique books, not genre-bucket rows.
+
+    Multi-genre titles (esp. after Hardcover fill) appear in several buckets;
+    summing bucket lengths inflated the audiobook count (~272 vs ~180 ABS).
+    """
+    src = LIBRARY_ROUTER.read_text(encoding="utf-8")
+    assert "totalItems\": unique_count" in src.replace(" ", "") or (
+        '"totalItems": unique_count' in src
+    )
+    assert "unique_count = len(items)" in src
+    # Must not sum genre bucket lengths for the subtitle count.
+    assert "sum(len(v) for v in genres.values())" not in src
+
+    util = UTIL.read_text(encoding="utf-8")
+    assert "const totalItems = items.filter" in util or "totalItems = items.filter" in util
+    assert "reduce((n, b) => n + b.length" not in util

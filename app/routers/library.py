@@ -767,7 +767,9 @@ async def abs_collection(
             if item["itemId"] not in seen_in_genre[top]:
                 genres.setdefault(top, []).append(item)
                 seen_in_genre[top].add(item["itemId"])
-    visible = sum(len(v) for v in genres.values()) + len(ungrouped)
+    # Unique books only — multi-genre titles appear in several buckets but must
+    # not inflate the My Library "N audiobooks" subtitle.
+    unique_count = len(items)
     sorted_genres = dict(sorted(genres.items(), key=lambda x: x[0]))
     for bucket in sorted_genres.values():
         bucket.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
@@ -775,7 +777,7 @@ async def abs_collection(
     payload = {
         "genres": sorted_genres,
         "ungrouped": ungrouped,
-        "totalItems": visible,
+        "totalItems": unique_count,
     }
     library_collection_cache.set(cache_key, payload)
     return payload

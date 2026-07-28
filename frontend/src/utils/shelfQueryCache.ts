@@ -141,8 +141,8 @@ function _regroupAbsItems(items: AbsCollectionItem[]): AbsCollectionData {
     (Number(b.addedAt) || 0) - (Number(a.addedAt) || 0);
   for (const bucket of Object.values(sortedGenres)) bucket.sort(byAdded);
   ungrouped.sort(byAdded);
-  const totalItems =
-    Object.values(sortedGenres).reduce((n, b) => n + b.length, 0) + ungrouped.length;
+  // Unique books only (same book may sit in multiple genre buckets).
+  const totalItems = items.filter((it) => (it?.itemId || "").trim()).length;
   return { genres: sortedGenres, ungrouped, totalItems };
 }
 

@@ -26,7 +26,7 @@ export default function HeroSearch({ onGenreToggle, genreActiveCount = 0 }: Prop
 
   return (
     <div
-      className={`text-center pt-2 lg:py-12 ${
+      className={`text-center pt-2 lg:pt-4 ${
         liftForMini
           ? "pb-[calc(4.5rem+env(safe-area-inset-bottom,0px))]"
           : "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]"

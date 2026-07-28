@@ -29,8 +29,12 @@ import {
   ListMusic,
   Heart,
   CheckCircle2,
+  SlidersHorizontal,
+  Upload,
 } from "lucide-react";
-import CompactFilterSelect from "../components/CompactFilterSelect";
+import LibraryFilterDrawer, {
+  type BrowseByView,
+} from "../components/LibraryFilterDrawer";
 import ContinueShelves from "../components/ContinueShelves";
 import { getProgress, clearProgress } from "../utils/readingProgress";
 import { isBookCached } from "../utils/audioCache";
@@ -303,6 +307,9 @@ export default function MyLibrary() {
     item: KavitaItem;
     progress: NonNullable<ReturnType<typeof getProgress>>;
   } | null>(null);
+  const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
+  const [uploadingOwned, setUploadingOwned] = useState(false);
+  const ownedUploadInputRef = useRef<HTMLInputElement>(null);
 
   const scrollYRef = useRef(savedUi?.scrollY ?? 0);
   const scrollRestoredRef = useRef(false);
@@ -1130,67 +1137,96 @@ export default function MyLibrary() {
     [navigate, persistLibraryUi]
   );
 
-  const FilterBar = ({
-    options,
-  }: {
-    options: { genres: string[]; series: string[]; authors: string[] };
-  }) => (
-    <div className="flex w-full flex-nowrap items-center gap-1.5 sm:gap-2">
-      <CompactFilterSelect
-        label="Genre"
-        value={filterGenre}
-        options={options.genres}
-        allLabel="All genres"
-        onChange={setFilterGenre}
-        className="flex-1 min-w-0"
-      />
-      <CompactFilterSelect
-        label="Series"
-        value={filterSeries}
-        options={options.series}
-        allLabel="All series"
-        onChange={setFilterSeries}
-        className="flex-1 min-w-0"
-      />
-      <CompactFilterSelect
-        label="Author"
-        value={filterAuthor}
-        options={options.authors}
-        allLabel="All authors"
-        onChange={setFilterAuthor}
-        className="flex-1 min-w-0"
-      />
-      {(filterGenre || filterSeries || filterAuthor) && (
-        <button
-          type="button"
-          onClick={() => {
-            setFilterGenre("");
-            setFilterSeries("");
-            setFilterAuthor("");
-          }}
-          className="px-2 py-1.5 text-xs text-gray-400 hover:text-gray-200 shrink-0"
-        >
-          Clear
-        </button>
-      )}
-    </div>
+  const filterableTab = tab === "abs" || tab === "ebooks" || tab === "collection";
+  const activeFilterOptions =
+    tab === "ebooks"
+      ? ebookFilterOptions
+      : tab === "collection"
+        ? collectionFilterOptions
+        : absFilterOptions;
+  const activeBrowseBy: BrowseByView =
+    tab === "ebooks" ? ebookView : tab === "collection" ? collectionView : absView;
+  const setActiveBrowseBy = useCallback(
+    (v: BrowseByView) => {
+      if (tab === "ebooks") setEbookView(v);
+      else if (tab === "collection") setCollectionView(v);
+      else setAbsView(v);
+    },
+    [tab]
+  );
+  const activeFilterCount =
+    (filterGenre ? 1 : 0) +
+    (filterSeries ? 1 : 0) +
+    (filterAuthor ? 1 : 0) +
+    (filterableTab && activeBrowseBy !== "all" ? 1 : 0);
+
+  const clearAllFilters = useCallback(() => {
+    setFilterGenre("");
+    setFilterSeries("");
+    setFilterAuthor("");
+    setAbsView("all");
+    setEbookView("all");
+    setCollectionView("all");
+  }, []);
+
+  const { data: ownedUploadGate } = useQuery({
+    queryKey: ["owned-uploads-allowed"],
+    queryFn: async () => {
+      const { data } = await api.get("/library/owned-uploads/allowed");
+      return data as { allowed: boolean; allow_user_audiobook_upload?: boolean };
+    },
+    enabled: !!user && sessionReady && !offline,
+    staleTime: 60_000,
+  });
+  const canUploadOwned =
+    user?.role === "admin" ||
+    !!user?.allowUserAudiobookUpload ||
+    !!ownedUploadGate?.allowed;
+
+  const handleOwnedUpload = useCallback(
+    async (file: File | null) => {
+      if (!file) return;
+      setUploadingOwned(true);
+      try {
+        const form = new FormData();
+        form.append("files", file);
+        await api.post("/library/owned-uploads", form, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        toast("Upload received — processing your book.", "success");
+        softRefreshLibraryCollectionQueries(queryClient);
+      } catch (err: any) {
+        const status = err?.response?.status;
+        const detail = err?.response?.data?.detail;
+        if (status === 404 || status === 501 || status === 405) {
+          toast("Owned-book upload is not available yet.", "error");
+        } else {
+          toast(typeof detail === "string" ? detail : "Upload failed", "error");
+        }
+      } finally {
+        setUploadingOwned(false);
+        if (ownedUploadInputRef.current) ownedUploadInputRef.current.value = "";
+      }
+    },
+    [queryClient, toast]
   );
 
-  const viewToggle = (view: TabView, setView: (v: TabView) => void) => (
-    <div className="flex w-full gap-1 bg-gray-800/30 p-0.5 rounded-md">
-      {(["all", "genre", "series", "author"] as const).map((v) => (
-        <button
-          key={v}
-          onClick={() => setView(v)}
-          className={`flex-1 min-w-0 px-1.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-medium transition-colors text-center whitespace-nowrap ${
-            view === v ? "bg-gray-700 text-gray-100" : "text-gray-500 hover:text-gray-300"
-          }`}
-        >
-          {v === "all" ? "All" : v === "genre" ? "By Genre" : v === "series" ? "By Series" : "By Author"}
-        </button>
-      ))}
-    </div>
-  );
+  const filterTrigger = filterableTab && !isSearching ? (
+    <button
+      type="button"
+      onClick={() => setFilterDrawerOpen(true)}
+      className="inline-flex items-center justify-center gap-0.5 p-2 rounded-full text-gray-400 hover:text-gray-100 hover:bg-gray-800/80 transition-colors"
+      title="Filters"
+      aria-label="Open library filters"
+    >
+      <SlidersHorizontal size={18} />
+      {activeFilterCount > 0 && (
+        <span className="min-w-[1.1rem] px-1 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
+          {activeFilterCount}
+        </span>
+      )}
+    </button>
+  ) : null;
 
   const renderTabChrome = () =>
     !isSearching ? (
@@ -1254,14 +1290,6 @@ export default function MyLibrary() {
           Finished
         </button>
       </div>
-
-      {tab === "abs" && viewToggle(absView, setAbsView)}
-      {tab === "ebooks" && viewToggle(ebookView, setEbookView)}
-      {tab === "collection" && viewToggle(collectionView, setCollectionView)}
-
-      {tab === "abs" && <FilterBar options={absFilterOptions} />}
-      {tab === "ebooks" && <FilterBar options={ebookFilterOptions} />}
-      {tab === "collection" && <FilterBar options={collectionFilterOptions} />}
     </>
   ) : null;
 
@@ -1323,6 +1351,23 @@ export default function MyLibrary() {
         )}
       </Modal>
 
+      {filterableTab && (
+        <LibraryFilterDrawer
+          open={filterDrawerOpen}
+          onClose={() => setFilterDrawerOpen(false)}
+          options={activeFilterOptions}
+          filterGenre={filterGenre}
+          filterSeries={filterSeries}
+          filterAuthor={filterAuthor}
+          onFilterGenre={setFilterGenre}
+          onFilterSeries={setFilterSeries}
+          onFilterAuthor={setFilterAuthor}
+          browseBy={activeBrowseBy}
+          onBrowseBy={setActiveBrowseBy}
+          onClearAll={clearAllFilters}
+        />
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between mb-3 lg:mb-6">
         <div className="flex items-center gap-3">
@@ -1350,6 +1395,37 @@ export default function MyLibrary() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {canUploadOwned && (
+            <>
+              <input
+                ref={ownedUploadInputRef}
+                type="file"
+                accept=".epub,.mobi,.azw,.azw3,.pdf,.mp3,.m4a,.m4b,.flac,audio/*,application/epub+zip,application/pdf"
+                className="hidden"
+                onChange={(e) => void handleOwnedUpload(e.target.files?.[0] ?? null)}
+              />
+              <button
+                type="button"
+                onClick={() => ownedUploadInputRef.current?.click()}
+                disabled={offline || uploadingOwned}
+                className="inline-flex items-center justify-center p-2.5 bg-gray-700 text-gray-200 rounded-lg hover:bg-gray-600 transition-colors disabled:opacity-50"
+                title={
+                  offline
+                    ? "Unavailable offline"
+                    : uploadingOwned
+                      ? "Uploading…"
+                      : "Add owned book"
+                }
+                aria-label={uploadingOwned ? "Uploading owned book" : "Add owned book"}
+              >
+                {uploadingOwned ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Upload size={16} />
+                )}
+              </button>
+            </>
+          )}
           <button
             type="button"
             onClick={handleRefreshLibrary}
@@ -1410,9 +1486,14 @@ export default function MyLibrary() {
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={offline ? "Search unavailable offline" : "Search your library..."}
             disabled={offline}
-            className="w-full pl-5 pr-14 py-3 bg-gray-900/90 backdrop-blur-md border border-gray-700/70 rounded-full text-sm text-gray-100 shadow-lg shadow-black/40 focus:outline-none focus:ring-2 focus:ring-brand-500/80 focus:border-brand-500/50 placeholder:text-gray-500 disabled:opacity-50"
+            className={`w-full pl-5 py-3 bg-gray-900/90 backdrop-blur-md border border-gray-700/70 rounded-full text-sm text-gray-100 shadow-lg shadow-black/40 focus:outline-none focus:ring-2 focus:ring-brand-500/80 focus:border-brand-500/50 placeholder:text-gray-500 disabled:opacity-50 ${
+              filterableTab && !isSearching ? "pr-[6.5rem]" : "pr-14"
+            }`}
             aria-label="Search your library"
           />
+          {filterTrigger && (
+            <span className="absolute right-[3.35rem] top-1/2 -translate-y-1/2">{filterTrigger}</span>
+          )}
           {searchQuery ? (
             <button
               type="button"
@@ -1444,9 +1525,24 @@ export default function MyLibrary() {
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={offline ? "Search unavailable offline" : "Search your library..."}
             disabled={offline}
-            className="w-full pl-10 pr-10 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500 disabled:opacity-50"
+            className={`w-full pl-10 py-2.5 bg-gray-800 border border-gray-700 rounded-xl text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500 disabled:opacity-50 ${
+              filterableTab && !isSearching
+                ? searchQuery
+                  ? "pr-20"
+                  : "pr-12"
+                : "pr-10"
+            }`}
             aria-label="Search your library"
           />
+          {filterTrigger && (
+            <span
+              className={`absolute top-1/2 -translate-y-1/2 ${
+                searchQuery ? "right-10" : "right-2"
+              }`}
+            >
+              {filterTrigger}
+            </span>
+          )}
           {searchQuery && (
             <button
               type="button"

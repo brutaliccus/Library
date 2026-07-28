@@ -133,6 +133,8 @@ class AdminDownloadResponse(BaseModel):
     cover_url: str | None = None
     size_bytes: int | None = None
     indexer: str | None = None
+    source: str | None = None
+    abs_item_id: str | None = None
     created_at: str
     completed_at: str | None
     progress_percent: float | None = None
@@ -142,6 +144,10 @@ class AdminDownloadResponse(BaseModel):
     staging_path: str | None = None
     quarantine_reason: str | None = None
     manual_review_url: str | None = None
+
+
+class SweepReviewCursorBody(BaseModel):
+    request_id: int | None = None
 
 
 class RejectRequestBody(BaseModel):
@@ -562,6 +568,8 @@ async def list_all_downloads(
             cover_url=getattr(req, "cover_url", None),
             size_bytes=req.size_bytes,
             indexer=req.indexer,
+            source=getattr(req, "source", None),
+            abs_item_id=getattr(req, "abs_item_id", None),
             created_at=req.created_at.isoformat() if req.created_at else "",
             completed_at=req.completed_at.isoformat() if req.completed_at else None,
             progress_percent=req.progress_percent,
@@ -2080,3 +2088,58 @@ async def cancel_ol_catalog_schedule(_admin: User = Depends(require_admin)):
     from app.services import ol_catalog_build
 
     return await ol_catalog_build.cancel_scheduled_build()
+
+
+# --- Library Sweep ---
+
+
+@router.post("/library-sweep/start")
+async def library_sweep_start(admin: User = Depends(require_admin)):
+    """Start or resume Library Sweep (ABS → forge, no download)."""
+    from app.services import library_sweep
+
+    return await library_sweep.start_sweep(user_id=admin.id)
+
+
+@router.post("/library-sweep/pause")
+async def library_sweep_pause(_admin: User = Depends(require_admin)):
+    from app.services import library_sweep
+
+    return await library_sweep.pause_sweep()
+
+
+@router.post("/library-sweep/cancel")
+async def library_sweep_cancel(_admin: User = Depends(require_admin)):
+    from app.services import library_sweep
+
+    return await library_sweep.cancel_sweep()
+
+
+@router.get("/library-sweep/status")
+async def library_sweep_status(_admin: User = Depends(require_admin)):
+    from app.services import library_sweep
+
+    return await library_sweep.get_status()
+
+
+@router.get("/library-sweep/needs-review")
+async def library_sweep_needs_review(_admin: User = Depends(require_admin)):
+    from app.services import library_sweep
+
+    items = await library_sweep.list_needs_review()
+    status = await library_sweep.get_status()
+    return {
+        "items": items,
+        "review_cursor_request_id": status.get("review_cursor_request_id"),
+        "count": len(items),
+    }
+
+
+@router.put("/library-sweep/review-cursor")
+async def library_sweep_review_cursor(
+    body: SweepReviewCursorBody,
+    _admin: User = Depends(require_admin),
+):
+    from app.services import library_sweep
+
+    return await library_sweep.set_review_cursor(body.request_id)

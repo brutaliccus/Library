@@ -299,7 +299,7 @@ export default function LibrariesPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-950 px-4 py-8 pt-[calc(2rem+env(safe-area-inset-top,0px))] pb-[calc(2rem+env(safe-area-inset-bottom,0px))]">
+    <div className="min-h-screen bg-gray-950 px-4 pt-8 pb-[calc(2rem+env(safe-area-inset-bottom,0px))]">
       <div className="max-w-3xl mx-auto">
         <div className="flex items-start justify-between gap-3 mb-8">
           <div className="min-w-0">

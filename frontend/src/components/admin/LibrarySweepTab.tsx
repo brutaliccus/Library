@@ -1,0 +1,462 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Play,
+  Pause,
+  Square,
+  ChevronLeft,
+  ChevronRight,
+  Check,
+  Wand2,
+  Loader2,
+  RefreshCw,
+} from "lucide-react";
+import api from "../../api/client";
+import { useToast } from "../../contexts/ToastContext";
+import CoverImage from "../CoverImage";
+import QuickReviewWizard from "./QuickReviewWizard";
+
+type SweepStatus = {
+  id: number;
+  status: string;
+  started_at: string | null;
+  updated_at: string | null;
+  total: number;
+  scanned: number;
+  auto_applied: number;
+  needs_review: number;
+  failed: number;
+  m4b_queued: number;
+  review_cursor_request_id: number | null;
+  error: string | null;
+  started_by_user_id: number | null;
+};
+
+type NeedsReviewItem = {
+  id: number;
+  title: string | null;
+  author: string | null;
+  status: string;
+  status_detail: string | null;
+  quarantine_reason: string | null;
+  abs_item_id: string | null;
+  staging_path: string | null;
+  cover_url: string | null;
+  created_at: string | null;
+};
+
+type NeedsReviewResponse = {
+  items: NeedsReviewItem[];
+  review_cursor_request_id: number | null;
+  count: number;
+};
+
+const STATUS_KEY = ["admin-library-sweep-status"] as const;
+const REVIEW_KEY = ["admin-library-sweep-needs-review"] as const;
+
+const START_CONFIRM =
+  "Library Sweep will rewrite audiobook metadata and may queue M4B conversion for matching library books. Continue?";
+
+function iconBtnClass(active?: boolean) {
+  return `inline-flex items-center justify-center p-2 rounded-lg border transition-colors disabled:opacity-40 ${
+    active
+      ? "border-brand-600/60 bg-brand-600/20 text-brand-300"
+      : "border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-gray-100"
+  }`;
+}
+
+export default function LibrarySweepTab() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [cursorRestored, setCursorRestored] = useState(false);
+
+  const { data: status, isLoading: statusLoading, refetch: refetchStatus } = useQuery({
+    queryKey: STATUS_KEY,
+    queryFn: async () => {
+      const { data } = await api.get("/admin/library-sweep/status");
+      return data as SweepStatus;
+    },
+    refetchInterval: (q) => {
+      const s = q.state.data?.status;
+      return s === "running" ? 3000 : 15_000;
+    },
+  });
+
+  const { data: review, isLoading: reviewLoading, refetch: refetchReview } = useQuery({
+    queryKey: REVIEW_KEY,
+    queryFn: async () => {
+      const { data } = await api.get("/admin/library-sweep/needs-review");
+      return data as NeedsReviewResponse;
+    },
+    refetchInterval: (q) => {
+      const s = status?.status;
+      return s === "running" ? 5000 : 20_000;
+    },
+  });
+
+  const items = review?.items ?? [];
+  const selectedIndex = useMemo(() => {
+    if (selectedId == null) return -1;
+    return items.findIndex((i) => i.id === selectedId);
+  }, [items, selectedId]);
+  const selectedItem = selectedIndex >= 0 ? items[selectedIndex] : null;
+
+  const setCursor = useMutation({
+    mutationFn: async (requestId: number | null) => {
+      const { data } = await api.put("/admin/library-sweep/review-cursor", {
+        request_id: requestId,
+      });
+      return data as SweepStatus;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(STATUS_KEY, data);
+      void queryClient.invalidateQueries({ queryKey: REVIEW_KEY });
+    },
+  });
+
+  const selectItem = useCallback(
+    (id: number | null, { openWizard = false }: { openWizard?: boolean } = {}) => {
+      setSelectedId(id);
+      if (openWizard && id != null) setWizardOpen(true);
+      if (id !== status?.review_cursor_request_id) {
+        setCursor.mutate(id);
+      }
+    },
+    [setCursor, status?.review_cursor_request_id],
+  );
+
+  // Restore review cursor from status / needs-review payload once.
+  useEffect(() => {
+    if (cursorRestored || reviewLoading) return;
+    const cursor =
+      review?.review_cursor_request_id ?? status?.review_cursor_request_id ?? null;
+    if (cursor != null && items.some((i) => i.id === cursor)) {
+      setSelectedId(cursor);
+      setCursorRestored(true);
+      return;
+    }
+    if (items.length > 0 && selectedId == null) {
+      setSelectedId(items[0].id);
+      setCursorRestored(true);
+      return;
+    }
+    if (!reviewLoading && status) setCursorRestored(true);
+  }, [
+    cursorRestored,
+    review?.review_cursor_request_id,
+    status?.review_cursor_request_id,
+    status,
+    items,
+    reviewLoading,
+    selectedId,
+  ]);
+
+  // Drop selection if the item left the queue (e.g. after Quick Review continue).
+  useEffect(() => {
+    if (selectedId == null || reviewLoading) return;
+    if (items.length === 0) {
+      setSelectedId(null);
+      setWizardOpen(false);
+      return;
+    }
+    if (!items.some((i) => i.id === selectedId)) {
+      const next = items[Math.min(selectedIndex < 0 ? 0 : selectedIndex, items.length - 1)];
+      setSelectedId(next.id);
+      if (wizardOpen) setWizardOpen(true);
+    }
+  }, [items, selectedId, selectedIndex, reviewLoading, wizardOpen]);
+
+  const startMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post("/admin/library-sweep/start");
+      return data as SweepStatus & { message?: string };
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(STATUS_KEY, data);
+      void refetchReview();
+      toast(data.message || "Library Sweep started", "success");
+    },
+    onError: (err: { response?: { data?: { detail?: string } } }) => {
+      toast(err?.response?.data?.detail || "Failed to start sweep", "error");
+    },
+  });
+
+  const pauseMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post("/admin/library-sweep/pause");
+      return data as SweepStatus;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(STATUS_KEY, data);
+      toast("Library Sweep paused", "info");
+    },
+    onError: (err: { response?: { data?: { detail?: string } } }) => {
+      toast(err?.response?.data?.detail || "Failed to pause sweep", "error");
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post("/admin/library-sweep/cancel");
+      return data as SweepStatus;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(STATUS_KEY, data);
+      void refetchReview();
+      toast("Library Sweep cancelled", "info");
+    },
+    onError: (err: { response?: { data?: { detail?: string } } }) => {
+      toast(err?.response?.data?.detail || "Failed to cancel sweep", "error");
+    },
+  });
+
+  const busy =
+    startMutation.isPending || pauseMutation.isPending || cancelMutation.isPending;
+  const running = status?.status === "running";
+  const paused = status?.status === "paused";
+
+  const goPrev = () => {
+    if (selectedIndex <= 0) return;
+    const prev = items[selectedIndex - 1];
+    selectItem(prev.id, { openWizard: wizardOpen });
+  };
+
+  const goNext = (openWizard = wizardOpen) => {
+    if (selectedIndex < 0 || selectedIndex >= items.length - 1) {
+      setWizardOpen(false);
+      return;
+    }
+    const next = items[selectedIndex + 1];
+    selectItem(next.id, { openWizard });
+  };
+
+  const saveAndNext = () => {
+    if (selectedIndex < 0) return;
+    if (selectedIndex >= items.length - 1) {
+      setWizardOpen(false);
+      toast("End of needs-review queue", "info");
+      return;
+    }
+    goNext(true);
+  };
+
+  const counters: { label: string; value: number | string }[] = [
+    { label: "Status", value: status?.status ?? "—" },
+    { label: "Total", value: status?.total ?? 0 },
+    { label: "Scanned", value: status?.scanned ?? 0 },
+    { label: "Auto-applied", value: status?.auto_applied ?? 0 },
+    { label: "Needs review", value: status?.needs_review ?? 0 },
+    { label: "Failed", value: status?.failed ?? 0 },
+    { label: "M4B queued", value: status?.m4b_queued ?? 0 },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-gray-100 flex items-center gap-2">
+            <Wand2 size={20} className="text-brand-400 shrink-0" />
+            Library Sweep
+          </h2>
+          <p className="text-xs text-gray-500 mt-1 max-w-xl">
+            Walk existing ABS audiobooks through the forge pipeline (no re-download). Books that
+            need judgment land in the needs-review queue below.
+          </p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            className={iconBtnClass(running)}
+            title={paused ? "Resume sweep" : "Start sweep"}
+            aria-label={paused ? "Resume sweep" : "Start sweep"}
+            disabled={busy || running}
+            onClick={() => {
+              if (!window.confirm(START_CONFIRM)) return;
+              startMutation.mutate();
+            }}
+          >
+            {startMutation.isPending ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Play size={16} />
+            )}
+          </button>
+          <button
+            type="button"
+            className={iconBtnClass(paused)}
+            title="Pause sweep"
+            aria-label="Pause sweep"
+            disabled={busy || !running}
+            onClick={() => pauseMutation.mutate()}
+          >
+            {pauseMutation.isPending ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Pause size={16} />
+            )}
+          </button>
+          <button
+            type="button"
+            className={iconBtnClass()}
+            title="Cancel sweep"
+            aria-label="Cancel sweep"
+            disabled={busy || (!running && !paused)}
+            onClick={() => {
+              if (!window.confirm("Cancel the current Library Sweep?")) return;
+              cancelMutation.mutate();
+            }}
+          >
+            {cancelMutation.isPending ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Square size={16} />
+            )}
+          </button>
+          <button
+            type="button"
+            className={iconBtnClass()}
+            title="Refresh status"
+            aria-label="Refresh status"
+            onClick={() => {
+              void refetchStatus();
+              void refetchReview();
+            }}
+          >
+            <RefreshCw size={16} />
+          </button>
+        </div>
+      </div>
+
+      {statusLoading && !status ? (
+        <p className="text-sm text-gray-500">Loading sweep status…</p>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+          {counters.map((c) => (
+            <div
+              key={c.label}
+              className="rounded-xl border border-gray-800 bg-gray-900/50 px-3 py-2.5"
+            >
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{c.label}</p>
+              <p className="text-sm font-semibold text-gray-100 mt-0.5 truncate capitalize">
+                {c.value}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {status?.error && (
+        <p className="text-sm text-red-400 border border-red-900/50 bg-red-950/30 rounded-lg px-3 py-2">
+          {status.error}
+        </p>
+      )}
+
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-gray-200">Needs review</h3>
+          {items.length > 0 && selectedIndex >= 0 && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-gray-500 tabular-nums mr-1">
+                {selectedIndex + 1} / {items.length}
+              </span>
+              <button
+                type="button"
+                className={iconBtnClass()}
+                title="Previous"
+                aria-label="Previous needs-review item"
+                disabled={selectedIndex <= 0 || setCursor.isPending}
+                onClick={goPrev}
+              >
+                <ChevronLeft size={16} />
+              </button>
+              <button
+                type="button"
+                className={iconBtnClass()}
+                title="Save & next"
+                aria-label="Save and next"
+                disabled={selectedIndex < 0 || setCursor.isPending}
+                onClick={saveAndNext}
+              >
+                <Check size={14} />
+                <ChevronRight size={14} className="-ml-0.5" />
+              </button>
+              <button
+                type="button"
+                className={iconBtnClass()}
+                title="Skip / next"
+                aria-label="Skip to next"
+                disabled={selectedIndex < 0 || selectedIndex >= items.length - 1 || setCursor.isPending}
+                onClick={() => goNext(wizardOpen)}
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
+          )}
+        </div>
+
+        {reviewLoading && items.length === 0 ? (
+          <p className="text-sm text-gray-500">Loading queue…</p>
+        ) : items.length === 0 ? (
+          <p className="text-sm text-gray-500">No books waiting for review.</p>
+        ) : (
+          <ul className="space-y-2">
+            {items.map((item) => {
+              const active = item.id === selectedId;
+              return (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    onClick={() => selectItem(item.id, { openWizard: true })}
+                    className={`w-full text-left flex gap-3 p-3 rounded-xl border transition-colors ${
+                      active
+                        ? "border-brand-600/50 bg-brand-950/30"
+                        : "border-gray-800 bg-gray-900/40 hover:border-gray-700"
+                    }`}
+                  >
+                    <div className="w-10 h-14 shrink-0 rounded overflow-hidden bg-gray-800">
+                      {item.cover_url ? (
+                        <CoverImage
+                          src={item.cover_url}
+                          alt=""
+                          className="w-full h-full object-cover"
+                        />
+                      ) : null}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-gray-100 truncate">
+                        {item.title || `Request #${item.id}`}
+                      </p>
+                      {item.author && (
+                        <p className="text-xs text-gray-400 truncate mt-0.5">{item.author}</p>
+                      )}
+                      {item.quarantine_reason && (
+                        <p className="text-[11px] text-amber-400/90 mt-1 line-clamp-2">
+                          {item.quarantine_reason}
+                        </p>
+                      )}
+                    </div>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      {selectedItem && (
+        <QuickReviewWizard
+          requestId={selectedItem.id}
+          title={selectedItem.title || `Request #${selectedItem.id}`}
+          open={wizardOpen}
+          onClose={() => {
+            setWizardOpen(false);
+            void refetchReview();
+            void refetchStatus();
+          }}
+        />
+      )}
+    </div>
+  );
+}

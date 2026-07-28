@@ -31,6 +31,8 @@ interface AuthUser {
   role: string;
   mustChangePassword: boolean;
   mustSetEmail: boolean;
+  /** From /auth/me — admins always true when setting allows users. */
+  allowUserAudiobookUpload?: boolean;
 }
 
 interface SessionTokens {
@@ -242,6 +244,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             role: data.role,
             mustChangePassword: !!data.must_change_password,
             mustSetEmail: !!data.must_set_email,
+            allowUserAudiobookUpload: !!data.allow_user_audiobook_upload,
           });
           setOfflineSession(false);
           const origin = currentOrigin();
@@ -399,6 +402,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         role: data.role,
         mustChangePassword: !!data.must_change_password,
         mustSetEmail: !!data.must_set_email,
+        allowUserAudiobookUpload: !!data.allow_user_audiobook_upload,
       });
       setOfflineSession(false);
       localStorage.setItem("must_set_email", String(!!data.must_set_email));

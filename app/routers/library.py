@@ -5,9 +5,10 @@ import asyncio
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, File, Form, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1886,4 +1887,107 @@ def _serialize(item: StreamingLibraryItem) -> dict:
         "tracks": tracks,
         "createdAt": item.created_at.isoformat() if item.created_at else "",
         "updatedAt": item.updated_at.isoformat() if item.updated_at else "",
+    }
+
+
+@router.get("/owned-uploads/allowed")
+async def owned_uploads_allowed(user: User = Depends(get_current_user)):
+    """Whether the current user may POST /owned-uploads."""
+    from app.services import library_ingest
+
+    allowed = await library_ingest.user_may_upload_owned(user.role)
+    return {"allowed": allowed, "allow_user_audiobook_upload": allowed}
+
+
+@router.post("/owned-uploads")
+async def owned_audiobook_upload(
+    user: User = Depends(get_current_user),
+    files: list[UploadFile] = File(...),
+    title: str | None = Form(None),
+    author: str | None = Form(None),
+):
+    """Upload owned audiobook files → staging → forge (no debrid).
+
+    Admins always allowed; non-admins require ``allow_user_audiobook_upload``.
+    """
+    from app.services import library_ingest
+
+    if not await library_ingest.user_may_upload_owned(user.role):
+        raise HTTPException(
+            status_code=403,
+            detail="Owned audiobook upload is disabled for users",
+        )
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    blobs: list[tuple[str, bytes]] = []
+    for uf in files:
+        name = (uf.filename or "audio").strip() or "audio"
+        data = await uf.read()
+        if not data:
+            continue
+        blobs.append((name, data))
+    if not blobs:
+        raise HTTPException(status_code=400, detail="Uploaded files were empty")
+
+    book_title = (title or "").strip()
+    if not book_title:
+        # Derive from first audio-ish filename stem
+        for name, _ in blobs:
+            if library_ingest.is_audio_filename(name):
+                book_title = Path(name).stem
+                break
+        if not book_title:
+            book_title = Path(blobs[0][0]).stem or "Owned audiobook"
+
+    book_author = (author or "").strip() or None
+
+    # Stage + create request first without forge, then forge in background so
+    # the HTTP response returns promptly for large uploads.
+    result = await library_ingest.ingest_uploaded_audiobook(
+        user_id=user.id,
+        title=book_title,
+        author=book_author,
+        file_blobs=blobs,
+        kick_forge=False,
+    )
+    request_id = int(result["id"])
+    staging_path = result.get("staging_path")
+
+    async def _forge() -> None:
+        try:
+            from app.services.forge_pipeline import (
+                audiobook_staging_dir,
+                resolve_staging_dir,
+                run_forge_after_download,
+            )
+
+            staging = audiobook_staging_dir(request_id, book_title)
+            if staging_path:
+                try:
+                    staging = resolve_staging_dir(str(staging_path))
+                except FileNotFoundError:
+                    pass
+            await run_forge_after_download(
+                request_id,
+                staging=staging,
+                user_id=user.id,
+                title=book_title,
+                author=book_author,
+                resume_from="metadata",
+            )
+        except Exception:
+            logger.exception("Owned upload forge failed for request %s", request_id)
+
+    asyncio.create_task(_forge())
+
+    return {
+        "ok": True,
+        "id": request_id,
+        "title": book_title,
+        "author": book_author,
+        "status": result.get("status") or "metadata_forge",
+        "file_count": result.get("file_count") or len(blobs),
+        "staging_path": staging_path,
+        "message": "Upload staged — forge started in background",
     }

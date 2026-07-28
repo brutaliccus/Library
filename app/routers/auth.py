@@ -80,6 +80,8 @@ class MeResponse(BaseModel):
     role: str
     must_change_password: bool = False
     must_set_email: bool = False
+    # True when this user may upload owned audiobooks (admin always, else setting).
+    allow_user_audiobook_upload: bool = False
 
 
 def _normalize_invite_code(raw: str) -> str:
@@ -160,12 +162,16 @@ async def _library_for_invite(code: str, db: AsyncSession) -> LibraryGroup:
 
 @router.get("/me", response_model=MeResponse)
 async def me(user: User = Depends(get_current_user)):
+    from app.services import library_ingest
+
+    can_upload = await library_ingest.user_may_upload_owned(user.role)
     return MeResponse(
         username=user.username,
         email=user.email,
         role=user.role,
         must_change_password=user.must_change_password,
         must_set_email=_must_set_email(user),
+        allow_user_audiobook_upload=can_upload,
     )
 
 

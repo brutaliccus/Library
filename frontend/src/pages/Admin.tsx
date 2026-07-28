@@ -28,6 +28,7 @@ import {
   Workflow,
   Menu,
   Database,
+  Wand2,
   type LucideIcon,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
@@ -35,6 +36,7 @@ import ScraperTab from "../components/admin/ScraperTab";
 import ConfigTab from "../components/admin/ConfigTab";
 import StagingFilesViewer from "../components/admin/StagingFilesViewer";
 import QuickReviewWizard from "../components/admin/QuickReviewWizard";
+import LibrarySweepTab from "../components/admin/LibrarySweepTab";
 import AudibleAuthPanel from "../components/admin/AudibleAuthPanel";
 import { usePushNotifications } from "../hooks/usePushNotifications";
 import { Link, useSearchParams } from "react-router-dom";
@@ -56,6 +58,7 @@ type AdminTab =
   | "users"
   | "discovery"
   | "catalog"
+  | "library-sweep"
   | "pipelines"
   | "integrations"
   | "settings";
@@ -82,6 +85,7 @@ const ADMIN_NAV: NavGroup[] = [
     items: [
       { id: "discovery", label: "Discovery", icon: Radar },
       { id: "catalog", label: "Catalog", icon: Database },
+      { id: "library-sweep", label: "Library Sweep", icon: Wand2 },
     ],
   },
   {
@@ -221,7 +225,7 @@ export default function AdminPage() {
   );
 
   return (
-    <div className="w-full max-w-6xl mx-auto min-w-0 overflow-x-hidden pt-[calc(2rem+env(safe-area-inset-top,0px))] pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))]">
+    <div className="w-full max-w-6xl mx-auto min-w-0 overflow-x-hidden pt-8 pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))]">
       <div className="flex items-start justify-between gap-3 mb-4">
         <div className="min-w-0">
           <h1 className="text-2xl font-bold text-gray-100 flex items-center gap-2">
@@ -340,6 +344,7 @@ export default function AdminPage() {
               description="Catalog API keys (Hardcover, NYT, ISBNdb, OpenRouter, Google Books) plus the local Open Library catalog build, update, and schedule controls."
             />
           )}
+          {activeTab === "library-sweep" && <LibrarySweepTab />}
           {activeTab === "pipelines" && (
             <ConfigTab
               lockedGroup="pipeline"

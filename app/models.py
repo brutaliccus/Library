@@ -103,11 +103,40 @@ class DownloadRequest(Base):
     staging_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     libraforge_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     quarantine_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Ingest provenance: null/request (debrid download) | sweep | upload
+    source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    abs_item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    # Idempotency key for Library Sweep (e.g. abs:{itemId})
+    ingest_fingerprint: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="download_requests")
+
+
+class LibrarySweepJob(Base):
+    """Singleton-ish progress row for Admin → Library Sweep."""
+    __tablename__ = "library_sweep_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # idle | running | paused | cancelled | completed
+    status: Mapped[str] = mapped_column(String(32), default="idle")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    scanned: Mapped[int] = mapped_column(Integer, default=0)
+    auto_applied: Mapped[int] = mapped_column(Integer, default=0)
+    needs_review: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    m4b_queued: Mapped[int] = mapped_column(Integer, default=0)
+    review_cursor_request_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
 
 
 class SearchHistory(Base):

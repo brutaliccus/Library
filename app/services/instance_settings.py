@@ -200,6 +200,17 @@ REGISTRY: list[SettingDef] = [
         ),
     ),
     SettingDef(
+        key="allow_user_audiobook_upload",
+        group="pipeline",
+        label="Allow user audiobook uploads",
+        value_type="bool",
+        env_fallback=False,
+        help=(
+            "When on, non-admin users can upload owned audiobooks from My Library "
+            "(admins always can). Uploads land in .unorganized and run the forge pipeline."
+        ),
+    ),
+    SettingDef(
         key="config.ebook_min_score",
         group="pipeline",
         label="Ebook min score",

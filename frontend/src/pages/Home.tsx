@@ -29,10 +29,18 @@ interface PersonalizedShelf {
 interface Props {
   genreMobileOpen: boolean;
   onGenreMobileClose: () => void;
+  onGenreToggle?: () => void;
+  genreActiveCount?: number;
   onActiveCountChange: (count: number) => void;
 }
 
-export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCountChange }: Props) {
+export default function Home({
+  genreMobileOpen,
+  onGenreMobileClose,
+  onGenreToggle,
+  genreActiveCount = 0,
+  onActiveCountChange,
+}: Props) {
   useEffect(() => { onActiveCountChange(0); }, [onActiveCountChange]);
 
   const { data: genresData } = useQuery({
@@ -174,7 +182,7 @@ export default function Home({ genreMobileOpen, onGenreMobileClose, onActiveCoun
   return (
     <div className="pb-12">
       <div className="max-w-3xl mx-auto px-4 lg:px-6">
-        <HeroSearch />
+        <HeroSearch onGenreToggle={onGenreToggle} genreActiveCount={genreActiveCount} />
         <BadgeLegend />
       </div>
 

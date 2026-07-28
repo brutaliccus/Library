@@ -162,7 +162,7 @@ export default function App() {
     location.pathname.startsWith("/shelf/");
 
   return (
-    <div className={`min-h-screen bg-gray-950 overflow-x-hidden w-full max-w-[100vw] ${nowPlaying && !expanded ? "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]" : ""}`}>
+    <div className={`min-h-screen bg-gray-950 overflow-x-clip w-full max-w-[100vw] ${nowPlaying && !expanded ? "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]" : ""}`}>
       {pendingUpdate && (
         <AppUpdateBanner
           update={pendingUpdate}
@@ -176,10 +176,7 @@ export default function App() {
         !user.mustSetEmail &&
         location.pathname !== "/libraries" &&
         !location.pathname.startsWith("/read/") && (
-        <Navbar
-          onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
-          genreActiveCount={showGenreButton ? genreActiveCount : 0}
-        />
+        <Navbar />
       )}
       {user &&
         !user.mustChangePassword &&
@@ -238,6 +235,8 @@ export default function App() {
               <Home
                 genreMobileOpen={genreMobileOpen}
                 onGenreMobileClose={handleGenreMobileClose}
+                onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
+                genreActiveCount={genreActiveCount}
                 onActiveCountChange={setGenreActiveCount}
               />
             </ProtectedRoute>
@@ -250,6 +249,8 @@ export default function App() {
               <SearchResults
                 genreMobileOpen={genreMobileOpen}
                 onGenreMobileClose={handleGenreMobileClose}
+                onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
+                genreActiveCount={genreActiveCount}
                 onActiveCountChange={setGenreActiveCount}
               />
             </ProtectedRoute>
@@ -278,6 +279,7 @@ export default function App() {
               <ShelfPage
                 genreMobileOpen={genreMobileOpen}
                 onGenreMobileClose={handleGenreMobileClose}
+                onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
               />
             </ProtectedRoute>
           }
@@ -289,6 +291,7 @@ export default function App() {
               <GenreHubPage
                 genreMobileOpen={genreMobileOpen}
                 onGenreMobileClose={handleGenreMobileClose}
+                onGenreToggle={showGenreButton ? handleGenreToggle : undefined}
               />
             </ProtectedRoute>
           }

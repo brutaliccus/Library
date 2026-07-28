@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, BookOpen } from "lucide-react";
+import { ArrowLeft, BookOpen, SlidersHorizontal } from "lucide-react";
 import api from "../api/client";
 import BookCarousel from "../components/BookCarousel";
 import GenreSidebar from "../components/GenreSidebar";
@@ -90,11 +90,13 @@ function GenreCuratedShelf({ slug }: { slug: string }) {
 interface Props {
   genreMobileOpen?: boolean;
   onGenreMobileClose?: () => void;
+  onGenreToggle?: () => void;
 }
 
 export default function GenreHubPage({
   genreMobileOpen = false,
   onGenreMobileClose,
+  onGenreToggle,
 }: Props) {
   const { slug = "" } = useParams<{ slug: string }>();
   const navigate = useNavigate();
@@ -131,14 +133,28 @@ export default function GenreHubPage({
         )}
 
         <div className="flex-1 min-w-0 py-8">
-          <button
-            type="button"
-            onClick={() => navigate(-1)}
-            className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-200 mb-4"
-          >
-            <ArrowLeft size={16} />
-            Back
-          </button>
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <button
+              type="button"
+              onClick={() => navigate(-1)}
+              className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-200"
+            >
+              <ArrowLeft size={16} />
+              Back
+            </button>
+            {onGenreToggle && (
+              <button
+                type="button"
+                onClick={onGenreToggle}
+                className="lg:hidden inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
+                title="Filter genres"
+                aria-label="Filter genres"
+              >
+                <SlidersHorizontal size={16} />
+                Genres
+              </button>
+            )}
+          </div>
 
           <h1 className="text-2xl font-bold text-gray-100 mb-1">
             {genre?.name || decoded.replace(/-/g, " ")}

@@ -3,14 +3,16 @@ import { useAuth } from "../hooks/useAuth";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useState, FormEvent, useEffect } from "react";
-import { BookOpen, Compass, Download, Shield, LogOut, Search, Headphones, Library, LayoutGrid, SlidersHorizontal, Lock, Unlock, Settings } from "lucide-react";
+import { BookOpen, Compass, Download, Shield, LogOut, Search, Headphones, Library, LayoutGrid, Lock, Unlock, Settings } from "lucide-react";
 
-interface Props {
-  onGenreToggle?: () => void;
-  genreActiveCount?: number;
-}
+type NavLink = {
+  to: string;
+  label: string;
+  icon: typeof Library;
+  onlineOnly?: boolean;
+};
 
-export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
+export default function Navbar() {
   const { user, logout, offlineSession } = useAuth();
   const { nowPlaying, isPlaying, setExpanded } = usePlayer();
   const online = useOnlineStatus();
@@ -48,10 +50,13 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
 
   if (!user) return null;
 
-  const links = [
+  const primaryLinks: NavLink[] = [
     { to: "/my-library", label: "My Library", icon: Library },
     { to: "/", label: "Browse", icon: Compass, onlineOnly: true },
-    { to: "/downloads", label: "Downloads", icon: Download, onlineOnly: true },
+    { to: "/downloads", label: "Requests", icon: Download, onlineOnly: true },
+  ];
+
+  const rightLinks: NavLink[] = [
     { to: "/libraries", label: "Libraries", icon: LayoutGrid },
     ...(user.role === "admin"
       ? [{ to: "/admin", label: "Admin", icon: Shield, onlineOnly: true }]
@@ -78,8 +83,37 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
     }
   };
 
+  const renderLink = ({ to, label, icon: Icon, onlineOnly: needsOnline }: NavLink) => {
+    if (needsOnline && !onlineOnly) {
+      return (
+        <span
+          key={to}
+          title="Unavailable offline"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-gray-600 cursor-not-allowed"
+        >
+          <Icon size={16} />
+          <span className="hidden md:inline">{label}</span>
+        </span>
+      );
+    }
+    return (
+      <Link
+        key={to}
+        to={to}
+        className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+          isActive(to)
+            ? "bg-brand-600/20 text-brand-400"
+            : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+        }`}
+      >
+        <Icon size={16} />
+        <span className="hidden md:inline">{label}</span>
+      </Link>
+    );
+  };
+
   return (
-    <nav className="bg-gray-900 border-b border-gray-800 sticky top-0 z-50 pt-[env(safe-area-inset-top,0px)]">
+    <nav className="bg-gray-900/95 backdrop-blur-sm border-b border-gray-800 sticky top-0 z-50 pt-[env(safe-area-inset-top,0px)]">
       <div className="px-4 lg:px-6 flex items-center justify-between h-14 gap-3">
         <Link to="/my-library" className="flex items-center gap-2 text-brand-400 font-bold text-lg shrink-0">
           <BookOpen size={22} />
@@ -117,50 +151,8 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
               <Search size={16} />
             </Link>
           )}
-          {onGenreToggle && onlineOnly && (
-            <button
-              onClick={onGenreToggle}
-              className="lg:hidden flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
-              title="Genres"
-            >
-              <SlidersHorizontal size={16} />
-              <span className="hidden sm:inline">Genres</span>
-              {genreActiveCount > 0 && (
-                <span className="px-1.5 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
-                  {genreActiveCount}
-                </span>
-              )}
-            </button>
-          )}
 
-          {links.map(({ to, label, icon: Icon, onlineOnly: needsOnline }) => {
-            if (needsOnline && !onlineOnly) {
-              return (
-                <span
-                  key={to}
-                  title="Unavailable offline"
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-gray-600 cursor-not-allowed"
-                >
-                  <Icon size={16} />
-                  <span className="hidden md:inline">{label}</span>
-                </span>
-              );
-            }
-            return (
-              <Link
-                key={to}
-                to={to}
-                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  isActive(to)
-                    ? "bg-brand-600/20 text-brand-400"
-                    : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-                }`}
-              >
-                <Icon size={16} />
-                <span className="hidden md:inline">{label}</span>
-              </Link>
-            );
-          })}
+          {primaryLinks.map(renderLink)}
 
           {nowPlaying && (
             <button
@@ -175,7 +167,8 @@ export default function Navbar({ onGenreToggle, genreActiveCount = 0 }: Props) {
             </button>
           )}
 
-          <div className="ml-2 pl-2 border-l border-gray-700 flex items-center gap-2">
+          <div className="ml-2 pl-2 border-l border-gray-700 flex items-center gap-1 sm:gap-2">
+            {rightLinks.map(renderLink)}
             {rotationLockSupported && (
               <button
                 onClick={handleRotationLock}

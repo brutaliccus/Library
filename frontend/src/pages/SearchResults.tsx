@@ -6,7 +6,7 @@ import BookGrid from "../components/BookGrid";
 import CacheReleaseCard, { type CacheReleaseCardData } from "../components/CacheReleaseCard";
 import GenreSidebar from "../components/GenreSidebar";
 import type { Genre } from "../components/GenreSidebar";
-import { Search, ChevronLeft, ChevronRight, Library, BookOpen, Headphones, HardDrive, Loader2 } from "lucide-react";
+import { Search, ChevronLeft, ChevronRight, Library, BookOpen, Headphones, HardDrive, Loader2, SlidersHorizontal } from "lucide-react";
 import type { BookSummary } from "../types/book";
 import CoverImage from "../components/CoverImage";
 
@@ -64,10 +64,18 @@ function buildHeading(q: string, categories: string[], genres: Genre[]): string 
 interface Props {
   genreMobileOpen: boolean;
   onGenreMobileClose: () => void;
+  onGenreToggle?: () => void;
+  genreActiveCount?: number;
   onActiveCountChange: (count: number) => void;
 }
 
-export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onActiveCountChange }: Props) {
+export default function SearchResults({
+  genreMobileOpen,
+  onGenreMobileClose,
+  onGenreToggle,
+  genreActiveCount = 0,
+  onActiveCountChange,
+}: Props) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const q = searchParams.get("q") || "";
@@ -257,26 +265,53 @@ export default function SearchResults({ genreMobileOpen, onGenreMobileClose, onA
   const heading = buildHeading(q, activeCategories, genres);
 
   return (
-    <div className="py-8">
-      <form onSubmit={handleSubmit} className="relative max-w-2xl mx-auto mb-6 px-4 lg:px-6">
-        <Search
-          size={20}
-          className="absolute left-8 lg:left-10 top-1/2 -translate-y-1/2 text-gray-500"
-        />
-        <input
-          type="text"
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          placeholder="Search by title, author, or ISBN..."
-          className="w-full pl-12 pr-24 py-3.5 bg-gray-800 border border-gray-700 rounded-xl text-base text-gray-100 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500"
-        />
-        <button
-          type="submit"
-          className="absolute right-6 lg:right-8 top-1/2 -translate-y-1/2 px-5 py-2 bg-brand-600 text-white text-sm font-semibold rounded-xl hover:bg-brand-500 transition-colors"
-        >
-          Search
-        </button>
-      </form>
+    <div className="pb-8 pt-2 lg:py-8">
+      {/* Spacer for fixed mobile search */}
+      <div className="h-[4rem] lg:hidden" aria-hidden />
+
+      <div
+        className={`z-40 lg:static lg:bg-transparent lg:border-0 lg:backdrop-blur-none lg:mb-6 lg:px-4 lg:relative
+          fixed left-0 right-0 top-[calc(3.5rem+env(safe-area-inset-top,0px))] px-4 py-2 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800/80
+          lg:left-auto lg:right-auto lg:top-auto lg:py-0 lg:border-0`}
+      >
+        <form onSubmit={handleSubmit} className="relative max-w-2xl mx-auto">
+          <Search
+            size={20}
+            className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none"
+          />
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            placeholder="Search by title, author, or ISBN..."
+            className={`w-full pl-12 py-3.5 bg-gray-800 border border-gray-700 rounded-xl text-base text-gray-100 shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500 ${
+              onGenreToggle ? "pr-36" : "pr-24"
+            }`}
+          />
+          {onGenreToggle && (
+            <button
+              type="button"
+              onClick={onGenreToggle}
+              className="absolute right-[5.5rem] top-1/2 -translate-y-1/2 inline-flex items-center justify-center gap-1 p-2 rounded-xl text-gray-400 hover:text-gray-100 hover:bg-gray-700/80 transition-colors"
+              title="Filter genres"
+              aria-label="Filter genres"
+            >
+              <SlidersHorizontal size={18} />
+              {genreActiveCount > 0 && (
+                <span className="min-w-[1.1rem] px-1 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
+                  {genreActiveCount}
+                </span>
+              )}
+            </button>
+          )}
+          <button
+            type="submit"
+            className="absolute right-2 top-1/2 -translate-y-1/2 px-5 py-2 bg-brand-600 text-white text-sm font-semibold rounded-xl hover:bg-brand-500 transition-colors"
+          >
+            Search
+          </button>
+        </form>
+      </div>
 
       <div className="flex px-4 lg:px-6 gap-6">
         {genres.length > 0 && (

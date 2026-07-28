@@ -1191,6 +1191,79 @@ export default function MyLibrary() {
     </div>
   );
 
+  const renderTabChrome = () =>
+    !isSearching ? (
+    <>
+      <div className="flex flex-nowrap gap-1 bg-gray-800/50 p-1 rounded-lg overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-full">
+        <button
+          onClick={() => setTab("abs")}
+          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+            tab === "abs" ? "bg-emerald-600 text-white" : "text-gray-400 hover:text-gray-200"
+          }`}
+        >
+          <Headphones size={14} />
+          Audiobooks
+        </button>
+        <button
+          onClick={() => setTab("ebooks")}
+          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+            tab === "ebooks" ? "bg-amber-600 text-white" : "text-gray-400 hover:text-gray-200"
+          }`}
+        >
+          <BookOpen size={14} />
+          eBooks
+        </button>
+        <button
+          onClick={() => setTab("collection")}
+          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+            tab === "collection" ? "bg-teal-700 text-white" : "text-gray-400 hover:text-gray-200"
+          }`}
+        >
+          <Layers size={14} />
+          My Collection
+        </button>
+        <button
+          onClick={() => setTab("downloaded")}
+          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+            tab === "downloaded" ? "bg-brand-600 text-white" : "text-gray-400 hover:text-gray-200"
+          }`}
+        >
+          <Download size={14} />
+          Downloads
+          {downloadedItems.length > 0 && (
+            <span className="text-[10px] opacity-80">({downloadedItems.length})</span>
+          )}
+        </button>
+        <button
+          onClick={() => setTab("want")}
+          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+            tab === "want" ? "bg-rose-700 text-white" : "text-gray-400 hover:text-gray-200"
+          }`}
+        >
+          <Heart size={14} />
+          Want
+        </button>
+        <button
+          onClick={() => setTab("finished")}
+          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+            tab === "finished" ? "bg-violet-700 text-white" : "text-gray-400 hover:text-gray-200"
+          }`}
+        >
+          <CheckCircle2 size={14} />
+          Finished
+        </button>
+      </div>
+
+      {tab === "abs" && viewToggle(absView, setAbsView)}
+      {tab === "ebooks" && viewToggle(ebookView, setEbookView)}
+      {tab === "collection" && viewToggle(collectionView, setCollectionView)}
+
+      {tab === "abs" && <FilterBar options={absFilterOptions} />}
+      {tab === "ebooks" && <FilterBar options={ebookFilterOptions} />}
+      {tab === "collection" && <FilterBar options={collectionFilterOptions} />}
+    </>
+  ) : null;
+
   return (
     <div className="max-w-7xl mx-auto px-4 lg:px-6 py-8">
       <Modal
@@ -1315,8 +1388,15 @@ export default function MyLibrary() {
         </div>
       )}
 
-      {/* Sticky chrome: library search + tab/filter panels (under app nav + safe area) */}
-      <div className="sticky z-40 -mx-4 lg:-mx-6 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800/80 pt-1 pb-3 mb-4 space-y-3 top-[calc(3.5rem+env(safe-area-inset-top,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))] lg:pl-[max(1.5rem,env(safe-area-inset-left,0px))] lg:pr-[max(1.5rem,env(safe-area-inset-right,0px))]">
+      {/* Mobile: floating search overlay. Desktop: sticky search + tabs under nav. */}
+      <div className="h-[3.75rem] lg:hidden" aria-hidden />
+      <div
+        className={`z-40 -mx-4 lg:-mx-6 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800/80 pt-1 pb-2 lg:pb-3 mb-0 lg:mb-4 space-y-0 lg:space-y-3
+          fixed lg:sticky left-0 right-0 lg:left-auto lg:right-auto
+          top-[calc(3.5rem+env(safe-area-inset-top,0px))]
+          pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))]
+          lg:pl-[max(1.5rem,env(safe-area-inset-left,0px))] lg:pr-[max(1.5rem,env(safe-area-inset-right,0px))]`}
+      >
         <div className="relative">
           <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
           <input
@@ -1339,79 +1419,10 @@ export default function MyLibrary() {
             </button>
           )}
         </div>
-
-        {!isSearching && (
-          <>
-            <div className="flex flex-nowrap gap-1 bg-gray-800/50 p-1 rounded-lg overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-full">
-              <button
-                onClick={() => setTab("abs")}
-                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  tab === "abs" ? "bg-emerald-600 text-white" : "text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <Headphones size={14} />
-                Audiobooks
-              </button>
-              <button
-                onClick={() => setTab("ebooks")}
-                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  tab === "ebooks" ? "bg-amber-600 text-white" : "text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <BookOpen size={14} />
-                eBooks
-              </button>
-              <button
-                onClick={() => setTab("collection")}
-                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  tab === "collection" ? "bg-teal-700 text-white" : "text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <Layers size={14} />
-                My Collection
-              </button>
-              <button
-                onClick={() => setTab("downloaded")}
-                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  tab === "downloaded" ? "bg-brand-600 text-white" : "text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <Download size={14} />
-                Downloads
-                {downloadedItems.length > 0 && (
-                  <span className="text-[10px] opacity-80">({downloadedItems.length})</span>
-                )}
-              </button>
-              <button
-                onClick={() => setTab("want")}
-                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  tab === "want" ? "bg-rose-700 text-white" : "text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <Heart size={14} />
-                Want
-              </button>
-              <button
-                onClick={() => setTab("finished")}
-                className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  tab === "finished" ? "bg-violet-700 text-white" : "text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <CheckCircle2 size={14} />
-                Finished
-              </button>
-            </div>
-
-            {tab === "abs" && viewToggle(absView, setAbsView)}
-            {tab === "ebooks" && viewToggle(ebookView, setEbookView)}
-            {tab === "collection" && viewToggle(collectionView, setCollectionView)}
-
-            {tab === "abs" && <FilterBar options={absFilterOptions} />}
-            {tab === "ebooks" && <FilterBar options={ebookFilterOptions} />}
-            {tab === "collection" && <FilterBar options={collectionFilterOptions} />}
-          </>
-        )}
+        <div className="hidden lg:block space-y-3">{renderTabChrome()}</div>
       </div>
+
+      {!isSearching && <div className="lg:hidden mb-4 space-y-3">{renderTabChrome()}</div>}
 
       {/* Search Results */}
       {isSearching ? (
@@ -2348,7 +2359,7 @@ function EmptyABS({ onBrowse, onDownloads }: { onBrowse: () => void; onDownloads
       <Headphones className="mx-auto mb-4 text-gray-600" size={40} />
       <h3 className="text-base font-semibold text-gray-300 mb-2">No audiobooks yet</h3>
       <p className="text-sm text-gray-500 mb-4 max-w-md mx-auto">
-        Find a book in Browse → Get audiobook → track it under Downloads → Listen here.
+        Find a book in Browse → Get audiobook → track it under Requests → Listen here.
       </p>
       <div className="flex flex-wrap items-center justify-center gap-2">
         <button onClick={onBrowse} className="px-5 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-500 transition-colors">
@@ -2356,7 +2367,7 @@ function EmptyABS({ onBrowse, onDownloads }: { onBrowse: () => void; onDownloads
         </button>
         {onDownloads && (
           <button onClick={onDownloads} className="px-5 py-2 bg-gray-800 text-gray-200 border border-gray-700 rounded-lg text-sm font-medium hover:bg-gray-700 transition-colors">
-            Downloads
+            Requests
           </button>
         )}
       </div>

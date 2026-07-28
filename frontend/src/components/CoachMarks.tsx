@@ -18,7 +18,7 @@ const STEPS = [
     icon: Compass,
   },
   {
-    title: "Downloads",
+    title: "Requests",
     body: "Track requests here and wait until a title is Ready to listen.",
     to: "/downloads",
     icon: Download,

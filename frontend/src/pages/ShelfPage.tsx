@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, BookOpen, Loader2 } from "lucide-react";
+import { ArrowLeft, BookOpen, Loader2, SlidersHorizontal } from "lucide-react";
 import api from "../api/client";
 import BookGrid from "../components/BookGrid";
 import GenreSidebar from "../components/GenreSidebar";
@@ -46,9 +46,14 @@ function isTaxonomySlug(slug: string, genres: Genre[]): boolean {
 interface Props {
   genreMobileOpen?: boolean;
   onGenreMobileClose?: () => void;
+  onGenreToggle?: () => void;
 }
 
-export default function ShelfPage({ genreMobileOpen = false, onGenreMobileClose }: Props) {
+export default function ShelfPage({
+  genreMobileOpen = false,
+  onGenreMobileClose,
+  onGenreToggle,
+}: Props) {
   const { slug = "" } = useParams<{ slug: string }>();
   const navigate = useNavigate();
   const decoded = decodeURIComponent(slug);
@@ -196,14 +201,28 @@ export default function ShelfPage({ genreMobileOpen = false, onGenreMobileClose 
         )}
 
         <div className="flex-1 min-w-0 py-8">
-          <button
-            type="button"
-            onClick={() => navigate(-1)}
-            className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-200 mb-4"
-          >
-            <ArrowLeft size={16} />
-            Back
-          </button>
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <button
+              type="button"
+              onClick={() => navigate(-1)}
+              className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-200"
+            >
+              <ArrowLeft size={16} />
+              Back
+            </button>
+            {onGenreToggle && (
+              <button
+                type="button"
+                onClick={onGenreToggle}
+                className="lg:hidden inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
+                title="Filter genres"
+                aria-label="Filter genres"
+              >
+                <SlidersHorizontal size={16} />
+                Genres
+              </button>
+            )}
+          </div>
 
           <h1 className="text-2xl font-bold text-gray-100 mb-1">{heading}</h1>
           <p className="text-sm text-gray-500 mb-6">

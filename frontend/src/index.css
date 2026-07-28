@@ -114,7 +114,8 @@
 body {
   min-height: 100vh;
   color-scheme: dark;
-  overflow-x: hidden;
+  /* clip (not hidden) so position:sticky top nav still works while preventing sideways scroll */
+  overflow-x: clip;
   max-width: 100%;
   background-color: rgb(var(--gray-950));
   color: rgb(var(--gray-100));

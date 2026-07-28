@@ -106,7 +106,7 @@ export function useNativeNotifications(enabled: boolean) {
           status === "admin_rejected" ? "Request rejected" : "Download failed";
         void showNativeNotification(
           title,
-          msg.detail || "Open Downloads for details",
+          msg.detail || "Open Requests for details",
           { url: "/requests" }
         );
         return;

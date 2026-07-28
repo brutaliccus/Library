@@ -20,6 +20,29 @@ export interface BrowseChild {
   iconUri?: string;
 }
 
+export interface NativePlaybackEvent {
+  mediaId?: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  coverUrl?: string;
+  playing?: boolean;
+  duration?: number;
+  position?: number;
+  playbackRate?: number;
+  trackIndex?: number;
+  nativeOwner?: boolean;
+  error?: string;
+}
+
+export interface PlayableTrackPayload {
+  contentUrl: string;
+  title?: string;
+  startOffset?: number;
+  duration?: number;
+  mimeType?: string;
+}
+
 interface LibraryAutoPlugin {
   syncPlayback(options: {
     active: boolean;
@@ -40,6 +63,7 @@ interface LibraryAutoPlugin {
       action: string;
       seekTime?: number | null;
       mediaId?: string;
+      nativeStarted?: boolean;
     }) => void
   ): Promise<void>;
   resolveBrowseChildren(options: {
@@ -53,10 +77,44 @@ interface LibraryAutoPlugin {
     /** When true, allow clearing a non-empty native cache (live empty confirm). */
     allowEmpty?: boolean;
   }): Promise<void>;
+  /** Persist track URLs + auth so locked AA can start ExoPlayer without JS. */
+  cachePlayableMedia(options: {
+    mediaId: string;
+    title: string;
+    author?: string;
+    coverUrl?: string;
+    authToken?: string;
+    position?: number;
+    trackIndex?: number;
+    totalDuration?: number;
+    tracks: PlayableTrackPayload[];
+  }): Promise<void>;
+  getNativePlaybackState(): Promise<{
+    nativeOwner: boolean;
+    playing: boolean;
+    mediaId?: string;
+    position?: number;
+  }>;
+  getPlayableMedia(options: { mediaId: string }): Promise<{
+    mediaId?: string;
+    title?: string;
+    author?: string;
+    coverUrl?: string;
+    position?: number;
+    trackIndex?: number;
+    totalDuration?: number;
+    tracks?: PlayableTrackPayload[];
+  }>;
+  /** Release ExoPlayer before WebView HTML5 audio takes over. */
+  handOffNativePlayback(): Promise<void>;
   bringToForeground(): Promise<void>;
   addListener(
     eventName: "browseRequest",
     listenerFunc: (event: { parentId: string; requestId: string }) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: "nativePlayback",
+    listenerFunc: (event: NativePlaybackEvent) => void
   ): Promise<PluginListenerHandle>;
 }
 

@@ -175,6 +175,8 @@ async function loadContinueListening(): Promise<BrowseChild[]> {
       browsable: false,
       iconUri: coverUri(item.coverUrl, item.itemId),
     });
+    // Warm native ExoPlayer cache: offline manifest first, else /offline API.
+    void warmAbsPlayableCache(item);
   }
 
   for (const item of (rdRes.data?.items ?? []) as RDHistoryItem[]) {
@@ -188,9 +190,59 @@ async function loadContinueListening(): Promise<BrowseChild[]> {
       browsable: false,
       iconUri: coverUri(item.coverUrl),
     });
+    // Warm native ExoPlayer cache while unlocked — locked AA play needs URLs.
+    void import("./aaPlayableCache").then(({ cacheRdPlayable }) => {
+      const total = item.tracks.reduce((s, t) => s + (t.duration || 0), 0);
+      return cacheRdPlayable(
+        item.id,
+        item.title,
+        item.author,
+        item.coverUrl,
+        item.tracks,
+        total,
+        item.trackPositionSeconds || 0,
+        item.currentTrackIndex || 0
+      );
+    });
   }
 
   return children.slice(0, 24);
+}
+
+async function warmAbsPlayableCache(item: InProgressABS): Promise<void> {
+  try {
+    const { getAbsOfflineManifest } = await import("../utils/offlinePlayback");
+    const { cacheAbsPlayable } = await import("./aaPlayableCache");
+    const m = getAbsOfflineManifest(item.itemId);
+    if (m?.tracks?.length) {
+      await cacheAbsPlayable(
+        item.itemId,
+        m.title || item.title,
+        m.author || item.author,
+        m.coverUrl || item.coverUrl || "",
+        m.tracks,
+        m.totalDuration,
+        0,
+        0
+      );
+      return;
+    }
+    // Never-played-but-in-progress: /offline gives proxy URLs without a session.
+    const { data } = await api.get(`/stream/abs/${encodeURIComponent(item.itemId)}/offline`);
+    if (!data?.tracks?.length) return;
+    await cacheAbsPlayable(
+      item.itemId,
+      data.title || item.title,
+      data.author || item.author,
+      data.coverUrl || item.coverUrl || "",
+      data.tracks,
+      data.duration || 0,
+      0,
+      0
+    );
+  } catch {
+    /* offline / API fail — browse still works from cache */
+  }
 }
 
 async function loadLibraryRoot(): Promise<BrowseChild[]> {
@@ -318,6 +370,14 @@ export async function handlePlayMediaId(
   mediaId: string,
   handlers: AutoPlayHandlers
 ): Promise<void> {
+  // If native ExoPlayer already owns this session, never start WebView audio.
+  try {
+    const { isNativePlaybackOwner } = await import("./libraryAuto");
+    if (isNativePlaybackOwner()) return;
+  } catch {
+    /* ignore */
+  }
+
   try {
     await LibraryAuto.bringToForeground();
     // Give the WebView time to resume after a cold start / interruption.
@@ -360,6 +420,23 @@ export async function handlePlayMediaId(
       }
     }
     if (!item?.tracks?.length) return;
+    // Warm native playable cache for next locked-phone AA play.
+    try {
+      const { cacheRdPlayable } = await import("./aaPlayableCache");
+      const total = item.tracks.reduce((s, t) => s + (t.duration || 0), 0);
+      void cacheRdPlayable(
+        item.id,
+        item.title,
+        item.author,
+        item.coverUrl,
+        item.tracks,
+        total,
+        item.trackPositionSeconds || 0,
+        item.currentTrackIndex || 0
+      );
+    } catch {
+      /* ignore */
+    }
     handlers.playRD(item.tracks, item.title, item.author, item.coverUrl, item.id, {
       startAt: item.progressSeconds,
       trackIndex: item.currentTrackIndex,

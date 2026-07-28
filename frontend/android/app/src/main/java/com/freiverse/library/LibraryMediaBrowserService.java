@@ -46,10 +46,10 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             public void onPlay() {
                 LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
                 bridge.requestAudioFocusForPlay();
-                // Flip the session state immediately so the Android Auto button
-                // updates without waiting for the (possibly throttled) WebView
-                // round-trip. The next syncPlayback from JS confirms/corrects it.
                 bridge.setPlayingOptimistic(true);
+                if (bridge.tryNativeResume()) {
+                    return;
+                }
                 bridge.dispatch("play", null);
             }
 
@@ -57,6 +57,11 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             public void onPause() {
                 LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
                 bridge.setPlayingOptimistic(false);
+                if (bridge.tryNativePause()) {
+                    // Still notify JS so UI state mirrors when unlocked.
+                    bridge.dispatch("pause", null);
+                    return;
+                }
                 // Keep audio focus so a subsequent play from AA/lock screen
                 // doesn't race a fresh focus request while the WebView wakes.
                 bridge.dispatch("pause", null);
@@ -64,30 +69,47 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
             @Override
             public void onStop() {
+                LibraryAutoBridge.getInstance().stopNativePlayback();
                 LibraryAutoBridge.getInstance().abandonAudioFocus();
                 LibraryAutoBridge.getInstance().dispatch("stop", null);
             }
 
             @Override
             public void onSkipToNext() {
-                LibraryAutoBridge.getInstance().dispatch("nexttrack", null);
+                LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
+                if (bridge.tryNativeSkipNext()) {
+                    return;
+                }
+                bridge.dispatch("nexttrack", null);
             }
 
             @Override
             public void onSkipToPrevious() {
-                LibraryAutoBridge.getInstance().dispatch("previoustrack", null);
+                LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
+                if (bridge.tryNativeSkipPrevious()) {
+                    return;
+                }
+                bridge.dispatch("previoustrack", null);
             }
 
             @Override
             public void onSeekTo(long pos) {
+                LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
+                if (bridge.tryNativeSeekTo(pos)) {
+                    return;
+                }
                 Bundle extras = new Bundle();
                 extras.putLong("seekTimeMs", pos);
-                LibraryAutoBridge.getInstance().dispatch("seekto", extras);
+                bridge.dispatch("seekto", extras);
             }
 
             @Override
             public void onFastForward() {
-                LibraryAutoBridge.getInstance().seekRelativeAndDispatch(
+                LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
+                if (bridge.tryNativeSeekRelative(LibraryAutoBridge.SKIP_MS)) {
+                    return;
+                }
+                bridge.seekRelativeAndDispatch(
                     LibraryAutoBridge.SKIP_MS,
                     "seekforward"
                 );
@@ -95,7 +117,11 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
 
             @Override
             public void onRewind() {
-                LibraryAutoBridge.getInstance().seekRelativeAndDispatch(
+                LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
+                if (bridge.tryNativeSeekRelative(-LibraryAutoBridge.SKIP_MS)) {
+                    return;
+                }
+                bridge.seekRelativeAndDispatch(
                     -LibraryAutoBridge.SKIP_MS,
                     "seekbackward"
                 );
@@ -114,9 +140,16 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             public void onPlayFromMediaId(String mediaId, Bundle extras) {
                 LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
                 bridge.requestAudioFocusForPlay();
-                // Optimistic play so AA shows playing while the book loads.
                 if (bridge.isActive()) {
                     bridge.setPlayingOptimistic(true);
+                }
+                // Native ExoPlayer first — locked phone must not depend on WebView.
+                if (bridge.tryNativePlayFromMediaId(mediaId)) {
+                    Bundle payload = new Bundle();
+                    payload.putString("mediaId", mediaId);
+                    payload.putBoolean("nativeStarted", true);
+                    bridge.dispatch("playmedia", payload);
+                    return;
                 }
                 Bundle payload = new Bundle();
                 payload.putString("mediaId", mediaId);

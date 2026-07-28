@@ -2,7 +2,11 @@ import { Capacitor } from "@capacitor/core";
 import type { MediaActionHandlers, NowPlayingLike } from "./capacitorMediaSession";
 import { playbackScope } from "../utils/playerNav";
 import { MEDIA_SKIP_SECONDS, toAbsoluteArtworkUrl } from "./playerMediaSession";
-import { LibraryAuto, type LibraryAutoAction } from "./libraryAutoPlugin";
+import {
+  LibraryAuto,
+  type LibraryAutoAction,
+  type NativePlaybackEvent,
+} from "./libraryAutoPlugin";
 import {
   handlePlayMediaId,
   prefetchAndroidAutoBrowseCache,
@@ -16,6 +20,12 @@ export { LibraryAuto } from "./libraryAutoPlugin";
 
 let autoHandlersRegistered = false;
 let playHandlers: AutoPlayHandlers | null = null;
+let nativePlaybackListener: { remove: () => Promise<void> } | null = null;
+
+/** True while ExoPlayer owns PCM — WebView must not start a second decoder. */
+let nativeOwnsPlayback = false;
+let lastNativeEvent: NativePlaybackEvent | null = null;
+let attachNativeHandler: ((ev: NativePlaybackEvent) => void) | null = null;
 
 let lastMetaKey = "";
 let lastChapterKey = "";
@@ -28,6 +38,30 @@ const PAUSED_SYNC_GRACE_MS = 2_500;
 /** Cap Activity wakes — startActivity storms rebooted some OEM devices. */
 let lastBringToForegroundAt = 0;
 const BRING_TO_FOREGROUND_COOLDOWN_MS = 8_000;
+
+export function isNativePlaybackOwner(): boolean {
+  return nativeOwnsPlayback;
+}
+
+export function getLastNativePlaybackEvent(): NativePlaybackEvent | null {
+  return lastNativeEvent;
+}
+
+/** PlayerContext registers to mirror native position into React state without HTML5 play. */
+export function setNativePlaybackAttachHandler(
+  handler: ((ev: NativePlaybackEvent) => void) | null
+): void {
+  attachNativeHandler = handler;
+}
+
+export async function handOffNativeToWebView(): Promise<void> {
+  try {
+    await LibraryAuto.handOffNativePlayback();
+  } catch {
+    /* ignore */
+  }
+  nativeOwnsPlayback = false;
+}
 
 /** Cooldown-guarded Activity wake used by JS retry / AA paths. */
 export async function bringToForegroundSafe(): Promise<void> {
@@ -73,6 +107,17 @@ export async function registerAndroidAutoHandlers(
     // Keep native Continue/Library warm whenever handlers register (app open).
     void prefetchAndroidAutoBrowseCache();
 
+    if (!nativePlaybackListener) {
+      nativePlaybackListener = await LibraryAuto.addListener(
+        "nativePlayback",
+        (ev: NativePlaybackEvent) => {
+          nativeOwnsPlayback = ev.nativeOwner === true;
+          lastNativeEvent = ev;
+          attachNativeHandler?.(ev);
+        }
+      );
+    }
+
     if (autoHandlersRegistered) return;
 
     const SKIP = MEDIA_SKIP_SECONDS;
@@ -81,11 +126,13 @@ export async function registerAndroidAutoHandlers(
       fn: (details?: {
         seekTime?: number | null;
         mediaId?: string;
+        nativeStarted?: boolean;
       }) => void;
     }> = [
       {
         action: "play",
         fn: () => {
+          if (nativeOwnsPlayback) return;
           void withWebViewReady(() => handlers.play());
         },
       },
@@ -98,14 +145,38 @@ export async function registerAndroidAutoHandlers(
         },
       },
       { action: "stop", fn: () => handlers.dismissPlayer() },
-      // Native MediaSession onRewind / onFastForward / custom ±15 → same in-app seek.
-      { action: "seekbackward", fn: () => handlers.seekRelative(-SKIP) },
-      { action: "seekforward", fn: () => handlers.seekRelative(SKIP) },
-      { action: "previoustrack", fn: () => handlers.skipChapterPrev() },
-      { action: "nexttrack", fn: () => handlers.skipChapterNext() },
+      {
+        action: "seekbackward",
+        fn: () => {
+          if (nativeOwnsPlayback) return;
+          handlers.seekRelative(-SKIP);
+        },
+      },
+      {
+        action: "seekforward",
+        fn: () => {
+          if (nativeOwnsPlayback) return;
+          handlers.seekRelative(SKIP);
+        },
+      },
+      {
+        action: "previoustrack",
+        fn: () => {
+          if (nativeOwnsPlayback) return;
+          handlers.skipChapterPrev();
+        },
+      },
+      {
+        action: "nexttrack",
+        fn: () => {
+          if (nativeOwnsPlayback) return;
+          handlers.skipChapterNext();
+        },
+      },
       {
         action: "seekto",
         fn: (d) => {
+          if (nativeOwnsPlayback) return;
           const t = d?.seekTime;
           if (t != null && isFinite(t)) handlers.seek(t);
         },
@@ -115,6 +186,12 @@ export async function registerAndroidAutoHandlers(
         fn: (d) => {
           const id = d?.mediaId;
           const ph = playHandlers;
+          // Native ExoPlayer already started — attach UI only, do not loadTrack/blob.
+          if (d?.nativeStarted || nativeOwnsPlayback) {
+            markOptimisticPlaying();
+            if (lastNativeEvent) attachNativeHandler?.(lastNativeEvent);
+            return;
+          }
           if (id && ph) {
             void withWebViewReady(() => {
               void handlePlayMediaId(id, ph);
@@ -141,6 +218,9 @@ export async function syncAndroidAutoPlayback(
   playbackRate: number
 ): Promise<void> {
   if (Capacitor.getPlatform() !== "android") return;
+
+  // Native owns PCM — do not push HTML5 paused ticks into MediaSession.
+  if (nativeOwnsPlayback) return;
 
   try {
     if (!np) {

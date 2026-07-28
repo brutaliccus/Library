@@ -48,6 +48,7 @@ public final class LibraryAutoBridge {
     private static final String TAG = "LibraryAutoBridge";
     private static final String PREFS = "library_auto_session";
     private static final String BROWSE_PREFS = "library_auto_browse";
+    private static final String PLAYABLE_PREFS = "library_auto_playable";
     private static final long BROWSE_TIMEOUT_MS = 8_000;
 
     public interface ActionListener {
@@ -135,6 +136,12 @@ public final class LibraryAutoBridge {
      * still uses the deep-idle retry schedule.
      */
     private boolean deepIdlePlayLatched = false;
+    /**
+     * When true, ExoPlayer owns PCM and the WebView must not start HTML5 audio
+     * for the same session (attach UI only). Cleared on handoff / stop.
+     */
+    private boolean nativeOwnsPlayback = false;
+    private String nativeMediaId = "";
 
     private LibraryAutoBridge() {}
 
@@ -145,7 +152,236 @@ public final class LibraryAutoBridge {
         audioManager = (AudioManager) service.getApplicationContext()
             .getSystemService(Context.AUDIO_SERVICE);
         restorePersistedSession(service.getApplicationContext());
+        LibraryNativePlayer.getInstance().addListener(nativeListener);
         refreshSession(true);
+    }
+
+    private final LibraryNativePlayer.Listener nativeListener =
+        new LibraryNativePlayer.Listener() {
+            @Override
+            public void onNativePlaying(
+                String mediaId,
+                String title,
+                String artist,
+                String album,
+                String coverUrl,
+                boolean playing,
+                long durationMs,
+                long positionMs,
+                float speed,
+                int trackIndex
+            ) {
+                nativeOwnsPlayback = true;
+                nativeMediaId = mediaId != null ? mediaId : "";
+                // Keep a short settle window so OEM focus blips don't pause Exo.
+                ignoreFocusLossUntilElapsed =
+                    SystemClock.elapsedRealtime() + FOCUS_LOSS_GRACE_MS;
+                update(
+                    title,
+                    artist,
+                    album,
+                    null,
+                    true,
+                    playing,
+                    durationMs,
+                    positionMs,
+                    speed
+                );
+                Context ctx = appContextRef.get();
+                if (ctx != null) {
+                    LibraryMediaBrowserService svc = serviceRef.get();
+                    if (svc != null) {
+                        svc.promoteToForeground();
+                    }
+                }
+            }
+
+            @Override
+            public void onNativeStopped() {
+                nativeOwnsPlayback = false;
+                nativeMediaId = "";
+            }
+
+            @Override
+            public void onNativeError(String message) {
+                Log.w(TAG, "Native playback error: " + message);
+                // Fall back to WebView sticky path if still latched.
+                nativeOwnsPlayback = false;
+            }
+        };
+
+    public boolean isNativeOwningPlayback() {
+        return nativeOwnsPlayback && LibraryNativePlayer.getInstance().isOwning();
+    }
+
+    @Nullable
+    public String getNativeMediaId() {
+        return nativeMediaId.isEmpty() ? null : nativeMediaId;
+    }
+
+    /** Persist a playable queue so locked AA can start ExoPlayer without JS. */
+    public void putPlayableCache(String mediaId, JSONObject playableJson) {
+        if (mediaId == null || mediaId.isEmpty() || playableJson == null) {
+            return;
+        }
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return;
+        }
+        try {
+            playableJson.put("mediaId", mediaId);
+            ctx
+                .getSharedPreferences(PLAYABLE_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(mediaId, playableJson.toString())
+                .apply();
+            // Cap entries — keep Continue Listening warm without unbounded growth.
+            SharedPreferences prefs =
+                ctx.getSharedPreferences(PLAYABLE_PREFS, Context.MODE_PRIVATE);
+            if (prefs.getAll().size() > 40) {
+                // Drop oldest-ish by rewriting only recent keys we touch; simple trim:
+                // leave as-is unless severely over — SharedPreferences is small JSON.
+                Log.i(TAG, "Playable cache size=" + prefs.getAll().size());
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "putPlayableCache failed", e);
+        }
+    }
+
+    @Nullable
+    public LibraryNativePlayer.Playable getPlayableCache(String mediaId) {
+        if (mediaId == null || mediaId.isEmpty()) {
+            return null;
+        }
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return null;
+        }
+        String raw =
+            ctx
+                .getSharedPreferences(PLAYABLE_PREFS, Context.MODE_PRIVATE)
+                .getString(mediaId, null);
+        if (raw == null || raw.isEmpty()) {
+            return null;
+        }
+        try {
+            return LibraryNativePlayer.parsePlayable(new JSONObject(raw));
+        } catch (Exception e) {
+            Log.w(TAG, "getPlayableCache parse failed", e);
+            return null;
+        }
+    }
+
+    /**
+     * Start ExoPlayer from a cached playable. Returns true if native took ownership
+     * (caller should skip / cancel WebView sticky wake storms).
+     */
+    public boolean tryNativePlayFromMediaId(String mediaId) {
+        if (mediaId == null || mediaId.isEmpty() || "now_playing".equals(mediaId)) {
+            // now_playing: resume native if already owning, else false → JS play().
+            if ("now_playing".equals(mediaId) && isNativeOwningPlayback()) {
+                LibraryNativePlayer.getInstance().resume();
+                return true;
+            }
+            if ("now_playing".equals(mediaId)) {
+                // Try last known media id from session title — not enough; fall through.
+                return false;
+            }
+        }
+        LibraryNativePlayer.Playable playable = getPlayableCache(mediaId);
+        if (playable == null) {
+            Log.i(TAG, "No native playable cache for " + mediaId);
+            return false;
+        }
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return false;
+        }
+        // Optimistic session metadata before first Exo tick.
+        update(
+            playable.title,
+            playable.author,
+            playable.author,
+            null,
+            true,
+            true,
+            playable.totalDurationMs,
+            playable.positionMs + trackOffset(playable),
+            1.0f
+        );
+        nativeOwnsPlayback = true;
+        nativeMediaId = mediaId;
+        LibraryNativePlayer.getInstance().play(ctx, playable);
+        return true;
+    }
+
+    private static long trackOffset(LibraryNativePlayer.Playable playable) {
+        int idx = Math.min(playable.trackIndex, Math.max(0, playable.tracks.size() - 1));
+        if (idx >= 0 && idx < playable.tracks.size()) {
+            return playable.tracks.get(idx).startOffsetMs;
+        }
+        return 0;
+    }
+
+    /** Resume native player if it owns the session. */
+    public boolean tryNativeResume() {
+        if (!isNativeOwningPlayback()) {
+            return false;
+        }
+        LibraryNativePlayer.getInstance().resume();
+        return true;
+    }
+
+    public boolean tryNativePause() {
+        if (!isNativeOwningPlayback()) {
+            return false;
+        }
+        LibraryNativePlayer.getInstance().pause();
+        return true;
+    }
+
+    public boolean tryNativeSeekRelative(long deltaMs) {
+        if (!isNativeOwningPlayback()) {
+            return false;
+        }
+        LibraryNativePlayer.getInstance().seekRelative(deltaMs);
+        return true;
+    }
+
+    public boolean tryNativeSeekTo(long positionMs) {
+        if (!isNativeOwningPlayback()) {
+            return false;
+        }
+        LibraryNativePlayer.getInstance().seekTo(positionMs);
+        return true;
+    }
+
+    public boolean tryNativeSkipNext() {
+        if (!isNativeOwningPlayback()) {
+            return false;
+        }
+        LibraryNativePlayer.getInstance().skipToNextTrack();
+        return true;
+    }
+
+    public boolean tryNativeSkipPrevious() {
+        if (!isNativeOwningPlayback()) {
+            return false;
+        }
+        LibraryNativePlayer.getInstance().skipToPreviousTrack();
+        return true;
+    }
+
+    /** WebView is becoming the audio owner — stop ExoPlayer without wiping AA session. */
+    public void handOffNativeToWebView() {
+        nativeOwnsPlayback = false;
+        LibraryNativePlayer.getInstance().handOffToWebView();
+    }
+
+    public void stopNativePlayback() {
+        nativeOwnsPlayback = false;
+        nativeMediaId = "";
+        LibraryNativePlayer.getInstance().stopAndReleaseOwnership();
     }
 
     /** So JS can persist browse folders before MediaBrowserService has attached. */
@@ -328,6 +564,7 @@ public final class LibraryAutoBridge {
     }
 
     public void clear() {
+        stopNativePlayback();
         abandonAudioFocus();
         resumeAfterFocusGain = false;
         ignorePausedSyncUntilElapsed = 0;
@@ -437,6 +674,25 @@ public final class LibraryAutoBridge {
         switch (focusChange) {
             case AudioManager.AUDIOFOCUS_LOSS:
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT: {
+                // Native ExoPlayer is playing under OUR focus request — only pause
+                // for real external loss (call / other app), not settle races.
+                if (isNativeOwningPlayback()) {
+                    if (SystemClock.elapsedRealtime() < ignoreFocusLossUntilElapsed) {
+                        Log.i(TAG, "Ignoring focus loss during native play settle");
+                        return;
+                    }
+                    if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
+                        resumeAfterFocusGain = false;
+                        tryNativePause();
+                        setPlayingOptimistic(false);
+                        abandonAudioFocus();
+                    } else {
+                        resumeAfterFocusGain = playing || resumeAfterFocusGain;
+                        tryNativePause();
+                        setPlayingOptimistic(false);
+                    }
+                    break;
+                }
                 // WebView HTML5 audio taking focus after our MediaSession play —
                 // do not pause or the user hears ~0.5s then silence.
                 if (SystemClock.elapsedRealtime() < ignoreFocusLossUntilElapsed) {
@@ -466,7 +722,9 @@ public final class LibraryAutoBridge {
                 if (resumeAfterFocusGain && active) {
                     resumeAfterFocusGain = false;
                     setPlayingOptimistic(true);
-                    dispatch("play", null);
+                    if (!tryNativeResume()) {
+                        dispatch("play", null);
+                    }
                 }
                 break;
             default:

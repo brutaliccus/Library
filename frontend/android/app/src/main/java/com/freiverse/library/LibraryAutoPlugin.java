@@ -80,12 +80,66 @@ public class LibraryAutoPlugin extends Plugin
         }
         LibraryAutoBridge.getInstance().addActionListener(this);
         LibraryAutoBridge.getInstance().setBrowseRequestEmitter(this);
+        LibraryNativePlayer.getInstance().addListener(nativePlayerListener);
     }
+
+    private final LibraryNativePlayer.Listener nativePlayerListener =
+        new LibraryNativePlayer.Listener() {
+            @Override
+            public void onNativePlaying(
+                String mediaId,
+                String title,
+                String artist,
+                String album,
+                String coverUrl,
+                boolean playing,
+                long durationMs,
+                long positionMs,
+                float speed,
+                int trackIndex
+            ) {
+                // Bridge already updates MediaSession; notify JS for attach/UI.
+                JSObject data = new JSObject();
+                data.put("mediaId", mediaId != null ? mediaId : "");
+                data.put("title", title != null ? title : "");
+                data.put("artist", artist != null ? artist : "");
+                data.put("album", album != null ? album : "");
+                data.put("coverUrl", coverUrl != null ? coverUrl : "");
+                data.put("playing", playing);
+                data.put("duration", durationMs / 1000.0);
+                data.put("position", positionMs / 1000.0);
+                data.put("playbackRate", speed);
+                data.put("trackIndex", trackIndex);
+                data.put("nativeOwner", true);
+                notifyListeners("nativePlayback", data);
+                // Confirm sticky — native audio is the confirmation, not WebView.
+                if (playing) {
+                    cancelStickyPlay();
+                }
+            }
+
+            @Override
+            public void onNativeStopped() {
+                JSObject data = new JSObject();
+                data.put("nativeOwner", false);
+                data.put("playing", false);
+                notifyListeners("nativePlayback", data);
+            }
+
+            @Override
+            public void onNativeError(String message) {
+                JSObject data = new JSObject();
+                data.put("error", message != null ? message : "error");
+                data.put("nativeOwner", false);
+                notifyListeners("nativePlayback", data);
+            }
+        };
 
     @Override
     protected void handleOnDestroy() {
         cancelStickyPlay();
         releasePlayWakeLock();
+        LibraryNativePlayer.getInstance().removeListener(nativePlayerListener);
         LibraryAutoBridge.getInstance().removeActionListener(this);
         LibraryAutoBridge.getInstance().setBrowseRequestEmitter(null);
         super.handleOnDestroy();
@@ -138,6 +192,89 @@ public class LibraryAutoPlugin extends Plugin
      * Proactive persist of Continue / Library folders while the app is awake so
      * Android Auto can browse with the phone locked (no live JS/API required).
      */
+    /**
+     * Persist a full playable queue (track URLs + auth) so Android Auto can
+     * start ExoPlayer while the phone is locked / WebView frozen.
+     */
+    @PluginMethod
+    public void cachePlayableMedia(PluginCall call) {
+        String mediaId = call.getString("mediaId");
+        if (mediaId == null || mediaId.isEmpty()) {
+            call.reject("mediaId required");
+            return;
+        }
+        Context ctx = getContext();
+        if (ctx != null) {
+            LibraryAutoBridge.getInstance().ensureAppContext(ctx);
+        }
+        try {
+            JSObject raw = call.getData();
+            if (raw == null) {
+                call.reject("playable payload required");
+                return;
+            }
+            LibraryAutoBridge.getInstance().putPlayableCache(mediaId, new JSONObject(raw.toString()));
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("cachePlayableMedia failed: " + e.getMessage());
+        }
+    }
+
+    /** Snapshot of native ExoPlayer ownership — used when the app UI opens mid-play. */
+    @PluginMethod
+    public void getNativePlaybackState(PluginCall call) {
+        LibraryNativePlayer np = LibraryNativePlayer.getInstance();
+        JSObject data = new JSObject();
+        boolean owning = LibraryAutoBridge.getInstance().isNativeOwningPlayback();
+        data.put("nativeOwner", owning);
+        data.put("playing", owning && np.isPlaying());
+        String mid = LibraryAutoBridge.getInstance().getNativeMediaId();
+        if (mid != null) {
+            data.put("mediaId", mid);
+        }
+        data.put("position", owning ? np.getPositionMs() / 1000.0 : 0);
+        call.resolve(data);
+    }
+
+    /** Return a cached playable JSON payload for UI attach without re-fetching. */
+    @PluginMethod
+    public void getPlayableMedia(PluginCall call) {
+        String mediaId = call.getString("mediaId");
+        if (mediaId == null || mediaId.isEmpty()) {
+            call.reject("mediaId required");
+            return;
+        }
+        Context ctx = getContext();
+        if (ctx != null) {
+            LibraryAutoBridge.getInstance().ensureAppContext(ctx);
+        }
+        String raw =
+            ctx != null
+                ? ctx
+                    .getSharedPreferences("library_auto_playable", Context.MODE_PRIVATE)
+                    .getString(mediaId, null)
+                : null;
+        if (raw == null || raw.isEmpty()) {
+            call.resolve(new JSObject());
+            return;
+        }
+        try {
+            call.resolve(new JSObject(raw));
+        } catch (Exception e) {
+            call.reject("getPlayableMedia failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * WebView is about to decode audio — release ExoPlayer so we never have
+     * two decoders fighting for focus / RAM.
+     */
+    @PluginMethod
+    public void handOffNativePlayback(PluginCall call) {
+        LibraryAutoBridge.getInstance().handOffNativeToWebView();
+        call.resolve();
+    }
+
     @PluginMethod
     public void cacheBrowseChildren(PluginCall call) {
         String parentId = call.getString("parentId");
@@ -323,12 +460,24 @@ public class LibraryAutoPlugin extends Plugin
         }
 
         if (positionOnly) {
+            // While native owns PCM, ignore WebView position ticks — they are
+            // stale (HTML5 paused) and would thrash MediaSession / cause focus fights.
+            if (LibraryAutoBridge.getInstance().isNativeOwningPlayback()) {
+                call.resolve();
+                return;
+            }
             LibraryAutoBridge.getInstance().updatePosition(
                 playing,
                 Math.round(positionSec * 1000),
                 playbackRate
             );
             maybeConfirmStickyPlay(playing);
+            call.resolve();
+            return;
+        }
+
+        if (LibraryAutoBridge.getInstance().isNativeOwningPlayback() && !playing) {
+            // Stale WebView "paused" sync while ExoPlayer is active — drop it.
             call.resolve();
             return;
         }
@@ -637,6 +786,20 @@ public class LibraryAutoPlugin extends Plugin
         }
 
         if (isPlay) {
+            // Native already started from MediaSession — do NOT sticky-wake the
+            // WebView (that path storm-starts Activities and OOMs some OEMs).
+            boolean nativeStarted =
+                extras != null && extras.getBoolean("nativeStarted", false);
+            if (nativeStarted || LibraryAutoBridge.getInstance().isNativeOwningPlayback()) {
+                cancelStickyPlay();
+                softWakeWebView();
+                // Soft deliver once so JS can attach UI — no activity wake storm.
+                mainHandler.postDelayed(
+                    () -> deliverToJs(action, extras),
+                    200
+                );
+                return;
+            }
             boolean deepIdle = LibraryAutoBridge.getInstance().isDeepIdlePlay();
             Log.i(
                 TAG,
@@ -700,6 +863,9 @@ public class LibraryAutoPlugin extends Plugin
             }
             if (extras.containsKey("mediaId")) {
                 data.put("mediaId", extras.getString("mediaId"));
+            }
+            if (extras.containsKey("nativeStarted")) {
+                data.put("nativeStarted", extras.getBoolean("nativeStarted"));
             }
         }
         handler.resolve(data);

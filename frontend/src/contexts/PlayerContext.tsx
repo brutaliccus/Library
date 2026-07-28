@@ -35,6 +35,13 @@ import {
 import { usePlayerProgressSync } from "../hooks/usePlayerProgressSync";
 import { usePlayerMediaSession } from "../hooks/usePlayerMediaSession";
 import {
+  handOffNativeToWebView,
+  isNativePlaybackOwner,
+  setNativePlaybackAttachHandler,
+} from "../media/libraryAuto";
+import { LibraryAuto, type NativePlaybackEvent } from "../media/libraryAutoPlugin";
+import { cacheAbsPlayable, cacheRdPlayable } from "../media/aaPlayableCache";
+import {
   npKey,
   type AbsChapter,
   type NowPlaying,
@@ -710,6 +717,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const playABS = useCallback(
     async (itemId: string, opts?: { startAt?: number }) => {
+      // Opening the app while AA native ExoPlayer is already on this book —
+      // attach UI only; never start a second decoder / blob load (OOM path).
+      if (isNativePlaybackOwner()) {
+        const mid = `play/abs/${itemId}`;
+        try {
+          const st = await LibraryAuto.getNativePlaybackState();
+          if (st.nativeOwner && (!st.mediaId || st.mediaId === mid)) {
+            return;
+          }
+          // Different book requested — hand off then continue with WebView.
+          await handOffNativeToWebView();
+        } catch {
+          /* continue */
+        }
+      }
+
       probeAbortRef.current?.abort();
       retryCountRef.current = 0;
       setPlayIntent(true);
@@ -769,6 +792,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           expanded: false,
         }));
         loadTrack(np, trackIdx, localStart);
+        void cacheAbsPlayable(
+          itemId,
+          manifest.title,
+          manifest.author,
+          manifest.coverUrl,
+          np.tracks,
+          manifest.totalDuration,
+          localStart,
+          trackIdx
+        );
         return true;
       };
 
@@ -841,6 +874,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           tracks: data.tracks,
           totalDuration: data.duration || 0,
         });
+
+        void cacheAbsPlayable(
+          itemId,
+          data.title,
+          data.author || "",
+          data.coverUrl || "",
+          np.tracks,
+          data.duration || 0,
+          localStart,
+          trackIdx
+        );
 
         // Download tracks locally while they stream (ABS + debrid)
         void cacheBookAudio(np.tracks);
@@ -962,6 +1006,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         trackLocal: localStart,
       };
 
+      if (streamHistoryId != null) {
+        void cacheRdPlayable(
+          streamHistoryId,
+          title,
+          author || "",
+          coverUrl || "",
+          tracksCopy,
+          totalDuration,
+          localStart,
+          trackIdx
+        );
+      }
+
       saveRdOfflineManifest({
         libraryItemId,
         streamHistoryId,
@@ -1032,6 +1089,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // Toggle semantics there are dangerous: if native and web state disagree,
   // "pause" would start playback.
   const play = useCallback(() => {
+    // Native ExoPlayer already playing from AA — do not start HTML5 / blob.
+    if (isNativePlaybackOwner()) {
+      setPlayIntent(true);
+      setState((s) => (s.isPlaying ? s : { ...s, isPlaying: true, wantPlaying: true }));
+      return;
+    }
+
     setPlayIntent(true);
     const audio = getAudio();
     const np = stateRef.current.nowPlaying;
@@ -1125,7 +1189,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       resumeAfterTransientPauseRef.current = null;
     }
     setPlayIntent(false);
-    getAudio().pause();
+    // Native owns PCM — MediaSession pause already hit ExoPlayer; keep HTML5 quiet.
+    if (!isNativePlaybackOwner()) {
+      getAudio().pause();
+    }
+    setState((s) => ({ ...s, isPlaying: false, wantPlaying: false }));
   }, [getAudio, setPlayIntent]);
 
   const seek = useCallback(
@@ -1306,6 +1374,126 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [seek, jumpToTrack, setPlayIntent]);
 
   // Lock screen / browser / Android Auto controls and metadata.
+  useEffect(() => {
+    let attachedMediaId: string | null = null;
+    const attach = (ev: NativePlaybackEvent) => {
+      if (!ev.nativeOwner) {
+        attachedMediaId = null;
+        return;
+      }
+      void (async () => {
+        try {
+          const mediaId = ev.mediaId;
+          if (!mediaId) return;
+
+          // Position ticks after first hydrate — never re-clear HTML5 / re-set tracks.
+          if (attachedMediaId === mediaId && stateRef.current.nowPlaying) {
+            setState((s) => ({
+              ...s,
+              isPlaying: ev.playing === true,
+              wantPlaying: ev.playing === true,
+              currentTime: ev.position ?? s.currentTime,
+              currentTrackIndex: ev.trackIndex ?? s.currentTrackIndex,
+              buffering: false,
+            }));
+            return;
+          }
+
+          const raw = await LibraryAuto.getPlayableMedia({ mediaId });
+          if (!raw?.tracks?.length) return;
+
+          const tracks: Track[] = raw.tracks.map((t, i) => ({
+            index: i,
+            title: t.title || `Track ${i + 1}`,
+            contentUrl: t.contentUrl,
+            mimeType: t.mimeType || "audio/mpeg",
+            startOffset: t.startOffset ?? 0,
+            duration: t.duration ?? 0,
+          }));
+          const totalDuration =
+            raw.totalDuration && raw.totalDuration > 0
+              ? raw.totalDuration
+              : tracks.reduce((s, t) => s + (t.duration || 0), 0);
+          let source: "abs" | "rd" = "abs";
+          let itemId: string | undefined;
+          let streamHistoryId: number | undefined;
+          if (mediaId.startsWith("play/abs/")) {
+            itemId = mediaId.slice("play/abs/".length);
+            source = "abs";
+          } else if (mediaId.startsWith("play/rdhist/")) {
+            streamHistoryId = parseInt(mediaId.slice("play/rdhist/".length), 10);
+            source = "rd";
+          }
+          const np: NowPlaying = withAbsoluteMediaUrls({
+            source,
+            itemId,
+            streamHistoryId: Number.isFinite(streamHistoryId)
+              ? streamHistoryId
+              : undefined,
+            title: raw.title || ev.title || "Audiobook",
+            author: raw.author || ev.album || "",
+            coverUrl: raw.coverUrl || ev.coverUrl || "",
+            tracks,
+            totalDuration,
+          });
+          const trackIndex = Math.min(
+            Math.max(0, ev.trackIndex ?? raw.trackIndex ?? 0),
+            Math.max(0, tracks.length - 1)
+          );
+          const position = Math.max(0, ev.position ?? 0);
+          const audio = getAudio();
+          if (!audio.paused) audio.pause();
+          if (audio.src) {
+            try {
+              audio.removeAttribute("src");
+              audio.load();
+            } catch {
+              /* ignore */
+            }
+          }
+          setPlayIntent(ev.playing === true);
+          attachedMediaId = mediaId;
+          setState((s) => ({
+            ...s,
+            nowPlaying: np,
+            currentTime: position,
+            duration: totalDuration,
+            currentTrackIndex: trackIndex,
+            isPlaying: ev.playing === true,
+            wantPlaying: ev.playing === true,
+            buffering: false,
+            expanded: false,
+          }));
+          lastPosRef.current = {
+            key: npKey(np),
+            time: position,
+            trackIndex,
+            trackLocal: Math.max(
+              0,
+              position - (tracks[trackIndex]?.startOffset ?? 0)
+            ),
+          };
+        } catch (e) {
+          console.warn("[player] native attach failed", e);
+        }
+      })();
+    };
+    setNativePlaybackAttachHandler(attach);
+    void LibraryAuto.getNativePlaybackState()
+      .then((st) => {
+        if (st.nativeOwner && st.mediaId) {
+          attach({
+            nativeOwner: true,
+            mediaId: st.mediaId,
+            playing: st.playing,
+            position: st.position,
+          });
+        }
+      })
+      .catch(() => {});
+    return () => setNativePlaybackAttachHandler(null);
+  }, [getAudio, setPlayIntent]);
+
   usePlayerMediaSession(
     {
       nowPlaying: state.nowPlaying,

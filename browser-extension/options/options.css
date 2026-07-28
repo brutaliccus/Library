@@ -1,17 +1,23 @@
+/* Matches Library Site default ocean theme (frontend/src/index.css). */
 :root {
-  --ink: #1a2e2e;
-  --muted: #4a6363;
-  --paper: #f3efe6;
-  --panel: #fffdf8;
-  --line: #d5cdc0;
-  --teal: #1a5c5c;
-  --teal-deep: #0f3f3f;
-  --accent: #c48c4a;
-  --danger: #9b2c2c;
-  --ok: #1f6b3a;
-  --shadow: 0 12px 40px rgba(26, 46, 46, 0.08);
-  --font: "Segoe UI", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
-  --sans: "Segoe UI", system-ui, sans-serif;
+  --brand-300: #91a7ff;
+  --brand-400: #748ffc;
+  --brand-500: #5c7cfa;
+  --brand-600: #4c6ef5;
+  --gray-100: #f3f4f6;
+  --gray-300: #d1d5db;
+  --gray-400: #9ca3af;
+  --gray-500: #6b7280;
+  --gray-700: #374151;
+  --gray-800: #1f2937;
+  --gray-900: #111827;
+  --gray-950: #030712;
+  --panel: #111827;
+  --line: #374151;
+  --danger: #f87171;
+  --ok: #4ade80;
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 * {
@@ -21,12 +27,13 @@
 body {
   margin: 0;
   min-height: 100vh;
-  color: var(--ink);
+  color: var(--gray-100);
+  color-scheme: dark;
   font-family: var(--sans);
   background:
-    radial-gradient(1200px 600px at 10% -10%, rgba(196, 140, 74, 0.18), transparent 55%),
-    radial-gradient(900px 500px at 100% 0%, rgba(26, 92, 92, 0.16), transparent 50%),
-    linear-gradient(180deg, #e8e2d4 0%, var(--paper) 45%, #ebe6db 100%);
+    radial-gradient(1000px 520px at 8% -12%, rgba(76, 110, 245, 0.22), transparent 55%),
+    radial-gradient(800px 480px at 100% 0%, rgba(116, 143, 252, 0.12), transparent 50%),
+    linear-gradient(180deg, #0b1220 0%, var(--gray-950) 48%, #060a14 100%);
 }
 
 .wrap {
@@ -39,27 +46,45 @@ body {
   margin-bottom: 1.75rem;
 }
 
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.brand-mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
 .brand {
-  margin: 0 0 0.35rem;
-  font-family: var(--font);
-  font-size: 1.75rem;
+  margin: 0;
+  font-size: 1.35rem;
   font-weight: 700;
   letter-spacing: -0.02em;
-  color: var(--teal-deep);
+  color: var(--brand-400);
 }
 
 .hero h1 {
   margin: 0 0 0.6rem;
-  font-family: var(--font);
   font-size: 1.35rem;
   font-weight: 600;
+  color: var(--gray-100);
 }
 
 .lede {
   margin: 0;
-  color: var(--muted);
+  color: var(--gray-400);
   line-height: 1.5;
   max-width: 38em;
+}
+
+.lede strong {
+  color: var(--gray-300);
+  font-weight: 600;
 }
 
 .panel {
@@ -73,10 +98,10 @@ body {
 
 .panel h2 {
   margin: 0 0 1rem;
-  font-size: 0.95rem;
+  font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--muted);
+  color: var(--gray-500);
   font-weight: 600;
 }
 
@@ -86,7 +111,7 @@ label {
   margin-bottom: 0.85rem;
   font-size: 0.85rem;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--gray-300);
 }
 
 input {
@@ -95,19 +120,23 @@ input {
   padding: 0.65rem 0.75rem;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fff;
-  color: var(--ink);
+  background: var(--gray-950);
+  color: var(--gray-100);
+}
+
+input::placeholder {
+  color: var(--gray-500);
 }
 
 input:focus {
-  outline: 2px solid rgba(26, 92, 92, 0.35);
-  border-color: var(--teal);
+  outline: 2px solid rgba(92, 124, 250, 0.45);
+  border-color: var(--brand-500);
 }
 
 .hint {
   margin: 0 0 1rem;
   font-size: 0.8rem;
-  color: var(--muted);
+  color: var(--gray-500);
   line-height: 1.4;
 }
 
@@ -125,12 +154,13 @@ button {
   border-radius: 8px;
   padding: 0.65rem 1rem;
   cursor: pointer;
-  background: var(--teal);
+  background: var(--brand-600);
   color: #fff;
+  transition: background 0.15s ease;
 }
 
 button:hover {
-  background: var(--teal-deep);
+  background: var(--brand-500);
 }
 
 button:disabled {
@@ -140,22 +170,22 @@ button:disabled {
 
 button.ghost {
   background: transparent;
-  color: var(--teal);
+  color: var(--brand-400);
   border: 1px solid var(--line);
 }
 
 button.ghost:hover {
-  background: rgba(26, 92, 92, 0.06);
+  background: rgba(76, 110, 245, 0.12);
 }
 
 button.danger {
   background: transparent;
   color: var(--danger);
-  border: 1px solid rgba(155, 44, 44, 0.35);
+  border: 1px solid rgba(248, 113, 113, 0.35);
 }
 
 button.danger:hover {
-  background: rgba(155, 44, 44, 0.06);
+  background: rgba(248, 113, 113, 0.08);
 }
 
 .status {
@@ -166,12 +196,12 @@ button.danger:hover {
 }
 
 .status.ok {
-  background: rgba(31, 107, 58, 0.1);
+  background: rgba(74, 222, 128, 0.1);
   color: var(--ok);
 }
 
 .status.err {
-  background: rgba(155, 44, 44, 0.1);
+  background: rgba(248, 113, 113, 0.1);
   color: var(--danger);
 }
 
@@ -205,25 +235,25 @@ button.danger:hover {
 
 .lib-meta strong {
   display: block;
-  font-family: var(--font);
   font-size: 1.05rem;
+  color: var(--gray-100);
 }
 
 .lib-meta span {
   display: block;
   font-size: 0.8rem;
-  color: var(--muted);
+  color: var(--gray-500);
   word-break: break-all;
 }
 
 .empty {
   margin: 0;
-  color: var(--muted);
+  color: var(--gray-500);
   font-size: 0.9rem;
 }
 
 .foot {
-  color: var(--muted);
+  color: var(--gray-500);
   font-size: 0.78rem;
   line-height: 1.45;
 }

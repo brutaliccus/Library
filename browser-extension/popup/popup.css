@@ -1,9 +1,17 @@
+/* Matches Library Site default ocean theme (frontend/src/index.css). */
 :root {
-  --ink: #1a2e2e;
-  --muted: #4a6363;
-  --teal: #1a5c5c;
-  --line: #d5cdc0;
-  --paper: #f7f3ea;
+  --brand-400: #748ffc;
+  --brand-500: #5c7cfa;
+  --brand-600: #4c6ef5;
+  --gray-100: #f3f4f6;
+  --gray-400: #9ca3af;
+  --gray-500: #6b7280;
+  --gray-700: #374151;
+  --gray-800: #1f2937;
+  --gray-900: #111827;
+  --gray-950: #030712;
+  --line: rgba(55, 65, 81, 0.9);
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 * {
@@ -13,27 +21,42 @@
 body {
   margin: 0;
   width: 280px;
-  font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
-  color: var(--ink);
-  background: linear-gradient(160deg, #e7e1d3, var(--paper));
+  font: 13px/1.45 var(--sans);
+  color: var(--gray-100);
+  color-scheme: dark;
+  background: linear-gradient(165deg, #0b1220 0%, var(--gray-950) 55%, #060a14 100%);
 }
 
 header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 14px 14px 10px;
+}
+
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+
+.brand-copy {
+  min-width: 0;
 }
 
 .brand {
   margin: 0;
-  font-family: Georgia, "Iowan Old Style", serif;
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 700;
-  color: #0f3f3f;
+  letter-spacing: -0.02em;
+  color: var(--brand-400);
 }
 
 .sub {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 12px;
+  margin: 2px 0 0;
+  color: var(--gray-400);
+  font-size: 11px;
 }
 
 #libs {
@@ -49,10 +72,11 @@ header {
 
 #libs strong {
   display: block;
+  color: var(--gray-100);
 }
 
 #libs span {
-  color: var(--muted);
+  color: var(--gray-500);
   font-size: 11px;
   word-break: break-all;
 }
@@ -60,7 +84,7 @@ header {
 .empty {
   margin: 0;
   padding: 4px 16px 12px;
-  color: var(--muted);
+  color: var(--gray-400);
 }
 
 .hidden {
@@ -79,10 +103,11 @@ button {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
-  background: var(--teal);
+  background: var(--brand-600);
   color: #fff;
+  transition: background 0.15s ease;
 }
 
 button:hover {
-  filter: brightness(0.95);
+  background: var(--brand-500);
 }

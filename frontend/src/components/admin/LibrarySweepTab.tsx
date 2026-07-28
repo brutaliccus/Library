@@ -17,6 +17,7 @@ import api from "../../api/client";
 import { useToast } from "../../contexts/ToastContext";
 import CoverImage from "../CoverImage";
 import QuickReviewWizard from "./QuickReviewWizard";
+import NamingTemplateBuilder from "./NamingTemplateBuilder";
 
 type SweepCurrent = {
   request_id: number | null;
@@ -24,6 +25,14 @@ type SweepCurrent = {
   author: string | null;
   cover_url: string | null;
   status: string | null;
+  abs_item_id?: string | null;
+};
+
+type SweepUpNext = {
+  request_id?: number | null;
+  title: string | null;
+  author: string | null;
+  cover_url: string | null;
   abs_item_id?: string | null;
 };
 
@@ -50,6 +59,8 @@ type SweepStatus = {
   error: string | null;
   started_by_user_id: number | null;
   current?: SweepCurrent | null;
+  up_next?: SweepUpNext | null;
+  processed_total?: number;
   unprocessed?: UnprocessedCounts;
 };
 
@@ -78,11 +89,33 @@ type UnprocessedResponse = {
   counts: UnprocessedCounts;
 };
 
-type QueueTab = "needs-review" | "unprocessed";
+type ProcessedItem = {
+  id: number;
+  title: string | null;
+  author: string | null;
+  status: string;
+  status_detail: string | null;
+  abs_item_id: string | null;
+  cover_url: string | null;
+  created_at: string | null;
+  completed_at: string | null;
+};
+
+type ProcessedResponse = {
+  items: ProcessedItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  count: number;
+};
+
+type QueueTab = "needs-review" | "unprocessed" | "processed";
 
 const STATUS_KEY = ["admin-library-sweep-status"] as const;
 const REVIEW_KEY = ["admin-library-sweep-needs-review"] as const;
 const UNPROCESSED_KEY = ["admin-library-sweep-unprocessed"] as const;
+const PROCESSED_KEY = ["admin-library-sweep-processed"] as const;
+const PROCESSED_PAGE_SIZE = 40;
 const SWEEP_SETTINGS_KEYS = [
   "config.libraforge_naming_template",
   "config.libraforge_metadata_provider",
@@ -132,6 +165,7 @@ export default function LibrarySweepTab() {
   const [cursorRestored, setCursorRestored] = useState(false);
   const [queueTab, setQueueTab] = useState<QueueTab>("needs-review");
   const [settingsDraft, setSettingsDraft] = useState<Record<string, string>>({});
+  const [processedOffset, setProcessedOffset] = useState(0);
 
   const { data: status, isLoading: statusLoading, refetch: refetchStatus } = useQuery({
     queryKey: STATUS_KEY,
@@ -237,8 +271,30 @@ export default function LibrarySweepTab() {
     },
   });
 
+  const {
+    data: processed,
+    isLoading: processedLoading,
+    refetch: refetchProcessed,
+  } = useQuery({
+    queryKey: [...PROCESSED_KEY, processedOffset],
+    queryFn: async () => {
+      const { data } = await api.get("/admin/library-sweep/processed", {
+        params: { limit: PROCESSED_PAGE_SIZE, offset: processedOffset },
+      });
+      return data as ProcessedResponse;
+    },
+    enabled: queueTab === "processed",
+    refetchInterval: (q) => {
+      const s = status?.status;
+      return s === "running" ? 10_000 : 45_000;
+    },
+  });
+
   const items = review?.items ?? [];
   const unprocessedItems = unprocessed?.items ?? [];
+  const processedItems = processed?.items ?? [];
+  const processedTotal =
+    processed?.total ?? status?.processed_total ?? 0;
   const selectedIndex = useMemo(() => {
     if (selectedId == null) return -1;
     return items.findIndex((i) => i.id === selectedId);
@@ -312,6 +368,7 @@ export default function LibrarySweepTab() {
     void refetchStatus();
     void refetchReview();
     void refetchUnprocessed();
+    void refetchProcessed();
   };
 
   const startMutation = useMutation({
@@ -404,6 +461,7 @@ export default function LibrarySweepTab() {
   const running = status?.status === "running";
   const paused = status?.status === "paused";
   const current = status?.current;
+  const upNext = status?.up_next;
   const unprocessedTotal =
     status?.unprocessed?.total ?? unprocessed?.counts?.total ?? unprocessedItems.length;
 
@@ -575,21 +633,21 @@ export default function LibrarySweepTab() {
           <p className="text-xs text-gray-500">Loading settings…</p>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block space-y-1 sm:col-span-2">
+            <div className="block space-y-1 sm:col-span-2">
               <span className="text-xs text-gray-400">Folder Forge naming template</span>
-              <input
-                type="text"
-                className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 font-mono"
-                value={settingsDraft["config.libraforge_naming_template"] ?? ""}
-                placeholder="{author}/{series} [{edition}]/{title}/{filename}"
-                onChange={(e) =>
+              <NamingTemplateBuilder
+                value={
+                  settingsDraft["config.libraforge_naming_template"] ??
+                  "{author}/{series} [{edition}]/{title}/{filename}"
+                }
+                onChange={(next) =>
                   setSettingsDraft((d) => ({
                     ...d,
-                    "config.libraforge_naming_template": e.target.value,
+                    "config.libraforge_naming_template": next,
                   }))
                 }
               />
-            </label>
+            </div>
             <label className="block space-y-1">
               <span className="text-xs text-gray-400">Default metadata provider</span>
               <select
@@ -677,6 +735,42 @@ export default function LibrarySweepTab() {
         </div>
       )}
 
+      {(running || paused) && upNext && (
+        <div className="rounded-xl border border-gray-800/80 bg-gray-900/40 p-3 flex gap-3 items-center">
+          <div className="w-12 h-[4.25rem] shrink-0 rounded overflow-hidden bg-gray-800">
+            {upNext.cover_url ? (
+              <CoverImage
+                src={upNext.cover_url}
+                alt=""
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center text-gray-600 text-xs">
+                —
+              </div>
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">Up next</p>
+            <p className="text-sm font-medium text-gray-200 truncate mt-0.5">
+              {upNext.title || "—"}
+            </p>
+            {upNext.author && (
+              <p className="text-xs text-gray-400 truncate mt-0.5">{upNext.author}</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {(running || paused) && !upNext && (
+        <div className="rounded-xl border border-dashed border-gray-800 bg-gray-900/20 px-3 py-2">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Up next</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {running ? "Looking ahead…" : "Nothing queued after the current book"}
+          </p>
+        </div>
+      )}
+
       {status?.error && (
         <p className="text-sm text-red-400 border border-red-900/50 bg-red-950/30 rounded-lg px-3 py-2">
           {status.error}
@@ -707,6 +801,20 @@ export default function LibrarySweepTab() {
               onClick={() => setQueueTab("unprocessed")}
             >
               Unprocessed ({unprocessedTotal})
+            </button>
+            <button
+              type="button"
+              className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
+                queueTab === "processed"
+                  ? "bg-brand-600/20 text-brand-200"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+              onClick={() => {
+                setQueueTab("processed");
+                setProcessedOffset(0);
+              }}
+            >
+              Processed ({status?.processed_total ?? processedTotal})
             </button>
           </div>
           {queueTab === "needs-review" && items.length > 0 && selectedIndex >= 0 && (
@@ -797,55 +905,130 @@ export default function LibrarySweepTab() {
               })}
             </ul>
           )
-        ) : unprocessedLoading && unprocessedItems.length === 0 ? (
-          <p className="text-sm text-gray-500">Loading unprocessed…</p>
-        ) : unprocessedItems.length === 0 ? (
-          <p className="text-sm text-gray-500">No cancelled, failed, or skipped sweep books.</p>
+        ) : queueTab === "unprocessed" ? (
+          unprocessedLoading && unprocessedItems.length === 0 ? (
+            <p className="text-sm text-gray-500">Loading unprocessed…</p>
+          ) : unprocessedItems.length === 0 ? (
+            <p className="text-sm text-gray-500">No cancelled, failed, or skipped sweep books.</p>
+          ) : (
+            <ul className="space-y-2">
+              {unprocessedItems.map((item) => (
+                <li
+                  key={item.id}
+                  className="flex gap-3 p-3 rounded-xl border border-gray-800 bg-gray-900/40"
+                >
+                  <div className="w-10 h-14 shrink-0 rounded overflow-hidden bg-gray-800">
+                    {item.cover_url ? (
+                      <CoverImage
+                        src={item.cover_url}
+                        alt=""
+                        className="w-full h-full object-cover"
+                      />
+                    ) : null}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-gray-100 truncate">
+                      {item.title || `Request #${item.id}`}
+                    </p>
+                    {item.author && (
+                      <p className="text-xs text-gray-400 truncate mt-0.5">{item.author}</p>
+                    )}
+                    <p className={`text-[11px] mt-1 capitalize ${statusBadge(item.status)}`}>
+                      {item.status}
+                      {item.status_detail ? ` · ${item.status_detail}` : ""}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className={iconBtnClass()}
+                    title="Reprocess (forge only)"
+                    aria-label={`Reprocess ${item.title || item.id}`}
+                    disabled={reprocessMutation.isPending}
+                    onClick={() => reprocessMutation.mutate(item.id)}
+                  >
+                    {reprocessMutation.isPending && reprocessMutation.variables === item.id ? (
+                      <Loader2 size={16} className="animate-spin" />
+                    ) : (
+                      <RotateCcw size={16} />
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
+        ) : processedLoading && processedItems.length === 0 ? (
+          <p className="text-sm text-gray-500">Loading processed…</p>
+        ) : processedItems.length === 0 ? (
+          <p className="text-sm text-gray-500">No successfully completed sweep books yet.</p>
         ) : (
-          <ul className="space-y-2">
-            {unprocessedItems.map((item) => (
-              <li
-                key={item.id}
-                className="flex gap-3 p-3 rounded-xl border border-gray-800 bg-gray-900/40"
-              >
-                <div className="w-10 h-14 shrink-0 rounded overflow-hidden bg-gray-800">
-                  {item.cover_url ? (
-                    <CoverImage
-                      src={item.cover_url}
-                      alt=""
-                      className="w-full h-full object-cover"
-                    />
-                  ) : null}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium text-gray-100 truncate">
-                    {item.title || `Request #${item.id}`}
-                  </p>
-                  {item.author && (
-                    <p className="text-xs text-gray-400 truncate mt-0.5">{item.author}</p>
-                  )}
-                  <p className={`text-[11px] mt-1 capitalize ${statusBadge(item.status)}`}>
-                    {item.status}
-                    {item.status_detail ? ` · ${item.status_detail}` : ""}
-                  </p>
-                </div>
+          <div className="space-y-3">
+            <ul className="space-y-2 max-h-[28rem] overflow-y-auto pr-0.5">
+              {processedItems.map((item) => (
+                <li
+                  key={item.id}
+                  className="flex gap-3 p-3 rounded-xl border border-gray-800 bg-gray-900/40"
+                >
+                  <div className="w-10 h-14 shrink-0 rounded overflow-hidden bg-gray-800">
+                    {item.cover_url ? (
+                      <CoverImage
+                        src={item.cover_url}
+                        alt=""
+                        className="w-full h-full object-cover"
+                      />
+                    ) : null}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-gray-100 truncate">
+                      {item.title || `Request #${item.id}`}
+                    </p>
+                    {item.author && (
+                      <p className="text-xs text-gray-400 truncate mt-0.5">{item.author}</p>
+                    )}
+                    <p className="text-[11px] text-emerald-400/90 mt-1">
+                      Completed
+                      {item.completed_at
+                        ? ` · ${new Date(item.completed_at).toLocaleString()}`
+                        : item.id
+                          ? ` · #${item.id}`
+                          : ""}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {processedTotal > PROCESSED_PAGE_SIZE && (
+              <div className="flex items-center justify-between gap-2">
                 <button
                   type="button"
                   className={iconBtnClass()}
-                  title="Reprocess (forge only)"
-                  aria-label={`Reprocess ${item.title || item.id}`}
-                  disabled={reprocessMutation.isPending}
-                  onClick={() => reprocessMutation.mutate(item.id)}
+                  disabled={processedOffset <= 0 || processedLoading}
+                  onClick={() =>
+                    setProcessedOffset((o) => Math.max(0, o - PROCESSED_PAGE_SIZE))
+                  }
+                  aria-label="Previous processed page"
                 >
-                  {reprocessMutation.isPending && reprocessMutation.variables === item.id ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <RotateCcw size={16} />
-                  )}
+                  <ChevronLeft size={16} />
                 </button>
-              </li>
-            ))}
-          </ul>
+                <span className="text-xs text-gray-500 tabular-nums">
+                  {processedOffset + 1}–
+                  {Math.min(processedOffset + processedItems.length, processedTotal)} of{" "}
+                  {processedTotal}
+                </span>
+                <button
+                  type="button"
+                  className={iconBtnClass()}
+                  disabled={
+                    processedLoading ||
+                    processedOffset + PROCESSED_PAGE_SIZE >= processedTotal
+                  }
+                  onClick={() => setProcessedOffset((o) => o + PROCESSED_PAGE_SIZE)}
+                  aria-label="Next processed page"
+                >
+                  <ChevronRight size={16} />
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </div>
 

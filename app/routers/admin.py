@@ -2174,6 +2174,18 @@ async def library_sweep_unprocessed(_admin: User = Depends(require_admin)):
     }
 
 
+@router.get("/library-sweep/processed")
+async def library_sweep_processed(
+    limit: int = 50,
+    offset: int = 0,
+    _admin: User = Depends(require_admin),
+):
+    """Successfully completed Library Sweep books (paginated)."""
+    from app.services import library_sweep
+
+    return await library_sweep.list_processed(limit=limit, offset=offset)
+
+
 @router.post("/library-sweep/reprocess/{request_id}")
 async def library_sweep_reprocess(
     request_id: int,

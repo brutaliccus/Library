@@ -18,9 +18,9 @@ async def _android_update_policy() -> tuple[int, bool]:
     """Return (minVersionCode, forceUpdates) from Admin / env defaults."""
     raw_min = (await instance_settings.get_effective("config.android_min_version_code") or "").strip()
     try:
-        min_code = int(raw_min) if raw_min else 54
+        min_code = int(raw_min) if raw_min else 55
     except ValueError:
-        min_code = 54
+        min_code = 55
     force = await instance_settings.get_effective_bool("config.android_force_updates", True)
     return max(0, min_code), force
 

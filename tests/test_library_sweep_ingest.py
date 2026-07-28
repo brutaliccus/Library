@@ -98,6 +98,7 @@ def test_admin_sweep_routes_registered():
     assert any("library-sweep/review-cursor" in p for p in paths)
     assert any("library-sweep/skip" in p for p in paths)
     assert any("library-sweep/unprocessed" in p for p in paths)
+    assert any("library-sweep/processed" in p for p in paths)
     assert any("library-sweep/reprocess" in p for p in paths)
 
 
@@ -161,6 +162,25 @@ def test_abs_scan_every_helper(monkeypatch):
     assert library_sweep._abs_scan_every() == 1
     monkeypatch.setattr(library_sweep.settings, "library_sweep_abs_scan_every", "nope")
     assert library_sweep._abs_scan_every() == 25
+
+
+def test_abs_item_preview_and_up_next_helpers():
+    from app.services import library_sweep
+
+    item = {
+        "id": "abs-1",
+        "media": {"metadata": {"title": "Mistborn", "authorName": "Sanderson"}},
+    }
+    preview = library_sweep._abs_item_preview(item)
+    assert preview["title"] == "Mistborn"
+    assert preview["author"] == "Sanderson"
+    assert preview["abs_item_id"] == "abs-1"
+    assert "abs-1" in (preview["cover_url"] or "")
+
+    library_sweep._set_up_next(preview)
+    assert library_sweep._up_next and library_sweep._up_next["title"] == "Mistborn"
+    library_sweep._set_up_next(None)
+    assert library_sweep._up_next is None
 
 
 def test_user_may_upload_admin_always(monkeypatch):

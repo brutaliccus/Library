@@ -88,11 +88,10 @@ REGISTRY: list[SettingDef] = [
         value_type="int",
         help=(
             "Installed APKs with a lower versionCode are blocked until they update "
-            "(default 54 = Library 1.53). Raise this after publishing a required release."
+            "(default 55 = Library 1.54). Raise this after publishing a required release."
         ),
-        placeholder="54",
-    ),
-    SettingDef(
+        placeholder="55",
+    ),    SettingDef(
         key="config.android_force_updates",
         group="mobile",
         label="Force Android APK updates",
@@ -205,8 +204,8 @@ REGISTRY: list[SettingDef] = [
         label="Folder Forge naming template",
         env_attr="libraforge_naming_template",
         help=(
-            "Path template for Folder Forge (author/series/title tokens). "
-            "Also editable on the Library Sweep tab."
+            "Folder path for Folder Forge. Use the path builder on Library Sweep / Pipelines "
+            "(tokens: author, series, edition, title, filename, narrator, year, asin, …)."
         ),
         placeholder="{author}/{series} [{edition}]/{title}/{filename}",
     ),

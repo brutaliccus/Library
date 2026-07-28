@@ -24,6 +24,8 @@ _worker_lock = asyncio.Lock()
 
 # Book the sweep worker is currently on (metadata / sync forge — not M4B waiters).
 _current: dict[str, Any] | None = None
+# Next ABS book the worker will actually process (skips already-done / unprocessed).
+_up_next: dict[str, Any] | None = None
 _skip_request_ids: set[int] = set()
 
 # Completed sweep books since the last batched ABS scan (includes M4B handoffs).
@@ -93,6 +95,61 @@ def _set_current(
         "status": status or "processing",
         "abs_item_id": abs_item_id,
     }
+
+
+def _set_up_next(preview: dict[str, Any] | None) -> None:
+    global _up_next
+    _up_next = dict(preview) if preview else None
+
+
+def _abs_item_preview(item: dict[str, Any]) -> dict[str, Any]:
+    """Title/author/cover card fields from a raw ABS library item."""
+    media = item.get("media") or {}
+    meta = media.get("metadata") or {}
+    item_id = str(item.get("id") or "").strip()
+    title = (meta.get("title") or meta.get("titleIgnorePrefix") or "Untitled").strip()
+    author = (meta.get("authorName") or "").strip() or None
+    cover_url = f"/api/stream/abs/proxy/cover/{item_id}" if item_id else None
+    return {
+        "request_id": None,
+        "title": title,
+        "author": author,
+        "cover_url": cover_url,
+        "abs_item_id": item_id or None,
+    }
+
+
+async def _item_would_be_processed(item: dict[str, Any]) -> bool:
+    """True when the sweep worker would kick forge for this ABS item (not skip)."""
+    item_id = str(item.get("id") or "").strip()
+    if not item_id:
+        return False
+    fingerprint = library_ingest.sweep_fingerprint(item_id)
+    if await library_ingest.fingerprint_already_swept(fingerprint):
+        return False
+    if await library_ingest.fingerprint_in_flight(fingerprint):
+        return False
+    existing = await library_ingest.latest_sweep_request(fingerprint)
+    if not existing:
+        return True
+    if existing.status == "completed":
+        return False
+    if existing.status in library_ingest._UNPROCESSED_STATUSES:
+        return False
+    # quarantined → retry; other statuses → attempt
+    return True
+
+
+async def _peek_up_next(
+    books: list[dict[str, Any]], *, after_index: int, lookahead: int = 250
+) -> dict[str, Any] | None:
+    """First upcoming ABS book the worker will process after ``after_index``."""
+    end = min(len(books), max(after_index + 1, 0) + max(1, lookahead))
+    for j in range(after_index + 1, end):
+        item = books[j]
+        if await _item_would_be_processed(item):
+            return _abs_item_preview(item)
+    return None
 
 
 async def _refresh_current_from_db(request_id: int) -> None:
@@ -255,7 +312,22 @@ async def get_status() -> dict[str, Any]:
     job = await get_or_create_job()
     data = job_to_dict(job)
     data["current"] = await _resolve_current_book()
+    data["up_next"] = dict(_up_next) if _up_next else None
     data["unprocessed"] = await _unprocessed_counts()
+    async with async_session() as db:
+        data["processed_total"] = int(
+            (
+                await db.execute(
+                    select(func.count())
+                    .select_from(DownloadRequest)
+                    .where(
+                        DownloadRequest.source == library_ingest.SOURCE_SWEEP,
+                        DownloadRequest.status == "completed",
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
     return data
 
 
@@ -298,6 +370,65 @@ async def list_unprocessed(*, limit: int = 500) -> list[dict[str, Any]]:
     return [_request_to_unprocessed(r) for r in rows]
 
 
+def _request_to_processed(r: DownloadRequest) -> dict[str, Any]:
+    return {
+        "id": r.id,
+        "title": r.title,
+        "author": r.author,
+        "status": r.status,
+        "status_detail": r.status_detail,
+        "abs_item_id": r.abs_item_id,
+        "ingest_fingerprint": r.ingest_fingerprint,
+        "staging_path": r.staging_path,
+        "cover_url": r.cover_url,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+    }
+
+
+async def list_processed(
+    *, limit: int = 50, offset: int = 0
+) -> dict[str, Any]:
+    """Successfully completed sweep books (source=sweep, status=completed)."""
+    lim = max(1, min(int(limit or 50), 200))
+    off = max(0, int(offset or 0))
+    async with async_session() as db:
+        total = int(
+            (
+                await db.execute(
+                    select(func.count())
+                    .select_from(DownloadRequest)
+                    .where(
+                        DownloadRequest.source == library_ingest.SOURCE_SWEEP,
+                        DownloadRequest.status == "completed",
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        result = await db.execute(
+            select(DownloadRequest)
+            .where(
+                DownloadRequest.source == library_ingest.SOURCE_SWEEP,
+                DownloadRequest.status == "completed",
+            )
+            .order_by(
+                DownloadRequest.completed_at.desc(),
+                DownloadRequest.id.desc(),
+            )
+            .offset(off)
+            .limit(lim)
+        )
+        rows = list(result.scalars().all())
+    return {
+        "items": [_request_to_processed(r) for r in rows],
+        "total": total,
+        "limit": lim,
+        "offset": off,
+        "count": len(rows),
+    }
+
+
 async def start_sweep(*, user_id: int) -> dict[str, Any]:
     """Start or resume a sweep. Returns job status dict."""
     global _worker_task, _completed_since_abs_scan
@@ -330,6 +461,7 @@ async def start_sweep(*, user_id: int) -> dict[str, Any]:
     # Fresh start (idle / completed / cancelled)
     _skip_request_ids.clear()
     _set_current()
+    _set_up_next(None)
     _completed_since_abs_scan = 0
     updated = await _update_job(
         job.id,
@@ -368,6 +500,7 @@ async def cancel_sweep() -> dict[str, Any]:
     was_paused = job.status == "paused"
     await _update_job(job.id, status="cancelled")
     _set_current()
+    _set_up_next(None)
     # Worker may already have exited (paused) — still flush a batch scan.
     if was_paused:
         await run_batched_abs_scan(reason="sweep cancelled")
@@ -499,17 +632,23 @@ async def _run_sweep_worker(job_id: int) -> None:
             if job.status == "paused":
                 logger.info("Library Sweep job %s paused at index %s", job_id, index)
                 _set_current()
+                # Keep up_next so the UI shows what resumes next.
+                _set_up_next(await _peek_up_next(books, after_index=index - 1))
                 await run_batched_abs_scan(reason="sweep paused")
                 return
             if job.status == "cancelled":
                 logger.info("Library Sweep job %s cancelled at index %s", job_id, index)
                 _set_current()
+                _set_up_next(None)
                 await run_batched_abs_scan(reason="sweep cancelled")
                 return
             if job.status != "running":
                 _set_current()
+                _set_up_next(None)
                 await run_batched_abs_scan(reason=f"sweep stopped ({job.status})")
                 return
+
+            _set_up_next(await _peek_up_next(books, after_index=index))
 
             try:
                 await _process_one_item(job_id, item, scan_index=index)
@@ -534,9 +673,11 @@ async def _run_sweep_worker(job_id: int) -> None:
             logger.info("Library Sweep job %s completed", job_id)
             await run_batched_abs_scan(reason="sweep completed")
         _set_current()
+        _set_up_next(None)
     except asyncio.CancelledError:
         logger.info("Library Sweep worker cancelled")
         _set_current()
+        _set_up_next(None)
         await run_batched_abs_scan(reason="sweep stopped")
         raise
     except Exception as e:
@@ -545,6 +686,7 @@ async def _run_sweep_worker(job_id: int) -> None:
         if job and job.status == "running":
             await _update_job(job_id, status="completed", error=str(e)[:500])
         _set_current()
+        _set_up_next(None)
         await run_batched_abs_scan(reason="sweep error stop")
 
 

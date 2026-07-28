@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import api from "../../api/client";
 import { useToast } from "../../contexts/ToastContext";
+import NamingTemplateBuilder from "./NamingTemplateBuilder";
 
 interface OlCatalogStatus {
   status: string;
@@ -565,6 +566,27 @@ export default function ConfigTab({
                     />
                     Enabled
                   </label>
+                ) : s.key === "config.libraforge_naming_template" ? (
+                  <div className="space-y-2">
+                    <NamingTemplateBuilder
+                      value={displayValue}
+                      onChange={(next) => setDrafts((d) => ({ ...d, [s.key]: next }))}
+                      dense
+                    />
+                    {s.overridden && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDrafts((d) => ({ ...d, [s.key]: "" }));
+                          save.mutate({ [s.key]: "" });
+                        }}
+                        className="px-2 py-1 text-xs text-gray-400 hover:text-red-400 border border-gray-700 rounded-lg"
+                        title="Clear DB override (revert to env)"
+                      >
+                        Clear override
+                      </button>
+                    )}
+                  </div>
                 ) : (
                   <div className="flex gap-2">
                     <input

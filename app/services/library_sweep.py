@@ -296,6 +296,24 @@ async def _process_one_item(job_id: int, item: dict[str, Any]) -> None:
         raise RuntimeError("Sweep job missing started_by_user_id")
     user_id = int(job.started_by_user_id)
 
+    # Resume / re-run: reuse quarantined sweep rows instead of creating duplicates.
+    existing = await library_ingest.latest_sweep_request(fingerprint)
+    if existing and existing.status == "quarantined":
+        result = await library_ingest.retry_quarantined_ingest(
+            existing.id,
+            user_id=user_id,
+            title=title,
+            author=author,
+        )
+        await _record_sweep_result(job_id, result)
+        return
+
+    if existing and existing.status == "completed":
+        job = await _load_job(job_id)
+        if job:
+            await _update_job(job_id, scanned=int(job.scanned or 0) + 1)
+        return
+
     root = Path(settings.audiobook_dir)
     try:
         library_dir = resolve_abs_book_dir(root, item)
@@ -322,6 +340,10 @@ async def _process_one_item(job_id: int, item: dict[str, Any]) -> None:
         kick_forge=True,
     )
 
+    await _record_sweep_result(job_id, result)
+
+
+async def _record_sweep_result(job_id: int, result: dict[str, Any]) -> None:
     job = await _load_job(job_id)
     if not job:
         return
@@ -336,10 +358,14 @@ async def _process_one_item(job_id: int, item: dict[str, Any]) -> None:
         m4b_queued += 1
 
     status = result.get("status") or ""
+    retried = bool(result.get("retried"))
     if status == "completed":
         auto_applied += 1
+        if retried:
+            needs_review = max(0, needs_review - 1)
     elif status == "quarantined":
-        needs_review += 1
+        if not retried:
+            needs_review += 1
         # Seed review cursor on first quarantine if unset
         cursor = job.review_cursor_request_id
         if cursor is None and result.get("id"):
@@ -350,6 +376,8 @@ async def _process_one_item(job_id: int, item: dict[str, Any]) -> None:
     elif status in ("m4b_convert", "chapter_forge", "folder_forge", "finalizing", "metadata_forge"):
         # Still running somehow — count as scanned; forge should have finished sync.
         auto_applied += 1
+        if retried:
+            needs_review = max(0, needs_review - 1)
     else:
         failed += 1
 

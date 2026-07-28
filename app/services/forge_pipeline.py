@@ -764,6 +764,25 @@ def _path_under_staging_roots(path: Path) -> bool:
     return False
 
 
+def _staging_audio_hardlinked(staging: Path) -> bool:
+    """True when every staging audio file shares an inode (nlink ≥ 2).
+
+    Library Sweep stages via hardlink from the live library, so nlink≥2 means
+    the library original remains after staging cleanup. Used to accept Folder
+    Forge no-op moves without quarantining.
+    """
+    audio = _collect_audio(staging)
+    if not audio:
+        return False
+    for path in audio:
+        try:
+            if path.stat().st_nlink < 2:
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def _cleanup_staging_after_folder_forge(
     staging: Path,
     *,
@@ -1095,16 +1114,32 @@ async def _run_metadata_forge_once(
         err = report.get("error") or report.get("status") or "Metadata Forge failed"
         return "fail", str(err)[:500]
 
-    if not libraforge.metadata_auto_applied(report):
-        return "fail", libraforge.quarantine_reason_from_report(report)
+    if libraforge.metadata_auto_applied(report):
+        if not staging_has_applied_metadata(staging):
+            return "fail", (
+                "Metadata Forge reported a write, but no applied libraforge.json / "
+                "ASIN metadata.json was found in staging. Match may not have been "
+                "persisted (permissions or apply race)."
+            )
+        return "ok", ""
 
-    if not staging_has_applied_metadata(staging):
+    # Library Sweep / re-runs: LibraForge skips books that already carry apply
+    # markers ("already processed"). That is success when on-disk evidence exists —
+    # not a quarantine. Without this, sweep fails ~100% of already-fixed library books.
+    if libraforge.metadata_already_processed(report):
+        if staging_has_applied_metadata(staging):
+            logger.info(
+                "Metadata Forge skipped request %s (already processed) with applied "
+                "markers — continuing pipeline",
+                request_id,
+            )
+            return "ok", ""
         return "fail", (
-            "Metadata Forge reported a write, but no applied libraforge.json / "
-            "ASIN metadata.json was found in staging. Match may not have been "
-            "persisted (permissions or apply race)."
+            "Metadata Forge reported already processed, but no applied "
+            "libraforge.json marker was found in staging."
         )
-    return "ok", ""
+
+    return "fail", libraforge.quarantine_reason_from_report(report)
 
 
 async def _llm_metadata_assist_retry(
@@ -2089,20 +2124,29 @@ async def run_forge_after_download(
 
         # Folder Forge reporting success with zero moves while audio still sits
         # in staging means metadata was never applied (or tags are unusable).
-        # Do not mark the request completed — quarantine for admin review.
+        # Exception: Library Sweep hardlinks — files already live in the library
+        # tree, so a no-op organize is expected; drop staging links and finalize.
         leftover_audio = _collect_audio(staging)
         moved = libraforge.organizer_moved_files(report)
         if leftover_audio and not moved:
-            await _set_quarantine(
-                request_id,
-                (
-                    "Folder Forge made no library moves while audio remains in staging "
-                    f"({len(leftover_audio)} file(s)). Metadata was likely not applied — "
-                    "use LibraForge Manual Review, then Continue pipeline."
-                ),
-                staging,
-            )
-            return
+            if _staging_audio_hardlinked(staging):
+                logger.info(
+                    "Folder Forge made no moves for request %s but staging audio is "
+                    "hardlinked into the library — treating as already organized",
+                    request_id,
+                )
+                moved = True
+            else:
+                await _set_quarantine(
+                    request_id,
+                    (
+                        "Folder Forge made no library moves while audio remains in staging "
+                        f"({len(leftover_audio)} file(s)). Metadata was likely not applied — "
+                        "use LibraForge Manual Review, then Continue pipeline."
+                    ),
+                    staging,
+                )
+                return
 
         # Wipe req_* staging after successful organize (covers/nfo/empty format
         # dirs; force=True also drops leftover samples when moves succeeded).

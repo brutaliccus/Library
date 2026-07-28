@@ -147,6 +147,75 @@ async def fingerprint_in_flight(fingerprint: str) -> bool:
         return result.scalar_one_or_none() is not None
 
 
+async def latest_sweep_request(fingerprint: str) -> DownloadRequest | None:
+    """Most recent sweep DownloadRequest for this ABS fingerprint (any status)."""
+    if not fingerprint:
+        return None
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest)
+            .where(
+                DownloadRequest.ingest_fingerprint == fingerprint,
+                DownloadRequest.source == SOURCE_SWEEP,
+            )
+            .order_by(DownloadRequest.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+async def retry_quarantined_ingest(
+    request_id: int,
+    *,
+    user_id: int,
+    title: str,
+    author: str | None,
+) -> dict[str, Any]:
+    """Re-kick forge from metadata for an existing quarantined sweep request."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req = result.scalar_one_or_none()
+        if not req:
+            raise FileNotFoundError(f"Request {request_id} not found")
+        staging_raw = (req.staging_path or "").strip()
+        stored_title = req.title or title
+        stored_author = req.author if req.author is not None else author
+
+    if not staging_raw:
+        return {
+            "ok": False,
+            "id": request_id,
+            "status": "failed",
+            "reason": "missing_staging",
+        }
+
+    staging = Path(staging_raw)
+    if not staging.is_dir():
+        return {
+            "ok": False,
+            "id": request_id,
+            "status": "failed",
+            "reason": "staging_missing",
+        }
+
+    from app.services.forge_pipeline import needs_m4b_conversion
+
+    needs_m4b = needs_m4b_conversion(staging)
+    result = await prepare_staging_and_forge(
+        request_id,
+        staging=staging,
+        user_id=user_id,
+        title=title or stored_title,
+        author=author if author is not None else stored_author,
+        kick_forge=True,
+    )
+    result["needs_m4b"] = needs_m4b
+    result["retried"] = True
+    return result
+
+
 async def create_ingest_request(
     *,
     user_id: int,

@@ -540,6 +540,31 @@ def _has_category_items(cats: dict[str, Any], *keys: str) -> bool:
     return False
 
 
+def metadata_already_processed(report: dict[str, Any]) -> bool:
+    """True when Metadata Forge skipped because tags were previously applied.
+
+    Common for Library Sweep (hardlinked library files already carry
+    ``libraforge.json`` markers) and for re-runs of already-fixed books.
+    Callers must still verify on-disk write evidence before treating as success.
+    """
+    stats = report.get("stats") or {}
+    if isinstance(stats, dict):
+        skip_reasons = stats.get("skip_reasons") or {}
+        if isinstance(skip_reasons, dict):
+            for key, count in skip_reasons.items():
+                if "already processed" in str(key).lower() and int(count or 0) > 0:
+                    return True
+    for item in report.get("report_items") or []:
+        if not isinstance(item, dict):
+            continue
+        skip = str(item.get("skip_reason") or "").lower()
+        if "already processed" in skip:
+            return True
+        if str(item.get("title") or "").lower() == "already processed":
+            return True
+    return False
+
+
 def metadata_auto_applied(report: dict[str, Any]) -> bool:
     """True only when Metadata Forge actually wrote tags / metadata.json.
 
@@ -689,7 +714,7 @@ def quarantine_reason_from_report(report: dict[str, Any]) -> str:
     if isinstance(stats, dict):
         skip_reasons = stats.get("skip_reasons") or {}
         if isinstance(skip_reasons, dict) and skip_reasons:
-            parts = [f"{k} Ã—{v}" for k, v in list(skip_reasons.items())[:4]]
+            parts = [f"{k} x{v}" for k, v in list(skip_reasons.items())[:4]]
             return "Metadata Forge did not auto-apply: " + "; ".join(parts)[:400]
 
     report_items = report.get("report_items") or []

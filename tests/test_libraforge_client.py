@@ -7,6 +7,7 @@ import json
 import pytest
 
 from app.services.libraforge import (
+    metadata_already_processed,
     metadata_auto_applied,
     metadata_matched_without_apply,
     organizer_moved_files,
@@ -99,6 +100,42 @@ def test_metadata_not_applied_when_matched_but_write_skipped():
     assert not metadata_auto_applied(report)
     reason = quarantine_reason_from_report(report)
     assert "score below minimum" in reason or "did not auto-apply" in reason
+
+
+def test_metadata_already_processed_detected():
+    report = {
+        "stats": {
+            "found": 1,
+            "matched": 0,
+            "skipped": 1,
+            "skip_reasons": {"already processed": 1},
+            "mode_breakdown": {"full": 0},
+        },
+        "report_items": [
+            {
+                "path": "/audiobooks/.unorganized/req_1/book.m4b",
+                "status": "skipped",
+                "skip_reason": "already processed",
+                "score": 0.0,
+                "write_action": "write_skipped",
+                "title": "already processed",
+                "local": {"title": "Book", "author": "Author", "asin": "B0ABCDEF12"},
+            }
+        ],
+        "categories": {"status:skipped": [1], "write:write_skipped": [1]},
+    }
+    assert metadata_already_processed(report)
+    assert not metadata_auto_applied(report)
+
+
+def test_metadata_already_processed_not_confused_with_low_score():
+    report = {
+        "stats": {"skip_reasons": {"score below minimum: 0.4 < 0.7": 1}},
+        "report_items": [
+            {"skip_reason": "skipped: score below minimum: 0.4 < 0.7", "status": "skipped"}
+        ],
+    }
+    assert not metadata_already_processed(report)
 
 
 def test_metadata_auto_applied_from_report_items_written():

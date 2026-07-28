@@ -53,6 +53,23 @@ def test_stage_tree_copy_and_hardlink(tmp_path: Path):
     assert (dest / "chapter.mp3").read_bytes() == b"ID3fake"
 
 
+def test_staging_audio_hardlinked_helper(tmp_path: Path):
+    from app.services.forge_pipeline import _staging_audio_hardlinked
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    audio = staging / "book.m4b"
+    audio.write_bytes(b"m4b")
+    assert not _staging_audio_hardlinked(staging)
+    # Second hardlink name → nlink >= 2
+    other = tmp_path / "library_copy.m4b"
+    try:
+        other.hardlink_to(audio)
+    except OSError:
+        pytest.skip("hardlinks unsupported on this filesystem")
+    assert _staging_audio_hardlinked(staging)
+
+
 def test_stage_uploaded_files(tmp_path: Path):
     dest = tmp_path / "up"
     n = library_ingest.stage_uploaded_files(

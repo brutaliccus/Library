@@ -3,6 +3,7 @@ package com.freiverse.library;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -218,6 +219,116 @@ public class LibraryAutoPlugin extends Plugin
         } catch (Exception e) {
             call.reject("cachePlayableMedia failed: " + e.getMessage());
         }
+    }
+
+    /** Append a base64 audio chunk to the on-disk offline cache (large books). */
+    @PluginMethod
+    public void appendAudioDiskCache(PluginCall call) {
+        Context ctx = getContext();
+        if (ctx == null) {
+            call.reject("no context");
+            return;
+        }
+        String storageKey = call.getString("storageKey");
+        String data = call.getString("data");
+        String contentType = call.getString("contentType");
+        Double total = call.getDouble("total");
+        Integer offset = call.getInt("offset");
+        if (storageKey == null || storageKey.isEmpty() || data == null) {
+            call.reject("storageKey and data required");
+            return;
+        }
+        try {
+            LibraryAudioDiskCache.setStorageKeyMeta(
+                ctx,
+                storageKey,
+                contentType,
+                total != null ? total.longValue() : null
+            );
+            boolean ok =
+                LibraryAudioDiskCache.appendBase64(
+                    ctx,
+                    storageKey,
+                    data,
+                    contentType,
+                    total != null ? total.longValue() : null,
+                    offset != null ? offset : -1
+                );
+            JSObject result = new JSObject();
+            result.put("ok", ok);
+            result.put("size", LibraryAudioDiskCache.getPartialSize(ctx, storageKey));
+            call.resolve(result);
+        } catch (Exception e) {
+            call.reject("appendAudioDiskCache failed: " + e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void finalizeAudioDiskCache(PluginCall call) {
+        Context ctx = getContext();
+        if (ctx == null) {
+            call.reject("no context");
+            return;
+        }
+        String storageKey = call.getString("storageKey");
+        if (storageKey == null || storageKey.isEmpty()) {
+            call.reject("storageKey required");
+            return;
+        }
+        boolean ok = LibraryAudioDiskCache.finalizeStorageKey(ctx, storageKey);
+        JSObject result = new JSObject();
+        result.put("ok", ok);
+        Uri uri = LibraryAudioDiskCache.getFileUri(ctx, storageKey);
+        if (uri != null) {
+            result.put("uri", uri.toString());
+            result.put("path", uri.getPath());
+        }
+        result.put("size", LibraryAudioDiskCache.getCompleteSize(ctx, storageKey));
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void getAudioDiskCacheUri(PluginCall call) {
+        Context ctx = getContext();
+        if (ctx == null) {
+            call.reject("no context");
+            return;
+        }
+        String storageKey = call.getString("storageKey");
+        if (storageKey == null || storageKey.isEmpty()) {
+            call.reject("storageKey required");
+            return;
+        }
+        JSObject result = new JSObject();
+        boolean complete = LibraryAudioDiskCache.isComplete(ctx, storageKey);
+        result.put("complete", complete);
+        result.put("size", LibraryAudioDiskCache.getCompleteSize(ctx, storageKey));
+        result.put("partialSize", LibraryAudioDiskCache.getPartialSize(ctx, storageKey));
+        Uri uri = LibraryAudioDiskCache.getFileUri(ctx, storageKey);
+        if (uri != null) {
+            result.put("uri", uri.toString());
+            result.put("path", uri.getPath());
+        }
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void deleteAudioDiskCache(PluginCall call) {
+        Context ctx = getContext();
+        if (ctx == null) {
+            call.reject("no context");
+            return;
+        }
+        String storageKey = call.getString("storageKey");
+        String urlPrefix = call.getString("urlPrefix");
+        if (storageKey != null && !storageKey.isEmpty()) {
+            LibraryAudioDiskCache.deleteStorageKey(ctx, storageKey);
+        } else if (urlPrefix != null && !urlPrefix.isEmpty()) {
+            LibraryAudioDiskCache.deleteByUrlPrefix(ctx, urlPrefix);
+        } else if (Boolean.TRUE.equals(call.getBoolean("all", false))) {
+            LibraryAudioDiskCache.clearAll(ctx);
+        }
+        call.resolve();
     }
 
     /** Snapshot of native ExoPlayer ownership — used when the app UI opens mid-play. */

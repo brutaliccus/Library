@@ -219,8 +219,15 @@ async def retry_request(
     req.progress_bytes = None
     req.progress_total_bytes = None
     req.progress_speed_bps = None
-    # Non-AA: clear prior debrid binding so retry re-applies preferred/cache pick.
+    # Non-AA: clear prior debrid binding so retry re-applies preferred/cache pick,
+    # but exclude the provider that already failed (unique-cache would otherwise
+    # re-select TorBox forever).
     if not is_aa:
+        from app.services.pipeline import set_retry_exclude_providers
+
+        failed_provider = getattr(req, "debrid_provider", None)
+        if failed_provider:
+            set_retry_exclude_providers(req.id, [failed_provider])
         req.rd_torrent_id = None
         req.debrid_provider = None
     await db.commit()

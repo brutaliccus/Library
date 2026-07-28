@@ -73,10 +73,17 @@ async def check_cached_all(hashes: list[str]) -> dict[str, set[str]]:
     return out
 
 
+def _normalize_exclude(exclude: list[str] | set[str] | None) -> set[str]:
+    if not exclude:
+        return set()
+    return {normalize_provider(p) for p in exclude}
+
+
 def pick_provider(
     info_hash: str | None,
     cached_by_provider: dict[str, set[str]] | None,
     preferred: str | None,
+    exclude: list[str] | set[str] | None = None,
 ) -> str:
     """Select a debrid provider for stream/download.
 
@@ -88,8 +95,14 @@ def pick_provider(
 
     If the preferred provider's API key is missing, log and use another
     configured provider.
+
+    ``exclude`` skips providers that already failed for this request (retry).
     """
-    providers = available_providers()
+    excluded = _normalize_exclude(exclude)
+    providers = [p for p in available_providers() if p not in excluded]
+    if not providers:
+        # Nothing left after exclude — fall back to any configured provider.
+        providers = available_providers()
     if not providers:
         logger.warning(
             "No debrid providers configured; defaulting to %s",
@@ -125,12 +138,18 @@ def pick_provider(
 def download_provider_order(
     chosen: str,
     preferred: str | None = None,
+    exclude: list[str] | set[str] | None = None,
 ) -> list[str]:
     """Try ``chosen`` first; on failure, other configured providers (preferred next)."""
-    providers = available_providers()
+    excluded = _normalize_exclude(exclude)
+    providers = [p for p in available_providers() if p not in excluded]
+    if not providers:
+        providers = available_providers()
     if not providers:
         return [normalize_provider(chosen)]
     primary = normalize_provider(chosen)
+    if primary in excluded:
+        primary = providers[0]
     pref = normalize_provider(preferred)
     rest = [p for p in providers if p != primary]
     if pref in rest:
@@ -138,9 +157,16 @@ def download_provider_order(
     return [primary, *rest] if primary in providers else [providers[0], *[p for p in providers[1:]]]
 
 
-async def pick_provider_for_magnet(magnet_or_hash: str | None, preferred: str | None) -> str:
+async def pick_provider_for_magnet(
+    magnet_or_hash: str | None,
+    preferred: str | None,
+    exclude: list[str] | set[str] | None = None,
+) -> str:
     """Resolve hash, check caches, apply :func:`pick_provider` policy."""
-    providers = available_providers()
+    excluded = _normalize_exclude(exclude)
+    providers = [p for p in available_providers() if p not in excluded]
+    if not providers:
+        providers = available_providers()
     if len(providers) <= 1:
         choice = providers[0] if providers else RD
         if preferred and normalize_provider(preferred) not in providers:
@@ -153,15 +179,16 @@ async def pick_provider_for_magnet(magnet_or_hash: str | None, preferred: str | 
 
     h = extract_info_hash(magnet_or_hash, magnet_or_hash)
     if not h:
-        return pick_provider(None, None, preferred)
+        return pick_provider(None, None, preferred, exclude=excluded)
     cached = await check_cached_all([h])
-    choice = pick_provider(h, cached, preferred)
-    hits = [p for p in ALL_PROVIDERS if h in cached.get(p, set())]
+    choice = pick_provider(h, cached, preferred, exclude=excluded)
+    hits = [p for p in ALL_PROVIDERS if h in cached.get(p, set()) and p not in excluded]
     logger.info(
-        "Debrid pick: %s (preferred=%s, cache_hits=%s, hash=%s)",
+        "Debrid pick: %s (preferred=%s, cache_hits=%s, exclude=%s, hash=%s)",
         PROVIDER_LABELS[choice],
         PROVIDER_LABELS.get(normalize_provider(preferred), preferred),
         [PROVIDER_LABELS[p] for p in hits] or "none",
+        [PROVIDER_LABELS.get(p, p) for p in excluded] or "none",
         h[:12],
     )
     return choice

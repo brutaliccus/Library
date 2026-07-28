@@ -89,6 +89,31 @@ interface LibraryAutoPlugin {
     totalDuration?: number;
     tracks: PlayableTrackPayload[];
   }): Promise<void>;
+  /** Append base64 chunk to on-disk offline audio (Android large books). */
+  appendAudioDiskCache(options: {
+    storageKey: string;
+    data: string;
+    contentType?: string;
+    total?: number;
+    offset?: number;
+  }): Promise<{ ok: boolean; size?: number }>;
+  finalizeAudioDiskCache(options: {
+    storageKey: string;
+  }): Promise<{ ok: boolean; uri?: string; path?: string; size?: number }>;
+  getAudioDiskCacheUri(options: {
+    storageKey: string;
+  }): Promise<{
+    complete: boolean;
+    size?: number;
+    partialSize?: number;
+    uri?: string;
+    path?: string;
+  }>;
+  deleteAudioDiskCache(options: {
+    storageKey?: string;
+    urlPrefix?: string;
+    all?: boolean;
+  }): Promise<void>;
   getNativePlaybackState(): Promise<{
     nativeOwner: boolean;
     playing: boolean;

@@ -11,6 +11,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
+import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
@@ -361,14 +362,16 @@ public final class LibraryNativePlayer {
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(30_000)
             .setAllowCrossProtocolRedirects(true)
-            .setUserAgent("LibraryAndroidAuto/1.45");
+            .setUserAgent("LibraryAndroidAuto/1.47");
         if (authToken != null && !authToken.isEmpty()) {
             java.util.Map<String, String> headers = new java.util.HashMap<>();
             headers.put("Authorization", "Bearer " + authToken);
             http.setDefaultRequestProperties(headers);
         }
+        // DefaultDataSource supports file:// (offline disk cache) + http(s).
+        DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(app, http);
         DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(app)
-            .setDataSourceFactory(http);
+            .setDataSourceFactory(dataSourceFactory);
 
         AudioAttributes audioAttrs = new AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)

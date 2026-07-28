@@ -361,13 +361,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const seq = ++loadSeqRef.current;
 
       if (trackObjectUrlRef.current) {
-        URL.revokeObjectURL(trackObjectUrlRef.current);
+        if (trackObjectUrlRef.current.startsWith("blob:")) {
+          URL.revokeObjectURL(trackObjectUrlRef.current);
+        }
         trackObjectUrlRef.current = null;
       }
 
       const beginPlayback = (src: string, objectUrl: string | null) => {
         if (seq !== loadSeqRef.current) {
-          if (objectUrl) URL.revokeObjectURL(objectUrl);
+          if (objectUrl?.startsWith("blob:")) URL.revokeObjectURL(objectUrl);
           return;
         }
         if (objectUrl) trackObjectUrlRef.current = objectUrl;
@@ -402,7 +404,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
       const streamUrl = toAbsoluteUrl(track.contentUrl);
 
-      // Cached books: play from blob (offline). Uncached: stream immediately.
+      // Cached books: play from local blob/file (offline). Uncached: stream.
       void (async () => {
         try {
           if (await isTrackFullyCached(streamUrl)) {
@@ -1277,7 +1279,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       audio.src = "";
       loadSeqRef.current++; // cancel any in-flight cache lookup from loadTrack
       if (trackObjectUrlRef.current) {
-        URL.revokeObjectURL(trackObjectUrlRef.current);
+        if (trackObjectUrlRef.current.startsWith("blob:")) {
+          URL.revokeObjectURL(trackObjectUrlRef.current);
+        }
         trackObjectUrlRef.current = null;
       }
       lastPosRef.current = null;

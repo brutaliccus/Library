@@ -79,3 +79,16 @@ def test_download_provider_order_puts_chosen_first_then_preferred_fallback():
             debrid.RD,
             debrid.TORBOX,
         ]
+
+
+def test_exclude_skips_unique_cache_winner():
+    """Retry after TorBox failure must not re-pick TorBox via unique-cache."""
+    cached = {debrid.RD: set(), debrid.TORBOX: {HASH}}
+    with _both_configured():
+        assert (
+            debrid.pick_provider(HASH, cached, debrid.RD, exclude=[debrid.TORBOX])
+            == debrid.RD
+        )
+        assert debrid.download_provider_order(
+            debrid.TORBOX, debrid.TORBOX, exclude=[debrid.TORBOX]
+        ) == [debrid.RD]

@@ -5,6 +5,7 @@
 import { Capacitor } from "@capacitor/core";
 import { LibraryAuto } from "./libraryAutoPlugin";
 import { toAbsoluteUrl } from "../api/instanceUrl";
+import { androidDiskFileUri } from "../utils/audioDiskCache";
 import type { Track } from "../types/player";
 
 const AA_PLAY_ABS_PREFIX = "play/abs/";
@@ -30,6 +31,17 @@ function rdMediaId(historyId: number): string {
   return `${AA_PLAY_RD_HIST_PREFIX}${historyId}`;
 }
 
+async function resolveTrackUrl(contentUrl: string): Promise<string> {
+  const absolute = toAbsoluteUrl(contentUrl);
+  try {
+    const local = await androidDiskFileUri(absolute);
+    if (local) return local;
+  } catch {
+    /* network URL */
+  }
+  return absolute;
+}
+
 export async function cachePlayableForAndroidAuto(
   opts: CachePlayableOpts
 ): Promise<void> {
@@ -42,6 +54,15 @@ export async function cachePlayableForAndroidAuto(
       : "";
 
   try {
+    const tracks = await Promise.all(
+      opts.tracks.map(async (t) => ({
+        contentUrl: await resolveTrackUrl(t.contentUrl),
+        title: t.title || "",
+        startOffset: t.startOffset ?? 0,
+        duration: t.duration ?? 0,
+        mimeType: t.mimeType || "",
+      }))
+    );
     await LibraryAuto.cachePlayableMedia({
       mediaId: opts.mediaId,
       title: opts.title,
@@ -51,13 +72,7 @@ export async function cachePlayableForAndroidAuto(
       position: Math.max(0, opts.position ?? 0),
       trackIndex: Math.max(0, opts.trackIndex ?? 0),
       totalDuration: Math.max(0, opts.totalDuration ?? 0),
-      tracks: opts.tracks.map((t) => ({
-        contentUrl: toAbsoluteUrl(t.contentUrl),
-        title: t.title || "",
-        startOffset: t.startOffset ?? 0,
-        duration: t.duration ?? 0,
-        mimeType: t.mimeType || "",
-      })),
+      tracks,
     });
   } catch {
     /* plugin unavailable */

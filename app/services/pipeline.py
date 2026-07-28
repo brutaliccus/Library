@@ -23,6 +23,20 @@ settings = get_settings()
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".ogg", ".opus", ".flac", ".wav", ".wma", ".aac", ".mp4"}
 
 _progress_db_throttle: dict[int, float] = {}
+# request_id → providers to skip on the next process_download (retry after failure)
+_retry_exclude_providers: dict[int, list[str]] = {}
+
+
+def set_retry_exclude_providers(request_id: int, providers: list[str] | None) -> None:
+    """Remember which debrid provider(s) already failed so retry can try another."""
+    if not providers:
+        _retry_exclude_providers.pop(request_id, None)
+        return
+    cleaned = [debrid.normalize_provider(p) for p in providers if p]
+    if cleaned:
+        _retry_exclude_providers[request_id] = cleaned
+    else:
+        _retry_exclude_providers.pop(request_id, None)
 
 
 def _format_speed(speed_bps: float) -> str:
@@ -822,6 +836,9 @@ async def process_download(request_id: int) -> None:
                 except Exception as e:
                     logger.warning("ABB magnet resolve for request %s failed: %s", request_id, e)
 
+            # Retry path may ask us to skip a provider that already failed.
+            exclude_providers = _retry_exclude_providers.pop(request_id, None) or []
+
             if torrent_id:
                 # Resume an in-flight torrent on the provider that accepted it.
                 # Legacy rows without debrid_provider were always Real-Debrid.
@@ -829,8 +846,12 @@ async def process_download(request_id: int) -> None:
                     debrid.normalize_provider(stored_provider or debrid.RD)
                 ]
             else:
-                chosen = await debrid.pick_provider_for_magnet(link, preferred)
-                providers_to_try = debrid.download_provider_order(chosen, preferred)
+                chosen = await debrid.pick_provider_for_magnet(
+                    link, preferred, exclude=exclude_providers
+                )
+                providers_to_try = debrid.download_provider_order(
+                    chosen, preferred, exclude=exclude_providers
+                )
 
             torrent_info: dict | None = None
             client = None
@@ -873,14 +894,16 @@ async def process_download(request_id: int) -> None:
                     or (created_provider is None and bool(try_id))
                 )
                 hard = last_err is not None and _is_hard_debrid_failure(last_err)
-                # If a job was created, only fall back on terminal provider status
-                # (error/dead/…) — never on timeouts, 429s, or poll API bugs while
-                # the torrent is still downloading/queued on TorBox.
+                # Pre-create: any non-cancel failure may try the next provider
+                # (5xx/timeouts/API errors on createtorrent must not strand the
+                # user on a dead TorBox preference). Post-create: only fall back
+                # on terminal provider status (error/dead/…) — never on timeouts,
+                # 429s, or poll API bugs while the torrent may still be active.
                 terminal_after_create = hard and "failed with status" in str(
                     last_err
                 ).lower()
                 can_fallback = idx < len(providers_to_try) - 1 and (
-                    terminal_after_create if job_created else hard
+                    terminal_after_create if job_created else True
                 )
                 logger.warning(
                     "Request %s: %s failed (%s)%s",
@@ -905,6 +928,16 @@ async def process_download(request_id: int) -> None:
                     )
                     torrent_id = None
                     continue
+                # No active job: remember which provider failed so Retry can skip it.
+                if not job_created:
+                    await _update_status(
+                        db,
+                        request_id,
+                        "pending",
+                        f"{label} failed",
+                        debrid_provider=provider,
+                        clear_debrid_torrent=True,
+                    )
                 raise RuntimeError(
                     f"{label} failed"
                     + (f" after job created (id={created_id})" if job_created else "")

@@ -89,6 +89,34 @@ def test_http_429_is_not_hard_failure():
     assert not _is_hard_debrid_failure(httpx.HTTPStatusError("rate limited", request=req, response=resp))
 
 
+def test_http_500_is_not_hard_but_pre_create_fallback_uses_any_error():
+    """5xx is soft for post-create; pre-create path falls back on any error."""
+    req = httpx.Request("POST", "https://api.torbox.app/v1/api/torrents/createtorrent")
+    resp = httpx.Response(500, request=req)
+    assert not _is_hard_debrid_failure(
+        httpx.HTTPStatusError("server error", request=req, response=resp)
+    )
+
+
+def test_download_provider_order_excludes_failed_provider():
+    from app.services import debrid
+
+    with patch.object(
+        debrid,
+        "available_providers",
+        return_value=[debrid.RD, debrid.TORBOX],
+    ):
+        assert debrid.download_provider_order(
+            debrid.TORBOX, debrid.TORBOX, exclude=[debrid.TORBOX]
+        ) == [debrid.RD]
+        assert debrid.pick_provider(
+            "abcdef0123456789abcdef0123456789abcdef01",
+            {debrid.RD: set(), debrid.TORBOX: {"abcdef0123456789abcdef0123456789abcdef01"}},
+            debrid.RD,
+            exclude=[debrid.TORBOX],
+        ) == debrid.RD
+
+
 def test_poll_until_ready_accepts_on_progress():
     """Regression: pipeline always passes on_progress; TorBox must accept it."""
     calls: list[dict] = []

@@ -18,6 +18,17 @@
 
 import { toAbsoluteUrl } from "../api/instanceUrl";
 import {
+  androidDiskAppendChunk,
+  androidDiskClearAll,
+  androidDiskCacheEnabled,
+  androidDiskDeleteByPathPrefix,
+  androidDiskFinalize,
+  androidDiskIsComplete,
+  androidDiskMaterializeFromParts,
+  androidDiskPartialSize,
+  androidDiskWebSrc,
+} from "./audioDiskCache";
+import {
   cacheStorageKey,
   hasStorageRoom,
   shouldDeferCacheDownload,
@@ -113,12 +124,11 @@ async function cacheHasUrl(cache: Cache, url: string): Promise<boolean> {
 }
 
 export async function isBookCached(tracks: CacheableTrack[]): Promise<boolean> {
-  if (!cacheSupported() || tracks.length === 0) return false;
+  if (tracks.length === 0) return false;
   try {
-    const cache = await caches.open(AUDIO_CACHE);
     for (const t of tracks) {
       if (!t.contentUrl || !isCacheableUrl(t.contentUrl)) return false;
-      if (!(await cacheHasUrl(cache, t.contentUrl))) return false;
+      if (!(await isTrackFullyCached(t.contentUrl))) return false;
     }
     return true;
   } catch {
@@ -145,8 +155,10 @@ async function cachedResponseMeta(
 
 /** Fast check (no blob read) — is the full track on disk? */
 export async function isTrackFullyCached(url: string): Promise<boolean> {
-  if (!cacheSupported() || !url || !isCacheableUrl(url)) return false;
+  if (!url || !isCacheableUrl(url)) return false;
   try {
+    if (await androidDiskIsComplete(url)) return true;
+    if (!cacheSupported()) return false;
     const cache = await caches.open(AUDIO_CACHE);
     const key = cacheStorageKey(url);
     if (await cache.match(key)) return true;
@@ -185,17 +197,54 @@ async function objectUrlFromParts(storageKey: string): Promise<string | null> {
 }
 
 /**
- * Object URL for a fully-downloaded track, or null when not cached.
- * Callers own the URL and must revoke it via URL.revokeObjectURL().
+ * Object URL / local file URL for a fully-downloaded track, or null when not cached.
+ * Callers own blob URLs and must revoke via URL.revokeObjectURL().
  *
  * Android WebView cannot read the Cache API through a service worker for
- * <audio> — this blob URL is the only offline playback path on native for
- * small/medium tracks. Skips very large files — reading a 200 MB blob into
- * RAM freezes Android; those tracks keep streaming from the network.
+ * <audio> — prefer on-disk file URLs (any size), then blob URLs for small
+ * tracks. Large Cache API entries are materialized to disk on demand.
  */
 export async function getCachedTrackObjectUrl(url: string): Promise<string | null> {
-  if (!cacheSupported() || !url || !isCacheableUrl(url)) return null;
+  if (!url || !isCacheableUrl(url)) return null;
   try {
+    const diskSrc = await androidDiskWebSrc(url);
+    if (diskSrc) return diskSrc;
+
+    if (await androidDiskCacheEnabled()) {
+      // Materialize complete Cache API parts → disk (fixes pre-1.47 downloads).
+      if (cacheSupported()) {
+        const key = cacheStorageKey(url);
+        const cache = await caches.open(AUDIO_CACHE);
+        const state = await loadExistingParts(cache, key);
+        const partsComplete =
+          state.nextIndex > 0 &&
+          state.total != null &&
+          state.total > 0 &&
+          state.offset >= state.total;
+        if (partsComplete) {
+          const materialized = await androidDiskMaterializeFromParts(
+            key,
+            async (index) => {
+              const resp = await cache.match(partKey(key, index));
+              if (!resp) return null;
+              return resp.blob();
+            },
+            state.contentType,
+            state.total
+          );
+          if (materialized) return materialized;
+        }
+        const meta = await cachedResponseMeta(url);
+        if (meta && meta.size > 0 && meta.size <= MAX_BLOB_PLAYBACK_BYTES) {
+          // Small assembled entry — blob URL is fine.
+          const blob = await meta.resp.blob();
+          if (blob.size > 0) return URL.createObjectURL(blob);
+        }
+      }
+      return null;
+    }
+
+    if (!cacheSupported()) return null;
     const meta = await cachedResponseMeta(url);
     if (meta) {
       if (meta.size > MAX_BLOB_PLAYBACK_BYTES) return null;
@@ -224,7 +273,9 @@ export async function resolvePlaybackSource(
       return {
         src: objectUrl,
         cached: true,
-        revoke: () => URL.revokeObjectURL(objectUrl),
+        revoke: objectUrl.startsWith("blob:")
+          ? () => URL.revokeObjectURL(objectUrl)
+          : undefined,
       };
     }
   }
@@ -448,7 +499,8 @@ async function assembleParts(
 
 /**
  * Download a single track in ranged chunks, persisting each chunk immediately.
- * Returns true when the fully assembled track ended up in the cache.
+ * Returns true when the fully assembled track ended up in the cache
+ * (Cache API and/or Android on-disk file).
  */
 async function downloadTrack(
   cache: Cache,
@@ -456,7 +508,23 @@ async function downloadTrack(
   opts?: { force?: boolean }
 ): Promise<boolean> {
   const storageKey = cacheStorageKey(url);
+  const useDisk = await androidDiskCacheEnabled();
+  if (useDisk && (await androidDiskIsComplete(url))) {
+    return true;
+  }
+
   const state = await loadExistingParts(cache, storageKey);
+  if (useDisk) {
+    try {
+      const diskSize = await androidDiskPartialSize(url);
+      if (diskSize > state.offset) {
+        // Disk ahead of Cache API — keep writing Cache API from its offset;
+        // disk append uses expected offset from state for dual-write sync.
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 
   while (state.total == null || state.offset < state.total) {
     if (!opts?.force) {
@@ -482,18 +550,26 @@ async function downloadTrack(
 
     if (chunk.status === 200) {
       // Server ignored Range and sent the whole file. Holding a multi-hundred-MB
-      // body in RAM during playback freezes Android — abort this track.
+      // body in RAM during playback freezes Android — abort unless we can stream
+      // it straight to disk in one shot (still risky); refuse huge full-body.
       if (chunk.blob.size > MAX_BLOB_PLAYBACK_BYTES) {
         console.warn(
           `[audioCache] refusing full-file cache of ${chunk.blob.size} bytes`
         );
-        setLastError("Track too large for in-app cache while playing");
+        setLastError("Track too large for single-response cache — need Range");
         return false;
       }
       await deleteParts(cache, storageKey, state.nextIndex);
       state.contentType = chunk.contentType || state.contentType;
       if (!(await putPart(cache, storageKey, 0, chunk.blob, state.contentType, chunk.blob.size))) {
         return false;
+      }
+      if (useDisk) {
+        await androidDiskAppendChunk(url, chunk.blob, {
+          offset: 0,
+          total: chunk.blob.size,
+          contentType: state.contentType,
+        });
       }
       state.nextIndex = 1;
       state.offset = chunk.blob.size;
@@ -504,16 +580,30 @@ async function downloadTrack(
     state.contentType = chunk.contentType || state.contentType;
     if (chunk.totalFromRange) state.total = chunk.totalFromRange;
 
-    // Known-huge ranged downloads: stop before assemble thrash (including
-    // explicit Save Offline — assembling still OOMs Android). Parts already
-    // written stay for resume diagnostics; playback keeps using the stream URL.
-    if (state.total != null && state.total > MAX_BLOB_PLAYBACK_BYTES) {
+    // Known-huge ranged downloads: on Android keep going into on-disk cache.
+    // Elsewhere stop before assemble thrash; playback keeps using the stream URL.
+    if (
+      !useDisk &&
+      state.total != null &&
+      state.total > MAX_BLOB_PLAYBACK_BYTES
+    ) {
       setLastError("Track too large for in-app cache while playing");
       return false;
     }
 
     if (!(await putPart(cache, storageKey, state.nextIndex, chunk.blob, state.contentType, state.total))) {
       return false;
+    }
+    if (useDisk) {
+      const ok = await androidDiskAppendChunk(url, chunk.blob, {
+        offset: state.offset,
+        total: state.total,
+        contentType: state.contentType,
+      });
+      if (!ok) {
+        setLastError("Could not write offline audio file");
+        return false;
+      }
     }
     state.nextIndex++;
     state.offset += chunk.blob.size;
@@ -524,6 +614,24 @@ async function downloadTrack(
     if (state.total == null || state.offset < state.total) {
       await throttleDelay(INTER_CHUNK_DELAY_MS);
       await sleep(INTER_CHUNK_DELAY_MS);
+    }
+  }
+
+  if (useDisk) {
+    const diskSrc = await androidDiskFinalize(url);
+    if (diskSrc) {
+      setLastError(null);
+      // Still assemble small Cache API entries for web-parity; skip huge assemble.
+      if (state.total == null || state.total <= MAX_BLOB_PLAYBACK_BYTES) {
+        await assembleParts(
+          cache,
+          storageKey,
+          state.nextIndex,
+          state.contentType,
+          state.total
+        );
+      }
+      return true;
     }
   }
 
@@ -617,6 +725,11 @@ export async function cacheBookAudio(
 
         const url = t.contentUrl;
         const key = cacheStorageKey(url);
+        if (await isTrackFullyCached(url)) {
+          done++;
+          onProgress?.(done, tracks.length);
+          continue;
+        }
         if (await cacheHasUrl(cache, key)) {
           done++;
           onProgress?.(done, tracks.length);
@@ -652,19 +765,21 @@ export async function clearBookCacheForTracks(tracks: CacheableTrack[]): Promise
 }
 
 async function clearByPathPrefix(prefix: string): Promise<void> {
-  if (!cacheSupported()) return;
-  try {
-    const cache = await caches.open(AUDIO_CACHE);
-    const keys = await cache.keys();
-    await Promise.all(
-      keys
-        .filter((req) => new URL(req.url).pathname.startsWith(prefix))
-        .map((req) => cache.delete(req))
-    );
-    notifyCacheUpdated();
-  } catch {
-    // Best-effort
+  if (cacheSupported()) {
+    try {
+      const cache = await caches.open(AUDIO_CACHE);
+      const keys = await cache.keys();
+      await Promise.all(
+        keys
+          .filter((req) => new URL(req.url).pathname.startsWith(prefix))
+          .map((req) => cache.delete(req))
+      );
+      notifyCacheUpdated();
+    } catch {
+      // Best-effort
+    }
   }
+  await androidDiskDeleteByPathPrefix(prefix);
 }
 
 export async function clearBookCache(kind: "h" | "l", rowId: number): Promise<void> {
@@ -676,13 +791,15 @@ export async function clearAbsBookCache(itemId: string): Promise<void> {
 }
 
 export async function clearAllAudioCache(): Promise<void> {
-  if (!cacheSupported()) return;
-  try {
-    await caches.delete(AUDIO_CACHE);
-    notifyCacheUpdated();
-  } catch {
-    // ignore
+  if (cacheSupported()) {
+    try {
+      await caches.delete(AUDIO_CACHE);
+      notifyCacheUpdated();
+    } catch {
+      // ignore
+    }
   }
+  await androidDiskClearAll();
 }
 
 /** Total bytes on disk — includes in-progress chunks so progress is visible. */

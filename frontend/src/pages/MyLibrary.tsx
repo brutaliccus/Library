@@ -269,7 +269,8 @@ function groupItemsByLocalSeries<T extends { seriesName?: string; series?: Array
 export default function MyLibrary() {
   const { user, sessionReady } = useAuth();
   const { toast } = useToast();
-  const { playABS, playRD } = usePlayer();
+  const { playABS, playRD, nowPlaying, expanded } = usePlayer();
+  const liftForMini = Boolean(nowPlaying && !expanded);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const online = useOnlineStatus();
@@ -1265,7 +1266,13 @@ export default function MyLibrary() {
   ) : null;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 lg:px-6 py-8">
+    <div
+      className={`max-w-7xl mx-auto px-4 lg:px-6 pt-8 ${
+        liftForMini
+          ? "pb-[calc(4.5rem+env(safe-area-inset-bottom,0px))]"
+          : "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]"
+      } lg:pb-8`}
+    >
       <Modal
         title="Continue reading?"
         show={!!continueModal}
@@ -1388,14 +1395,46 @@ export default function MyLibrary() {
         </div>
       )}
 
-      {/* Mobile: floating search overlay. Desktop: sticky search + tabs under nav. */}
-      <div className="h-[3.75rem] lg:hidden" aria-hidden />
+      {/* Mobile: bottom floating pill. Desktop: sticky search + tabs under nav. */}
       <div
-        className={`z-40 -mx-4 lg:-mx-6 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800/80 pt-1 pb-2 lg:pb-3 mb-0 lg:mb-4 space-y-0 lg:space-y-3
-          fixed lg:sticky left-0 right-0 lg:left-auto lg:right-auto
-          top-[calc(3.5rem+env(safe-area-inset-top,0px))]
-          pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))]
-          lg:pl-[max(1.5rem,env(safe-area-inset-left,0px))] lg:pr-[max(1.5rem,env(safe-area-inset-right,0px))]`}
+        className={`lg:hidden z-40 fixed left-0 right-0 px-4 pointer-events-none ${
+          liftForMini
+            ? "bottom-[calc(5rem+0.75rem+env(safe-area-inset-bottom,0px))]"
+            : "bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))]"
+        }`}
+      >
+        <div className="pointer-events-auto relative max-w-xl mx-auto">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={offline ? "Search unavailable offline" : "Search your library..."}
+            disabled={offline}
+            className="w-full pl-5 pr-14 py-3 bg-gray-900/90 backdrop-blur-md border border-gray-700/70 rounded-full text-sm text-gray-100 shadow-lg shadow-black/40 focus:outline-none focus:ring-2 focus:ring-brand-500/80 focus:border-brand-500/50 placeholder:text-gray-500 disabled:opacity-50"
+            aria-label="Search your library"
+          />
+          {searchQuery ? (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-2.5 rounded-full text-gray-400 hover:text-gray-100 hover:bg-gray-800/80 transition-colors"
+              aria-label="Clear library search"
+            >
+              <X size={18} />
+            </button>
+          ) : (
+            <span
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-brand-600/90 text-white pointer-events-none shadow-md shadow-brand-900/30"
+              aria-hidden
+            >
+              <Search size={18} strokeWidth={2.25} />
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div
+        className="hidden lg:block z-40 -mx-4 lg:-mx-6 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800/80 pt-1 pb-3 mb-4 space-y-3 sticky top-[calc(3.5rem+env(safe-area-inset-top,0px))] pl-[max(1.5rem,env(safe-area-inset-left,0px))] pr-[max(1.5rem,env(safe-area-inset-right,0px))]"
       >
         <div className="relative">
           <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
@@ -1419,7 +1458,7 @@ export default function MyLibrary() {
             </button>
           )}
         </div>
-        <div className="hidden lg:block space-y-3">{renderTabChrome()}</div>
+        <div className="space-y-3">{renderTabChrome()}</div>
       </div>
 
       {!isSearching && <div className="lg:hidden mb-4 space-y-3">{renderTabChrome()}</div>}

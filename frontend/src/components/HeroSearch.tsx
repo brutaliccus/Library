@@ -1,18 +1,18 @@
 import { useState, FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, SlidersHorizontal } from "lucide-react";
+import { usePlayer } from "../contexts/PlayerContext";
 
 interface Props {
   onGenreToggle?: () => void;
   genreActiveCount?: number;
 }
 
-const FLOAT_TOP =
-  "top-[calc(3.5rem+env(safe-area-inset-top,0px))]";
-
 export default function HeroSearch({ onGenreToggle, genreActiveCount = 0 }: Props) {
   const [value, setValue] = useState("");
   const navigate = useNavigate();
+  const { nowPlaying, expanded } = usePlayer();
+  const liftForMini = Boolean(nowPlaying && !expanded);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -24,54 +24,61 @@ export default function HeroSearch({ onGenreToggle, genreActiveCount = 0 }: Prop
 
   const hasFilter = Boolean(onGenreToggle);
 
-  const renderSearchForm = () => (
-    <form onSubmit={handleSubmit} className="relative max-w-xl mx-auto">
-      <Search
-        size={22}
-        className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none"
-      />
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder="Search by title, author, or ISBN..."
-        className={`w-full pl-12 py-4 bg-gray-800 border border-gray-700 rounded-2xl text-base text-gray-100 shadow-lg focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500 ${
-          hasFilter ? "pr-36" : "pr-24"
-        }`}
-      />
-      {hasFilter && (
-        <button
-          type="button"
-          onClick={onGenreToggle}
-          className="absolute right-[5.5rem] top-1/2 -translate-y-1/2 inline-flex items-center justify-center gap-1 p-2 rounded-xl text-gray-400 hover:text-gray-100 hover:bg-gray-700/80 transition-colors"
-          title="Filter genres"
-          aria-label="Filter genres"
-        >
-          <SlidersHorizontal size={18} />
-          {genreActiveCount > 0 && (
-            <span className="min-w-[1.1rem] px-1 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
-              {genreActiveCount}
-            </span>
-          )}
-        </button>
-      )}
-      <button
-        type="submit"
-        className="absolute right-2 top-1/2 -translate-y-1/2 px-5 py-2 bg-brand-600 text-white text-sm font-semibold rounded-xl hover:bg-brand-500 transition-colors"
-      >
-        Search
-      </button>
-    </form>
-  );
-
   return (
-    <div className="text-center pt-2 pb-4 lg:py-12">
-      {/* Mobile floating search under sticky nav */}
-      <div className="h-[4.25rem] lg:hidden" aria-hidden />
+    <div
+      className={`text-center pt-2 lg:py-12 ${
+        liftForMini
+          ? "pb-[calc(4.5rem+env(safe-area-inset-bottom,0px))]"
+          : "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]"
+      } lg:pb-12`}
+    >
+      {/* Mobile: bottom floating pill — no outer tray */}
       <div
-        className={`lg:hidden z-40 fixed left-0 right-0 ${FLOAT_TOP} px-4 py-2 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800/80`}
+        className={`lg:hidden z-40 fixed left-0 right-0 px-4 pointer-events-none ${
+          liftForMini
+            ? "bottom-[calc(5rem+0.75rem+env(safe-area-inset-bottom,0px))]"
+            : "bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))]"
+        }`}
       >
-        {renderSearchForm()}
+        <form
+          onSubmit={handleSubmit}
+          className="pointer-events-auto relative max-w-xl mx-auto"
+        >
+          <input
+            type="text"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="Search by title, author, or ISBN..."
+            className={`w-full pl-5 py-3 bg-gray-900/90 backdrop-blur-md border border-gray-700/70 rounded-full text-base text-gray-100 shadow-lg shadow-black/40 focus:outline-none focus:ring-2 focus:ring-brand-500/80 focus:border-brand-500/50 placeholder:text-gray-500 ${
+              hasFilter ? "pr-[6.5rem]" : "pr-14"
+            }`}
+            aria-label="Search catalog"
+          />
+          {hasFilter && (
+            <button
+              type="button"
+              onClick={onGenreToggle}
+              className="absolute right-[3.35rem] top-1/2 -translate-y-1/2 inline-flex items-center justify-center gap-0.5 p-2 rounded-full text-gray-400 hover:text-gray-100 hover:bg-gray-800/80 transition-colors"
+              title="Filter genres"
+              aria-label="Filter genres"
+            >
+              <SlidersHorizontal size={18} />
+              {genreActiveCount > 0 && (
+                <span className="min-w-[1.1rem] px-1 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
+                  {genreActiveCount}
+                </span>
+              )}
+            </button>
+          )}
+          <button
+            type="submit"
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-brand-600 text-white hover:bg-brand-500 transition-colors shadow-md shadow-brand-900/30"
+            aria-label="Search"
+            title="Search"
+          >
+            <Search size={18} strokeWidth={2.25} />
+          </button>
+        </form>
       </div>
 
       <h1 className="text-4xl font-bold text-gray-100 mb-2">
@@ -85,7 +92,43 @@ export default function HeroSearch({ onGenreToggle, genreActiveCount = 0 }: Prop
       </p>
 
       {/* Desktop inline search */}
-      <div className="hidden lg:block">{renderSearchForm()}</div>
+      <form onSubmit={handleSubmit} className="relative max-w-xl mx-auto hidden lg:block">
+        <Search
+          size={22}
+          className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none"
+        />
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="Search by title, author, or ISBN..."
+          className={`w-full pl-12 py-4 bg-gray-800 border border-gray-700 rounded-2xl text-base text-gray-100 shadow-lg focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-gray-500 ${
+            hasFilter ? "pr-36" : "pr-24"
+          }`}
+        />
+        {hasFilter && (
+          <button
+            type="button"
+            onClick={onGenreToggle}
+            className="absolute right-[5.5rem] top-1/2 -translate-y-1/2 inline-flex items-center justify-center gap-1 p-2 rounded-xl text-gray-400 hover:text-gray-100 hover:bg-gray-700/80 transition-colors"
+            title="Filter genres"
+            aria-label="Filter genres"
+          >
+            <SlidersHorizontal size={18} />
+            {genreActiveCount > 0 && (
+              <span className="min-w-[1.1rem] px-1 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
+                {genreActiveCount}
+              </span>
+            )}
+          </button>
+        )}
+        <button
+          type="submit"
+          className="absolute right-2 top-1/2 -translate-y-1/2 px-5 py-2 bg-brand-600 text-white text-sm font-semibold rounded-xl hover:bg-brand-500 transition-colors"
+        >
+          Search
+        </button>
+      </form>
     </div>
   );
 }

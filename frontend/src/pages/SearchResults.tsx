@@ -9,6 +9,7 @@ import type { Genre } from "../components/GenreSidebar";
 import { Search, ChevronLeft, ChevronRight, Library, BookOpen, Headphones, HardDrive, Loader2, SlidersHorizontal } from "lucide-react";
 import type { BookSummary } from "../types/book";
 import CoverImage from "../components/CoverImage";
+import { usePlayer } from "../contexts/PlayerContext";
 
 interface LibrarySearchHit {
   title: string;
@@ -77,6 +78,8 @@ export default function SearchResults({
   onActiveCountChange,
 }: Props) {
   const navigate = useNavigate();
+  const { nowPlaying, expanded } = usePlayer();
+  const liftForMini = Boolean(nowPlaying && !expanded);
   const [searchParams, setSearchParams] = useSearchParams();
   const q = searchParams.get("q") || "";
   const categoryParam = searchParams.get("category") || "";
@@ -265,15 +268,61 @@ export default function SearchResults({
   const heading = buildHeading(q, activeCategories, genres);
 
   return (
-    <div className="pb-8 pt-2 lg:py-8">
-      {/* Spacer for fixed mobile search */}
-      <div className="h-[4rem] lg:hidden" aria-hidden />
-
+    <div
+      className={`pt-2 lg:py-8 ${
+        liftForMini
+          ? "pb-[calc(4.5rem+env(safe-area-inset-bottom,0px))]"
+          : "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]"
+      } lg:pb-8`}
+    >
+      {/* Mobile: bottom floating pill */}
       <div
-        className={`z-40 lg:static lg:bg-transparent lg:border-0 lg:backdrop-blur-none lg:mb-6 lg:px-4 lg:relative
-          fixed left-0 right-0 top-[calc(3.5rem+env(safe-area-inset-top,0px))] px-4 py-2 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800/80
-          lg:left-auto lg:right-auto lg:top-auto lg:py-0 lg:border-0`}
+        className={`lg:hidden z-40 fixed left-0 right-0 px-4 pointer-events-none ${
+          liftForMini
+            ? "bottom-[calc(5rem+0.75rem+env(safe-area-inset-bottom,0px))]"
+            : "bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))]"
+        }`}
       >
+        <form onSubmit={handleSubmit} className="pointer-events-auto relative max-w-2xl mx-auto">
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            placeholder="Search by title, author, or ISBN..."
+            className={`w-full pl-5 py-3 bg-gray-900/90 backdrop-blur-md border border-gray-700/70 rounded-full text-base text-gray-100 shadow-lg shadow-black/40 focus:outline-none focus:ring-2 focus:ring-brand-500/80 focus:border-brand-500/50 placeholder:text-gray-500 ${
+              onGenreToggle ? "pr-[6.5rem]" : "pr-14"
+            }`}
+            aria-label="Search catalog"
+          />
+          {onGenreToggle && (
+            <button
+              type="button"
+              onClick={onGenreToggle}
+              className="absolute right-[3.35rem] top-1/2 -translate-y-1/2 inline-flex items-center justify-center gap-0.5 p-2 rounded-full text-gray-400 hover:text-gray-100 hover:bg-gray-800/80 transition-colors"
+              title="Filter genres"
+              aria-label="Filter genres"
+            >
+              <SlidersHorizontal size={18} />
+              {genreActiveCount > 0 && (
+                <span className="min-w-[1.1rem] px-1 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
+                  {genreActiveCount}
+                </span>
+              )}
+            </button>
+          )}
+          <button
+            type="submit"
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-brand-600 text-white hover:bg-brand-500 transition-colors shadow-md shadow-brand-900/30"
+            aria-label="Search"
+            title="Search"
+          >
+            <Search size={18} strokeWidth={2.25} />
+          </button>
+        </form>
+      </div>
+
+      {/* Desktop search */}
+      <div className="hidden lg:block mb-6 px-4">
         <form onSubmit={handleSubmit} className="relative max-w-2xl mx-auto">
           <Search
             size={20}

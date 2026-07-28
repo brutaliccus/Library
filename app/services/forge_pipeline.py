@@ -1758,8 +1758,9 @@ async def run_forge_after_download(
 
         seed_staging_metadata_hints(staging, title=title, author=author)
 
-        # Score ≥ min_score means match identity is trusted — not that the
-        # torrent's existing tags/cover are correct. Force full overwrite.
+        # Score ≥ min_score means match identity is trusted for auto-apply.
+        # Apply itself is always full overwrite of all matched fields + cover
+        # (never series_only / fill-if-empty), regardless of score quality.
         applied = await _apply_metadata_forge(
             request_id,
             staging=staging,

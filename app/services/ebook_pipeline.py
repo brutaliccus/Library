@@ -427,7 +427,7 @@ def _get_ebook_meta_bin() -> str | None:
 
 
 async def embed_ebook_metadata(ebook_path: Path, meta: EbookMeta) -> bool:
-    """Write title/author/series (OPF) via Calibre ``ebook-meta`` for Kavita series grouping."""
+    """Write title/author/series/cover (OPF) via Calibre ``ebook-meta``."""
     if ebook_path.suffix.lower() not in {".epub", ".mobi", ".azw3", ".azw"}:
         return False
     ebook_meta = _get_ebook_meta_bin()
@@ -451,12 +451,45 @@ async def embed_ebook_metadata(ebook_path: Path, meta: EbookMeta) -> bool:
     if isbn:
         cmd.extend(["--isbn", isbn])
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _stdout, stderr = await proc.communicate()
+    cover_tmp: Path | None = None
+    cover_url = (meta.cover_url or "").strip()
+    if cover_url.startswith("http"):
+        try:
+            import tempfile
+            import urllib.request
+
+            suffix = ".jpg"
+            lower = cover_url.lower()
+            if ".png" in lower:
+                suffix = ".png"
+            elif ".webp" in lower:
+                suffix = ".webp"
+            fd, tmp_name = tempfile.mkstemp(prefix="ebook-cover-", suffix=suffix)
+            cover_tmp = Path(tmp_name)
+            with urllib.request.urlopen(cover_url, timeout=30) as resp:  # noqa: S310
+                data = resp.read(10 * 1024 * 1024 + 1)
+            if len(data) > 10 * 1024 * 1024:
+                raise RuntimeError("cover too large")
+            with open(fd, "wb") as fh:
+                fh.write(data)
+            cmd.extend(["--cover", str(cover_tmp)])
+        except Exception as e:
+            logger.warning("Could not download ebook cover for embed: %s", e)
+            if cover_tmp and cover_tmp.exists():
+                cover_tmp.unlink(missing_ok=True)
+            cover_tmp = None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await proc.communicate()
+    finally:
+        if cover_tmp and cover_tmp.exists():
+            cover_tmp.unlink(missing_ok=True)
+
     if proc.returncode != 0:
         logger.warning(
             "ebook-meta failed for %s: %s",

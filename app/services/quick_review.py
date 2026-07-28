@@ -387,27 +387,26 @@ def _enrich_selected_for_apply(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Ensure chosen metadata carries cover_url (and top-level URL) for LibraForge.
 
-    LibraForge only embeds covers when ``edit_mode == "full"`` and
-    ``replace_cover`` / ``cover_if_missing`` with a non-empty ``cover_url``
-    on the chosen metadata blob — not the top-level candidate field alone.
+    LibraForge embeds covers when ``replace_cover`` / ``cover_if_missing`` with a
+    non-empty ``cover_url`` on the chosen metadata blob — not the top-level
+    candidate field alone. Apply paths always use ``edit_mode=full``.
     """
     selected = dict(selected_result)
     by_mode_raw = selected.get("chosen_metadata_by_mode") or {}
     by_mode: dict[str, Any] = dict(by_mode_raw) if isinstance(by_mode_raw, dict) else {}
     cover = _cover_url_from_candidate(selected, edit_mode)
 
-    for mode_key in ("full", edit_mode):
-        if mode_key not in {"full", "series_only"}:
-            continue
-        base = by_mode.get(mode_key) or selected.get("chosen_metadata") or {}
+    for mode_key in ("full", "series_only"):
+        base = by_mode.get(mode_key)
+        if base is None and mode_key == edit_mode:
+            base = selected.get("chosen_metadata") or {}
         if not isinstance(base, dict):
+            if mode_key != "full" and mode_key != edit_mode:
+                continue
             base = {}
         entry = dict(base)
-        if cover and mode_key == "full":
+        if cover:
             entry["cover_url"] = cover
-        elif mode_key == "series_only":
-            # series_only never embeds covers in LibraForge writers
-            entry.setdefault("cover_url", "")
         by_mode[mode_key] = entry
 
     if cover:
@@ -419,7 +418,7 @@ def _enrich_selected_for_apply(
         selected["chosen_metadata"] = dict(chosen)
 
     override: dict[str, Any] = {}
-    if replace_cover and edit_mode == "full" and cover:
+    if replace_cover and cover:
         override["cover_url"] = cover
     return selected, override
 
@@ -430,22 +429,21 @@ def resolve_apply_edit_mode(
     edit_mode: str = "full",
     replace_cover: bool = True,
 ) -> str:
-    """Pick apply edit_mode. Cover replace requires LibraForge ``full`` mode."""
+    """Pick apply edit_mode. Pipeline apply always uses full overwrite."""
+    del replace_cover  # retained for call-site compatibility; apply is always full
     mode = (edit_mode or "full").strip()
     if mode not in {"full", "series_only"}:
         mode = "full"
     allowed_raw = selected_result.get("allowed_edit_modes") or []
     allowed = [str(m) for m in allowed_raw] if isinstance(allowed_raw, list) else []
 
-    # Quick Review always requests replace_cover; LibraForge writers gate cover
-    # embeds on edit_mode == "full". Prefer full whenever cover replace is on.
-    if replace_cover and (not allowed or "full" in allowed):
+    # Once a match is applied, always full-replace every field + cover.
+    # Score/confidence only decides auto-pick vs quarantine — not write depth.
+    if not allowed or "full" in allowed:
         return "full"
 
     recommended = str(selected_result.get("recommended_edit_mode") or "").strip()
-    if recommended in {"full", "series_only"} and (
-        not allowed or recommended in allowed
-    ):
+    if recommended in {"full", "series_only"} and recommended in allowed:
         return recommended
     if allowed and mode not in allowed:
         return "full" if "full" in allowed else str(allowed[0])
@@ -488,7 +486,7 @@ async def apply_quick_review(
         selected_result, edit_mode=mode, replace_cover=replace_cover
     )
     cover = _cover_url_from_candidate(enriched, mode)
-    if replace_cover and mode == "full" and not cover:
+    if replace_cover and not cover:
         logger.warning(
             "Quick Review apply for request %s: replace_cover set but candidate has no cover_url",
             req.id,

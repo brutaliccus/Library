@@ -115,7 +115,8 @@ def test_list_staging_targets_and_resolve(tmp_path):
     assert "req_9_Timeline" in lf.replace("\\", "/")
 
 
-def test_resolve_apply_edit_mode_forces_full_when_replace_cover():
+def test_resolve_apply_edit_mode_always_full():
+    """Apply path always full-replaces; score only gates auto-pick vs quarantine."""
     selected = {
         "recommended_edit_mode": "series_only",
         "allowed_edit_modes": ["full", "series_only"],
@@ -126,7 +127,7 @@ def test_resolve_apply_edit_mode_forces_full_when_replace_cover():
     )
     assert (
         resolve_apply_edit_mode(selected, edit_mode="series_only", replace_cover=False)
-        == "series_only"
+        == "full"
     )
 
 
@@ -142,6 +143,9 @@ def test_enrich_selected_injects_top_level_cover_into_full_mode():
         selected, edit_mode="full", replace_cover=True
     )
     assert enriched["chosen_metadata_by_mode"]["full"]["cover_url"] == (
+        "https://images.example/cover.jpg"
+    )
+    assert enriched["chosen_metadata_by_mode"]["series_only"]["cover_url"] == (
         "https://images.example/cover.jpg"
     )
     assert override.get("cover_url") == "https://images.example/cover.jpg"

@@ -51,7 +51,7 @@ Signed-in Android users get:
 
 - A **blocking “Update required” modal** when a newer APK is available and
   **Force Android APK updates** is on (Admin default), or when the installed
-  `versionCode` is below **Minimum Android versionCode** (default **53** = 1.52)
+  `versionCode` is below **Minimum Android versionCode** (default **54** = 1.53)
 - A soft **Update available** banner (dismissible) only when force updates are
   turned off and the install is still above the minimum
 - A system notification (when the app is in the background) with **Update now**
@@ -93,7 +93,7 @@ you deployed). Commit first, then deploy.
 
 Admin → Config → **Android APK GitHub repo** can point at a fork. Optional GitHub
 token raises API rate limits. **Force Android APK updates** and **Minimum Android
-versionCode** control the hard gate (defaults: force on, min = 53).
+versionCode** control the hard gate (defaults: force on, min = 54).
 
 ## Notes
 

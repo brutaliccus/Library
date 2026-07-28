@@ -88,9 +88,9 @@ REGISTRY: list[SettingDef] = [
         value_type="int",
         help=(
             "Installed APKs with a lower versionCode are blocked until they update "
-            "(default 53 = Library 1.52). Raise this after publishing a required release."
+            "(default 54 = Library 1.53). Raise this after publishing a required release."
         ),
-        placeholder="53",
+        placeholder="54",
     ),
     SettingDef(
         key="config.android_force_updates",
@@ -967,7 +967,7 @@ async def setup_status() -> dict[str, Any]:
             "help": (
                 "GitHub `owner/repo` whose Releases host the Library APK "
                 "(latest .apk asset). Force updates + minimum versionCode "
-                "(default 53 = 1.52) gate old installs. See docs/android-app.md."
+                "(default 54 = 1.53) gate old installs. See docs/android-app.md."
             ),
         },
         {

@@ -383,7 +383,7 @@ public final class LibraryNativePlayer {
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(30_000)
             .setAllowCrossProtocolRedirects(true)
-            .setUserAgent("LibraryAndroidAuto/1.52");
+            .setUserAgent("LibraryAndroidAuto/1.53");
         if (!token.isEmpty()) {
             java.util.Map<String, String> headers = new java.util.HashMap<>();
             headers.put("Authorization", "Bearer " + token);

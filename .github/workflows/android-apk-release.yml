@@ -93,6 +93,22 @@ jobs:
           npm run build
           npx cap sync android
 
+      - name: Verify embedded SPA UI markers
+        working-directory: frontend
+        shell: bash
+        run: |
+          PUB="android/app/src/main/assets/public"
+          test -f "$PUB/index.html"
+          # Distinctive strings from recent UI work — fail the release if sync was stale.
+          for needle in "Up next" "Processed" "Folder Forge" "Update required"; do
+            if ! grep -R --fixed-strings -q -- "$needle" "$PUB/assets"; then
+              echo "Missing embedded UI marker: $needle" >&2
+              exit 1
+            fi
+            echo "OK: $needle"
+          done
+          ls -la "$PUB/index.html" "$PUB/assets"/index-*.js | head -20
+
       - name: Patch Android version
         working-directory: frontend/android/app
         shell: bash

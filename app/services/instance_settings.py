@@ -88,10 +88,11 @@ REGISTRY: list[SettingDef] = [
         value_type="int",
         help=(
             "Installed APKs with a lower versionCode are blocked until they update "
-            "(default 55 = Library 1.54). Raise this after publishing a required release."
+            "(default 56 = Library 1.55). Raise this after publishing a required release."
         ),
-        placeholder="55",
-    ),    SettingDef(
+        placeholder="56",
+    ),
+    SettingDef(
         key="config.android_force_updates",
         group="mobile",
         label="Force Android APK updates",

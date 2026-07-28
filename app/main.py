@@ -87,6 +87,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("ABS metadata hardening skipped: %s", e)
     await resume_interrupted_downloads()
+    try:
+        from app.services.library_sweep import resume_running_sweep_on_startup
+
+        await resume_running_sweep_on_startup()
+    except Exception as e:
+        logger.warning("Library Sweep resume skipped: %s", e)
     start_scraper()
     _shelf_refresh_task = asyncio.create_task(_daily_shelf_refresh_loop())
     _ol_dumps_check_task = asyncio.create_task(_ol_dumps_check_loop())

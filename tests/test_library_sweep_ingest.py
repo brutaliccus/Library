@@ -96,6 +96,18 @@ def test_admin_sweep_routes_registered():
     assert any("library-sweep/status" in p for p in paths)
     assert any("library-sweep/needs-review" in p for p in paths)
     assert any("library-sweep/review-cursor" in p for p in paths)
+    assert any("library-sweep/skip" in p for p in paths)
+    assert any("library-sweep/unprocessed" in p for p in paths)
+    assert any("library-sweep/reprocess" in p for p in paths)
+
+
+def test_synthetic_magnet_helpers():
+    assert library_ingest.is_synthetic_magnet("sweep:abs:abc")
+    assert library_ingest.is_synthetic_magnet("upload:deadbeef")
+    assert not library_ingest.is_synthetic_magnet("magnet:?xt=urn:btih:abc")
+    assert library_ingest.is_local_ingest_source("sweep")
+    assert library_ingest.is_local_ingest_source("upload")
+    assert not library_ingest.is_local_ingest_source("request")
 
 
 def test_owned_upload_routes_registered():

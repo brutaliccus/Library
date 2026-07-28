@@ -209,7 +209,7 @@ async def _is_cancelled(request_id: int) -> bool:
             select(DownloadRequest.status).where(DownloadRequest.id == request_id)
         )
         status = result.scalar_one_or_none()
-        return status in ("cancelled", "admin_rejected")
+        return status in ("cancelled", "admin_rejected", "skipped")
 
 
 async def _update_status(
@@ -233,10 +233,12 @@ async def _update_status(
     if req is None:
         logger.warning("DownloadRequest %s missing during status update → %s", request_id, status)
         return
-    # Never clobber an explicit user cancel / admin reject with pipeline progress/failure.
+    # Never clobber an explicit user cancel / admin reject / skip with pipeline progress/failure.
     if req.status == "cancelled" and status != "cancelled":
         return
     if req.status == "admin_rejected" and status != "admin_rejected":
+        return
+    if req.status == "skipped" and status != "skipped":
         return
     req.status = status
     if detail is not None:
@@ -248,7 +250,7 @@ async def _update_status(
         req.rd_torrent_id = rd_torrent_id
     if debrid_provider is not None:
         req.debrid_provider = debrid_provider
-    if status in ("completed", "failed", "cancelled", "quarantined", "admin_rejected"):
+    if status in ("completed", "failed", "cancelled", "quarantined", "admin_rejected", "skipped"):
         req.progress_percent = None
         req.progress_bytes = None
         req.progress_total_bytes = None
@@ -780,6 +782,75 @@ async def _resolve_debrid_torrent(
 async def process_download(request_id: int) -> None:
     """Runs (or resumes) the full download pipeline for a request.
     Checks the current DB state so it can skip already-completed steps."""
+    # Sweep / owned-upload magnets are not torrents — never call Real-Debrid.
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req_probe = result.scalar_one_or_none()
+        if req_probe is None:
+            logger.warning("Download: request %s not found", request_id)
+            return
+        from app.services import library_ingest
+
+        if library_ingest.is_local_ingest_request(req_probe):
+            logger.warning(
+                "process_download refused for local ingest #%s (source=%s magnet=%s…) — "
+                "routing to forge if staging exists",
+                request_id,
+                getattr(req_probe, "source", None),
+                (req_probe.magnet_link or "")[:24],
+            )
+            staging_str = (getattr(req_probe, "staging_path", None) or "").strip()
+            user_id = req_probe.user_id
+            title = req_probe.title
+            author = req_probe.author
+            if not staging_str:
+                await _update_status(
+                    db,
+                    request_id,
+                    "failed",
+                    "Local library ingest has no staging — use Library Sweep reprocess "
+                    "(not debrid Retry)",
+                )
+                return
+            local_staging = staging_str
+            local_user_id = user_id
+            local_title = title
+            local_author = author
+        else:
+            local_staging = None
+
+    if local_staging is not None:
+        from pathlib import Path as _Path
+        from app.services.forge_pipeline import (
+            resolve_staging_dir,
+            run_forge_after_download,
+        )
+
+        try:
+            staging = resolve_staging_dir(local_staging)
+        except FileNotFoundError:
+            staging = _Path(local_staging)
+        if staging.is_dir():
+            await run_forge_after_download(
+                request_id,
+                staging=staging,
+                user_id=local_user_id,
+                title=local_title,
+                author=local_author,
+                resume_from="metadata",
+            )
+            return
+        async with async_session() as db:
+            await _update_status(
+                db,
+                request_id,
+                "failed",
+                "Local library ingest staging missing — use Library Sweep reprocess",
+            )
+        return
+
     async with async_session() as db:
         try:
             result = await db.execute(
@@ -789,6 +860,7 @@ async def process_download(request_id: int) -> None:
             if req is None:
                 logger.warning("Download: request %s not found", request_id)
                 return
+
             # Download with the requesting user's library-group debrid keys
             from app.services import debrid_tokens
             await debrid_tokens.apply_tokens_for_user_id(req.user_id)
@@ -1583,6 +1655,24 @@ async def resume_interrupted_downloads() -> None:
                 continue
 
         kind = "AA" if _is_aa_request(req) else "RD"
+        from app.services import library_ingest
+
+        if library_ingest.is_local_ingest_request(req):
+            logger.warning(
+                "  -> #%s '%s' local ingest with no forge staging — mark failed "
+                "(refusing debrid)",
+                req.id,
+                req.title,
+            )
+            async with async_session() as db:
+                await _update_status(
+                    db,
+                    req.id,
+                    "failed",
+                    "Local ingest interrupted with no staging path — reprocess from Library Sweep",
+                )
+            continue
+
         logger.info(
             f"  -> #{req.id} '{req.title}' (status={req.status}, {kind}, id={req.rd_torrent_id})"
         )

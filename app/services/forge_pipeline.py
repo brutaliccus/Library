@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -1708,6 +1709,34 @@ async def _run_chapter_forge_step(
             )
 
 
+_m4b_handoff_tasks: set[asyncio.Task] = set()
+
+
+async def _run_m4b_handoff_continuation(
+    request_id: int,
+    *,
+    staging: Path,
+    user_id: int,
+    title: str,
+    author: str | None,
+) -> None:
+    """Background: finish M4B → chapters → folder after sweep handed off."""
+    try:
+        await run_forge_after_download(
+            request_id,
+            staging=staging,
+            user_id=user_id,
+            title=title,
+            author=author,
+            resume_from="m4b",
+            handoff_m4b=False,
+        )
+    except Exception:
+        logger.exception(
+            "M4B handoff continuation failed for request %s", request_id
+        )
+
+
 async def run_forge_after_download(
     request_id: int,
     *,
@@ -1718,6 +1747,7 @@ async def run_forge_after_download(
     resume_from: str | None = None,
     stop_after: str | None = None,
     asin_override: str | None = None,
+    handoff_m4b: bool = False,
 ) -> None:
     """Run Metadata Forge → M4B → re-apply → Chapter Forge → Folder Forge → ABS.
 
@@ -1734,6 +1764,10 @@ async def run_forge_after_download(
 
     ``stop_after``: optional step id (``m4b`` / ``chapters`` / ``folder``) — return
     after that step completes so Quick Review can run steps interactively.
+
+    ``handoff_m4b``: when True and conversion is needed, queue M4B (and the rest of
+    the pipeline) as a background task and return immediately so Library Sweep can
+    keep scanning. Encode concurrency stays 1 via ``m4b_queue``.
     """
     p = _pipeline()
     staging.mkdir(parents=True, exist_ok=True)
@@ -1827,6 +1861,32 @@ async def run_forge_after_download(
     # --- M4B (Pi LibraForge; global queue concurrency 1) ---
     if start_step == "m4b":
         m4b_produced_new_file = False
+        # Library Sweep: don't block the scanner on hours-long encodes.
+        if handoff_m4b and needs_m4b_conversion(staging):
+            detail = "Queued for M4B — sweep continuing with next books…"
+            async with async_session() as db:
+                await p._update_status(db, request_id, "m4b_convert", detail)
+            await p._report_progress(
+                request_id, user_id, "m4b_convert", detail, progress_percent=None
+            )
+            task = asyncio.create_task(
+                _run_m4b_handoff_continuation(
+                    request_id,
+                    staging=staging,
+                    user_id=user_id,
+                    title=title,
+                    author=author,
+                ),
+                name=f"forge-m4b-handoff-{request_id}",
+            )
+            _m4b_handoff_tasks.add(task)
+            task.add_done_callback(_m4b_handoff_tasks.discard)
+            logger.info(
+                "Request %s: M4B handed off to background (sweep non-blocking)",
+                request_id,
+            )
+            return
+
         if needs_m4b_conversion(staging):
             async def _on_m4b_queued(position: int, active_id: int | None) -> None:
                 detail = m4b_queue.format_queue_detail(position, active_id)

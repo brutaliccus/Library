@@ -32,7 +32,7 @@ _ACTIVE_STATUSES = frozenset({
     "folder_forge",
     "finalizing",
 })
-_RETRYABLE_STATUSES = frozenset({"failed", "cancelled", "admin_rejected"})
+_RETRYABLE_STATUSES = frozenset({"failed", "cancelled", "admin_rejected", "skipped"})
 _COVER_BACKFILL_LIMIT = 24
 
 
@@ -208,6 +208,38 @@ async def retry_request(
     req = await _get_user_request(request_id, user.id, db)
     if req.status not in _RETRYABLE_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot retry request in status '{req.status}'")
+
+    from app.services import library_ingest
+
+    # Sweep / owned upload — never Real-Debrid; re-kick forge from staging.
+    if library_ingest.is_local_ingest_request(req):
+        req.status = "pending"
+        req.status_detail = "Retrying local ingest…"
+        req.completed_at = None
+        req.progress_percent = None
+        req.progress_bytes = None
+        req.progress_total_bytes = None
+        req.progress_speed_bps = None
+        await db.commit()
+        await db.refresh(req)
+
+        async def _retry_local() -> None:
+            try:
+                await library_ingest.reprocess_local_ingest(request_id)
+            except Exception:
+                logger.exception("Local ingest retry failed for request %s", request_id)
+
+        asyncio.create_task(_retry_local())
+        await ws_manager.send_to_user(
+            user.id,
+            {
+                "type": "status_update",
+                "request_id": req.id,
+                "status": req.status,
+                "detail": req.status_detail,
+            },
+        )
+        return _to_response(req)
 
     is_aa = (req.magnet_link or "").startswith("aa:") or (
         (req.indexer or "").lower().find("anna") >= 0 and bool(req.rd_torrent_id)

@@ -11,7 +11,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 from sqlalchemy import select
 
@@ -41,6 +41,14 @@ _ACTIVE_FORGE = frozenset({
     "finalizing",
 })
 
+# Terminal outcomes that Library Sweep should not auto-reprocess on walk.
+_UNPROCESSED_STATUSES = frozenset({
+    "cancelled",
+    "failed",
+    "skipped",
+    "admin_rejected",
+})
+
 
 def sweep_magnet(abs_item_id: str) -> str:
     return f"sweep:abs:{abs_item_id}"
@@ -53,6 +61,22 @@ def upload_magnet(token: str | None = None) -> str:
 def sweep_fingerprint(abs_item_id: str) -> str:
     return f"abs:{abs_item_id}"
 
+
+def is_synthetic_magnet(magnet: str | None) -> bool:
+    """True for sweep:/upload: magnets that must never hit Real-Debrid."""
+    m = (magnet or "").strip().lower()
+    return m.startswith("sweep:") or m.startswith("upload:")
+
+
+def is_local_ingest_source(source: str | None) -> bool:
+    return (source or "").strip().lower() in (SOURCE_SWEEP, SOURCE_UPLOAD)
+
+
+def is_local_ingest_request(req: DownloadRequest | Any) -> bool:
+    """Sweep/upload rows — forge-only; never debrid ``process_download``."""
+    return is_local_ingest_source(getattr(req, "source", None)) or is_synthetic_magnet(
+        getattr(req, "magnet_link", None)
+    )
 
 def _link_or_copy(src: str, dst: str) -> None:
     """Prefer hardlink (same filesystem); fall back to copy2."""
@@ -170,6 +194,7 @@ async def retry_quarantined_ingest(
     user_id: int,
     title: str,
     author: str | None,
+    handoff_m4b: bool = False,
 ) -> dict[str, Any]:
     """Re-kick forge from metadata for an existing quarantined sweep request."""
     async with async_session() as db:
@@ -210,9 +235,70 @@ async def retry_quarantined_ingest(
         title=title or stored_title,
         author=author if author is not None else stored_author,
         kick_forge=True,
+        handoff_m4b=handoff_m4b,
     )
     result["needs_m4b"] = needs_m4b
     result["retried"] = True
+    return result
+
+
+async def reprocess_local_ingest(
+    request_id: int,
+    *,
+    handoff_m4b: bool = False,
+) -> dict[str, Any]:
+    """Manual reprocess for cancelled/failed/skipped/quarantined sweep or upload."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req = result.scalar_one_or_none()
+        if not req:
+            raise FileNotFoundError(f"Request {request_id} not found")
+        if not is_local_ingest_request(req):
+            raise ValueError("Not a sweep/upload ingest request")
+        if req.status in _ACTIVE_FORGE:
+            raise ValueError(f"Request already in progress ({req.status})")
+        user_id = int(req.user_id)
+        title = req.title or "Untitled"
+        author = req.author
+        staging_raw = (req.staging_path or "").strip()
+
+    if not staging_raw:
+        return {
+            "ok": False,
+            "id": request_id,
+            "status": "failed",
+            "reason": "missing_staging",
+        }
+    staging = Path(staging_raw)
+    if not staging.is_dir():
+        from app.services.forge_pipeline import resolve_staging_dir
+
+        try:
+            staging = resolve_staging_dir(staging_raw)
+        except FileNotFoundError:
+            return {
+                "ok": False,
+                "id": request_id,
+                "status": "failed",
+                "reason": "staging_missing",
+            }
+
+    from app.services.forge_pipeline import needs_m4b_conversion
+
+    needs_m4b = needs_m4b_conversion(staging)
+    result = await prepare_staging_and_forge(
+        request_id,
+        staging=staging,
+        user_id=user_id,
+        title=title,
+        author=author,
+        kick_forge=True,
+        handoff_m4b=handoff_m4b,
+    )
+    result["needs_m4b"] = needs_m4b
+    result["reprocessed"] = True
     return result
 
 
@@ -259,8 +345,13 @@ async def prepare_staging_and_forge(
     title: str,
     author: str | None = None,
     kick_forge: bool = True,
+    handoff_m4b: bool = False,
 ) -> dict[str, Any]:
-    """Persist staging path, set metadata_forge, optionally run forge from metadata."""
+    """Persist staging path, set metadata_forge, optionally run forge from metadata.
+
+    ``handoff_m4b``: for Library Sweep — after metadata, queue M4B in the background
+    and return so the sweep worker can advance to the next book.
+    """
     if not staging.is_dir() or not _collect_audio(staging):
         async with async_session() as db:
             result = await db.execute(
@@ -301,6 +392,7 @@ async def prepare_staging_and_forge(
             title=title,
             author=author,
             resume_from="metadata",
+            handoff_m4b=handoff_m4b,
         )
 
     async with async_session() as db:
@@ -318,6 +410,7 @@ async def prepare_staging_and_forge(
         "quarantine_reason": reason,
         "staging_path": staging_path_for_libraforge(staging),
         "needs_m4b": False,  # caller may set before forge
+        "m4b_handed_off": bool(handoff_m4b and status == "m4b_convert"),
     }
 
 
@@ -333,6 +426,8 @@ async def ingest_from_library_folder(
     ingest_fingerprint: str | None = None,
     cover_url: str | None = None,
     kick_forge: bool = True,
+    handoff_m4b: bool = False,
+    on_request_created: Callable[[int], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
     """Create request, stage library folder, run forge. Skips debrid entirely."""
     req = await create_ingest_request(
@@ -345,6 +440,10 @@ async def ingest_from_library_folder(
         ingest_fingerprint=ingest_fingerprint,
         cover_url=cover_url,
     )
+    if on_request_created is not None:
+        maybe = on_request_created(req.id)
+        if maybe is not None and hasattr(maybe, "__await__"):
+            await maybe
     staging = audiobook_staging_dir(req.id, title)
     method = stage_tree_from_library(library_dir, staging, prefer_hardlink=True)
     logger.info(
@@ -364,6 +463,7 @@ async def ingest_from_library_folder(
         title=title,
         author=author,
         kick_forge=kick_forge,
+        handoff_m4b=handoff_m4b,
     )
     result["stage_method"] = method
     result["needs_m4b"] = needs_m4b

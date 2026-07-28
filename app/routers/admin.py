@@ -150,6 +150,10 @@ class SweepReviewCursorBody(BaseModel):
     request_id: int | None = None
 
 
+class SweepSkipBody(BaseModel):
+    request_id: int | None = None
+
+
 class RejectRequestBody(BaseModel):
     reason: str = "Rejected by admin"
     delete_files: bool = True
@@ -2143,3 +2147,46 @@ async def library_sweep_review_cursor(
     from app.services import library_sweep
 
     return await library_sweep.set_review_cursor(body.request_id)
+
+
+@router.post("/library-sweep/skip")
+async def library_sweep_skip(
+    body: SweepSkipBody = Body(default_factory=SweepSkipBody),
+    _admin: User = Depends(require_admin),
+):
+    """Skip the current (or specified) sweep book without cancelling the whole job."""
+    from app.services import library_sweep
+
+    return await library_sweep.skip_current(request_id=body.request_id)
+
+
+@router.get("/library-sweep/unprocessed")
+async def library_sweep_unprocessed(_admin: User = Depends(require_admin)):
+    """Cancelled / failed / skipped sweep books for manual reprocess."""
+    from app.services import library_sweep
+
+    items = await library_sweep.list_unprocessed()
+    status = await library_sweep.get_status()
+    return {
+        "items": items,
+        "count": len(items),
+        "counts": status.get("unprocessed") or {},
+    }
+
+
+@router.post("/library-sweep/reprocess/{request_id}")
+async def library_sweep_reprocess(
+    request_id: int,
+    admin: User = Depends(require_admin),
+):
+    """Re-kick forge for an unprocessed sweep book (no debrid)."""
+    from app.services import library_sweep
+
+    try:
+        return await library_sweep.reprocess_unprocessed(
+            request_id, user_id=admin.id
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

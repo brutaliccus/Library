@@ -52,6 +52,14 @@ public class LibraryAutoPlugin extends Plugin
     private Bitmap cachedArtwork = null;
     /** Drops stale async artwork loads when a newer syncPlayback wins the race. */
     private int artworkLoadGeneration = 0;
+    /** In-flight cover URL so position ticks don't spawn parallel downloads. */
+    private String artworkLoadingUrl = null;
+    /** Last cover pushed into MediaSession for native play. */
+    private String lastPushedNativeArtUrl = null;
+    /** Throttle Capacitor nativePlayback events — 1 Hz storms wake WebView / OOM. */
+    private String lastNativeJsKey = "";
+    private long lastNativeJsEmitElapsed = 0;
+    private static final long NATIVE_JS_POS_INTERVAL_MS = 5_000;
 
     /** Sticky play/playmedia until retries exhaust or user pauses (not optimistic play). */
     private PendingAction stickyPlay = null;
@@ -99,6 +107,38 @@ public class LibraryAutoPlugin extends Plugin
                 float speed,
                 int trackIndex
             ) {
+                // Confirm sticky immediately — native audio is the confirmation.
+                if (playing) {
+                    cancelStickyPlay();
+                }
+
+                // Decode cover once at start (or when URL changes) — never per tick.
+                maybeLoadNativeArtworkOnce(
+                    coverUrl,
+                    title,
+                    artist,
+                    album,
+                    playing,
+                    durationMs,
+                    positionMs,
+                    speed
+                );
+
+                String key =
+                    (mediaId != null ? mediaId : "")
+                        + "|"
+                        + playing
+                        + "|"
+                        + trackIndex;
+                long now = SystemClock.elapsedRealtime();
+                boolean significant = !key.equals(lastNativeJsKey);
+                boolean due = now - lastNativeJsEmitElapsed >= NATIVE_JS_POS_INTERVAL_MS;
+                if (!significant && !due) {
+                    return;
+                }
+                lastNativeJsKey = key;
+                lastNativeJsEmitElapsed = now;
+
                 // Bridge already updates MediaSession; notify JS for attach/UI.
                 JSObject data = new JSObject();
                 data.put("mediaId", mediaId != null ? mediaId : "");
@@ -113,14 +153,12 @@ public class LibraryAutoPlugin extends Plugin
                 data.put("trackIndex", trackIndex);
                 data.put("nativeOwner", true);
                 notifyListeners("nativePlayback", data);
-                // Confirm sticky — native audio is the confirmation, not WebView.
-                if (playing) {
-                    cancelStickyPlay();
-                }
             }
 
             @Override
             public void onNativeStopped() {
+                lastNativeJsKey = "";
+                lastNativeJsEmitElapsed = 0;
                 JSObject data = new JSObject();
                 data.put("nativeOwner", false);
                 data.put("playing", false);
@@ -129,6 +167,8 @@ public class LibraryAutoPlugin extends Plugin
 
             @Override
             public void onNativeError(String message) {
+                lastNativeJsKey = "";
+                lastNativeJsEmitElapsed = 0;
                 JSObject data = new JSObject();
                 data.put("error", message != null ? message : "error");
                 data.put("nativeOwner", false);
@@ -163,8 +203,12 @@ public class LibraryAutoPlugin extends Plugin
     public void emitBrowseRequest(String parentId, String requestId) {
         // Locked / Doze: thaw timers so the browse listener can answer (or at
         // least so a later refresh lands). Native cache covers the empty case.
-        softWakeWebView();
-        acquirePlayWakeLock();
+        // During native ExoPlayer play, do NOT soft-wake the WebView — that
+        // path reloads Chromium mid-stream and contributes to mid-play OOMs.
+        if (!LibraryAutoBridge.getInstance().isNativeOwningPlayback()) {
+            softWakeWebView();
+            acquirePlayWakeLock();
+        }
         JSObject data = new JSObject();
         data.put("parentId", parentId);
         data.put("requestId", requestId);
@@ -564,6 +608,8 @@ public class LibraryAutoPlugin extends Plugin
             // Do not Bitmap.recycle() — MediaSession / notification may still
             // hold the same instance until the next metadata push.
             cachedArtwork = null;
+            artworkLoadingUrl = null;
+            lastPushedNativeArtUrl = null;
             cancelStickyPlay();
             LibraryAutoBridge.getInstance().clear();
             call.resolve();
@@ -700,6 +746,123 @@ public class LibraryAutoPlugin extends Plugin
      * sticky retries once enough time has passed for audio to actually start —
      * especially after multi-minute idle thaws.
      */
+    /**
+     * Decode cover once when native play starts (or cover URL changes). Never
+     * re-fetch on position ticks.
+     */
+    private void maybeLoadNativeArtworkOnce(
+        String coverUrl,
+        String title,
+        String artist,
+        String album,
+        boolean playing,
+        long durationMs,
+        long positionMs,
+        float speed
+    ) {
+        if (coverUrl == null || coverUrl.isEmpty()) {
+            return;
+        }
+        final Bitmap already;
+        synchronized (this) {
+            if (coverUrl.equals(lastPushedNativeArtUrl) && cachedArtwork != null) {
+                return;
+            }
+            if (coverUrl.equals(cachedArtworkUrl) && cachedArtwork != null) {
+                already = cachedArtwork;
+                lastPushedNativeArtUrl = coverUrl;
+            } else if (coverUrl.equals(artworkLoadingUrl)) {
+                return;
+            } else {
+                already = null;
+                artworkLoadingUrl = coverUrl;
+            }
+        }
+        final String metaTitle = title != null ? title : "";
+        final String metaArtist = artist != null ? artist : "";
+        final String metaAlbum = album != null ? album : "";
+        final boolean metaPlaying = playing;
+        final float metaRate = speed;
+        final long metaDuration = durationMs;
+        final long metaPosition = positionMs;
+
+        if (already != null) {
+            mainHandler.post(
+                () -> {
+                    if (!LibraryAutoBridge.getInstance().isNativeOwningPlayback()) {
+                        return;
+                    }
+                    LibraryAutoBridge.getInstance().update(
+                        metaTitle,
+                        metaArtist,
+                        metaAlbum,
+                        already,
+                        true,
+                        metaPlaying,
+                        metaDuration,
+                        metaPosition,
+                        metaRate
+                    );
+                }
+            );
+            return;
+        }
+
+        final String loadUrl = coverUrl;
+        final int loadGen = ++artworkLoadGeneration;
+        new Thread(
+            () -> {
+                try {
+                    Bitmap artwork = getCachedArtwork(loadUrl);
+                    if (artwork == null) {
+                        synchronized (this) {
+                            if (loadUrl.equals(artworkLoadingUrl)) {
+                                artworkLoadingUrl = null;
+                            }
+                        }
+                        return;
+                    }
+                    synchronized (this) {
+                        lastPushedNativeArtUrl = loadUrl;
+                        if (loadUrl.equals(artworkLoadingUrl)) {
+                            artworkLoadingUrl = null;
+                        }
+                    }
+                    mainHandler.post(
+                        () -> {
+                            if (loadGen != artworkLoadGeneration) {
+                                return;
+                            }
+                            if (!LibraryAutoBridge.getInstance().isNativeOwningPlayback()) {
+                                return;
+                            }
+                            LibraryAutoBridge.getInstance().update(
+                                metaTitle,
+                                metaArtist,
+                                metaAlbum,
+                                artwork,
+                                true,
+                                metaPlaying,
+                                metaDuration,
+                                metaPosition,
+                                metaRate
+                            );
+                            Log.i(TAG, "Native cover applied once");
+                        }
+                    );
+                } catch (IOException ex) {
+                    synchronized (this) {
+                        if (loadUrl.equals(artworkLoadingUrl)) {
+                            artworkLoadingUrl = null;
+                        }
+                    }
+                    Log.w(TAG, "Unable to load native artwork", ex);
+                }
+            },
+            "library-native-artwork"
+        ).start();
+    }
+
     private void maybeConfirmStickyPlay(boolean playing) {
         if (!playing || stickyPlay == null) {
             return;
@@ -884,11 +1047,22 @@ public class LibraryAutoPlugin extends Plugin
     @Override
     public void onAction(String action, Bundle extras) {
         boolean isPlay = "play".equals(action) || "playmedia".equals(action);
+        boolean nativeOwns = LibraryAutoBridge.getInstance().isNativeOwningPlayback();
+        boolean nativeStarted =
+            extras != null && extras.getBoolean("nativeStarted", false);
         boolean needsWake =
             isPlay
                 || "seekto".equals(action)
                 || "seekforward".equals(action)
                 || "seekbackward".equals(action);
+
+        // Native ExoPlayer path: never sticky-wake / Activity-storm the WebView.
+        if (isPlay && (nativeStarted || nativeOwns)) {
+            cancelStickyPlay();
+            softWakeWebView();
+            mainHandler.postDelayed(() -> deliverToJs(action, extras), 200);
+            return;
+        }
 
         if (needsWake) {
             softWakeWebView();
@@ -897,20 +1071,6 @@ public class LibraryAutoPlugin extends Plugin
         }
 
         if (isPlay) {
-            // Native already started from MediaSession — do NOT sticky-wake the
-            // WebView (that path storm-starts Activities and OOMs some OEMs).
-            boolean nativeStarted =
-                extras != null && extras.getBoolean("nativeStarted", false);
-            if (nativeStarted || LibraryAutoBridge.getInstance().isNativeOwningPlayback()) {
-                cancelStickyPlay();
-                softWakeWebView();
-                // Soft deliver once so JS can attach UI — no activity wake storm.
-                mainHandler.postDelayed(
-                    () -> deliverToJs(action, extras),
-                    200
-                );
-                return;
-            }
             boolean deepIdle = LibraryAutoBridge.getInstance().isDeepIdlePlay();
             Log.i(
                 TAG,
@@ -940,18 +1100,26 @@ public class LibraryAutoPlugin extends Plugin
                 }
             }
             // Retry delivery after WebView has a chance to re-register handlers.
-            mainHandler.postDelayed(() -> {
-                softWakeWebView();
-                PluginCall h = actionHandlers.get(action);
-                if (h != null && !PluginCall.CALLBACK_ID_DANGLING.equals(h.getCallbackId())) {
-                    flushPendingFor(action);
-                }
-            }, PLAY_WAKE_DELAY_MS + 200);
+            // Skip wake storms while native owns PCM.
+            if (!nativeOwns) {
+                mainHandler.postDelayed(() -> {
+                    softWakeWebView();
+                    PluginCall h = actionHandlers.get(action);
+                    if (h != null && !PluginCall.CALLBACK_ID_DANGLING.equals(h.getCallbackId())) {
+                        flushPendingFor(action);
+                    }
+                }, PLAY_WAKE_DELAY_MS + 200);
+            }
             return;
         }
 
         if (needsWake) {
             // Seek path: brief thaw then deliver (keep ±15 snappy).
+            // Native seek already handled in MediaSession callback — JS is mirror only.
+            if (nativeOwns) {
+                deliverToJs(action, extras);
+                return;
+            }
             mainHandler.postDelayed(() -> deliverToJs(action, extras), PLAY_WAKE_DELAY_MS);
             return;
         }
@@ -982,7 +1150,7 @@ public class LibraryAutoPlugin extends Plugin
         handler.resolve(data);
     }
 
-    private static final int MAX_ARTWORK_EDGE_PX = 512;
+    private static final int MAX_ARTWORK_EDGE_PX = 320;
 
     private Bitmap urlToBitmap(String url) throws IOException {
         if (url == null || url.isEmpty() || url.startsWith("blob:")) {

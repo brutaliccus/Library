@@ -1392,14 +1392,27 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
           // Position ticks after first hydrate — never re-clear HTML5 / re-set tracks.
           if (attachedMediaId === mediaId && stateRef.current.nowPlaying) {
-            setState((s) => ({
-              ...s,
-              isPlaying: ev.playing === true,
-              wantPlaying: ev.playing === true,
-              currentTime: ev.position ?? s.currentTime,
-              currentTrackIndex: ev.trackIndex ?? s.currentTrackIndex,
-              buffering: false,
-            }));
+            const pos = ev.position ?? stateRef.current.currentTime;
+            const playing = ev.playing === true;
+            setState((s) => {
+              // Skip no-op ticks to avoid React thrash while AA owns PCM.
+              if (
+                s.isPlaying === playing &&
+                s.wantPlaying === playing &&
+                s.currentTrackIndex === (ev.trackIndex ?? s.currentTrackIndex) &&
+                Math.abs((s.currentTime ?? 0) - (pos ?? 0)) < 0.75
+              ) {
+                return s;
+              }
+              return {
+                ...s,
+                isPlaying: playing,
+                wantPlaying: playing,
+                currentTime: pos ?? s.currentTime,
+                currentTrackIndex: ev.trackIndex ?? s.currentTrackIndex,
+                buffering: false,
+              };
+            });
             return;
           }
 

@@ -142,6 +142,11 @@ public final class LibraryAutoBridge {
      */
     private boolean nativeOwnsPlayback = false;
     private String nativeMediaId = "";
+    /** Last metadata signature from ExoPlayer — avoid setMetadata storms. */
+    private String lastNativeMetaKey = "";
+    private Boolean lastNativePlaying = null;
+    /** Skip redundant MediaMetadata pushes when title/art/duration unchanged. */
+    private String lastSessionMetaSig = "";
 
     private LibraryAutoBridge() {}
 
@@ -176,23 +181,56 @@ public final class LibraryAutoBridge {
                 // Keep a short settle window so OEM focus blips don't pause Exo.
                 ignoreFocusLossUntilElapsed =
                     SystemClock.elapsedRealtime() + FOCUS_LOSS_GRACE_MS;
-                update(
-                    title,
-                    artist,
-                    album,
-                    null,
-                    true,
-                    playing,
-                    durationMs,
-                    positionMs,
-                    speed
-                );
-                Context ctx = appContextRef.get();
-                if (ctx != null) {
+
+                // CRITICAL: ExoPlayer ticks ~1 Hz. Calling update()→setMetadata
+                // (with album-art bitmap) every second OOMs / freezes phones after
+                // ~20–30s via binder + NotificationManager storms. Position-only
+                // updates are cheap; full metadata only when title/track changes.
+                String metaKey =
+                    (mediaId != null ? mediaId : "")
+                        + "|"
+                        + (title != null ? title : "")
+                        + "|"
+                        + (artist != null ? artist : "")
+                        + "|"
+                        + (album != null ? album : "")
+                        + "|"
+                        + trackIndex
+                        + "|"
+                        + durationMs;
+                boolean metaChanged = !metaKey.equals(lastNativeMetaKey);
+                boolean playChanged =
+                    lastNativePlaying == null || lastNativePlaying != playing;
+                lastNativePlaying = playing;
+
+                if (metaChanged) {
+                    lastNativeMetaKey = metaKey;
+                    Log.i(
+                        TAG,
+                        "Native metadata applied mediaId="
+                            + mediaId
+                            + " track="
+                            + trackIndex
+                    );
+                    update(
+                        title,
+                        artist,
+                        album,
+                        null,
+                        true,
+                        playing,
+                        durationMs,
+                        positionMs,
+                        speed
+                    );
                     LibraryMediaBrowserService svc = serviceRef.get();
                     if (svc != null) {
                         svc.promoteToForeground();
                     }
+                } else if (playChanged) {
+                    updatePosition(playing, positionMs, speed);
+                } else {
+                    updatePosition(playing, positionMs, speed);
                 }
             }
 
@@ -200,6 +238,8 @@ public final class LibraryAutoBridge {
             public void onNativeStopped() {
                 nativeOwnsPlayback = false;
                 nativeMediaId = "";
+                lastNativeMetaKey = "";
+                lastNativePlaying = null;
             }
 
             @Override
@@ -207,6 +247,8 @@ public final class LibraryAutoBridge {
                 Log.w(TAG, "Native playback error: " + message);
                 // Fall back to WebView sticky path if still latched.
                 nativeOwnsPlayback = false;
+                lastNativeMetaKey = "";
+                lastNativePlaying = null;
             }
         };
 
@@ -441,7 +483,11 @@ public final class LibraryAutoBridge {
         boolean rootChanged =
             wasActive != active || !previousRootKey.equals(nowPlayingRootKey());
         refreshSession(true);
-        persistSession();
+        long now = System.currentTimeMillis();
+        if (now - lastPersistSessionMs >= PERSIST_SESSION_MIN_INTERVAL_MS) {
+            lastPersistSessionMs = now;
+            persistSession();
+        }
         if (rootChanged) {
             notifyRootChanged();
         }
@@ -571,6 +617,9 @@ public final class LibraryAutoBridge {
         ignoreFocusLossUntilElapsed = 0;
         pausedAtElapsed = 0;
         deepIdlePlayLatched = false;
+        lastNativeMetaKey = "";
+        lastNativePlaying = null;
+        lastSessionMetaSig = "";
         update("", "", "", null, false, false, 0, 0, 1.0f);
         Context ctx = appContextRef.get();
         if (ctx != null) {
@@ -882,7 +931,9 @@ public final class LibraryAutoBridge {
         // Library are never empty when we previously synced them from JS.
         if (!cached.isEmpty()) {
             result.sendResult(toMediaItems(cached));
-            if (emitter != null) {
+            // Skip background JS refresh while ExoPlayer owns PCM — waking the
+            // WebView mid-play is a known OOM contributor on some OEMs.
+            if (emitter != null && !isNativeOwningPlayback()) {
                 startBrowseRefresh(parentId, emitter);
             }
             return;
@@ -1109,6 +1160,7 @@ public final class LibraryAutoBridge {
         session.setPlaybackState(playbackState);
 
         if (!active) {
+            lastSessionMetaSig = "";
             session.setMetadata(null);
             LibraryMediaBrowserService service = serviceRef.get();
             if (service != null) {
@@ -1118,18 +1170,29 @@ public final class LibraryAutoBridge {
         }
 
         if (metadataMayHaveChanged) {
-            MediaMetadataCompat.Builder metaBuilder = new MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
-                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
-            // Never put a null bitmap — that clears cover art on many AA units.
-            // One bitmap key is enough; duplicating ALBUM_ART + DISPLAY_ICON
-            // copies the same pixels into the system binder payload twice.
-            if (artwork != null && !artwork.isRecycled()) {
-                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork);
+            // Skip no-op metadata pushes — binder copies of album art are expensive
+            // and repeating them mid-play freezes some OEM system_servers.
+            String artSig =
+                (artwork != null && !artwork.isRecycled())
+                    ? (artwork.getWidth() + "x" + artwork.getHeight() + "@" + System.identityHashCode(artwork))
+                    : "noart";
+            String metaSig =
+                title + "|" + artist + "|" + album + "|" + durationMs + "|" + artSig;
+            if (!metaSig.equals(lastSessionMetaSig)) {
+                lastSessionMetaSig = metaSig;
+                MediaMetadataCompat.Builder metaBuilder = new MediaMetadataCompat.Builder()
+                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
+                    .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+                // Never put a null bitmap — that clears cover art on many AA units.
+                // One bitmap key is enough; duplicating ALBUM_ART + DISPLAY_ICON
+                // copies the same pixels into the system binder payload twice.
+                if (artwork != null && !artwork.isRecycled()) {
+                    metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork);
+                }
+                session.setMetadata(metaBuilder.build());
             }
-            session.setMetadata(metaBuilder.build());
         }
         session.setActive(true);
 

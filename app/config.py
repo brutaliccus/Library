@@ -179,8 +179,8 @@ class Settings(BaseSettings):
     # Android APK updates — latest GitHub Release asset (Admin → Config can override).
     android_apk_github_repo: str = "brutaliccus/Library"
     github_token: str = ""
-    # Clients below this versionCode must update (1.50 == 51). Admin can raise further.
-    android_min_version_code: int = 51
+    # Clients below this versionCode must update (1.52 == 53). Admin can raise further.
+    android_min_version_code: int = 53
     # When true, any newer GitHub APK is a hard (non-dismissible) update.
     android_force_updates: bool = True
 

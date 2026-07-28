@@ -13,6 +13,7 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import java.util.ArrayList;
@@ -28,7 +29,14 @@ import org.json.JSONObject;
 public final class LibraryNativePlayer {
 
     private static final String TAG = "LibraryNativePlayer";
-    private static final long POSITION_TICK_MS = 1_000;
+    /** Position ticks for MediaSession scrubber — keep cheap (no metadata). */
+    private static final long POSITION_TICK_MS = 2_000;
+    /** Cap Exo readahead — large progressive buffers OOM mid-AA-play. */
+    private static final int MIN_BUFFER_MS = 12_000;
+    private static final int MAX_BUFFER_MS = 28_000;
+    private static final int PLAYBACK_BUFFER_MS = 1_500;
+    private static final int REBUFFER_MS = 3_000;
+    private static final int TARGET_BUFFER_BYTES = 2 * 1024 * 1024;
 
     public interface Listener {
         void onNativePlaying(
@@ -119,6 +127,7 @@ public final class LibraryNativePlayer {
     private String artist = "";
     private String album = "";
     private String coverUrl = "";
+    private String lastAuthToken = "";
     private long totalDurationMs = 0;
     private boolean owning = false;
     private final Runnable tickRunnable = this::tickPosition;
@@ -234,7 +243,15 @@ public final class LibraryNativePlayer {
         player.play();
         emitState(true);
         scheduleTick();
-        Log.i(TAG, "Native play started mediaId=" + mediaId + " tracks=" + items.size());
+        Log.i(
+            TAG,
+            "Native play started mediaId="
+                + mediaId
+                + " tracks="
+                + items.size()
+                + " maxBufferMs="
+                + MAX_BUFFER_MS
+        );
     }
 
     public void resume() {
@@ -354,24 +371,40 @@ public final class LibraryNativePlayer {
     }
 
     private void ensurePlayer(Context app, String authToken) {
+        String token = authToken != null ? authToken : "";
+        if (player != null && token.equals(lastAuthToken)) {
+            return;
+        }
         if (player != null) {
-            // Recreate if auth header may have changed.
             releasePlayerOnly();
         }
+        lastAuthToken = token;
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(30_000)
             .setAllowCrossProtocolRedirects(true)
-            .setUserAgent("LibraryAndroidAuto/1.47");
-        if (authToken != null && !authToken.isEmpty()) {
+            .setUserAgent("LibraryAndroidAuto/1.52");
+        if (!token.isEmpty()) {
             java.util.Map<String, String> headers = new java.util.HashMap<>();
-            headers.put("Authorization", "Bearer " + authToken);
+            headers.put("Authorization", "Bearer " + token);
             http.setDefaultRequestProperties(headers);
         }
         // DefaultDataSource supports file:// (offline disk cache) + http(s).
+        // Progressive HTTP streams — never assemble full-track blobs in RAM.
         DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(app, http);
         DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(app)
             .setDataSourceFactory(dataSourceFactory);
+
+        DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                MIN_BUFFER_MS,
+                MAX_BUFFER_MS,
+                PLAYBACK_BUFFER_MS,
+                REBUFFER_MS
+            )
+            .setTargetBufferBytes(TARGET_BUFFER_BYTES)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build();
 
         AudioAttributes audioAttrs = new AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -380,6 +413,7 @@ public final class LibraryNativePlayer {
 
         player = new ExoPlayer.Builder(app)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
             // LibraryAutoBridge owns audio focus for the MediaSession; avoid a
             // second focus request that would pause us via onAudioFocusChange.
             .setAudioAttributes(audioAttrs, /* handleAudioFocus= */ false)
@@ -421,6 +455,17 @@ public final class LibraryNativePlayer {
                         }
                     }
                 }
+
+                @Override
+                public void onMediaItemTransition(
+                    @Nullable MediaItem mediaItem,
+                    int reason
+                ) {
+                    if (owning) {
+                        // Track change — listeners must refresh metadata once.
+                        emitState(player != null && player.isPlaying());
+                    }
+                }
             }
         );
     }
@@ -435,6 +480,7 @@ public final class LibraryNativePlayer {
             }
             player = null;
         }
+        lastAuthToken = "";
     }
 
     public void release() {

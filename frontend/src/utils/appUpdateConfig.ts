@@ -4,3 +4,6 @@ export const ANDROID_APK_GITHUB_RELEASES_URL =
 
 /** localStorage: last successfully downloaded/installed release key (publishedAt). */
 export const APK_RELEASE_KEY_STORAGE = "library_apk_release_key";
+
+/** localStorage: last installed versionCode we cleared WebView cache for. */
+export const APK_VERSION_CODE_STORAGE = "library_apk_version_code";

@@ -35,7 +35,8 @@ public final class AppUpdateNotifier {
         String body,
         String releaseKey,
         String downloadUrl,
-        String authToken
+        String authToken,
+        boolean required
     ) {
         if (AppUpdatePlugin.isInForeground()) {
             return;
@@ -53,12 +54,6 @@ public final class AppUpdateNotifier {
         updateIntent.setAction(AppUpdateActionReceiver.ACTION_UPDATE_NOW);
         PendingIntent updatePending =
             PendingIntent.getBroadcast(context, NOTIFICATION_ID, updateIntent, pendingFlags);
-
-        Intent dismissIntent = new Intent(context, AppUpdateActionReceiver.class);
-        dismissIntent.setAction(AppUpdateActionReceiver.ACTION_DISMISS);
-        dismissIntent.putExtra(AppUpdateActionReceiver.EXTRA_RELEASE_KEY, releaseKey);
-        PendingIntent dismissPending =
-            PendingIntent.getBroadcast(context, NOTIFICATION_ID + 1, dismissIntent, pendingFlags);
 
         Intent openIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
         if (openIntent != null) {
@@ -78,19 +73,48 @@ public final class AppUpdateNotifier {
                 new NotificationCompat.BigTextStyle()
                     .bigText(body != null ? body : "A new version of Library is ready.")
             )
-            .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+            .setCategory(
+                required
+                    ? NotificationCompat.CATEGORY_ALARM
+                    : NotificationCompat.CATEGORY_RECOMMENDATION
+            )
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setAutoCancel(true)
-            .setDeleteIntent(dismissPending)
-            .addAction(0, "Update now", updatePending)
-            .addAction(0, "Dismiss", dismissPending);
+            .setPriority(
+                required
+                    ? NotificationCompat.PRIORITY_HIGH
+                    : NotificationCompat.PRIORITY_DEFAULT
+            )
+            .setOngoing(required)
+            .setAutoCancel(!required)
+            .addAction(0, required ? "Update now" : "Update now", updatePending);
+
+        if (!required) {
+            Intent dismissIntent = new Intent(context, AppUpdateActionReceiver.class);
+            dismissIntent.setAction(AppUpdateActionReceiver.ACTION_DISMISS);
+            dismissIntent.putExtra(AppUpdateActionReceiver.EXTRA_RELEASE_KEY, releaseKey);
+            PendingIntent dismissPending =
+                PendingIntent.getBroadcast(context, NOTIFICATION_ID + 1, dismissIntent, pendingFlags);
+            builder.setDeleteIntent(dismissPending);
+            builder.addAction(0, "Dismiss", dismissPending);
+        }
 
         if (contentPending != null) {
             builder.setContentIntent(contentPending);
         }
 
         NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, builder.build());
+    }
+
+    /** Soft (dismissible) update notification. */
+    public static void show(
+        Context context,
+        String title,
+        String body,
+        String releaseKey,
+        String downloadUrl,
+        String authToken
+    ) {
+        show(context, title, body, releaseKey, downloadUrl, authToken, false);
     }
 
     public static void dismiss(Context context) {

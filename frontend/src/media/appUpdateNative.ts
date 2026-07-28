@@ -9,8 +9,12 @@ export interface AppUpdateNativePlugin {
     releaseKey: string;
     downloadUrl: string;
     authToken?: string;
+    /** When true, notification has no dismiss action. */
+    required?: boolean;
   }): Promise<void>;
   dismissUpdateNotification(): Promise<void>;
+  /** Clear Chromium WebView HTTP/asset cache (after APK version change). */
+  clearWebViewCache(): Promise<void>;
   addListener(
     eventName: "downloadProgress",
     listenerFunc: (event: { percent: number }) => void

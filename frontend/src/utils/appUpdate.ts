@@ -1,7 +1,7 @@
 import api from "../api/client";
 import { isNativeApp } from "../api/instanceUrl";
 import { AppUpdateNative } from "../media/appUpdateNative";
-import { APK_RELEASE_KEY_STORAGE } from "./appUpdateConfig";
+import { APK_RELEASE_KEY_STORAGE, APK_VERSION_CODE_STORAGE } from "./appUpdateConfig";
 import { getApkReleaseKey } from "./appUpdateAlertState";
 
 export interface AndroidAppUpdateInfo {
@@ -15,6 +15,10 @@ export interface AndroidAppUpdateInfo {
   versionCode: number | null;
   publishedAt: string;
   releaseKey: string;
+  /** Server floor — installs below this must update. */
+  minVersionCode?: number | null;
+  /** When true, any newer GitHub APK is a hard (non-dismissible) update. */
+  forceUpdate?: boolean;
 }
 
 export function getLastInstalledReleaseKey(): string | null {
@@ -36,9 +40,13 @@ export function markApkInstalled(releaseKey: string | null) {
 
 export function isUpdateAvailable(
   installedVersionCode: number,
-  remote: Pick<AndroidAppUpdateInfo, "versionCode" | "releaseKey" | "publishedAt">,
+  remote: Pick<AndroidAppUpdateInfo, "versionCode" | "releaseKey" | "publishedAt" | "minVersionCode">,
   lastInstalledReleaseKey: string | null
 ): boolean {
+  const minCode = remote.minVersionCode;
+  if (typeof minCode === "number" && minCode > 0 && installedVersionCode < minCode) {
+    return true;
+  }
   if (remote.versionCode != null && remote.versionCode > installedVersionCode) {
     return true;
   }
@@ -50,6 +58,19 @@ export function isUpdateAvailable(
     return remote.versionCode != null && remote.versionCode > installedVersionCode;
   }
   return true;
+}
+
+/** Hard gate: below min version, or forceUpdate + newer GitHub build. */
+export function isUpdateRequired(
+  installedVersionCode: number,
+  remote: Pick<AndroidAppUpdateInfo, "versionCode" | "minVersionCode" | "forceUpdate">
+): boolean {
+  const minCode = remote.minVersionCode;
+  if (typeof minCode === "number" && minCode > 0 && installedVersionCode < minCode) {
+    return true;
+  }
+  if (!remote.forceUpdate) return false;
+  return remote.versionCode != null && remote.versionCode > installedVersionCode;
 }
 
 export async function fetchAndroidAppUpdateInfo(force = false): Promise<AndroidAppUpdateInfo> {
@@ -70,6 +91,37 @@ export async function getInstalledAndroidVersion(): Promise<{
       window.setTimeout(() => reject(new Error("Version check timed out")), timeoutMs);
     }),
   ]);
+}
+
+/**
+ * Clear WebView HTTP/asset cache once per installed versionCode so bundled SPA
+ * and any cached API shells are not stuck after an APK update.
+ */
+export async function bustWebViewCacheIfVersionChanged(): Promise<void> {
+  if (!isNativeApp()) return;
+  try {
+    const { versionCode } = await getInstalledAndroidVersion();
+    const key = String(versionCode);
+    let prev: string | null = null;
+    try {
+      prev = localStorage.getItem(APK_VERSION_CODE_STORAGE);
+    } catch {
+      prev = null;
+    }
+    if (prev === key) return;
+    try {
+      await AppUpdateNative.clearWebViewCache();
+    } catch {
+      /* plugin missing on older APKs */
+    }
+    try {
+      localStorage.setItem(APK_VERSION_CODE_STORAGE, key);
+    } catch {
+      /* ignore */
+    }
+  } catch {
+    /* version check failed */
+  }
 }
 
 export async function downloadAndInstallAndroidUpdate(

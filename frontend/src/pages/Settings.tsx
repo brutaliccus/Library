@@ -30,6 +30,7 @@ import {
   getLastInstalledReleaseKey,
   installAndroidAppUpdate,
   isUpdateAvailable,
+  isUpdateRequired,
   type AndroidAppUpdateInfo,
 } from "../utils/appUpdate";
 import { ANDROID_APK_GITHUB_RELEASES_URL } from "../utils/appUpdateConfig";
@@ -609,6 +610,8 @@ function AndroidApkSettings() {
     !!remote &&
     !!installed &&
     isUpdateAvailable(installed.versionCode, remote, lastKey);
+  const updateRequired =
+    !!remote && !!installed && isUpdateRequired(installed.versionCode, remote);
 
   const handleDownload = async () => {
     if (!remote) return;
@@ -644,6 +647,7 @@ function AndroidApkSettings() {
             <h3 className="text-sm font-semibold text-gray-100">Android app update</h3>
             <p className="text-xs text-gray-400 mt-1 leading-relaxed">
               Checks GitHub Releases for a newer Library APK and installs it on this device.
+              Required updates cannot be dismissed.
             </p>
           </div>
 
@@ -679,7 +683,9 @@ function AndroidApkSettings() {
             </div>
           </dl>
 
-          {updateReady ? (
+          {updateRequired ? (
+            <p className="text-xs text-amber-300">Update required — install to continue using the app</p>
+          ) : updateReady ? (
             <p className="text-xs text-emerald-300">A newer APK is available</p>
           ) : remote && !error ? (
             <p className="text-xs text-gray-500">This device has the latest release</p>

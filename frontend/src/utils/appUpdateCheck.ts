@@ -4,6 +4,7 @@ import {
   getInstalledAndroidVersion,
   getLastInstalledReleaseKey,
   isUpdateAvailable,
+  isUpdateRequired,
   type AndroidAppUpdateInfo,
 } from "./appUpdate";
 import { getApkReleaseKey } from "./appUpdateAlertState";
@@ -12,6 +13,8 @@ export type AppUpdateCheckResult = {
   releaseKey: string;
   remote: AndroidAppUpdateInfo;
   versionLabel: string;
+  /** Hard gate — blocking UI, dismiss ignored. */
+  required: boolean;
 };
 
 /** Returns release info when a newer APK is on GitHub; null if up to date or unavailable. */
@@ -28,5 +31,6 @@ export async function checkAppUpdateRelease(): Promise<AppUpdateCheckResult | nu
   if (!updateReady) return null;
 
   const versionLabel = remote.versionName?.trim() || remote.tagName || "new version";
-  return { releaseKey, remote, versionLabel };
+  const required = isUpdateRequired(installed.versionCode, remote);
+  return { releaseKey, remote, versionLabel, required };
 }

@@ -14,6 +14,41 @@ export default function AppUpdateBanner({
   onDismiss,
   onDownload,
 }: Props) {
+  if (update.required) {
+    return (
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="apk-force-update-title"
+        aria-describedby="apk-force-update-desc"
+        className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 px-4 pointer-events-auto"
+      >
+        <div className="w-full max-w-md rounded-xl border border-emerald-500/40 bg-gray-950 px-5 py-6 shadow-2xl">
+          <div className="flex items-start gap-3">
+            <Download size={22} className="shrink-0 text-emerald-300 mt-0.5" aria-hidden />
+            <div className="min-w-0 space-y-2">
+              <h2 id="apk-force-update-title" className="text-base font-semibold text-emerald-50">
+                Update required
+              </h2>
+              <p id="apk-force-update-desc" className="text-sm text-emerald-100/90 leading-relaxed">
+                Version {update.versionLabel} is required to continue using Library on this device.
+                Install the update to keep going.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onDownload}
+            disabled={downloading}
+            className="mt-5 w-full rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-400 transition-colors disabled:opacity-60"
+          >
+            {downloading ? "Downloading…" : "Update now"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       role="status"

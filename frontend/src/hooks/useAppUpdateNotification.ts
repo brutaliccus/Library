@@ -10,7 +10,7 @@ import {
   markApkUpdateAlertShown,
 } from "../utils/appUpdateAlertState";
 import { checkAppUpdateRelease, type AppUpdateCheckResult } from "../utils/appUpdateCheck";
-import { installAndroidAppUpdate } from "../utils/appUpdate";
+import { bustWebViewCacheIfVersionChanged, installAndroidAppUpdate } from "../utils/appUpdate";
 
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const RETRY_DELAYS_MS = [0, 3_000, 15_000] as const;
@@ -30,10 +30,13 @@ async function tryShowSystemUpdateAlert(result: AppUpdateCheckResult): Promise<b
   if (!ok) return false;
 
   await AppUpdateNative.showUpdateAvailable({
-    title: "Library update available",
-    body: `Version ${result.versionLabel} is ready to install.`,
+    title: result.required ? "Library update required" : "Library update available",
+    body: result.required
+      ? `Version ${result.versionLabel} is required to continue.`
+      : `Version ${result.versionLabel} is ready to install.`,
     releaseKey: result.releaseKey,
     downloadUrl: result.remote.downloadUrl,
+    required: result.required,
   });
   markApkUpdateAlertShown(result.releaseKey);
   return true;
@@ -66,7 +69,8 @@ export function useAppUpdateNotification(enabled: boolean) {
         return;
       }
 
-      if (!isApkUpdateAlertDismissed(result.releaseKey)) {
+      // Required updates always show; optional ones honor dismiss.
+      if (result.required || !isApkUpdateAlertDismissed(result.releaseKey)) {
         setPending(result);
         await tryShowSystemUpdateAlert(result);
       } else {
@@ -104,6 +108,8 @@ export function useAppUpdateNotification(enabled: boolean) {
       return;
     }
 
+    void bustWebViewCacheIfVersionChanged();
+
     const timeouts: number[] = [];
     for (const delay of RETRY_DELAYS_MS) {
       timeouts.push(window.setTimeout(() => void runCheck(), delay));
@@ -125,6 +131,8 @@ export function useAppUpdateNotification(enabled: boolean) {
           void runDownload();
         });
         removeDismissed = await AppUpdateNative.addListener("appUpdateDismissed", (e) => {
+          // Ignore dismiss for required updates — keep the blocking gate up.
+          if (pendingRef.current?.required) return;
           if (e.releaseKey) markApkUpdateAlertDismissed(e.releaseKey);
           setPending(null);
         });
@@ -148,6 +156,7 @@ export function useAppUpdateNotification(enabled: boolean) {
     recheckUpdate: runCheck,
     downloadUpdate: runDownload,
     dismissPending: () => {
+      if (pendingRef.current?.required) return;
       if (pendingRef.current) {
         markApkUpdateAlertDismissed(pendingRef.current.releaseKey);
         setPending(null);

@@ -80,6 +80,29 @@ REGISTRY: list[SettingDef] = [
         help="Optional PAT for higher GitHub API rate limits when checking for APK updates.",
         placeholder="ghp_…",
     ),
+    SettingDef(
+        key="config.android_min_version_code",
+        group="mobile",
+        label="Minimum Android versionCode",
+        env_attr="android_min_version_code",
+        value_type="int",
+        help=(
+            "Installed APKs with a lower versionCode are blocked until they update "
+            "(default 51 = Library 1.50). Raise this after publishing a required release."
+        ),
+        placeholder="51",
+    ),
+    SettingDef(
+        key="config.android_force_updates",
+        group="mobile",
+        label="Force Android APK updates",
+        env_attr="android_force_updates",
+        value_type="bool",
+        help=(
+            "When on, a newer GitHub APK is a hard gate (blocking modal, no dismiss). "
+            "When off, only installs below Minimum Android versionCode are forced."
+        ),
+    ),
     # --- Libraries ---
     SettingDef(
         key="config.abs_url",
@@ -907,8 +930,8 @@ async def setup_status() -> dict[str, Any]:
             "required": False,
             "help": (
                 "GitHub `owner/repo` whose Releases host the Library APK "
-                "(latest .apk asset; APK 1.34+ includes My Library metadata/search/filter layout). "
-                "See docs/android-app.md."
+                "(latest .apk asset). Force updates + minimum versionCode "
+                "(default 51 = 1.50) gate old installs. See docs/android-app.md."
             ),
         },
         {

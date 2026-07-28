@@ -49,12 +49,21 @@ Current backend builds already include this.
 
 Signed-in Android users get:
 
-- An **Update available** banner when a newer APK is published
+- A **blocking “Update required” modal** when a newer APK is available and
+  **Force Android APK updates** is on (Admin default), or when the installed
+  `versionCode` is below **Minimum Android versionCode** (default **51** = 1.50)
+- A soft **Update available** banner (dismissible) only when force updates are
+  turned off and the install is still above the minimum
 - A system notification (when the app is in the background) with **Update now**
+  (no Dismiss action when the update is required)
 - **Settings → Android app update** to check / download manually
 
+After each APK version change, the app clears the WebView HTTP/asset cache so
+bundled SPA files are not stuck on the previous build.
+
 The server calls GitHub `releases/latest` for the configured repo (default
-`brutaliccus/Library`) and looks for a `.apk` asset.
+`brutaliccus/Library`) and looks for a `.apk` asset. The update API also returns
+`minVersionCode` and `forceUpdate` from Admin → Config → **Android / mobile**.
 
 Themed app icons (ocean / ember / forest / dusk) are generated with
 `npm run icons:themed` in `frontend/` (PWA favicons + Android mipmaps). The app
@@ -75,13 +84,16 @@ release body (the GitHub Action does this automatically).
    - Standalone: `.\scripts\release_android_apk.ps1` (optional `-Force` / `-DryRun`)
 3. Or manually: **Actions → Android APK release → Run workflow**, or push a tag
    like `android-v1.5+6`
-4. Users on older builds will see the update banner after their next check
+4. Users on older builds will be forced to update after their next check (when
+   force updates / min version apply). Raise **Minimum Android versionCode** in
+   Admin after a required release if you need to block a specific floor.
 
 Working tree must be **clean** for the auto-release step (so the tag matches what
 you deployed). Commit first, then deploy.
 
 Admin → Config → **Android APK GitHub repo** can point at a fork. Optional GitHub
-token raises API rate limits.
+token raises API rate limits. **Force Android APK updates** and **Minimum Android
+versionCode** control the hard gate (defaults: force on, min = 51).
 
 ## Notes
 

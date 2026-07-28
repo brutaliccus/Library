@@ -6,6 +6,7 @@ import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
+import android.webkit.WebView;
 
 import androidx.core.content.FileProvider;
 import androidx.core.content.pm.PackageInfoCompat;
@@ -76,6 +77,7 @@ public class AppUpdatePlugin extends Plugin {
         String releaseKey = call.getString("releaseKey", "");
         String downloadUrl = call.getString("downloadUrl", "");
         String authToken = call.getString("authToken", "");
+        boolean required = Boolean.TRUE.equals(call.getBoolean("required", false));
         if (releaseKey == null || releaseKey.isEmpty() || downloadUrl == null || downloadUrl.isEmpty()) {
             call.reject("releaseKey and downloadUrl are required");
             return;
@@ -86,7 +88,8 @@ public class AppUpdatePlugin extends Plugin {
             body,
             releaseKey,
             downloadUrl,
-            authToken != null ? authToken : ""
+            authToken != null ? authToken : "",
+            required
         );
         call.resolve();
     }
@@ -95,6 +98,23 @@ public class AppUpdatePlugin extends Plugin {
     public void dismissUpdateNotification(PluginCall call) {
         AppUpdateNotifier.dismiss(getContext());
         call.resolve();
+    }
+
+    @PluginMethod
+    public void clearWebViewCache(PluginCall call) {
+        bridge
+            .getActivity()
+            .runOnUiThread(() -> {
+                try {
+                    WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+                    if (webView != null) {
+                        webView.clearCache(true);
+                    }
+                    call.resolve();
+                } catch (Exception e) {
+                    call.reject(e.getMessage() != null ? e.getMessage() : "clearWebViewCache failed", e);
+                }
+            });
     }
 
     static void requestJsDownload(Context context) {

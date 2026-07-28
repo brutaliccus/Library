@@ -83,9 +83,29 @@ type QueueTab = "needs-review" | "unprocessed";
 const STATUS_KEY = ["admin-library-sweep-status"] as const;
 const REVIEW_KEY = ["admin-library-sweep-needs-review"] as const;
 const UNPROCESSED_KEY = ["admin-library-sweep-unprocessed"] as const;
+const SWEEP_SETTINGS_KEYS = [
+  "config.libraforge_naming_template",
+  "config.libraforge_metadata_provider",
+  "config.library_sweep_abs_scan_every",
+] as const;
+
+const METADATA_PROVIDERS = [
+  { value: "audible", label: "Audible" },
+  { value: "graphicaudio", label: "Graphic Audio" },
+  { value: "soundbooththeater", label: "Soundbooth Theater" },
+] as const;
 
 const START_CONFIRM =
   "Library Sweep will rewrite audiobook metadata and may queue M4B conversion for matching library books. Continue?";
+
+type SweepSetting = {
+  key: string;
+  label: string;
+  value: string;
+  help?: string;
+  placeholder?: string;
+  valueType?: string;
+};
 
 function iconBtnClass(active?: boolean) {
   return `inline-flex items-center justify-center p-2 rounded-lg border transition-colors disabled:opacity-40 ${
@@ -111,6 +131,7 @@ export default function LibrarySweepTab() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [cursorRestored, setCursorRestored] = useState(false);
   const [queueTab, setQueueTab] = useState<QueueTab>("needs-review");
+  const [settingsDraft, setSettingsDraft] = useState<Record<string, string>>({});
 
   const { data: status, isLoading: statusLoading, refetch: refetchStatus } = useQuery({
     queryKey: STATUS_KEY,
@@ -123,6 +144,70 @@ export default function LibrarySweepTab() {
       return s === "running" ? 2500 : 15_000;
     },
   });
+
+  const { data: sweepSettings, isLoading: settingsLoading } = useQuery({
+    queryKey: ["admin-library-sweep-settings"],
+    queryFn: async () => {
+      const { data } = await api.get("/admin/config");
+      const all = (data?.settings || []) as SweepSetting[];
+      return all.filter((s) =>
+        (SWEEP_SETTINGS_KEYS as readonly string[]).includes(s.key),
+      );
+    },
+  });
+
+  useEffect(() => {
+    if (!sweepSettings) return;
+    const next: Record<string, string> = {};
+    for (const s of sweepSettings) {
+      next[s.key] = s.value ?? "";
+    }
+    setSettingsDraft((prev) => {
+      // Keep in-progress edits when refetching the same keys.
+      const merged = { ...next };
+      for (const k of Object.keys(prev)) {
+        if (prev[k] !== undefined && next[k] !== undefined && prev[k] !== next[k]) {
+          // Only preserve dirty keys relative to last loaded values.
+          const loaded = sweepSettings.find((s) => s.key === k)?.value ?? "";
+          if (prev[k] !== loaded) merged[k] = prev[k];
+        }
+      }
+      return merged;
+    });
+  }, [sweepSettings]);
+
+  const saveSettings = useMutation({
+    mutationFn: async () => {
+      const updates: Record<string, string> = {};
+      for (const key of SWEEP_SETTINGS_KEYS) {
+        const cur = settingsDraft[key];
+        if (cur === undefined) continue;
+        const original = sweepSettings?.find((s) => s.key === key)?.value ?? "";
+        if (cur !== original) updates[key] = cur;
+      }
+      if (Object.keys(updates).length === 0) return { settings: sweepSettings };
+      const { data } = await api.put("/admin/config", { settings: updates });
+      return data as { settings?: SweepSetting[] };
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-library-sweep-settings"] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-config"] });
+      toast("Sweep settings saved", "success");
+    },
+    onError: (err: { response?: { data?: { detail?: string } } }) => {
+      toast(err?.response?.data?.detail || "Failed to save settings", "error");
+    },
+  });
+
+  const settingsDirty = useMemo(() => {
+    if (!sweepSettings) return false;
+    return SWEEP_SETTINGS_KEYS.some((key) => {
+      const draft = settingsDraft[key];
+      if (draft === undefined) return false;
+      const original = sweepSettings.find((s) => s.key === key)?.value ?? "";
+      return draft !== original;
+    });
+  }, [settingsDraft, sweepSettings]);
 
   const { data: review, isLoading: reviewLoading, refetch: refetchReview } = useQuery({
     queryKey: REVIEW_KEY,
@@ -463,6 +548,91 @@ export default function LibrarySweepTab() {
           ))}
         </div>
       )}
+
+      <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-100">Sweep settings</h3>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Folder Forge naming, metadata provider, and ABS scan cadence. Also under Pipelines.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-brand-600/50 bg-brand-600/20 text-brand-200 text-xs font-medium disabled:opacity-40"
+            disabled={!settingsDirty || saveSettings.isPending || settingsLoading}
+            onClick={() => saveSettings.mutate()}
+          >
+            {saveSettings.isPending ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Check size={14} />
+            )}
+            Save
+          </button>
+        </div>
+        {settingsLoading && !sweepSettings ? (
+          <p className="text-xs text-gray-500">Loading settings…</p>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block space-y-1 sm:col-span-2">
+              <span className="text-xs text-gray-400">Folder Forge naming template</span>
+              <input
+                type="text"
+                className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 font-mono"
+                value={settingsDraft["config.libraforge_naming_template"] ?? ""}
+                placeholder="{author}/{series} [{edition}]/{title}/{filename}"
+                onChange={(e) =>
+                  setSettingsDraft((d) => ({
+                    ...d,
+                    "config.libraforge_naming_template": e.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs text-gray-400">Default metadata provider</span>
+              <select
+                className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100"
+                value={settingsDraft["config.libraforge_metadata_provider"] || "audible"}
+                onChange={(e) =>
+                  setSettingsDraft((d) => ({
+                    ...d,
+                    "config.libraforge_metadata_provider": e.target.value,
+                  }))
+                }
+              >
+                {METADATA_PROVIDERS.map((p) => (
+                  <option key={p.value} value={p.value}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] text-gray-500">
+                On a miss: Graphic Audio → Soundbooth Theater
+              </span>
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs text-gray-400">ABS scan every N completed books</span>
+              <input
+                type="number"
+                min={1}
+                className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100"
+                value={settingsDraft["config.library_sweep_abs_scan_every"] ?? "25"}
+                onChange={(e) =>
+                  setSettingsDraft((d) => ({
+                    ...d,
+                    "config.library_sweep_abs_scan_every": e.target.value,
+                  }))
+                }
+              />
+              <span className="text-[11px] text-gray-500">
+                Also scans when Sweep completes, pauses, cancels, or stops
+              </span>
+            </label>
+          </div>
+        )}
+      </div>
 
       {(running || paused || current) && (
         <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-3 flex gap-3 items-center">

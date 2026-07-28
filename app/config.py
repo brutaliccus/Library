@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     # + replace-cover (write_mode=overwrite). Below → quarantine for admin review.
     libraforge_min_score: float = 0.70
     libraforge_naming_template: str = "{author}/{series} [{edition}]/{title}/{filename}"
+    # Metadata Forge primary provider (audible | graphicaudio | soundbooththeater).
+    # After a miss, LibraForge tries graphicaudio then soundbooththeater.
+    libraforge_metadata_provider: str = "audible"
+    # Library Sweep: full ABS scan every N completed books (and on stop).
+    library_sweep_abs_scan_every: int = 25
     # Per-run ffmpeg/m4b-tool worker threads on Pi (not cross-request concurrency).
     # Cross-request M4B is serialized by app.services.m4b_queue (concurrency 1).
     libraforge_m4b_jobs: int = 1

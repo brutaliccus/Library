@@ -200,6 +200,42 @@ REGISTRY: list[SettingDef] = [
         placeholder="0.70",
     ),
     SettingDef(
+        key="config.libraforge_naming_template",
+        group="pipeline",
+        label="Folder Forge naming template",
+        env_attr="libraforge_naming_template",
+        help=(
+            "Path template for Folder Forge (author/series/title tokens). "
+            "Also editable on the Library Sweep tab."
+        ),
+        placeholder="{author}/{series} [{edition}]/{title}/{filename}",
+    ),
+    SettingDef(
+        key="config.libraforge_metadata_provider",
+        group="pipeline",
+        label="Default metadata provider",
+        env_attr="libraforge_metadata_provider",
+        help=(
+            "Primary Metadata Forge source: audible, graphicaudio, or soundbooththeater. "
+            "On a miss, LibraForge tries Graphic Audio then Soundbooth Theater. "
+            "Also editable on the Library Sweep tab."
+        ),
+        placeholder="audible",
+    ),
+    SettingDef(
+        key="config.library_sweep_abs_scan_every",
+        group="pipeline",
+        label="Library Sweep ABS scan every N books",
+        env_attr="library_sweep_abs_scan_every",
+        value_type="int",
+        help=(
+            "Full Audiobookshelf library scan after this many successfully completed "
+            "Sweep books (and whenever Sweep completes / pauses / cancels / stops). "
+            "Per-book scans are skipped during Sweep to keep runs fast."
+        ),
+        placeholder="25",
+    ),
+    SettingDef(
         key="config.libraforge_m4b_jobs",
         group="pipeline",
         label="LibraForge M4B jobs (per run)",

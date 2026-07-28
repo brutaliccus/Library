@@ -26,6 +26,47 @@ _worker_lock = asyncio.Lock()
 _current: dict[str, Any] | None = None
 _skip_request_ids: set[int] = set()
 
+# Completed sweep books since the last batched ABS scan (includes M4B handoffs).
+_completed_since_abs_scan = 0
+_abs_scan_lock = asyncio.Lock()
+
+
+def _abs_scan_every() -> int:
+    """How many completed books between full ABS scans (min 1)."""
+    raw = getattr(settings, "library_sweep_abs_scan_every", 25)
+    try:
+        n = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        n = 25
+    return max(1, n)
+
+
+async def run_batched_abs_scan(*, reason: str = "sweep") -> dict[str, Any]:
+    """One full ABS library scan + orphan cleanup (used by Sweep cadence)."""
+    global _completed_since_abs_scan
+    async with _abs_scan_lock:
+        logger.info("Library Sweep ABS batch scan (%s)", reason)
+        try:
+            status = await audiobookshelf.scan_library_and_wait(timeout_seconds=240)
+            await audiobookshelf.remove_items_with_issues()
+            audiobookshelf.invalidate_cache()
+            _completed_since_abs_scan = 0
+            return {"ok": True, "reason": reason, "scan": status}
+        except Exception as e:
+            logger.warning("Library Sweep ABS batch scan failed (%s): %s", reason, e)
+            return {"ok": False, "reason": reason, "error": str(e)[:300]}
+
+
+async def on_sweep_book_finalized() -> None:
+    """Called from forge finalize when a sweep book completes without a per-book ABS scan."""
+    global _completed_since_abs_scan
+    _completed_since_abs_scan += 1
+    every = _abs_scan_every()
+    if _completed_since_abs_scan >= every:
+        await run_batched_abs_scan(
+            reason=f"every {every} completed (at {_completed_since_abs_scan})"
+        )
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -259,7 +300,7 @@ async def list_unprocessed(*, limit: int = 500) -> list[dict[str, Any]]:
 
 async def start_sweep(*, user_id: int) -> dict[str, Any]:
     """Start or resume a sweep. Returns job status dict."""
-    global _worker_task
+    global _worker_task, _completed_since_abs_scan
     job = await get_or_create_job()
 
     if job.status == "running":
@@ -289,6 +330,7 @@ async def start_sweep(*, user_id: int) -> dict[str, Any]:
     # Fresh start (idle / completed / cancelled)
     _skip_request_ids.clear()
     _set_current()
+    _completed_since_abs_scan = 0
     updated = await _update_job(
         job.id,
         status="running",
@@ -323,8 +365,12 @@ async def cancel_sweep() -> dict[str, Any]:
     job = await get_or_create_job()
     if job.status not in ("running", "paused"):
         return {**(await get_status()), "message": f"Cannot cancel from status '{job.status}'"}
+    was_paused = job.status == "paused"
     await _update_job(job.id, status="cancelled")
     _set_current()
+    # Worker may already have exited (paused) — still flush a batch scan.
+    if was_paused:
+        await run_batched_abs_scan(reason="sweep cancelled")
     return {**(await get_status()), "message": "Sweep cancelled"}
 
 
@@ -453,13 +499,16 @@ async def _run_sweep_worker(job_id: int) -> None:
             if job.status == "paused":
                 logger.info("Library Sweep job %s paused at index %s", job_id, index)
                 _set_current()
+                await run_batched_abs_scan(reason="sweep paused")
                 return
             if job.status == "cancelled":
                 logger.info("Library Sweep job %s cancelled at index %s", job_id, index)
                 _set_current()
+                await run_batched_abs_scan(reason="sweep cancelled")
                 return
             if job.status != "running":
                 _set_current()
+                await run_batched_abs_scan(reason=f"sweep stopped ({job.status})")
                 return
 
             try:
@@ -483,10 +532,12 @@ async def _run_sweep_worker(job_id: int) -> None:
         if job and job.status == "running":
             await _update_job(job_id, status="completed", error=None)
             logger.info("Library Sweep job %s completed", job_id)
+            await run_batched_abs_scan(reason="sweep completed")
         _set_current()
     except asyncio.CancelledError:
         logger.info("Library Sweep worker cancelled")
         _set_current()
+        await run_batched_abs_scan(reason="sweep stopped")
         raise
     except Exception as e:
         logger.exception("Library Sweep worker crashed: %s", e)
@@ -494,6 +545,7 @@ async def _run_sweep_worker(job_id: int) -> None:
         if job and job.status == "running":
             await _update_job(job_id, status="completed", error=str(e)[:500])
         _set_current()
+        await run_batched_abs_scan(reason="sweep error stop")
 
 
 async def _bump_failed(job_id: int, scan_index: int, error: str) -> None:

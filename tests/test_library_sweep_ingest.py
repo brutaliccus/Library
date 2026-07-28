@@ -125,6 +125,44 @@ def test_allow_user_setting_in_registry():
     assert "allow_user_audiobook_upload" in keys
 
 
+def test_sweep_pipeline_settings_in_registry():
+    from app.services import instance_settings
+
+    keys = {d.key for d in instance_settings.REGISTRY}
+    assert "config.libraforge_naming_template" in keys
+    assert "config.libraforge_metadata_provider" in keys
+    assert "config.library_sweep_abs_scan_every" in keys
+
+
+def test_metadata_provider_chain_order():
+    from app.services import libraforge
+
+    assert libraforge.metadata_provider_chain("audible") == [
+        "audible",
+        "graphicaudio",
+        "soundbooththeater",
+    ]
+    assert libraforge.metadata_provider_chain("graphicaudio") == [
+        "graphicaudio",
+        "soundbooththeater",
+    ]
+    assert libraforge.metadata_provider_chain("soundbooththeater") == [
+        "soundbooththeater",
+        "graphicaudio",
+    ]
+
+
+def test_abs_scan_every_helper(monkeypatch):
+    from app.services import library_sweep
+
+    monkeypatch.setattr(library_sweep.settings, "library_sweep_abs_scan_every", 25)
+    assert library_sweep._abs_scan_every() == 25
+    monkeypatch.setattr(library_sweep.settings, "library_sweep_abs_scan_every", 0)
+    assert library_sweep._abs_scan_every() == 1
+    monkeypatch.setattr(library_sweep.settings, "library_sweep_abs_scan_every", "nope")
+    assert library_sweep._abs_scan_every() == 25
+
+
 def test_user_may_upload_admin_always(monkeypatch):
     import asyncio
 

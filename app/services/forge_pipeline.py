@@ -1071,6 +1071,7 @@ async def _run_metadata_forge_once(
     staging: Path,
     user_id: int,
     phase_detail: str,
+    provider: str | None = None,
 ) -> tuple[str, str]:
     """One Metadata Forge apply attempt.
 
@@ -1097,6 +1098,7 @@ async def _run_metadata_forge_once(
             write_mode="overwrite",
             cover_if_missing=False,
             replace_cover=True,
+            provider=provider,
         )
         await _persist_staging(request_id, staging, run_id=run_id)
         report = await libraforge.wait_for_run(
@@ -1141,6 +1143,42 @@ async def _run_metadata_forge_once(
         )
 
     return "fail", libraforge.quarantine_reason_from_report(report)
+
+
+async def _run_metadata_forge_with_provider_fallback(
+    request_id: int,
+    *,
+    staging: Path,
+    user_id: int,
+    phase_detail: str,
+) -> tuple[str, str]:
+    """Primary provider, then graphicaudio → soundbooththeater on miss.
+
+    LibraForge (when updated) also chains specialty catalogs inside one run;
+    these extra runs only execute when the prior attempt did not apply, covering
+    older LibraForge builds and forced-provider primary misses.
+    """
+    chain = libraforge.metadata_provider_chain()
+    last_reason = "Metadata Forge failed"
+    for idx, provider in enumerate(chain):
+        detail = phase_detail if idx == 0 else f"Retrying metadata via {provider}…"
+        if idx > 0:
+            logger.info(
+                "Metadata Forge provider fallback for request %s → %s",
+                request_id,
+                provider,
+            )
+        status, reason = await _run_metadata_forge_once(
+            request_id,
+            staging=staging,
+            user_id=user_id,
+            phase_detail=detail,
+            provider=provider,
+        )
+        if status in ("ok", "cancelled"):
+            return status, reason
+        last_reason = reason or last_reason
+    return "fail", last_reason
 
 
 async def _llm_metadata_assist_retry(
@@ -1229,7 +1267,7 @@ async def _llm_metadata_assist_retry(
         identification.confidence,
     )
 
-    return await _run_metadata_forge_once(
+    return await _run_metadata_forge_with_provider_fallback(
         request_id,
         staging=staging,
         user_id=user_id,
@@ -1250,7 +1288,7 @@ async def _apply_metadata_forge(
     On failure / no write evidence, optionally tries OpenRouter assist once
     (when ``allow_llm_assist`` and enabled), then quarantines and returns False.
     """
-    status, reason = await _run_metadata_forge_once(
+    status, reason = await _run_metadata_forge_with_provider_fallback(
         request_id,
         staging=staging,
         user_id=user_id,
@@ -2225,12 +2263,32 @@ async def run_forge_after_download(
     # --- Finalize (ABS) ---
     # Scan-only (no Quick Match / provider fetch). Then push LibraForge sidecars
     # into ABS so folder-name precedence cannot overwrite applied titles/covers.
+    #
+    # Library Sweep / owned upload: skip the full per-book ABS scan (very slow
+    # at library scale). Sweep batches scans every N completions + on stop;
+    # still sync moved-book metadata and invalidate the local cache.
+    from app.services import library_ingest
+
+    skip_full_abs_scan = False
+    req_row = None
     async with async_session() as db:
-        await p._update_status(db, request_id, "finalizing", "Scanning Audiobookshelf…")
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req_row = result.scalar_one_or_none()
+        if req_row and library_ingest.is_local_ingest_request(req_row):
+            skip_full_abs_scan = True
+        detail = (
+            "Finalizing (batched ABS scan)…"
+            if skip_full_abs_scan
+            else "Scanning Audiobookshelf…"
+        )
+        await p._update_status(db, request_id, "finalizing", detail)
 
     try:
-        await audiobookshelf.scan_library_and_wait(timeout_seconds=240)
-        await audiobookshelf.remove_items_with_issues()
+        if not skip_full_abs_scan:
+            await audiobookshelf.scan_library_and_wait(timeout_seconds=240)
+            await audiobookshelf.remove_items_with_issues()
         if organizer_report and libraforge.organizer_moved_files(organizer_report):
             sync_results = await audiobookshelf.sync_organizer_moves_to_abs(organizer_report)
             synced = sum(1 for r in sync_results if r.get("updated") or r.get("cover_updated"))
@@ -2255,6 +2313,16 @@ async def run_forge_after_download(
             pass
 
     audiobookshelf.invalidate_cache()
+
+    if skip_full_abs_scan and req_row is not None:
+        try:
+            from app.services import library_sweep as sweep_svc
+
+            src = (getattr(req_row, "source", None) or "").strip().lower()
+            if src == library_ingest.SOURCE_SWEEP:
+                await sweep_svc.on_sweep_book_finalized()
+        except Exception as e:
+            logger.debug("Sweep batch ABS cadence hook failed: %s", e)
 
     # Ensure unorganized leftovers are gone on E2E success. When Folder Forge
     # reported moves, force-delete the req_* tree (samples/extras included).

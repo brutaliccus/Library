@@ -343,21 +343,25 @@ async def start_metadata_run(
     write_mode: str = "overwrite",
     limit: int = 50,
     script_name: str | None = None,
+    provider: str | None = None,
 ) -> str:
     fixer, _ = await resolve_script_names()
+    primary = (provider or settings.libraforge_metadata_provider or "audible").strip().lower()
+    if primary not in ("audible", "abs", "graphicaudio", "soundbooththeater"):
+        primary = "audible"
     body: dict[str, Any] = {
         "script_name": script_name or fixer,
         "target_path": target_path,
         "apply": apply,
         "backup": False,
         # Maps to Metadata Forge CLI: --apply --write-mode overwrite --replace-cover
-        # (not --cover-if-missing / smart â€” those leave torrent tags/covers in place).
+        # (not --cover-if-missing / smart — those leave torrent tags/covers in place).
         "cover_if_missing": cover_if_missing,
         "replace_cover": replace_cover,
         "min_score": min_score if min_score is not None else settings.libraforge_min_score,
         "limit": limit,
         "write_mode": write_mode,
-        "provider": "audible",
+        "provider": primary,
         "enable_goodreads_fallback": True,
     }
     data = await _request("POST", "/api/runs", json_body=body, timeout=60.0)
@@ -365,6 +369,23 @@ async def start_metadata_run(
     if not run_id:
         raise LibraForgeError(f"Metadata Forge did not return a run id: {data}")
     return run_id
+
+
+# Specialty catalogs tried after the primary provider misses (Library Site retries
+# when LibraForge is older / does not yet chain these itself).
+METADATA_PROVIDER_FALLBACKS: tuple[str, ...] = ("graphicaudio", "soundbooththeater")
+
+
+def metadata_provider_chain(primary: str | None = None) -> list[str]:
+    """Primary first, then graphicaudio → soundbooththeater (deduped)."""
+    p = (primary or settings.libraforge_metadata_provider or "audible").strip().lower()
+    if p not in ("audible", "abs", "graphicaudio", "soundbooththeater"):
+        p = "audible"
+    out = [p]
+    for fb in METADATA_PROVIDER_FALLBACKS:
+        if fb not in out:
+            out.append(fb)
+    return out
 
 
 async def start_organizer_run(

@@ -57,7 +57,10 @@ function normalizeAbsChapters(raw: unknown): AbsChapter[] | undefined {
 }
 
 /** Fetch ABS track URLs for offline cache — prefers metadata (no play session). */
-async function fetchAbsOfflinePlayInfo(itemId: string): Promise<{
+async function fetchAbsOfflinePlayInfo(
+  itemId: string,
+  shareToken?: string
+): Promise<{
   tracks: Track[];
   title: string;
   author: string;
@@ -67,6 +70,21 @@ async function fetchAbsOfflinePlayInfo(itemId: string): Promise<{
   sessionId?: string;
 }> {
   const pathId = encodeURIComponent(itemId);
+
+  // Guest share: public offline endpoint (no JWT / no ABS play tracking).
+  if (shareToken) {
+    const { data } = await api.get(`/share/${encodeURIComponent(shareToken)}/offline`);
+    const tracks = absolutizeTracks((data.tracks || []) as Track[]);
+    if (!tracks.length) throw new Error("No audio tracks found");
+    return {
+      tracks,
+      title: data.title || "Audiobook",
+      author: data.author || "",
+      coverUrl: data.coverUrl ? toAbsoluteUrl(data.coverUrl) : "",
+      duration: data.duration || 0,
+      chapters: normalizeAbsChapters(data.chapters),
+    };
+  }
 
   // Preferred: library-item metadata → proxy URLs (never requires Listen first).
   try {
@@ -146,9 +164,10 @@ export async function ebookDownloadState(chapterId: number): Promise<"downloaded
 
 export async function downloadAbsOffline(
   itemId: string,
-  onProgress?: (done: number, total: number) => void
+  onProgress?: (done: number, total: number) => void,
+  shareToken?: string
 ): Promise<void> {
-  const info = await fetchAbsOfflinePlayInfo(itemId);
+  const info = await fetchAbsOfflinePlayInfo(itemId, shareToken);
   if (!info.tracks.length) throw new Error("No audio tracks to download");
 
   saveAbsOfflineManifest({

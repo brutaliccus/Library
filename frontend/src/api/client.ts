@@ -118,7 +118,8 @@ api.interceptors.response.use(
         localStorage.removeItem("must_set_email");
         if (
           !window.location.pathname.startsWith("/login") &&
-          !window.location.pathname.startsWith("/libraries")
+          !window.location.pathname.startsWith("/libraries") &&
+          !window.location.pathname.startsWith("/share/")
         ) {
           window.location.href = "/libraries";
         }

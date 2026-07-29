@@ -42,9 +42,11 @@ interface Props {
   className?: string;
   /** Compact icon+label for cards; default is a normal button. */
   size?: "sm" | "md";
+  /** Guest share token — uses public /api/share/{token}/offline. */
+  shareToken?: string;
 }
 
-export default function SaveOfflineButton({ target, className = "", size = "md" }: Props) {
+export default function SaveOfflineButton({ target, className = "", size = "md", shareToken }: Props) {
   const { toast } = useToast();
   const online = useOnlineStatus();
   const [state, setState] = useState<OfflineDownloadState>("idle");
@@ -89,7 +91,7 @@ export default function SaveOfflineButton({ target, className = "", size = "md" 
       if (target.kind === "abs") {
         await downloadAbsOffline(target.itemId, (done, total) => {
           setProgress(`${done}/${total}`);
-        });
+        }, shareToken);
       } else if (target.kind === "rd") {
         await downloadRdOffline({
           ...target,

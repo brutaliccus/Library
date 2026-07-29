@@ -47,6 +47,7 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     allow_audiobook_upload: bool = False
+    can_share_books: bool = False
     created_at: str
     last_seen_at: str | None = None
     is_online: bool = False
@@ -122,6 +123,7 @@ class SetActiveBody(BaseModel):
     is_active: bool | None = None
     role: str | None = None  # "admin" | "user"
     allow_audiobook_upload: bool | None = None
+    can_share_books: bool | None = None
 
 
 class AdminDownloadResponse(BaseModel):
@@ -446,6 +448,7 @@ async def list_users(
                 role=user.role,
                 is_active=user.is_active,
                 allow_audiobook_upload=bool(getattr(user, "allow_audiobook_upload", False)),
+                can_share_books=bool(getattr(user, "can_share_books", False)),
                 created_at=_iso(user.created_at) or "",
                 last_seen_at=_iso(user.last_seen_at),
                 is_online=user_is_online(user.last_seen_at, now=now),
@@ -499,12 +502,19 @@ async def patch_user(
             "upload_on" if user.allow_audiobook_upload else "upload_off"
         )
 
+    if body.can_share_books is not None:
+        user.can_share_books = bool(body.can_share_books)
+        changed.append(
+            "share_on" if user.can_share_books else "share_off"
+        )
+
     if not changed:
         return {
             "message": f"No changes for {user.username}",
             "is_active": user.is_active,
             "role": user.role,
             "allow_audiobook_upload": bool(user.allow_audiobook_upload),
+            "can_share_books": bool(user.can_share_books),
         }
 
     await db.commit()
@@ -514,6 +524,7 @@ async def patch_user(
         "is_active": user.is_active,
         "role": user.role,
         "allow_audiobook_upload": bool(user.allow_audiobook_upload),
+        "can_share_books": bool(user.can_share_books),
     }
 
 

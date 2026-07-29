@@ -33,6 +33,8 @@ interface AuthUser {
   mustSetEmail: boolean;
   /** From /auth/me — admins always true when setting allows users. */
   allowUserAudiobookUpload?: boolean;
+  /** From /auth/me — admins always true. */
+  canShareBooks?: boolean;
 }
 
 interface SessionTokens {
@@ -245,6 +247,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             mustChangePassword: !!data.must_change_password,
             mustSetEmail: !!data.must_set_email,
             allowUserAudiobookUpload: !!data.allow_user_audiobook_upload,
+            canShareBooks: !!data.can_share_books,
           });
           setOfflineSession(false);
           const origin = currentOrigin();
@@ -403,6 +406,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         mustChangePassword: !!data.must_change_password,
         mustSetEmail: !!data.must_set_email,
         allowUserAudiobookUpload: !!data.allow_user_audiobook_upload,
+        canShareBooks: !!data.can_share_books,
       });
       setOfflineSession(false);
       localStorage.setItem("must_set_email", String(!!data.must_set_email));

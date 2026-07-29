@@ -119,7 +119,7 @@ interface PlayerState {
 }
 
 interface PlayerActions {
-  playABS: (itemId: string, opts?: { startAt?: number }) => Promise<void>;
+  playABS: (itemId: string, opts?: { startAt?: number; shareToken?: string }) => Promise<void>;
   playRD: (
     tracks: Track[],
     title: string,
@@ -751,7 +751,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [state.sleepTimerEndAt, getAudio]);
 
   const playABS = useCallback(
-    async (itemId: string, opts?: { startAt?: number }) => {
+    async (itemId: string, opts?: { startAt?: number; shareToken?: string }) => {
       // Opening the app while AA native ExoPlayer is already on this book —
       // attach UI only; never start a second decoder / blob load (OOM path).
       if (isNativePlaybackOwner()) {
@@ -847,6 +847,99 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (isLikelyOffline()) {
         if (await startFromManifest()) return;
         throw new Error("Offline playback unavailable — download this book while online first");
+      }
+
+      // Guest share link: public play payload, no ABS session / server progress.
+      if (opts?.shareToken) {
+        const { data } = await api.post(`/share/${encodeURIComponent(opts.shareToken)}/play`);
+        const np = withAbsoluteMediaUrls({
+          source: "abs",
+          itemId,
+          title: data.title,
+          author: data.author,
+          coverUrl: data.coverUrl,
+          tracks: data.tracks,
+          totalDuration: data.duration,
+        });
+        const local = getOfflineProgress(progressKeyForAbs(itemId));
+        let startOffset = opts?.startAt ?? local?.time ?? 0;
+        let trackIdx = local?.trackIndex ?? 0;
+        let localStart = local?.trackLocal ?? 0;
+        if (opts?.startAt != null) {
+          trackIdx = 0;
+          localStart = opts.startAt;
+          for (let i = 0; i < np.tracks.length; i++) {
+            const tr = np.tracks[i];
+            if (opts.startAt >= tr.startOffset && opts.startAt < tr.startOffset + tr.duration) {
+              trackIdx = i;
+              localStart = opts.startAt - tr.startOffset;
+              break;
+            }
+          }
+        } else if (local != null) {
+          trackIdx = Math.min(Math.max(0, local.trackIndex), np.tracks.length - 1);
+          localStart = Math.max(0, local.trackLocal);
+          startOffset = (np.tracks[trackIdx]?.startOffset ?? 0) + localStart;
+        } else if (startOffset > 0) {
+          for (let i = 0; i < np.tracks.length; i++) {
+            const tr = np.tracks[i];
+            if (startOffset >= tr.startOffset && startOffset < tr.startOffset + tr.duration) {
+              trackIdx = i;
+              localStart = startOffset - tr.startOffset;
+              break;
+            }
+          }
+        }
+        const rate = resolveBookPlaybackRate(local?.playbackRate);
+        setState((s) => ({
+          ...s,
+          nowPlaying: np,
+          currentTime: (np.tracks[trackIdx]?.startOffset ?? 0) + localStart,
+          duration: data.duration,
+          currentTrackIndex: trackIdx,
+          expanded: false,
+          playbackRate: rate,
+        }));
+        getAudio().playbackRate = rate;
+        loadTrack(np, trackIdx, localStart);
+        saveAbsOfflineManifest({
+          itemId,
+          title: data.title,
+          author: data.author || "",
+          coverUrl: data.coverUrl || "",
+          tracks: data.tracks,
+          totalDuration: data.duration || 0,
+          absChapters: Array.isArray(data.chapters)
+            ? data.chapters.map((c: unknown, i: number) => {
+                const o = c as Record<string, unknown>;
+                const endRaw = o.end;
+                return {
+                  id: typeof o.id === "number" ? o.id : i,
+                  title: String(o.title ?? `Chapter ${i + 1}`),
+                  start: Number(o.start) || 0,
+                  end: endRaw != null && endRaw !== "" ? Number(endRaw) : null,
+                } satisfies AbsChapter;
+              })
+            : undefined,
+        });
+        void cacheBookAudio(np.tracks);
+        if (Array.isArray(data.chapters) && data.chapters.length) {
+          const absChapters = data.chapters.map((c: unknown, i: number) => {
+            const o = c as Record<string, unknown>;
+            const endRaw = o.end;
+            return {
+              id: typeof o.id === "number" ? o.id : i,
+              title: String(o.title ?? `Chapter ${i + 1}`),
+              start: Number(o.start) || 0,
+              end: endRaw != null && endRaw !== "" ? Number(endRaw) : null,
+            } satisfies AbsChapter;
+          });
+          setState((s) => {
+            if (s.nowPlaying?.source !== "abs" || s.nowPlaying.itemId !== itemId) return s;
+            return { ...s, nowPlaying: { ...s.nowPlaying, absChapters } };
+          });
+        }
+        return;
       }
 
       // Wake storage / ABS ahead of the play handshake (fire-and-forget).

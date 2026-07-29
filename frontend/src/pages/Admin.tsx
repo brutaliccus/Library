@@ -109,6 +109,7 @@ type AdminUser = {
   role: string;
   is_active: boolean;
   allow_audiobook_upload?: boolean;
+  can_share_books?: boolean;
   created_at: string;
   last_seen_at: string | null;
   is_online: boolean;
@@ -401,6 +402,7 @@ function UsersTab() {
       is_active?: boolean;
       role?: string;
       allow_audiobook_upload?: boolean;
+      can_share_books?: boolean;
     }) => {
       const { id, ...patch } = body;
       const { data } = await api.patch(`/admin/users/${id}`, patch);
@@ -409,6 +411,7 @@ function UsersTab() {
         is_active: boolean;
         role?: string;
         allow_audiobook_upload?: boolean;
+        can_share_books?: boolean;
       };
     },
     onSuccess: (data) => {
@@ -622,6 +625,21 @@ function UsersTab() {
                         }
                       />
                       Can upload books
+                    </label>
+                    <label className="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs text-gray-300">
+                      <input
+                        type="checkbox"
+                        className="rounded border-gray-600 bg-gray-900"
+                        checked={!!user.can_share_books || user.role === "admin"}
+                        disabled={user.role === "admin" || setActive.isPending}
+                        onChange={(e) =>
+                          setActive.mutate({
+                            id: user.id,
+                            can_share_books: e.target.checked,
+                          })
+                        }
+                      />
+                      Can share books
                     </label>
                     {!isSelf && user.role !== "admin" && (
                       <button

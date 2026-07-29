@@ -6,7 +6,7 @@ import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import {
-  ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store, Trash2, ListPlus,
+  ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store, Trash2, ListPlus, Share2,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
@@ -14,6 +14,10 @@ import Modal from "../components/Modal";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
 import type { AbsChapter } from "../types/player";
+import {
+  getOfflineProgress,
+  progressKeyForAbs,
+} from "../utils/offlinePlayback";
 
 interface ABSItemDetail {
   itemId: string;
@@ -61,6 +65,7 @@ export default function LibraryBookDetail() {
   const [storeLoading, setStoreLoading] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
 
   const { data: item, isLoading, error } = useQuery({
     queryKey: ["abs-item-detail", itemId],
@@ -111,6 +116,47 @@ export default function LibraryBookDetail() {
       toast(msg, "error");
     } finally {
       setPlayLoading(false);
+    }
+  };
+
+
+  const canShare = user?.role === "admin" || !!user?.canShareBooks;
+  const hasLocalProgress = (() => {
+    if (!itemId) return false;
+    const p = getOfflineProgress(progressKeyForAbs(itemId));
+    return !!p && (p.time > 5 || p.trackIndex > 0 || p.trackLocal > 5);
+  })();
+
+  const handleShare = async () => {
+    if (!itemId) return;
+    setShareBusy(true);
+    try {
+      const { data } = await api.post("/share", { item_id: itemId });
+      const path = (data as { path?: string }).path || `/share/${(data as { token: string }).token}`;
+      const url = `${window.location.origin}${path}`;
+      if (navigator.share) {
+        try {
+          await navigator.share({
+            title: item?.title || "Shared audiobook",
+            text: item?.title ? `Listen to ${item.title}` : "Shared audiobook",
+            url,
+          });
+          toast("Share sheet opened", "success");
+          return;
+        } catch (err) {
+          // User cancel — fall through to clipboard.
+          if ((err as { name?: string })?.name === "AbortError") return;
+        }
+      }
+      await navigator.clipboard.writeText(url);
+      toast("Share link copied", "success");
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Could not create share link";
+      toast(typeof detail === "string" ? detail : "Could not create share link", "error");
+    } finally {
+      setShareBusy(false);
     }
   };
 
@@ -252,8 +298,20 @@ export default function LibraryBookDetail() {
         className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
       >
         {playLoading ? <Loader2 size={16} className="animate-spin" /> : <Headphones size={16} />}
-        Listen
+        {hasLocalProgress ? "Resume" : "Listen"}
       </button>
+      {canShare && (
+        <button
+          type="button"
+          onClick={() => void handleShare()}
+          disabled={shareBusy}
+          title="Share listen link"
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
+        >
+          {shareBusy ? <Loader2 size={16} className="animate-spin" /> : <Share2 size={16} />}
+          Share
+        </button>
+      )}
       <button
         type="button"
         onClick={handleAddToUpNext}

@@ -68,6 +68,8 @@ class User(Base):
     play_queue_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Per-user gate for My Library owned-audiobook uploads (admins always allowed).
     allow_audiobook_upload: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Per-user gate for creating public book share links (admins always allowed).
+    can_share_books: Mapped[bool] = mapped_column(Boolean, default=False)
 
     download_requests: Mapped[list["DownloadRequest"]] = relationship(back_populates="user")
 
@@ -195,6 +197,18 @@ class PushSubscription(Base):
     p256dh: Mapped[str] = mapped_column(String(256), nullable=False)
     auth: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class BookShare(Base):
+    """Public share link for a single ABS audiobook (guest listen via token URL)."""
+    __tablename__ = "book_shares"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    abs_item_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ABSPlayTracking(Base):

@@ -23,6 +23,7 @@ import AdminPage from "./pages/Admin";
 import InstanceSetup from "./pages/InstanceSetup";
 import MyLibrary from "./pages/MyLibrary";
 import LibraryBookDetail from "./pages/LibraryBookDetail";
+import ShareBookDetail from "./pages/ShareBookDetail";
 import LibraryEbookDetail from "./pages/LibraryEbookDetail";
 import Ereader from "./pages/Ereader";
 import Settings from "./pages/Settings";
@@ -191,6 +192,7 @@ export default function App() {
       <DeepLinkNavigator />
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/share/:token" element={<ShareBookDetail />} />
         {/* Legacy approval-flow URLs → invite-only join */}
         <Route path="/request-account" element={<Navigate to="/join" replace />} />
         <Route path="/account-status" element={<Navigate to="/join" replace />} />

@@ -47,7 +47,9 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
                 LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
                 bridge.requestAudioFocusForPlay();
                 bridge.setPlayingOptimistic(true);
-                if (bridge.tryNativeResume()) {
+                // Cold idle / process death: restart Exo from playable cache — do
+                // not depend on Capacitor WebView being alive.
+                if (bridge.tryNativeResumeOrRestart()) {
                     return;
                 }
                 bridge.dispatch("play", null);

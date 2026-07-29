@@ -318,17 +318,29 @@ public final class LibraryAutoBridge {
      * Start ExoPlayer from a cached playable. Returns true if native took ownership
      * (caller should skip / cancel WebView sticky wake storms).
      */
+    /**
+     * Resume ExoPlayer if still alive; otherwise cold-start from persisted
+     * mediaId + playable cache. Does not require Capacitor / WebView.
+     */
+    public boolean tryNativeResumeOrRestart() {
+        if (tryNativeResume()) {
+            return true;
+        }
+        String mid = !nativeMediaId.isEmpty() ? nativeMediaId : getPersistedMediaId();
+        if (mid == null || mid.isEmpty()) {
+            Log.i(TAG, "Native resume/restart: no persisted mediaId");
+            return false;
+        }
+        Log.i(TAG, "Native cold-start from playable cache mediaId=" + mid);
+        return tryNativePlayFromMediaId(mid);
+    }
+
     public boolean tryNativePlayFromMediaId(String mediaId) {
-        if (mediaId == null || mediaId.isEmpty() || "now_playing".equals(mediaId)) {
-            // now_playing: resume native if already owning, else false → JS play().
-            if ("now_playing".equals(mediaId) && isNativeOwningPlayback()) {
-                LibraryNativePlayer.getInstance().resume();
-                return true;
-            }
-            if ("now_playing".equals(mediaId)) {
-                // Try last known media id from session title — not enough; fall through.
-                return false;
-            }
+        if (mediaId == null || mediaId.isEmpty()) {
+            return false;
+        }
+        if ("now_playing".equals(mediaId)) {
+            return tryNativeResumeOrRestart();
         }
         LibraryNativePlayer.Playable playable = getPlayableCache(mediaId);
         if (playable == null) {
@@ -339,6 +351,12 @@ public final class LibraryAutoBridge {
         if (ctx == null) {
             return false;
         }
+        // Prefer last known global position for this book (idle / process death).
+        String persistedId = getPersistedMediaId();
+        if (mediaId.equals(persistedId) && positionMs > 5_000) {
+            playable = playableWithGlobalPosition(playable, positionMs);
+        }
+        long globalPos = playable.positionMs + trackOffset(playable);
         // Optimistic session metadata before first Exo tick.
         update(
             playable.title,
@@ -348,13 +366,52 @@ public final class LibraryAutoBridge {
             true,
             true,
             playable.totalDurationMs,
-            playable.positionMs + trackOffset(playable),
+            globalPos,
             1.0f
         );
         nativeOwnsPlayback = true;
         nativeMediaId = mediaId;
+        persistMediaId(mediaId);
         LibraryNativePlayer.getInstance().play(ctx, playable);
         return true;
+    }
+
+    /** Seek a cached playable to a book-global position (ms). */
+    private static LibraryNativePlayer.Playable playableWithGlobalPosition(
+        LibraryNativePlayer.Playable playable,
+        long globalMs
+    ) {
+        if (playable == null || playable.tracks.isEmpty() || globalMs <= 0) {
+            return playable;
+        }
+        int idx = 0;
+        long local = globalMs;
+        for (int i = 0; i < playable.tracks.size(); i++) {
+            LibraryNativePlayer.TrackSpec tr = playable.tracks.get(i);
+            long start = tr.startOffsetMs;
+            long dur = tr.durationMs;
+            long end = dur > 0 ? start + dur : Long.MAX_VALUE;
+            if (globalMs >= start && globalMs < end) {
+                idx = i;
+                local = Math.max(0, globalMs - start);
+                break;
+            }
+            if (i == playable.tracks.size() - 1) {
+                idx = i;
+                local = Math.max(0, globalMs - start);
+            }
+        }
+        return new LibraryNativePlayer.Playable(
+            playable.mediaId,
+            playable.title,
+            playable.author,
+            playable.coverUrl,
+            playable.authToken,
+            local,
+            idx,
+            playable.totalDurationMs,
+            playable.tracks
+        );
     }
 
     private static long trackOffset(LibraryNativePlayer.Playable playable) {
@@ -379,7 +436,42 @@ public final class LibraryAutoBridge {
             return false;
         }
         LibraryNativePlayer.getInstance().pause();
+        stampPlayableCachePosition();
         return true;
+    }
+
+    /** Write current Exo position back into playable prefs for cold restart. */
+    private void stampPlayableCachePosition() {
+        String mid = !nativeMediaId.isEmpty() ? nativeMediaId : getPersistedMediaId();
+        if (mid == null || mid.isEmpty()) {
+            return;
+        }
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return;
+        }
+        try {
+            SharedPreferences prefs =
+                ctx.getSharedPreferences(PLAYABLE_PREFS, Context.MODE_PRIVATE);
+            String raw = prefs.getString(mid, null);
+            if (raw == null || raw.isEmpty()) {
+                return;
+            }
+            JSONObject o = new JSONObject(raw);
+            long global = Math.max(0, LibraryNativePlayer.getInstance().getPositionMs());
+            // Store track-local seconds + index for parsePlayable.
+            LibraryNativePlayer.Playable base = LibraryNativePlayer.parsePlayable(o);
+            if (base == null) {
+                return;
+            }
+            LibraryNativePlayer.Playable updated = playableWithGlobalPosition(base, global);
+            o.put("position", updated.positionMs / 1000.0);
+            o.put("trackIndex", updated.trackIndex);
+            prefs.edit().putString(mid, o.toString()).apply();
+            persistMediaId(mid);
+        } catch (Exception e) {
+            Log.w(TAG, "stampPlayableCachePosition failed", e);
+        }
     }
 
     public boolean tryNativeSeekRelative(long deltaMs) {
@@ -1086,8 +1178,46 @@ public final class LibraryAutoBridge {
             .putString("album", album)
             .putLong("durationMs", durationMs)
             .putLong("positionMs", positionMs)
-            .putFloat("playbackSpeed", playbackSpeed)
+            .putFloat("playbackSpeed", playbackSpeed);
+        String mid = !nativeMediaId.isEmpty() ? nativeMediaId : getPersistedMediaId();
+        if (mid != null && !mid.isEmpty()) {
+            ed.putString("mediaId", mid);
+        }
+        ed.apply();
+    }
+
+    /** Remember which book AA should cold-restart after idle. */
+    public void rememberMediaId(String mediaId) {
+        persistMediaId(mediaId);
+    }
+
+    private void persistMediaId(String mediaId) {
+        if (mediaId == null || mediaId.isEmpty() || "now_playing".equals(mediaId)) {
+            return;
+        }
+        nativeMediaId = mediaId;
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return;
+        }
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString("mediaId", mediaId)
             .apply();
+    }
+
+    @Nullable
+    public String getPersistedMediaId() {
+        if (!nativeMediaId.isEmpty()) {
+            return nativeMediaId;
+        }
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return null;
+        }
+        String mid =
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("mediaId", "");
+        return mid != null && !mid.isEmpty() ? mid : null;
     }
 
     private void restorePersistedSession(Context ctx) {
@@ -1103,7 +1233,14 @@ public final class LibraryAutoBridge {
         this.durationMs = prefs.getLong("durationMs", 0);
         this.positionMs = prefs.getLong("positionMs", 0);
         this.playbackSpeed = prefs.getFloat("playbackSpeed", 1.0f);
-        Log.i(TAG, "Restored AA session metadata: " + title);
+        String mid = prefs.getString("mediaId", "");
+        if (mid != null && !mid.isEmpty()) {
+            this.nativeMediaId = mid;
+        }
+        Log.i(
+            TAG,
+            "Restored AA session metadata: " + title + " mediaId=" + this.nativeMediaId
+        );
     }
 
     private void refreshSession(boolean metadataMayHaveChanged) {

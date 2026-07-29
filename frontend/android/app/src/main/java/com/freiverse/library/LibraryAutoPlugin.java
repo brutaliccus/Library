@@ -603,6 +603,16 @@ public class LibraryAutoPlugin extends Plugin
         float playbackRate = call.getFloat("playbackRate", 1.0f);
 
         if (!active) {
+            // SPA remount / WebView thaw must NOT kill a living ExoPlayer session
+            // (AA Continue / lock-screen play while the Activity was destroyed).
+            if (
+                LibraryAutoBridge.getInstance().isNativeOwningPlayback()
+                    || LibraryNativePlayer.getInstance().isOwning()
+            ) {
+                Log.i(TAG, "Ignoring syncPlayback(active=false) — native owns PCM");
+                call.resolve();
+                return;
+            }
             artworkLoadGeneration++;
             cachedArtworkUrl = null;
             // Do not Bitmap.recycle() — MediaSession / notification may still
@@ -637,6 +647,11 @@ public class LibraryAutoPlugin extends Plugin
             // Stale WebView "paused" sync while ExoPlayer is active — drop it.
             call.resolve();
             return;
+        }
+
+        String mediaId = call.getString("mediaId", "");
+        if (mediaId != null && !mediaId.isEmpty()) {
+            LibraryAutoBridge.getInstance().rememberMediaId(mediaId);
         }
 
         String title = call.getString("title", "");

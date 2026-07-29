@@ -47,6 +47,8 @@ interface LibraryAutoPlugin {
   syncPlayback(options: {
     active: boolean;
     playing: boolean;
+    /** play/abs/... or play/rdhist/... for cold AA resume */
+    mediaId?: string;
     title?: string;
     artist?: string;
     album?: string;

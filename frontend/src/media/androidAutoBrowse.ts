@@ -35,6 +35,9 @@ interface InProgressABS {
   author: string;
   coverUrl?: string;
   isFinished?: boolean;
+  currentTime?: number;
+  duration?: number;
+  progress?: number;
 }
 
 interface RDHistoryItem {
@@ -209,12 +212,51 @@ async function loadContinueListening(): Promise<BrowseChild[]> {
   return children.slice(0, 24);
 }
 
+function resolveAbsResume(
+  tracks: Array<{ startOffset: number; duration: number }>,
+  globalSeconds: number
+): { position: number; trackIndex: number } {
+  const t = Math.max(0, globalSeconds || 0);
+  if (!tracks.length) return { position: t, trackIndex: 0 };
+  for (let i = 0; i < tracks.length; i++) {
+    const start = tracks[i].startOffset || 0;
+    const dur = tracks[i].duration || 0;
+    const end = dur > 0 ? start + dur : Number.POSITIVE_INFINITY;
+    if (t >= start && t < end) {
+      return { position: Math.max(0, t - start), trackIndex: i };
+    }
+  }
+  const last = tracks.length - 1;
+  const start = tracks[last].startOffset || 0;
+  return { position: Math.max(0, t - start), trackIndex: last };
+}
+
 async function warmAbsPlayableCache(item: InProgressABS): Promise<void> {
   try {
-    const { getAbsOfflineManifest } = await import("../utils/offlinePlayback");
+    const {
+      getAbsOfflineManifest,
+      getOfflineProgress,
+      progressKeyForAbs,
+    } = await import("../utils/offlinePlayback");
     const { cacheAbsPlayable } = await import("./aaPlayableCache");
+    const local = getOfflineProgress(progressKeyForAbs(item.itemId));
+    const serverSec = Number(item.currentTime) || 0;
+    // Prefer device-local resume (what the guest/listener actually heard).
+    let globalSec = serverSec;
+    let trackIndexHint: number | null = null;
+    let trackLocalHint: number | null = null;
+    if (local && (local.time > 5 || local.trackIndex > 0)) {
+      globalSec = local.time;
+      trackIndexHint = local.trackIndex;
+      trackLocalHint = local.trackLocal;
+    }
+
     const m = getAbsOfflineManifest(item.itemId);
     if (m?.tracks?.length) {
+      const resume =
+        trackIndexHint != null && trackLocalHint != null
+          ? { position: trackLocalHint, trackIndex: trackIndexHint }
+          : resolveAbsResume(m.tracks, globalSec);
       await cacheAbsPlayable(
         item.itemId,
         m.title || item.title,
@@ -222,14 +264,18 @@ async function warmAbsPlayableCache(item: InProgressABS): Promise<void> {
         m.coverUrl || item.coverUrl || "",
         m.tracks,
         m.totalDuration,
-        0,
-        0
+        resume.position,
+        resume.trackIndex
       );
       return;
     }
     // Never-played-but-in-progress: /offline gives proxy URLs without a session.
     const { data } = await api.get(`/stream/abs/${encodeURIComponent(item.itemId)}/offline`);
     if (!data?.tracks?.length) return;
+    const resume =
+      trackIndexHint != null && trackLocalHint != null
+        ? { position: trackLocalHint, trackIndex: trackIndexHint }
+        : resolveAbsResume(data.tracks, globalSec);
     await cacheAbsPlayable(
       item.itemId,
       data.title || item.title,
@@ -237,8 +283,8 @@ async function warmAbsPlayableCache(item: InProgressABS): Promise<void> {
       data.coverUrl || item.coverUrl || "",
       data.tracks,
       data.duration || 0,
-      0,
-      0
+      resume.position,
+      resume.trackIndex
     );
   } catch {
     /* offline / API fail — browse still works from cache */

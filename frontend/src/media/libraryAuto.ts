@@ -210,6 +210,20 @@ export async function registerAndroidAutoHandlers(
   }
 }
 
+
+function aaMediaId(np: NowPlayingLike): string {
+  const anyNp = np as {
+    source?: string;
+    itemId?: string;
+    streamHistoryId?: number;
+  };
+  if (anyNp.source === "abs" && anyNp.itemId) return `play/abs/${anyNp.itemId}`;
+  if (anyNp.source === "rd" && anyNp.streamHistoryId != null) {
+    return `play/rdhist/${anyNp.streamHistoryId}`;
+  }
+  return "";
+}
+
 export async function syncAndroidAutoPlayback(
   np: NowPlayingLike | null,
   isPlaying: boolean,
@@ -285,6 +299,7 @@ export async function syncAndroidAutoPlayback(
       await LibraryAuto.syncPlayback({
         active: true,
         playing: reportPlaying,
+        mediaId: aaMediaId(np),
         // Android Auto MediaSession: TITLE (large) + ARTIST (small).
         // Put chapter in artist so the car shows Book / Chapter, not Author / Chapter.
         title: np.title || "Audiobook",
@@ -303,6 +318,7 @@ export async function syncAndroidAutoPlayback(
       await LibraryAuto.syncPlayback({
         active: true,
         playing: reportPlaying,
+        mediaId: aaMediaId(np),
         title: np.title || "Audiobook",
         artist: scope.label || trackLabel || np.author || "",
         album: np.author || "",

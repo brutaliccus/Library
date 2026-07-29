@@ -75,7 +75,7 @@ const ADMIN_NAV: NavGroup[] = [
   {
     label: "Operations",
     items: [
-      { id: "overview", label: "Overview", icon: Activity },
+      { id: "overview", label: "Health", icon: Activity },
       { id: "requests", label: "Requests", icon: Download },
       { id: "users", label: "Users", icon: Users },
     ],
@@ -108,6 +108,7 @@ type AdminUser = {
   email: string | null;
   role: string;
   is_active: boolean;
+  allow_audiobook_upload?: boolean;
   created_at: string;
   last_seen_at: string | null;
   is_online: boolean;
@@ -349,7 +350,7 @@ export default function AdminPage() {
             <ConfigTab
               lockedGroup="pipeline"
               title="Pipelines"
-              description="LibraForge and ebook pipeline toggles, scores, and M4B-related settings. Monitor LibraForge status under Overview; review quarantines under Requests."
+              description="LibraForge and ebook pipeline toggles, scores, and M4B-related settings. Monitor LibraForge status under Health; review quarantines under Requests."
             />
           )}
           {activeTab === "integrations" && <IntegrationsPanel />}
@@ -396,14 +397,25 @@ function UsersTab() {
         });
 
   const setActive = useMutation({
-    mutationFn: async ({ id, is_active }: { id: number; is_active: boolean }) => {
-      const { data } = await api.patch(`/admin/users/${id}`, { is_active });
-      return data as { message: string; is_active: boolean };
+    mutationFn: async (body: {
+      id: number;
+      is_active?: boolean;
+      role?: string;
+      allow_audiobook_upload?: boolean;
+    }) => {
+      const { id, ...patch } = body;
+      const { data } = await api.patch(`/admin/users/${id}`, patch);
+      return data as {
+        message: string;
+        is_active: boolean;
+        role?: string;
+        allow_audiobook_upload?: boolean;
+      };
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["admin-users"] });
       setDisableUserModal(null);
-      toast(data.message, data.is_active ? "success" : "info");
+      toast(data.message, "success");
     },
     onError: (err: any) => {
       toast(err.response?.data?.detail || "Failed to update user", "error");
@@ -443,7 +455,8 @@ function UsersTab() {
     <div className="space-y-6 min-w-0">
       <p className="text-sm text-gray-400">
         New members join with an invite link from Settings — no approval step. You can reset
-        passwords, disable/enable accounts, or permanently delete them here.
+        passwords, promote/demote admins, toggle per-user audiobook upload, disable accounts, or
+        permanently delete them here.
       </p>
 
       <div className="relative">
@@ -596,6 +609,41 @@ function UsersTab() {
                   </dl>
 
                   <div className="flex flex-wrap gap-2 pt-1 border-t border-gray-700/80">
+                    <label className="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs text-gray-300">
+                      <input
+                        type="checkbox"
+                        className="rounded border-gray-600 bg-gray-900"
+                        checked={!!user.allow_audiobook_upload || user.role === "admin"}
+                        disabled={user.role === "admin" || setActive.isPending}
+                        onChange={(e) =>
+                          setActive.mutate({
+                            id: user.id,
+                            allow_audiobook_upload: e.target.checked,
+                          })
+                        }
+                      />
+                      Can upload books
+                    </label>
+                    {!isSelf && user.role !== "admin" && (
+                      <button
+                        type="button"
+                        onClick={() => setActive.mutate({ id: user.id, role: "admin" })}
+                        disabled={setActive.isPending}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-brand-900/30 text-brand-300 text-sm rounded-lg hover:bg-brand-900/50 disabled:opacity-50"
+                      >
+                        <Shield size={14} /> Promote to admin
+                      </button>
+                    )}
+                    {!isSelf && user.role === "admin" && (
+                      <button
+                        type="button"
+                        onClick={() => setActive.mutate({ id: user.id, role: "user" })}
+                        disabled={setActive.isPending}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600 disabled:opacity-50"
+                      >
+                        Demote
+                      </button>
+                    )}
                     <button
                       onClick={() => resetPw.mutate(user.id)}
                       className="flex items-center gap-1 px-3 py-1.5 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600"
@@ -1069,7 +1117,7 @@ function HealthTab() {
       <div>
         <h2 className="text-lg font-semibold text-gray-100 flex items-center gap-2">
           <Activity size={18} />
-          Overview
+          Health
         </h2>
         <p className="text-xs text-gray-500 mt-1 max-w-xl">
           Service health, disk, and library scans. API keys and OpenRouter live under Integrations;

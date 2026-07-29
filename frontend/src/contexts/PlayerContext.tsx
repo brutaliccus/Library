@@ -30,8 +30,10 @@ import {
   isLikelyOffline,
   progressKeyForAbs,
   saveAbsOfflineManifest,
+  saveOfflineProgress,
   saveRdOfflineManifest,
 } from "../utils/offlinePlayback";
+import { pickResumeSeconds } from "../utils/resumeProgress";
 import { usePlayerProgressSync } from "../hooks/usePlayerProgressSync";
 import { usePlayerMediaSession } from "../hooks/usePlayerMediaSession";
 import {
@@ -830,16 +832,26 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           totalDuration: data.duration,
         });
 
-        // Prefer local offline progress when it's newer than ABS (listened offline).
+        // Prefer local only when offline or when local progress is clearly newer.
         const local = getOfflineProgress(progressKeyForAbs(itemId));
         let startOffset = opts?.startAt ?? (data.startOffset || 0);
-        if (
-          opts?.startAt == null &&
-          local &&
-          local.updatedAt > Date.now() - 7 * 24 * 60 * 60 * 1000 &&
-          local.time > startOffset + 5
-        ) {
-          startOffset = local.time;
+        if (opts?.startAt == null && local) {
+          const offline = isLikelyOffline();
+          startOffset = pickResumeSeconds({
+            serverSeconds: data.startOffset || 0,
+            serverUpdatedAtMs: null,
+            localSeconds: local.time,
+            localUpdatedAtMs: local.updatedAt,
+            offline,
+          });
+          // When online and server wins, refresh local so devices converge.
+          if (!offline && Math.abs(startOffset - local.time) > 2) {
+            saveOfflineProgress(progressKeyForAbs(itemId), {
+              time: startOffset,
+              trackIndex: local.trackIndex,
+              trackLocal: local.trackLocal,
+            });
+          }
         }
 
         setState((s) => ({

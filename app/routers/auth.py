@@ -164,7 +164,7 @@ async def _library_for_invite(code: str, db: AsyncSession) -> LibraryGroup:
 async def me(user: User = Depends(get_current_user)):
     from app.services import library_ingest
 
-    can_upload = await library_ingest.user_may_upload_owned(user.role)
+    can_upload = await library_ingest.user_may_upload_owned(user)
     return MeResponse(
         username=user.username,
         email=user.email,

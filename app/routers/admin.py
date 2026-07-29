@@ -46,6 +46,7 @@ class UserResponse(BaseModel):
     email: str | None = None
     role: str
     is_active: bool
+    allow_audiobook_upload: bool = False
     created_at: str
     last_seen_at: str | None = None
     is_online: bool = False
@@ -117,7 +118,10 @@ def stream_counts_as_finished(
 
 
 class SetActiveBody(BaseModel):
-    is_active: bool
+    """Partial user update — any field may be omitted."""
+    is_active: bool | None = None
+    role: str | None = None  # "admin" | "user"
+    allow_audiobook_upload: bool | None = None
 
 
 class AdminDownloadResponse(BaseModel):
@@ -441,6 +445,7 @@ async def list_users(
                 email=user.email,
                 role=user.role,
                 is_active=user.is_active,
+                allow_audiobook_upload=bool(getattr(user, "allow_audiobook_upload", False)),
                 created_at=_iso(user.created_at) or "",
                 last_seen_at=_iso(user.last_seen_at),
                 is_online=user_is_online(user.last_seen_at, now=now),
@@ -457,28 +462,59 @@ async def list_users(
 
 
 @router.patch("/users/{user_id}")
-async def set_user_active(
+async def patch_user(
     user_id: int,
     body: SetActiveBody,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Enable or disable an account (soft toggle via is_active)."""
-    if user_id == admin.id:
-        raise HTTPException(status_code=400, detail="Cannot change your own active status")
-
+    """Update active flag, role (promote/demote), and/or audiobook upload permission."""
     user = await _get_user_or_404(db, user_id)
-    if body.is_active == user.is_active:
-        state = "enabled" if user.is_active else "disabled"
-        return {"message": f"User {user.username} is already {state}", "is_active": user.is_active}
+    changed: list[str] = []
 
-    if not body.is_active:
-        await _ensure_not_last_active_admin(db, user, action="disable")
+    if body.is_active is not None:
+        if user_id == admin.id:
+            raise HTTPException(status_code=400, detail="Cannot change your own active status")
+        if body.is_active != user.is_active:
+            if not body.is_active:
+                await _ensure_not_last_active_admin(db, user, action="disable")
+            user.is_active = body.is_active
+            changed.append("enabled" if user.is_active else "disabled")
 
-    user.is_active = body.is_active
+    if body.role is not None:
+        new_role = (body.role or "").strip().lower()
+        if new_role not in ("admin", "user"):
+            raise HTTPException(status_code=400, detail="role must be admin or user")
+        if user_id == admin.id and new_role != "admin":
+            raise HTTPException(status_code=400, detail="Cannot demote yourself")
+        if new_role != user.role:
+            if user.role == "admin" and new_role == "user":
+                await _ensure_not_last_active_admin(db, user, action="demote")
+            user.role = new_role
+            changed.append(f"role={new_role}")
+
+    if body.allow_audiobook_upload is not None:
+        user.allow_audiobook_upload = bool(body.allow_audiobook_upload)
+        changed.append(
+            "upload_on" if user.allow_audiobook_upload else "upload_off"
+        )
+
+    if not changed:
+        return {
+            "message": f"No changes for {user.username}",
+            "is_active": user.is_active,
+            "role": user.role,
+            "allow_audiobook_upload": bool(user.allow_audiobook_upload),
+        }
+
     await db.commit()
-    state = "enabled" if user.is_active else "disabled"
-    return {"message": f"User {user.username} {state}", "is_active": user.is_active}
+    await db.refresh(user)
+    return {
+        "message": f"Updated {user.username} ({', '.join(changed)})",
+        "is_active": user.is_active,
+        "role": user.role,
+        "allow_audiobook_upload": bool(user.allow_audiobook_upload),
+    }
 
 
 @router.delete("/users/{user_id}")

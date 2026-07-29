@@ -612,10 +612,27 @@ def is_audio_filename(name: str) -> bool:
     return Path(name).suffix.lower() in AUDIO_EXTENSIONS
 
 
-async def user_may_upload_owned(user_role: str) -> bool:
-    """Admins always; users when allow_user_audiobook_upload is true."""
-    if (user_role or "").lower() == "admin":
+async def user_may_upload_owned(user_or_role: Any) -> bool:
+    """Admins always; others need ``User.allow_audiobook_upload``.
+
+    Pass a ``User`` (preferred) or a role string (legacy / tests).
+    """
+    if isinstance(user_or_role, str):
+        role = user_or_role
+        allow_flag: bool | None = None
+    else:
+        role = getattr(user_or_role, "role", None)
+        allow_flag = (
+            bool(getattr(user_or_role, "allow_audiobook_upload", False))
+            if hasattr(user_or_role, "allow_audiobook_upload")
+            else None
+        )
+
+    if (role or "").lower() == "admin":
         return True
+    if allow_flag is not None:
+        return allow_flag
+
     from app.services import instance_settings
 
     return await instance_settings.get_effective_bool(

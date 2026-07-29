@@ -13,6 +13,7 @@ import {
   SkipForward,
   RotateCcw,
   X,
+  Settings,
 } from "lucide-react";
 import api from "../../api/client";
 import { useToast } from "../../contexts/ToastContext";
@@ -121,7 +122,37 @@ const SWEEP_SETTINGS_KEYS = [
   "config.libraforge_naming_template",
   "config.libraforge_metadata_provider",
   "config.library_sweep_abs_scan_every",
+  "config.library_sweep_allow_m4b",
+  "config.library_sweep_force_metadata_forge",
+  "config.library_sweep_force_chapter_forge",
+  "config.library_sweep_force_folder_forge",
 ] as const;
+
+const SWEEP_BOOL_KEYS = [
+  "config.library_sweep_allow_m4b",
+  "config.library_sweep_force_metadata_forge",
+  "config.library_sweep_force_chapter_forge",
+  "config.library_sweep_force_folder_forge",
+] as const;
+
+const SWEEP_BOOL_LABELS: Record<(typeof SWEEP_BOOL_KEYS)[number], { label: string; help: string }> = {
+  "config.library_sweep_allow_m4b": {
+    label: "Allow M4B processing",
+    help: "Unchecked skips M4B conversion entirely during Sweep.",
+  },
+  "config.library_sweep_force_metadata_forge": {
+    label: "Force metadata forging",
+    help: "Unchecked skips Metadata Forge when applied markers already exist.",
+  },
+  "config.library_sweep_force_chapter_forge": {
+    label: "Force chapter forging",
+    help: "Unchecked skips Chapter Forge when the .m4b already has chapter markers.",
+  },
+  "config.library_sweep_force_folder_forge": {
+    label: "Force folder forging",
+    help: "Unchecked skips Folder Forge when staging is already hardlinked into the library.",
+  },
+};
 
 const METADATA_PROVIDERS = [
   { value: "audible", label: "Audible" },
@@ -167,6 +198,7 @@ export default function LibrarySweepTab() {
   const [queueTab, setQueueTab] = useState<QueueTab>("needs-review");
   const [settingsDraft, setSettingsDraft] = useState<Record<string, string>>({});
   const [processedOffset, setProcessedOffset] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const { data: status, isLoading: statusLoading, refetch: refetchStatus } = useQuery({
     queryKey: STATUS_KEY,
@@ -197,13 +229,17 @@ export default function LibrarySweepTab() {
     for (const s of sweepSettings) {
       next[s.key] = s.value ?? "";
     }
+    // Defaults for bools when not yet in DB
+    for (const key of SWEEP_BOOL_KEYS) {
+      if (next[key] === undefined || next[key] === "") {
+        next[key] = key === "config.library_sweep_allow_m4b" ? "true" : "false";
+      }
+    }
     setSettingsDraft((prev) => {
-      // Keep in-progress edits when refetching the same keys.
       const merged = { ...next };
       for (const k of Object.keys(prev)) {
         if (prev[k] !== undefined && next[k] !== undefined && prev[k] !== next[k]) {
-          // Only preserve dirty keys relative to last loaded values.
-          const loaded = sweepSettings.find((s) => s.key === k)?.value ?? "";
+          const loaded = sweepSettings.find((s) => s.key === k)?.value ?? next[k] ?? "";
           if (prev[k] !== loaded) merged[k] = prev[k];
         }
       }
@@ -614,6 +650,15 @@ export default function LibrarySweepTab() {
           >
             <RefreshCw size={16} />
           </button>
+          <button
+            type="button"
+            className={iconBtnClass(settingsOpen)}
+            title="Sweep settings"
+            aria-label="Sweep settings"
+            onClick={() => setSettingsOpen((o) => !o)}
+          >
+            <Settings size={16} />
+          </button>
         </div>
       </div>
 
@@ -635,12 +680,13 @@ export default function LibrarySweepTab() {
         </div>
       )}
 
+      {settingsOpen && (
       <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 className="text-sm font-semibold text-gray-100">Sweep settings</h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              Folder Forge naming, metadata provider, and ABS scan cadence. Also under Pipelines.
+              Folder Forge naming, metadata provider, forge force toggles, and ABS scan cadence.
             </p>
           </div>
           <button
@@ -661,6 +707,34 @@ export default function LibrarySweepTab() {
           <p className="text-xs text-gray-500">Loading settings…</p>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
+            <div className="sm:col-span-2 grid gap-2 sm:grid-cols-2">
+              {SWEEP_BOOL_KEYS.map((key) => {
+                const meta = SWEEP_BOOL_LABELS[key];
+                const checked = (settingsDraft[key] ?? "false") === "true";
+                return (
+                  <label
+                    key={key}
+                    className="flex items-start gap-2 rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-2.5"
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 rounded border-gray-600 bg-gray-900"
+                      checked={checked}
+                      onChange={(e) =>
+                        setSettingsDraft((d) => ({
+                          ...d,
+                          [key]: e.target.checked ? "true" : "false",
+                        }))
+                      }
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-gray-200">{meta.label}</span>
+                      <span className="block text-[11px] text-gray-500 mt-0.5">{meta.help}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
             <div className="block space-y-1 sm:col-span-2">
               <span className="text-xs text-gray-400">Folder Forge naming template</span>
               <NamingTemplateBuilder
@@ -719,6 +793,7 @@ export default function LibrarySweepTab() {
           </div>
         )}
       </div>
+      )}
 
       {(running || paused || current) && (
         <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-3 flex gap-3 items-center">

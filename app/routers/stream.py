@@ -1090,6 +1090,7 @@ async def get_in_progress(
             "currentTime": progress.get("currentTime", 0),
             "duration": progress.get("duration") or media.get("duration") or 0,
             "isFinished": progress.get("isFinished", False),
+            "updatedAt": progress.get("lastUpdate") or progress.get("updatedAt") or "",
         })
     return {"items": results}
 

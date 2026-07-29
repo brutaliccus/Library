@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -1895,7 +1896,7 @@ async def owned_uploads_allowed(user: User = Depends(get_current_user)):
     """Whether the current user may POST /owned-uploads."""
     from app.services import library_ingest
 
-    allowed = await library_ingest.user_may_upload_owned(user.role)
+    allowed = await library_ingest.user_may_upload_owned(user)
     return {"allowed": allowed, "allow_user_audiobook_upload": allowed}
 
 
@@ -1912,7 +1913,7 @@ async def owned_audiobook_upload(
     """
     from app.services import library_ingest
 
-    if not await library_ingest.user_may_upload_owned(user.role):
+    if not await library_ingest.user_may_upload_owned(user):
         raise HTTPException(
             status_code=403,
             detail="Owned audiobook upload is disabled for users",
@@ -1991,3 +1992,176 @@ async def owned_audiobook_upload(
         "staging_path": staging_path,
         "message": "Upload staged — forge started in background",
     }
+
+
+# --- Ebook reading progress (Continue Reading sync) ---
+
+
+class EbookProgressBody(BaseModel):
+    chapter_id: int
+    page: int = 0
+    viewport_page: int = 0
+    total_viewport_pages: int | None = None
+    total_kavita_pages: int | None = None
+    book_title: str = ""
+    series_name: str | None = None
+    cover_url: str = ""
+    hidden: bool = False
+    last_read_at: float | None = None  # epoch ms from client
+
+
+def _serialize_ebook_progress(row) -> dict:
+    return {
+        "chapterId": row.chapter_id,
+        "page": int(row.page or 0),
+        "viewportPage": int(row.viewport_page or 0),
+        "totalViewportPages": row.total_viewport_pages,
+        "totalKavitaPages": row.total_kavita_pages,
+        "bookTitle": row.book_title or "",
+        "seriesName": row.series_name,
+        "coverUrl": row.cover_url or "",
+        "hidden": bool(row.hidden),
+        "lastReadAt": int(row.last_read_at.timestamp() * 1000) if row.last_read_at else 0,
+    }
+
+
+@router.get("/reading-progress")
+async def list_reading_progress(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Continue Reading shelf — server-synced ebook progress for this account."""
+    from app.models import EbookReadingProgress
+
+    rows = (
+        await db.execute(
+            select(EbookReadingProgress)
+            .where(
+                EbookReadingProgress.user_id == user.id,
+                EbookReadingProgress.hidden.is_(False),
+            )
+            .order_by(EbookReadingProgress.last_read_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return {"items": [_serialize_ebook_progress(r) for r in rows]}
+
+
+@router.put("/reading-progress/{chapter_id}")
+async def upsert_reading_progress(
+    chapter_id: int,
+    body: EbookProgressBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upsert ebook progress. Keeps the newer last_read_at when racing devices."""
+    from app.models import EbookReadingProgress
+
+    cid = int(chapter_id)
+    existing = (
+        await db.execute(
+            select(EbookReadingProgress).where(
+                EbookReadingProgress.user_id == user.id,
+                EbookReadingProgress.chapter_id == cid,
+            )
+        )
+    ).scalar_one_or_none()
+
+    client_ts = None
+    if body.last_read_at is not None:
+        try:
+            client_ts = datetime.fromtimestamp(
+                float(body.last_read_at) / 1000.0, tz=timezone.utc
+            )
+        except (TypeError, ValueError, OSError):
+            client_ts = None
+    now = datetime.now(timezone.utc)
+    last_read = client_ts or now
+
+    if existing:
+        # Keep server row if it is newer than the client's stamp.
+        if (
+            existing.last_read_at
+            and client_ts
+            and existing.last_read_at > client_ts
+            and (existing.last_read_at - client_ts).total_seconds() > 2
+        ):
+            return {"item": _serialize_ebook_progress(existing), "kept": "server"}
+        existing.page = int(body.page or 0)
+        existing.viewport_page = int(body.viewport_page or 0)
+        existing.total_viewport_pages = body.total_viewport_pages
+        existing.total_kavita_pages = body.total_kavita_pages
+        if body.book_title:
+            existing.book_title = body.book_title[:512]
+        if body.series_name is not None:
+            existing.series_name = (body.series_name or None) and body.series_name[:512]
+        if body.cover_url:
+            existing.cover_url = body.cover_url[:1024]
+        existing.hidden = bool(body.hidden)
+        existing.last_read_at = last_read
+        await db.commit()
+        await db.refresh(existing)
+        return {"item": _serialize_ebook_progress(existing), "kept": "client"}
+
+    row = EbookReadingProgress(
+        user_id=user.id,
+        chapter_id=cid,
+        page=int(body.page or 0),
+        viewport_page=int(body.viewport_page or 0),
+        total_viewport_pages=body.total_viewport_pages,
+        total_kavita_pages=body.total_kavita_pages,
+        book_title=(body.book_title or "")[:512],
+        series_name=(body.series_name or None) and (body.series_name or "")[:512],
+        cover_url=(body.cover_url or "")[:1024],
+        hidden=bool(body.hidden),
+        last_read_at=last_read,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return {"item": _serialize_ebook_progress(row), "kept": "client"}
+
+
+@router.delete("/reading-progress/{chapter_id}")
+async def delete_reading_progress(
+    chapter_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models import EbookReadingProgress
+
+    row = (
+        await db.execute(
+            select(EbookReadingProgress).where(
+                EbookReadingProgress.user_id == user.id,
+                EbookReadingProgress.chapter_id == int(chapter_id),
+            )
+        )
+    ).scalar_one_or_none()
+    if row:
+        await db.delete(row)
+        await db.commit()
+    return {"ok": True}
+
+
+@router.post("/reading-progress/{chapter_id}/hide")
+async def hide_reading_progress(
+    chapter_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models import EbookReadingProgress
+
+    row = (
+        await db.execute(
+            select(EbookReadingProgress).where(
+                EbookReadingProgress.user_id == user.id,
+                EbookReadingProgress.chapter_id == int(chapter_id),
+            )
+        )
+    ).scalar_one_or_none()
+    if row:
+        row.hidden = True
+        await db.commit()
+    return {"ok": True}

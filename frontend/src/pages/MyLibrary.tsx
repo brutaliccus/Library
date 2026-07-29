@@ -37,6 +37,7 @@ import LibraryFilterDrawer, {
 } from "../components/LibraryFilterDrawer";
 import ContinueShelves from "../components/ContinueShelves";
 import { getProgress, clearProgress } from "../utils/readingProgress";
+import { pickResumeSeconds } from "../utils/resumeProgress";
 import { isBookCached } from "../utils/audioCache";
 import {
   getOfflineProgress,
@@ -733,18 +734,23 @@ export default function MyLibrary() {
         const { data } = await api.post(`/library/${item.id}/play`);
         const local = getOfflineProgress(progressKeyForRd({ libraryItemId: item.id }) || "");
         const serverStart = data.progressSeconds || 0;
-        const resume =
-          local && local.time > serverStart + 5
-            ? {
-                startAt: local.time,
-                trackIndex: local.trackIndex,
-                trackPositionSeconds: local.trackLocal,
-              }
-            : {
-                startAt: serverStart,
-                trackIndex: data.currentTrackIndex || 0,
-                trackPositionSeconds: data.trackPositionSeconds || 0,
-              };
+        const startAt = pickResumeSeconds({
+          serverSeconds: serverStart,
+          serverUpdatedAtMs: data.updatedAt ? Date.parse(data.updatedAt) : null,
+          localSeconds: local?.time,
+          localUpdatedAtMs: local?.updatedAt,
+          offline: false,
+        });
+        const useLocal = local && Math.abs(startAt - local.time) < 2;
+        const resume = {
+          startAt,
+          trackIndex: useLocal
+            ? local.trackIndex
+            : data.currentTrackIndex || 0,
+          trackPositionSeconds: useLocal
+            ? local.trackLocal
+            : data.trackPositionSeconds || 0,
+        };
         playRD(
           data.tracks?.length > 0 ? data.tracks : item.tracks,
           item.title,
@@ -1650,6 +1656,10 @@ export default function MyLibrary() {
       ) : (
         <>
           <ContinueShelves />
+
+          <h2 className="text-sm font-semibold text-gray-200 tracking-wide mt-2 mb-3">
+            Library
+          </h2>
 
           {/* ABS Tab */}
           {tab === "abs" && (

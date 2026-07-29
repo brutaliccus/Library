@@ -259,14 +259,55 @@ REGISTRY: list[SettingDef] = [
         ),
     ),
     SettingDef(
-        key="allow_user_audiobook_upload",
+        key="config.library_sweep_allow_m4b",
         group="pipeline",
-        label="Allow user audiobook uploads",
+        label="Library Sweep: allow M4B processing",
+        value_type="bool",
+        env_fallback=True,
+        help="When off, Sweep skips M4B conversion entirely (keeps existing audio layout).",
+    ),
+    SettingDef(
+        key="config.library_sweep_force_metadata_forge",
+        group="pipeline",
+        label="Library Sweep: force metadata forging",
         value_type="bool",
         env_fallback=False,
         help=(
-            "When on, non-admin users can upload owned audiobooks from My Library "
-            "(admins always can). Uploads land in .unorganized and run the forge pipeline."
+            "When off, skip Metadata Forge if applied markers already exist. "
+            "When on, always re-run Metadata Forge."
+        ),
+    ),
+    SettingDef(
+        key="config.library_sweep_force_chapter_forge",
+        group="pipeline",
+        label="Library Sweep: force chapter forging",
+        value_type="bool",
+        env_fallback=False,
+        help=(
+            "When off, skip Chapter Forge if the .m4b already has chapter markers. "
+            "When on, always re-embed Audible chapters."
+        ),
+    ),
+    SettingDef(
+        key="config.library_sweep_force_folder_forge",
+        group="pipeline",
+        label="Library Sweep: force folder forging",
+        value_type="bool",
+        env_fallback=False,
+        help=(
+            "When off, skip Folder Forge if staging audio is already hardlinked into the library. "
+            "When on, always run Folder Forge."
+        ),
+    ),
+    SettingDef(
+        key="allow_user_audiobook_upload",
+        group="pipeline",
+        label="Allow user audiobook uploads (legacy global)",
+        value_type="bool",
+        env_fallback=False,
+        help=(
+            "Legacy global toggle. Prefer per-user “can upload books” on the Users tab. "
+            "Admins always can upload. Kept for migration/compat."
         ),
     ),
     SettingDef(

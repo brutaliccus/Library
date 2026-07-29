@@ -12,6 +12,7 @@ import {
   getContinueReading,
   clearProgress as clearReadingProgress,
   hideFromContinueReading,
+  hydrateReadingProgressFromServer,
 } from "../utils/readingProgress";
 import { clearBookCache, clearAbsBookCache } from "../utils/audioCache";
 
@@ -90,6 +91,12 @@ export default function ContinueShelves() {
   const queryClient = useQueryClient();
   const [continueReading, setContinueReading] = useState(() => getContinueReading(6));
   const [menuTarget, setMenuTarget] = useState<ContinueMenuTarget | null>(null);
+
+  useEffect(() => {
+    void hydrateReadingProgressFromServer().then(() => {
+      setContinueReading(getContinueReading(6));
+    });
+  }, []);
 
   const openMenu = useCallback(
     (base: Omit<ContinueMenuTarget, "anchorX" | "anchorY">, point: { x: number; y: number }) => {

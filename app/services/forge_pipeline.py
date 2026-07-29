@@ -1601,8 +1601,12 @@ async def _run_chapter_forge_step(
     user_id: int,
     should_abort,
     asin_override: str | None = None,
+    force: bool = True,
 ) -> None:
-    """Apply Audible chapters when ASIN + primary .m4b exist. Soft-fail only."""
+    """Apply Audible chapters when ASIN + primary .m4b exist. Soft-fail only.
+
+    When ``force`` is False, skip if the .m4b already has chapter markers (≥2).
+    """
     p = _pipeline()
     asin = normalize_asin(asin_override) if asin_override else ""
     if not asin:
@@ -1635,6 +1639,29 @@ async def _run_chapter_forge_step(
                 request_id, user_id, "chapter_forge", detail, progress_percent=100.0,
             )
         return
+
+    if not force:
+        try:
+            loaded = await libraforge.chaptering_load(staging_path_for_libraforge(audio))
+            current = _extract_chapters_from_report(loaded if isinstance(loaded, dict) else {})
+            if len(current) >= 2:
+                detail = (
+                    f"Chapter Forge skipped — {len(current)} existing markers "
+                    f"(force_chapter_forge off)"
+                )
+                logger.info("Chapter Forge skipped for request %s: existing chapters", request_id)
+                async with async_session() as db:
+                    await p._update_status(db, request_id, "chapter_forge", detail)
+                    await p._report_progress(
+                        request_id, user_id, "chapter_forge", detail, progress_percent=100.0,
+                    )
+                return
+        except Exception as e:
+            logger.debug(
+                "Chapter Forge existing-marker probe failed for %s: %s",
+                request_id,
+                e,
+            )
 
     source_path = staging_path_for_libraforge(audio)
     async with async_session() as db:
@@ -1807,10 +1834,43 @@ async def run_forge_after_download(
     the pipeline) as a background task and return immediately so Library Sweep can
     keep scanning. Encode concurrency stays 1 via ``m4b_queue``.
     """
+    from app.services import library_ingest
+    from app.services import instance_settings
+
     p = _pipeline()
     staging.mkdir(parents=True, exist_ok=True)
     lf_path = staging_path_for_libraforge(staging)
     await _persist_staging(request_id, staging)
+
+    # Sweep / owned-upload: honor Library Sweep force/allow toggles.
+    # Normal debrid downloads keep prior always-run behavior.
+    is_local_ingest = False
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req_row = result.scalar_one_or_none()
+        if req_row and library_ingest.is_local_ingest_request(req_row):
+            is_local_ingest = True
+
+    if is_local_ingest:
+        allow_m4b = await instance_settings.get_effective_bool(
+            "config.library_sweep_allow_m4b", default=True
+        )
+        force_metadata = await instance_settings.get_effective_bool(
+            "config.library_sweep_force_metadata_forge", default=False
+        )
+        force_chapter = await instance_settings.get_effective_bool(
+            "config.library_sweep_force_chapter_forge", default=False
+        )
+        force_folder = await instance_settings.get_effective_bool(
+            "config.library_sweep_force_folder_forge", default=False
+        )
+    else:
+        allow_m4b = True
+        force_metadata = True
+        force_chapter = True
+        force_folder = True
 
     start_step = resume_from or "metadata"
     stop_at = (stop_after or "").strip().lower() or None
@@ -1865,16 +1925,32 @@ async def run_forge_after_download(
 
         seed_staging_metadata_hints(staging, title=title, author=author)
 
-        # Score ≥ min_score means match identity is trusted for auto-apply.
-        # Apply itself is always full overwrite of all matched fields + cover
-        # (never series_only / fill-if-empty), regardless of score quality.
-        applied = await _apply_metadata_forge(
-            request_id,
-            staging=staging,
-            user_id=user_id,
-            phase_detail="Matching metadata via LibraForge…",
-            allow_llm_assist=True,
-        )
+        # Intelligent skip: applied markers already present and force is off.
+        if not force_metadata and staging_has_applied_metadata(staging):
+            logger.info(
+                "Metadata Forge skipped for request %s (applied markers present; "
+                "force_metadata_forge off)",
+                request_id,
+            )
+            async with async_session() as db:
+                await p._update_status(
+                    db,
+                    request_id,
+                    "metadata_forge",
+                    "Metadata already applied — skipping (force off)",
+                )
+            applied = True
+        else:
+            # Score ≥ min_score means match identity is trusted for auto-apply.
+            # Apply itself is always full overwrite of all matched fields + cover
+            # (never series_only / fill-if-empty), regardless of score quality.
+            applied = await _apply_metadata_forge(
+                request_id,
+                staging=staging,
+                user_id=user_id,
+                phase_detail="Matching metadata via LibraForge…",
+                allow_llm_assist=True,
+            )
         if not applied:
             return
 
@@ -1899,8 +1975,22 @@ async def run_forge_after_download(
     # --- M4B (Pi LibraForge; global queue concurrency 1) ---
     if start_step == "m4b":
         m4b_produced_new_file = False
+        needs_m4b = allow_m4b and needs_m4b_conversion(staging)
+        if not allow_m4b and needs_m4b_conversion(staging):
+            logger.info(
+                "M4B skipped for request %s (library_sweep_allow_m4b off)",
+                request_id,
+            )
+            async with async_session() as db:
+                await p._update_status(
+                    db,
+                    request_id,
+                    "m4b_convert",
+                    "M4B disabled in Sweep settings — skipping conversion",
+                )
+
         # Library Sweep: don't block the scanner on hours-long encodes.
-        if handoff_m4b and needs_m4b_conversion(staging):
+        if handoff_m4b and needs_m4b:
             detail = "Queued for M4B — sweep continuing with next books…"
             async with async_session() as db:
                 await p._update_status(db, request_id, "m4b_convert", detail)
@@ -1925,7 +2015,7 @@ async def run_forge_after_download(
             )
             return
 
-        if needs_m4b_conversion(staging):
+        if needs_m4b:
             async def _on_m4b_queued(position: int, active_id: int | None) -> None:
                 detail = m4b_queue.format_queue_detail(position, active_id)
                 async with async_session() as db:
@@ -2070,10 +2160,15 @@ async def run_forge_after_download(
                 if not m4b_produced_new_file:
                     _cleanup_forge_temps(staging)
         else:
+            skip_detail = (
+                "M4B disabled in Sweep settings — skipping convert"
+                if not allow_m4b
+                else "Already a single M4B — skipping convert"
+            )
             async with async_session() as db:
-                await p._update_status(db, request_id, "m4b_convert", "Already a single M4B — skipping convert")
+                await p._update_status(db, request_id, "m4b_convert", skip_detail)
                 await p._report_progress(
-                    request_id, user_id, "m4b_convert", "Already a single M4B — skipping convert",
+                    request_id, user_id, "m4b_convert", skip_detail,
                     progress_percent=100.0,
                 )
             _cleanup_forge_temps(staging)
@@ -2153,6 +2248,7 @@ async def run_forge_after_download(
             user_id=user_id,
             should_abort=_abort_if_cancelled,
             asin_override=asin_override,
+            force=force_chapter,
         )
         # Chapter Forge / m4b-tool may leave *-tmpfiles; never deletes source audio.
         _cleanup_forge_temps(staging)
@@ -2184,73 +2280,88 @@ async def run_forge_after_download(
     # --- Folder Forge ---
     organizer_report: dict[str, Any] | None = None
     if start_step == "folder":
-        async with async_session() as db:
-            await p._update_status(
-                db,
+        if not force_folder and _staging_audio_hardlinked(staging):
+            logger.info(
+                "Folder Forge skipped for request %s (already hardlinked; force_folder_forge off)",
                 request_id,
-                "folder_forge",
-                "Organizing into library folders…",
             )
-
-        async def _on_folder(state: dict[str, Any]) -> None:
-            await _forge_progress(request_id, user_id, "folder_forge", state)
-
-        try:
-            run_id = await libraforge.start_organizer_run(
-                lf_path,
-                destination_root=settings.audiobook_dir,
-                apply=True,
-                naming_template=settings.libraforge_naming_template,
-            )
-            await _persist_staging(request_id, staging, run_id=run_id)
-            report = await libraforge.wait_for_run(
-                run_id,
-                poll_seconds=3.0,
-                timeout_seconds=settings.libraforge_organizer_timeout,
-                on_progress=_on_folder,
-                should_abort=_abort_if_cancelled,
-            )
-            if libraforge.run_failed(report):
-                raise libraforge.LibraForgeError(
-                    str(report.get("error") or report.get("status") or "Folder Forge failed")
-                )
-            organizer_report = report
-        except libraforge.LibraForgeError as e:
-            if "cancelled" in str(e).lower():
-                return
-            raise RuntimeError(f"Folder Forge failed: {e}") from e
-
-        # Folder Forge reporting success with zero moves while audio still sits
-        # in staging means metadata was never applied (or tags are unusable).
-        # Exception: Library Sweep hardlinks — files already live in the library
-        # tree, so a no-op organize is expected; drop staging links and finalize.
-        leftover_audio = _collect_audio(staging)
-        moved = libraforge.organizer_moved_files(report)
-        if leftover_audio and not moved:
-            if _staging_audio_hardlinked(staging):
-                logger.info(
-                    "Folder Forge made no moves for request %s but staging audio is "
-                    "hardlinked into the library — treating as already organized",
+            async with async_session() as db:
+                await p._update_status(
+                    db,
                     request_id,
+                    "folder_forge",
+                    "Already organized in library — skipping Folder Forge (force off)",
                 )
-                moved = True
-            else:
-                await _set_quarantine(
+            _cleanup_staging_after_folder_forge(staging, force=True)
+            start_step = "finalize"
+        else:
+            async with async_session() as db:
+                await p._update_status(
+                    db,
                     request_id,
-                    (
-                        "Folder Forge made no library moves while audio remains in staging "
-                        f"({len(leftover_audio)} file(s)). Metadata was likely not applied — "
-                        "use LibraForge Manual Review, then Continue pipeline."
-                    ),
-                    staging,
+                    "folder_forge",
+                    "Organizing into library folders…",
                 )
-                return
 
-        # Wipe req_* staging after successful organize (covers/nfo/empty format
-        # dirs; force=True also drops leftover samples when moves succeeded).
-        # Soft-fail / quarantine paths above return before this runs.
-        _cleanup_staging_after_folder_forge(staging, force=moved)
-        start_step = "finalize"
+            async def _on_folder(state: dict[str, Any]) -> None:
+                await _forge_progress(request_id, user_id, "folder_forge", state)
+
+            try:
+                run_id = await libraforge.start_organizer_run(
+                    lf_path,
+                    destination_root=settings.audiobook_dir,
+                    apply=True,
+                    naming_template=settings.libraforge_naming_template,
+                )
+                await _persist_staging(request_id, staging, run_id=run_id)
+                report = await libraforge.wait_for_run(
+                    run_id,
+                    poll_seconds=3.0,
+                    timeout_seconds=settings.libraforge_organizer_timeout,
+                    on_progress=_on_folder,
+                    should_abort=_abort_if_cancelled,
+                )
+                if libraforge.run_failed(report):
+                    raise libraforge.LibraForgeError(
+                        str(report.get("error") or report.get("status") or "Folder Forge failed")
+                    )
+                organizer_report = report
+            except libraforge.LibraForgeError as e:
+                if "cancelled" in str(e).lower():
+                    return
+                raise RuntimeError(f"Folder Forge failed: {e}") from e
+
+            # Folder Forge reporting success with zero moves while audio still sits
+            # in staging means metadata was never applied (or tags are unusable).
+            # Exception: Library Sweep hardlinks — files already live in the library
+            # tree, so a no-op organize is expected; drop staging links and finalize.
+            leftover_audio = _collect_audio(staging)
+            moved = libraforge.organizer_moved_files(report)
+            if leftover_audio and not moved:
+                if _staging_audio_hardlinked(staging):
+                    logger.info(
+                        "Folder Forge made no moves for request %s but staging audio is "
+                        "hardlinked into the library — treating as already organized",
+                        request_id,
+                    )
+                    moved = True
+                else:
+                    await _set_quarantine(
+                        request_id,
+                        (
+                            "Folder Forge made no library moves while audio remains in staging "
+                            f"({len(leftover_audio)} file(s)). Metadata was likely not applied — "
+                            "use LibraForge Manual Review, then Continue pipeline."
+                        ),
+                        staging,
+                    )
+                    return
+
+            # Wipe req_* staging after successful organize (covers/nfo/empty format
+            # dirs; force=True also drops leftover samples when moves succeeded).
+            # Soft-fail / quarantine paths above return before this runs.
+            _cleanup_staging_after_folder_forge(staging, force=moved)
+            start_step = "finalize"
 
     elif start_step == "finalize":
         # Continue-from-finalize (Folder Forge already done manually / prior run):

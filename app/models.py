@@ -64,6 +64,8 @@ class User(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # JSON array of Up Next queue items (client-synced play queue).
     play_queue_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-user gate for My Library owned-audiobook uploads (admins always allowed).
+    allow_audiobook_upload: Mapped[bool] = mapped_column(Boolean, default=False)
 
     download_requests: Mapped[list["DownloadRequest"]] = relationship(back_populates="user")
 
@@ -310,3 +312,22 @@ class ScraperState(Base):
     last_matches_created: Mapped[int] = mapped_column(Integer, default=0)
     last_rss_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_rss_upserted: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class EbookReadingProgress(Base):
+    """Server-synced ebook Continue Reading progress (per user / Kavita chapter)."""
+
+    __tablename__ = "ebook_reading_progress"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    chapter_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    page: Mapped[int] = mapped_column(Integer, default=0)
+    viewport_page: Mapped[int] = mapped_column(Integer, default=0)
+    total_viewport_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_kavita_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    book_title: Mapped[str] = mapped_column(String(512), default="")
+    series_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    cover_url: Mapped[str] = mapped_column(String(1024), default="")
+    hidden: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

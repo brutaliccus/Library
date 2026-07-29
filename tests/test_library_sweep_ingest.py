@@ -134,6 +134,9 @@ def test_sweep_pipeline_settings_in_registry():
     assert "config.libraforge_naming_template" in keys
     assert "config.libraforge_metadata_provider" in keys
     assert "config.library_sweep_abs_scan_every" in keys
+    assert "config.library_sweep_skip_m4b" in keys
+    assert "config.library_sweep_allow_m4b" not in keys
+    assert "config.library_sweep_force_metadata_forge" in keys
 
 
 def test_sweep_dismissed_status_constant():

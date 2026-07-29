@@ -21,7 +21,7 @@ const SKIP_PATH_PREFIXES = [
 
 /**
  * One-time skippable prompt for existing accounts that never enrolled a PIN.
- * New users set PIN during onboarding; this covers next login for older accounts.
+ * Sole owner of post-login PIN setup (Libraries must not open a second copy).
  */
 export default function OfflineUnlockSetupPrompt() {
   const { user, sessionReady, offlineSession } = useAuth();
@@ -66,6 +66,7 @@ export default function OfflineUnlockSetupPrompt() {
       onClose={dismiss}
       onSkip={dismiss}
       onUnlocked={() => {
+        dismissOfflineUnlockPrompt(origin, email);
         setOpen(false);
         toast("Offline unlock ready", "success");
       }}

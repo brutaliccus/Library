@@ -14,6 +14,7 @@ import {
 import { useAuth } from "../hooks/useAuth";
 import CoverImage from "../components/CoverImage";
 import OfflineUnlockModal from "../components/OfflineUnlockModal";
+import ConfirmModal from "../components/ConfirmModal";
 import {
   getSessionForOrigin,
   listRememberedLibraries,
@@ -34,7 +35,6 @@ import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import {
   dismissOfflineUnlockPrompt,
   hasOfflineUnlock,
-  shouldPromptOfflineUnlockSetup,
 } from "../utils/offlineUnlock";
 
 export default function LibrariesPage() {
@@ -73,6 +73,7 @@ export default function LibrariesPage() {
   const [unlockMode, setUnlockMode] = useState<"setup" | "unlock">("unlock");
   /** Post-login one-time prompt may be dismissed; intentional setup from Open may not. */
   const [unlockAllowSkip, setUnlockAllowSkip] = useState(false);
+  const [removeLib, setRemoveLib] = useState<RememberedLibrary | null>(null);
 
   if (!sessionReady) {
     return (
@@ -165,13 +166,7 @@ export default function LibrariesPage() {
     try {
       await login(loginEmail.trim(), loginPassword, loginLib.origin);
       setLoginLib(null);
-      // One-time prompt for existing accounts that never enrolled a PIN.
-      if (shouldPromptOfflineUnlockSetup(loginLib.origin, loginEmail.trim())) {
-        setUnlockMode("setup");
-        setUnlockAllowSkip(true);
-        setUnlockLib(loginLib);
-        return;
-      }
+      // Global OfflineUnlockSetupPrompt handles one-time PIN setup after navigate.
       navigate("/my-library", { replace: true });
     } catch (e: any) {
       setLoginError(e?.response?.data?.detail || "Sign in failed");
@@ -180,9 +175,7 @@ export default function LibrariesPage() {
     }
   };
 
-  const leaveLibrary = async (lib: RememberedLibrary, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!confirm(`Remove "${lib.name}" from this device?`)) return;
+  const leaveLibrary = async (lib: RememberedLibrary) => {
     try {
       try {
         setInstanceUrl(lib.origin);
@@ -198,6 +191,11 @@ export default function LibrariesPage() {
       removeRememberedLibrary(lib.origin, lib.email);
       setTick((t) => t + 1);
     }
+  };
+
+  const requestLeaveLibrary = (lib: RememberedLibrary, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRemoveLib(lib);
   };
 
   const startEdit = (lib: RememberedLibrary, e: React.MouseEvent) => {
@@ -278,18 +276,7 @@ export default function LibrariesPage() {
     try {
       await login(signInEmail.trim(), signInPassword, origin);
       setShowAddOrSignIn(false);
-      if (shouldPromptOfflineUnlockSetup(origin, signInEmail.trim())) {
-        setUnlockMode("setup");
-        setUnlockAllowSkip(true);
-        setUnlockLib({
-          origin,
-          name: "Library",
-          coverUrl: null,
-          email: signInEmail.trim().toLowerCase(),
-          lastUsedAt: Date.now(),
-        });
-        return;
-      }
+      // Global OfflineUnlockSetupPrompt handles one-time PIN setup after navigate.
       navigate("/my-library", { replace: true });
     } catch (e: any) {
       setSignInError(e?.response?.data?.detail || "Sign in failed");
@@ -299,7 +286,7 @@ export default function LibrariesPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-950 px-4 pt-8 pb-[calc(2rem+env(safe-area-inset-bottom,0px))]">
+    <div className="min-h-screen bg-gray-950 px-4 pt-[calc(2rem+env(safe-area-inset-top,0px))] pb-[calc(2rem+env(safe-area-inset-bottom,0px))] pl-[max(1rem,env(safe-area-inset-left,0px))] pr-[max(1rem,env(safe-area-inset-right,0px))]">
       <div className="max-w-3xl mx-auto">
         <div className="flex items-start justify-between gap-3 mb-8">
           <div className="min-w-0">
@@ -421,7 +408,7 @@ export default function LibrariesPage() {
                       <span
                         role="button"
                         tabIndex={0}
-                        onClick={(e) => void leaveLibrary(lib, e)}
+                        onClick={(e) => requestLeaveLibrary(lib, e)}
                         className="p-1.5 rounded-lg bg-black/60 text-gray-300 hover:text-red-300"
                         title="Remove from this device"
                       >
@@ -652,6 +639,27 @@ export default function LibrariesPage() {
           }}
         />
       )}
+
+      <ConfirmModal
+        show={removeLib !== null}
+        title="Remove library?"
+        body={
+          removeLib ? (
+            <>
+              Remove “{removeLib.name}” from this device? You can add it again later.
+            </>
+          ) : null
+        }
+        confirmLabel="Remove"
+        variant="danger"
+        onCancel={() => setRemoveLib(null)}
+        onConfirm={() => {
+          if (!removeLib) return;
+          const lib = removeLib;
+          setRemoveLib(null);
+          void leaveLibrary(lib);
+        }}
+      />
     </div>
   );
 }

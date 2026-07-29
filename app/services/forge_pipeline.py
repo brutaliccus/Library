@@ -1854,9 +1854,10 @@ async def run_forge_after_download(
             is_local_ingest = True
 
     if is_local_ingest:
-        allow_m4b = await instance_settings.get_effective_bool(
-            "config.library_sweep_allow_m4b", default=True
+        skip_m4b = await instance_settings.get_effective_bool(
+            "config.library_sweep_skip_m4b", default=False
         )
+        allow_m4b = not skip_m4b
         force_metadata = await instance_settings.get_effective_bool(
             "config.library_sweep_force_metadata_forge", default=False
         )
@@ -1978,7 +1979,7 @@ async def run_forge_after_download(
         needs_m4b = allow_m4b and needs_m4b_conversion(staging)
         if not allow_m4b and needs_m4b_conversion(staging):
             logger.info(
-                "M4B skipped for request %s (library_sweep_allow_m4b off)",
+                "M4B skipped for request %s (library_sweep_skip_m4b on)",
                 request_id,
             )
             async with async_session() as db:

@@ -181,11 +181,6 @@ export default function Home({
 
   return (
     <div className="pb-12">
-      <div className="max-w-3xl mx-auto px-4 lg:px-6">
-        <HeroSearch onGenreToggle={onGenreToggle} genreActiveCount={genreActiveCount} />
-        <BadgeLegend />
-      </div>
-
       <div className="flex px-4 lg:px-6 gap-6">
         {genresData && (
           <GenreSidebar
@@ -198,6 +193,11 @@ export default function Home({
 
         <div className="flex-1 min-w-0">
           <ContinueShelves />
+
+          <div className="max-w-3xl mx-auto">
+            <HeroSearch onGenreToggle={onGenreToggle} genreActiveCount={genreActiveCount} />
+            <BadgeLegend />
+          </div>
 
           {!privateMode && personalizedShelves.length > 0 && (
             <div className="mb-8 space-y-8">

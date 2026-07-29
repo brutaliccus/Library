@@ -25,13 +25,7 @@ export default function HeroSearch({ onGenreToggle, genreActiveCount = 0 }: Prop
   const hasFilter = Boolean(onGenreToggle);
 
   return (
-    <div
-      className={`text-center pt-2 lg:pt-4 ${
-        liftForMini
-          ? "pb-[calc(4.5rem+env(safe-area-inset-bottom,0px))]"
-          : "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]"
-      } lg:pb-12`}
-    >
+    <div className="text-center pt-1 pb-3 lg:pt-4 lg:pb-12">
       {/* Mobile: bottom floating pill — no outer tray */}
       <div
         className={`lg:hidden z-40 fixed left-0 right-0 px-4 pointer-events-none ${

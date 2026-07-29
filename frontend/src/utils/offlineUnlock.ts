@@ -211,18 +211,6 @@ export function wasOfflineUnlockPromptDismissed(
   return !!readDismissed()[recordKey(origin, email)];
 }
 
-/** Mark one-time setup prompt as dismissed (Settings remains available). */
-export function dismissOfflineUnlockPrompt(origin: string, email: string): void {
-  if (!origin || !email) return;
-  try {
-    const store = readDismissed();
-    store[recordKey(origin, email)] = true;
-    localStorage.setItem(PROMPT_DISMISS_KEY, JSON.stringify(store));
-  } catch {
-    /* quota / private mode */
-  }
-}
-
 /** Show a skippable setup prompt once for existing accounts with no PIN. */
 export function shouldPromptOfflineUnlockSetup(
   origin: string,
@@ -230,7 +218,37 @@ export function shouldPromptOfflineUnlockSetup(
 ): boolean {
   if (!origin || !email) return false;
   if (hasOfflineUnlock(origin, email)) return false;
+  if (wasOfflineUnlockPromptShownThisSession(origin, email)) return false;
   return !wasOfflineUnlockPromptDismissed(origin, email);
+}
+
+/** In-memory guard so Strict Mode / remounts cannot re-open the same prompt. */
+const _promptShownThisSession = new Set<string>();
+
+export function wasOfflineUnlockPromptShownThisSession(
+  origin: string,
+  email: string
+): boolean {
+  if (!origin || !email) return false;
+  return _promptShownThisSession.has(recordKey(origin, email));
+}
+
+export function markOfflineUnlockPromptShown(origin: string, email: string): void {
+  if (!origin || !email) return;
+  _promptShownThisSession.add(recordKey(origin, email));
+}
+
+/** Mark one-time setup prompt as dismissed (Settings remains available). */
+export function dismissOfflineUnlockPrompt(origin: string, email: string): void {
+  if (!origin || !email) return;
+  markOfflineUnlockPromptShown(origin, email);
+  try {
+    const store = readDismissed();
+    store[recordKey(origin, email)] = true;
+    localStorage.setItem(PROMPT_DISMISS_KEY, JSON.stringify(store));
+  } catch {
+    /* quota / private mode */
+  }
 }
 
 export async function enrollOfflineUnlock(opts: {
@@ -275,6 +293,7 @@ export async function enrollOfflineUnlock(opts: {
   const store = readStore();
   store[recordKey(origin, email)] = record;
   writeStore(store);
+  dismissOfflineUnlockPrompt(origin, email);
   return record;
 }
 

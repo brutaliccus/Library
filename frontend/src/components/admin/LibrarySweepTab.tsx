@@ -18,6 +18,8 @@ import {
 import api from "../../api/client";
 import { useToast } from "../../contexts/ToastContext";
 import CoverImage from "../CoverImage";
+import ConfirmModal from "../ConfirmModal";
+import Modal from "../Modal";
 import QuickReviewWizard from "./QuickReviewWizard";
 import NamingTemplateBuilder from "./NamingTemplateBuilder";
 
@@ -122,23 +124,23 @@ const SWEEP_SETTINGS_KEYS = [
   "config.libraforge_naming_template",
   "config.libraforge_metadata_provider",
   "config.library_sweep_abs_scan_every",
-  "config.library_sweep_allow_m4b",
+  "config.library_sweep_skip_m4b",
   "config.library_sweep_force_metadata_forge",
   "config.library_sweep_force_chapter_forge",
   "config.library_sweep_force_folder_forge",
 ] as const;
 
 const SWEEP_BOOL_KEYS = [
-  "config.library_sweep_allow_m4b",
+  "config.library_sweep_skip_m4b",
   "config.library_sweep_force_metadata_forge",
   "config.library_sweep_force_chapter_forge",
   "config.library_sweep_force_folder_forge",
 ] as const;
 
 const SWEEP_BOOL_LABELS: Record<(typeof SWEEP_BOOL_KEYS)[number], { label: string; help: string }> = {
-  "config.library_sweep_allow_m4b": {
-    label: "Allow M4B processing",
-    help: "Unchecked skips M4B conversion entirely during Sweep.",
+  "config.library_sweep_skip_m4b": {
+    label: "Skip M4B processing",
+    help: "Checked disables M4B conversion during Sweep. Leave unchecked for normal M4B runs.",
   },
   "config.library_sweep_force_metadata_forge": {
     label: "Force metadata forging",
@@ -153,6 +155,11 @@ const SWEEP_BOOL_LABELS: Record<(typeof SWEEP_BOOL_KEYS)[number], { label: strin
     help: "Unchecked skips Folder Forge when staging is already hardlinked into the library.",
   },
 };
+
+type SweepConfirm =
+  | { kind: "start" }
+  | { kind: "cancel" }
+  | { kind: "dismiss"; id: number; title: string };
 
 const METADATA_PROVIDERS = [
   { value: "audible", label: "Audible" },
@@ -199,6 +206,7 @@ export default function LibrarySweepTab() {
   const [settingsDraft, setSettingsDraft] = useState<Record<string, string>>({});
   const [processedOffset, setProcessedOffset] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<SweepConfirm | null>(null);
 
   const { data: status, isLoading: statusLoading, refetch: refetchStatus } = useQuery({
     queryKey: STATUS_KEY,
@@ -229,10 +237,10 @@ export default function LibrarySweepTab() {
     for (const s of sweepSettings) {
       next[s.key] = s.value ?? "";
     }
-    // Defaults for bools when not yet in DB
+    // Defaults for bools when not yet in DB (all are deviations → default false)
     for (const key of SWEEP_BOOL_KEYS) {
       if (next[key] === undefined || next[key] === "") {
-        next[key] = key === "config.library_sweep_allow_m4b" ? "true" : "false";
+        next[key] = "false";
       }
     }
     setSettingsDraft((prev) => {
@@ -264,6 +272,7 @@ export default function LibrarySweepTab() {
       void queryClient.invalidateQueries({ queryKey: ["admin-library-sweep-settings"] });
       void queryClient.invalidateQueries({ queryKey: ["admin-config"] });
       toast("Sweep settings saved", "success");
+      setSettingsOpen(false);
     },
     onError: (err: { response?: { data?: { detail?: string } } }) => {
       toast(err?.response?.data?.detail || "Failed to save settings", "error");
@@ -585,10 +594,7 @@ export default function LibrarySweepTab() {
             title={paused ? "Resume sweep" : "Start sweep"}
             aria-label={paused ? "Resume sweep" : "Start sweep"}
             disabled={busy || running}
-            onClick={() => {
-              if (!window.confirm(START_CONFIRM)) return;
-              startMutation.mutate();
-            }}
+            onClick={() => setConfirmAction({ kind: "start" })}
           >
             {startMutation.isPending ? (
               <Loader2 size={16} className="animate-spin" />
@@ -630,10 +636,7 @@ export default function LibrarySweepTab() {
             title="Cancel sweep"
             aria-label="Cancel sweep"
             disabled={busy || (!running && !paused)}
-            onClick={() => {
-              if (!window.confirm("Cancel the current Library Sweep?")) return;
-              cancelMutation.mutate();
-            }}
+            onClick={() => setConfirmAction({ kind: "cancel" })}
           >
             {cancelMutation.isPending ? (
               <Loader2 size={16} className="animate-spin" />
@@ -655,7 +658,7 @@ export default function LibrarySweepTab() {
             className={iconBtnClass(settingsOpen)}
             title="Sweep settings"
             aria-label="Sweep settings"
-            onClick={() => setSettingsOpen((o) => !o)}
+            onClick={() => setSettingsOpen(true)}
           >
             <Settings size={16} />
           </button>
@@ -680,15 +683,16 @@ export default function LibrarySweepTab() {
         </div>
       )}
 
-      {settingsOpen && (
-      <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h3 className="text-sm font-semibold text-gray-100">Sweep settings</h3>
-            <p className="text-xs text-gray-500 mt-0.5">
-              Folder Forge naming, metadata provider, forge force toggles, and ABS scan cadence.
-            </p>
-          </div>
+      <Modal
+        title="Sweep settings"
+        show={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        size="lg"
+      >
+        <p className="text-xs text-gray-500 mb-3">
+          Folder Forge naming, metadata provider, forge force toggles, and ABS scan cadence.
+        </p>
+        <div className="flex justify-end mb-3">
           <button
             type="button"
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-brand-600/50 bg-brand-600/20 text-brand-200 text-xs font-medium disabled:opacity-40"
@@ -792,8 +796,7 @@ export default function LibrarySweepTab() {
             </label>
           </div>
         )}
-      </div>
-      )}
+      </Modal>
 
       {(running || paused || current) && (
         <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-3 flex gap-3 items-center">
@@ -1067,16 +1070,13 @@ export default function LibrarySweepTab() {
                       disabled={
                         reprocessMutation.isPending || dismissMutation.isPending
                       }
-                      onClick={() => {
-                        if (
-                          !window.confirm(
-                            `Remove “${item.title || `Request #${item.id}`}” from Unprocessed? Library files are kept.`,
-                          )
-                        ) {
-                          return;
-                        }
-                        dismissMutation.mutate(item.id);
-                      }}
+                      onClick={() =>
+                        setConfirmAction({
+                          kind: "dismiss",
+                          id: item.id,
+                          title: item.title || `Request #${item.id}`,
+                        })
+                      }
                     >
                       {dismissMutation.isPending &&
                       dismissMutation.variables === item.id ? (
@@ -1177,6 +1177,54 @@ export default function LibrarySweepTab() {
           }}
         />
       )}
+
+      <ConfirmModal
+        show={confirmAction?.kind === "start"}
+        title="Start Library Sweep?"
+        body={START_CONFIRM}
+        confirmLabel="Start sweep"
+        variant="warning"
+        busy={startMutation.isPending}
+        onCancel={() => setConfirmAction(null)}
+        onConfirm={() => {
+          setConfirmAction(null);
+          startMutation.mutate();
+        }}
+      />
+      <ConfirmModal
+        show={confirmAction?.kind === "cancel"}
+        title="Cancel Library Sweep?"
+        body="Stop the current Library Sweep? In-progress books may be left incomplete."
+        confirmLabel="Cancel sweep"
+        variant="danger"
+        busy={cancelMutation.isPending}
+        onCancel={() => setConfirmAction(null)}
+        onConfirm={() => {
+          setConfirmAction(null);
+          cancelMutation.mutate();
+        }}
+      />
+      <ConfirmModal
+        show={confirmAction?.kind === "dismiss"}
+        title="Remove from Unprocessed?"
+        body={
+          confirmAction?.kind === "dismiss" ? (
+            <>
+              Remove “{confirmAction.title}” from Unprocessed? Library files are kept.
+            </>
+          ) : null
+        }
+        confirmLabel="Remove"
+        variant="danger"
+        busy={dismissMutation.isPending}
+        onCancel={() => setConfirmAction(null)}
+        onConfirm={() => {
+          if (confirmAction?.kind !== "dismiss") return;
+          const id = confirmAction.id;
+          setConfirmAction(null);
+          dismissMutation.mutate(id);
+        }}
+      />
     </div>
   );
 }

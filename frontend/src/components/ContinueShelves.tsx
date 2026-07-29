@@ -191,7 +191,7 @@ export default function ContinueShelves() {
   if (continueReading.length === 0 && !hasListening) return null;
 
   return (
-    <div className="mb-6 space-y-6">
+    <div className="mb-2 space-y-4">
       <ContinueItemMenu
         target={menuTarget}
         onClose={() => setMenuTarget(null)}

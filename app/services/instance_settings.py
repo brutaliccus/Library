@@ -88,7 +88,7 @@ REGISTRY: list[SettingDef] = [
         value_type="int",
         help=(
             "Installed APKs with a lower versionCode are blocked until they update "
-            "(default 58 = Library 1.57). Raise this after publishing a required release."
+            "(default 59 = Library 1.58). Raise this after publishing a required release."
         ),
         placeholder="56",
     ),
@@ -259,12 +259,15 @@ REGISTRY: list[SettingDef] = [
         ),
     ),
     SettingDef(
-        key="config.library_sweep_allow_m4b",
+        key="config.library_sweep_skip_m4b",
         group="pipeline",
-        label="Library Sweep: allow M4B processing",
+        label="Library Sweep: skip M4B processing",
         value_type="bool",
-        env_fallback=True,
-        help="When off, Sweep skips M4B conversion entirely (keeps existing audio layout).",
+        env_fallback=False,
+        help=(
+            "When off (default), Sweep runs M4B conversion when needed. "
+            "When on, skip M4B entirely and keep the existing audio layout."
+        ),
     ),
     SettingDef(
         key="config.library_sweep_force_metadata_forge",
@@ -1128,6 +1131,35 @@ async def apply_setup_defaults() -> None:
     logger.info("Applied recommended RSS-only scraper defaults")
 
 
+_OLD_SWEEP_ALLOW_M4B = "config.library_sweep_allow_m4b"
+_SWEEP_SKIP_M4B = "config.library_sweep_skip_m4b"
+
+
+async def migrate_library_sweep_m4b_setting() -> None:
+    """Invert legacy allow_m4b → skip_m4b once, then drop the old key."""
+    new_stored = await app_settings.get_setting(_SWEEP_SKIP_M4B, default="")
+    old_stored = await app_settings.get_setting(_OLD_SWEEP_ALLOW_M4B, default="")
+    if new_stored:
+        if old_stored:
+            await app_settings.set_setting(_OLD_SWEEP_ALLOW_M4B, "")
+            invalidate_cache(_OLD_SWEEP_ALLOW_M4B)
+        return
+    if not old_stored:
+        return
+    allow = old_stored.strip().lower() in ("1", "true", "yes", "on")
+    skip = not allow
+    await app_settings.set_setting(_SWEEP_SKIP_M4B, "true" if skip else "false")
+    await app_settings.set_setting(_OLD_SWEEP_ALLOW_M4B, "")
+    invalidate_cache(_SWEEP_SKIP_M4B)
+    invalidate_cache(_OLD_SWEEP_ALLOW_M4B)
+    logger.info(
+        "Migrated %s → %s (skip_m4b=%s)",
+        _OLD_SWEEP_ALLOW_M4B,
+        _SWEEP_SKIP_M4B,
+        skip,
+    )
+
+
 async def apply_runtime_overrides() -> None:
     """Push DB overrides onto the process-wide Settings singleton.
 
@@ -1136,6 +1168,11 @@ async def apply_runtime_overrides() -> None:
     """
     import os
     from app.config import _host_for_docker
+
+    try:
+        await migrate_library_sweep_m4b_setting()
+    except Exception as e:
+        logger.warning("library_sweep M4B setting migration skipped: %s", e)
 
     s = get_settings()
     for defn in REGISTRY:

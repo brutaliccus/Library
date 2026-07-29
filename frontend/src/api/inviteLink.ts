@@ -59,7 +59,7 @@ function isShareableOrigin(origin: string): boolean {
  * browser origin — skipping localhost so the Android WebView never produces
  * https://localhost/join/CODE (or a bare code fallback).
  */
-function resolveShareOrigin(origin?: string | null): string {
+export function resolveShareOrigin(origin?: string | null): string {
   const candidates = [
     origin && normalizeInstanceUrl(origin),
     getStoredInstanceUrl(),

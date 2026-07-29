@@ -2,6 +2,7 @@ import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import api from "../api/client";
+import { resolveShareOrigin } from "../api/inviteLink";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
@@ -133,7 +134,13 @@ export default function LibraryBookDetail() {
     try {
       const { data } = await api.post("/share", { item_id: itemId });
       const path = (data as { path?: string }).path || `/share/${(data as { token: string }).token}`;
-      const url = `${window.location.origin}${path}`;
+      const serverUrl = ((data as { url?: string }).url || "").trim();
+      const origin = resolveShareOrigin();
+      const url = serverUrl.startsWith("http")
+        ? serverUrl
+        : origin
+          ? `${origin}${path}`
+          : `${window.location.origin}${path}`;
       if (navigator.share) {
         try {
           await navigator.share({

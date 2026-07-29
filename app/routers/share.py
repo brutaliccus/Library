@@ -18,6 +18,24 @@ from app.utils.auth import get_current_user
 
 router = APIRouter(prefix="/api/share", tags=["share"])
 
+async def _public_share_url(path: str) -> str:
+    """Build an absolute share URL from Admin APP_URL (never localhost)."""
+    base = ""
+    try:
+        from app.services import instance_settings
+        base = (await instance_settings.get_effective("config.app_url")).strip()
+    except Exception:
+        base = ""
+    if not base:
+        from app.config import get_settings
+        base = (get_settings().app_url or "").strip()
+    base = base.rstrip("/")
+    if not base:
+        return path
+    return f"{base}{path if path.startswith('/') else '/' + path}"
+
+
+
 
 class CreateShareBody(BaseModel):
     item_id: str
@@ -120,10 +138,12 @@ async def create_share(
         )
     ).scalar_one_or_none()
     if existing:
+        path = f"/share/{existing.token}"
         return {
             "token": existing.token,
             "itemId": existing.abs_item_id,
-            "path": f"/share/{existing.token}",
+            "path": path,
+            "url": await _public_share_url(path),
         }
 
     token = secrets.token_urlsafe(24)
@@ -135,10 +155,12 @@ async def create_share(
     )
     db.add(row)
     await db.commit()
+    path = f"/share/{token}"
     return {
         "token": token,
         "itemId": item_id,
-        "path": f"/share/{token}",
+        "path": path,
+        "url": await _public_share_url(path),
     }
 
 

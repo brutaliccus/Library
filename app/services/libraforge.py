@@ -440,13 +440,30 @@ async def manual_review_search(
     metadata: dict[str, Any] | None = None,
     limit: int = 10,
     script_name: str | None = None,
+    provider: str = "audible",
 ) -> dict[str, Any]:
-    """Search Audible candidates via LibraForge Manual Review / M4B search."""
+    """Search metadata candidates via LibraForge (Audible or abs-agg specialty)."""
+    meta = metadata or {}
+    provider_key = (provider or "audible").strip().lower() or "audible"
+    lim = max(1, min(int(limit or 10), 25))
+
+    if provider_key in ("graphicaudio", "soundbooththeater"):
+        # Match LibraForge Manual Review UI: specialty catalogs go through abs-agg.
+        q = (query or "").strip() or str(meta.get("title") or "").strip()
+        body: dict[str, Any] = {
+            "query": q,
+            "author": str(meta.get("author") or "").strip(),
+            "provider": provider_key,
+            "limit": lim,
+            "base_url": "",
+        }
+        return await _request("POST", "/api/abs-agg/search", json_body=body, timeout=120.0)
+
     fixer, _ = await resolve_script_names()
-    body: dict[str, Any] = {
+    body = {
         "query": query or "",
-        "metadata": metadata or {},
-        "limit": max(1, min(int(limit or 10), 25)),
+        "metadata": meta,
+        "limit": lim,
         "script_name": script_name or fixer,
         "auth_file": "/auth/audible-metadata.json",
     }

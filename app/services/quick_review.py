@@ -321,8 +321,9 @@ async def search_quick_review(
     sequence: str = "",
     narrator: str = "",
     limit: int = 10,
+    provider: str = "audible",
 ) -> dict[str, Any]:
-    """Proxy Audible metadata search for the request's staging context."""
+    """Proxy metadata search for the request's staging context."""
     if (req.media_type or "") == "ebook":
         raise QuickReviewError("Quick Review search is audiobook-only")
     resolve_staging_dir(req.staging_path or "")
@@ -340,8 +341,14 @@ async def search_quick_review(
         "sequence": (sequence or "").strip(),
         "narrator": (narrator or "").strip(),
     }
+    provider_key = (provider or "audible").strip().lower() or "audible"
     try:
-        data = await libraforge.manual_review_search(query=q, metadata=metadata, limit=limit)
+        data = await libraforge.manual_review_search(
+            query=q,
+            metadata=metadata,
+            limit=limit,
+            provider=provider_key,
+        )
     except libraforge.LibraForgeError as e:
         raise QuickReviewError(str(e)) from e
 
@@ -352,7 +359,7 @@ async def search_quick_review(
         "request_id": req.id,
         "queries": data.get("queries") if isinstance(data, dict) else [q],
         "results": results,
-        "provider": "audible",
+        "provider": provider_key,
     }
 
 

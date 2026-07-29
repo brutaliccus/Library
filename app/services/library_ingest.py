@@ -32,6 +32,8 @@ SOURCE_REQUEST = "request"
 SOURCE_SWEEP = "sweep"
 SOURCE_UPLOAD = "upload"
 
+STATUS_SWEEP_DISMISSED = "sweep_dismissed"
+
 _ACTIVE_FORGE = frozenset({
     "pending",
     "metadata_forge",
@@ -47,6 +49,12 @@ _UNPROCESSED_STATUSES = frozenset({
     "failed",
     "skipped",
     "admin_rejected",
+})
+
+# Fingerprints the sweep walker should leave alone (completed or manually dismissed).
+_SWEEP_WALK_SKIP_STATUSES = frozenset({
+    "completed",
+    STATUS_SWEEP_DISMISSED,
 })
 
 
@@ -143,7 +151,7 @@ def stage_uploaded_files(
 
 
 async def fingerprint_already_swept(fingerprint: str) -> bool:
-    """True when a prior sweep ingest for this fingerprint completed successfully."""
+    """True when a prior sweep ingest completed or was dismissed from Unprocessed."""
     if not fingerprint:
         return False
     async with async_session() as db:
@@ -151,7 +159,7 @@ async def fingerprint_already_swept(fingerprint: str) -> bool:
             select(DownloadRequest.id).where(
                 DownloadRequest.ingest_fingerprint == fingerprint,
                 DownloadRequest.source == SOURCE_SWEEP,
-                DownloadRequest.status == "completed",
+                DownloadRequest.status.in_(tuple(_SWEEP_WALK_SKIP_STATUSES)),
             ).limit(1)
         )
         return result.scalar_one_or_none() is not None
@@ -242,12 +250,75 @@ async def retry_quarantined_ingest(
     return result
 
 
+async def _resolve_or_restage_sweep(
+    request_id: int,
+    *,
+    staging_raw: str,
+    title: str,
+    abs_item_id: str | None,
+) -> Path | None:
+    """Resolve existing staging, or re-copy from the ABS library folder for sweep rows."""
+    from app.services.forge_pipeline import audiobook_staging_dir, resolve_staging_dir
+
+    if staging_raw:
+        staging = Path(staging_raw)
+        if staging.is_dir() and _collect_audio(staging):
+            return staging
+        try:
+            resolved = resolve_staging_dir(staging_raw)
+            if resolved.is_dir() and _collect_audio(resolved):
+                return resolved
+        except FileNotFoundError:
+            pass
+
+    item_id = (abs_item_id or "").strip()
+    if not item_id:
+        return None
+
+    from app.config import settings
+    from app.services import audiobookshelf
+    from app.services.library_media_delete import resolve_abs_book_dir
+
+    item = await audiobookshelf.get_library_item(item_id)
+    if not item:
+        logger.warning(
+            "Reprocess %s: ABS item %s not found for restage", request_id, item_id
+        )
+        return None
+    try:
+        library_dir = resolve_abs_book_dir(Path(settings.audiobook_dir), item)
+    except ValueError as e:
+        logger.warning("Reprocess %s: cannot resolve ABS path: %s", request_id, e)
+        return None
+    if not library_dir.is_dir():
+        logger.warning(
+            "Reprocess %s: library folder missing at %s", request_id, library_dir
+        )
+        return None
+
+    staging = audiobook_staging_dir(request_id, title or "Untitled")
+    method = stage_tree_from_library(library_dir, staging, prefer_hardlink=True)
+    logger.info(
+        "Reprocess %s restaged from ABS %s via %s → %s",
+        request_id,
+        item_id,
+        method,
+        staging,
+    )
+    return staging
+
+
 async def reprocess_local_ingest(
     request_id: int,
     *,
     handoff_m4b: bool = False,
+    kick_forge: bool = True,
 ) -> dict[str, Any]:
-    """Manual reprocess for cancelled/failed/skipped/quarantined sweep or upload."""
+    """Manual reprocess for cancelled/failed/skipped/quarantined sweep or upload.
+
+    When staging is gone for a sweep row, re-copies from the ABS library path
+    using ``abs_item_id`` so Unprocessed → Reprocess can actually kick forge.
+    """
     async with async_session() as db:
         result = await db.execute(
             select(DownloadRequest).where(DownloadRequest.id == request_id)
@@ -263,27 +334,39 @@ async def reprocess_local_ingest(
         title = req.title or "Untitled"
         author = req.author
         staging_raw = (req.staging_path or "").strip()
+        abs_item_id = (req.abs_item_id or "").strip() or None
+        source = (req.source or "").strip().lower()
 
-    if not staging_raw:
+    staging: Path | None = None
+    if staging_raw:
+        staging_path = Path(staging_raw)
+        if staging_path.is_dir() and _collect_audio(staging_path):
+            staging = staging_path
+        else:
+            from app.services.forge_pipeline import resolve_staging_dir
+
+            try:
+                resolved = resolve_staging_dir(staging_raw)
+                if resolved.is_dir() and _collect_audio(resolved):
+                    staging = resolved
+            except FileNotFoundError:
+                staging = None
+
+    if staging is None and source == SOURCE_SWEEP:
+        staging = await _resolve_or_restage_sweep(
+            request_id,
+            staging_raw=staging_raw,
+            title=title,
+            abs_item_id=abs_item_id,
+        )
+
+    if staging is None:
         return {
             "ok": False,
             "id": request_id,
             "status": "failed",
-            "reason": "missing_staging",
+            "reason": "staging_missing",
         }
-    staging = Path(staging_raw)
-    if not staging.is_dir():
-        from app.services.forge_pipeline import resolve_staging_dir
-
-        try:
-            staging = resolve_staging_dir(staging_raw)
-        except FileNotFoundError:
-            return {
-                "ok": False,
-                "id": request_id,
-                "status": "failed",
-                "reason": "staging_missing",
-            }
 
     from app.services.forge_pipeline import needs_m4b_conversion
 
@@ -294,7 +377,7 @@ async def reprocess_local_ingest(
         user_id=user_id,
         title=title,
         author=author,
-        kick_forge=True,
+        kick_forge=kick_forge,
         handoff_m4b=handoff_m4b,
     )
     result["needs_m4b"] = needs_m4b

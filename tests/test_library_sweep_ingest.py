@@ -100,6 +100,7 @@ def test_admin_sweep_routes_registered():
     assert any("library-sweep/unprocessed" in p for p in paths)
     assert any("library-sweep/processed" in p for p in paths)
     assert any("library-sweep/reprocess" in p for p in paths)
+    assert any("library-sweep/dismiss" in p for p in paths)
 
 
 def test_synthetic_magnet_helpers():
@@ -133,6 +134,12 @@ def test_sweep_pipeline_settings_in_registry():
     assert "config.libraforge_naming_template" in keys
     assert "config.libraforge_metadata_provider" in keys
     assert "config.library_sweep_abs_scan_every" in keys
+
+
+def test_sweep_dismissed_status_constant():
+    assert library_ingest.STATUS_SWEEP_DISMISSED == "sweep_dismissed"
+    assert "sweep_dismissed" in library_ingest._SWEEP_WALK_SKIP_STATUSES
+    assert "sweep_dismissed" not in library_ingest._UNPROCESSED_STATUSES
 
 
 def test_metadata_provider_chain_order():

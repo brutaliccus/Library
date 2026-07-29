@@ -177,6 +177,8 @@ class QuickReviewSearchBody(BaseModel):
     sequence: str = ""
     narrator: str = ""
     limit: int = 10
+    # audible (default) | graphicaudio | soundbooththeater
+    provider: str = "audible"
 
 
 class QuickReviewApplyBody(BaseModel):
@@ -976,6 +978,7 @@ async def post_quick_review_search(
             sequence=body.sequence,
             narrator=body.narrator,
             limit=body.limit,
+            provider=body.provider,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
@@ -2200,5 +2203,41 @@ async def library_sweep_reprocess(
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+class SweepDismissBody(BaseModel):
+    """Dismiss one or more Unprocessed sweep rows (optional bulk)."""
+    request_ids: list[int] = []
+
+
+@router.post("/library-sweep/dismiss/{request_id}")
+async def library_sweep_dismiss_one(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+):
+    """Remove a single book from the Unprocessed queue (keeps library files)."""
+    from app.services import library_sweep
+
+    try:
+        return await library_sweep.dismiss_unprocessed(request_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/library-sweep/dismiss")
+async def library_sweep_dismiss_bulk(
+    body: SweepDismissBody,
+    _admin: User = Depends(require_admin),
+):
+    """Bulk-remove books from the Unprocessed queue."""
+    from app.services import library_sweep
+
+    ids = list(body.request_ids or [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="request_ids required")
+    try:
+        return await library_sweep.dismiss_unprocessed(ids)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

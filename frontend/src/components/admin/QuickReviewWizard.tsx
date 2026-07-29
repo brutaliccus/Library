@@ -107,6 +107,21 @@ type ChosenMeta = {
   [key: string]: unknown;
 };
 
+const SEARCH_PROVIDERS = [
+  { value: "audible", label: "Audible" },
+  { value: "graphicaudio", label: "Graphic Audio" },
+  { value: "soundbooththeater", label: "Soundbooth Theater" },
+] as const;
+
+type SearchProvider = (typeof SEARCH_PROVIDERS)[number]["value"];
+
+function normalizeSearchProvider(raw: string | null | undefined): SearchProvider {
+  const v = (raw || "").trim().toLowerCase();
+  if (v === "graphicaudio" || v.includes("graphic")) return "graphicaudio";
+  if (v === "soundbooththeater" || v.includes("soundbooth")) return "soundbooththeater";
+  return "audible";
+}
+
 type SearchResult = {
   asin?: string;
   title?: string;
@@ -263,6 +278,7 @@ export default function QuickReviewWizard({
   });
   const [results, setResults] = useState<SearchResult[]>([]);
   const [selectedAsin, setSelectedAsin] = useState<string | null>(null);
+  const [searchProvider, setSearchProvider] = useState<SearchProvider>("audible");
   const [metadataApplied, setMetadataApplied] = useState(false);
   const [m4bDone, setM4bDone] = useState(false);
   const [chaptersDone, setChaptersDone] = useState(false);
@@ -329,6 +345,7 @@ export default function QuickReviewWizard({
       setRelativePath("");
       setResults([]);
       setSelectedAsin(null);
+      setSearchProvider("audible");
       setMetadataApplied(false);
       setM4bDone(false);
       setChaptersDone(false);
@@ -350,6 +367,9 @@ export default function QuickReviewWizard({
       sequence: review.clues?.sequence || "",
       narrator: review.clues?.narrator || "",
     });
+    if (review.provider_hint) {
+      setSearchProvider(normalizeSearchProvider(review.provider_hint));
+    }
     if (review.already_applied) setMetadataApplied(true);
     if (!relativePath && review.selected_relative_path) {
       setRelativePath(review.selected_relative_path);
@@ -390,8 +410,9 @@ export default function QuickReviewWizard({
         sequence: clues.sequence,
         narrator: clues.narrator,
         limit: 12,
+        provider: searchProvider,
       });
-      return data as { results: SearchResult[]; queries: string[] };
+      return data as { results: SearchResult[]; queries: string[]; provider?: string };
     },
     onSuccess: (data) => {
       setResults(data.results || []);
@@ -741,7 +762,25 @@ export default function QuickReviewWizard({
                   ))}
                 </div>
 
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="block text-xs text-gray-400 min-w-[10rem]">
+                    Provider
+                    <select
+                      className="mt-1 w-full bg-gray-900 border border-gray-600 rounded-lg px-2.5 py-2 text-sm text-gray-100"
+                      value={searchProvider}
+                      onChange={(e) => {
+                        setSearchProvider(normalizeSearchProvider(e.target.value));
+                        setResults([]);
+                        setSelectedAsin(null);
+                      }}
+                    >
+                      {SEARCH_PROVIDERS.map((p) => (
+                        <option key={p.value} value={p.value}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <button
                     type="button"
                     onClick={() => searchMutation.mutate()}

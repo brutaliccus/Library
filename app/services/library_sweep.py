@@ -132,7 +132,7 @@ async def _item_would_be_processed(item: dict[str, Any]) -> bool:
     existing = await library_ingest.latest_sweep_request(fingerprint)
     if not existing:
         return True
-    if existing.status == "completed":
+    if existing.status in library_ingest._SWEEP_WALK_SKIP_STATUSES:
         return False
     if existing.status in library_ingest._UNPROCESSED_STATUSES:
         return False
@@ -563,19 +563,113 @@ async def skip_current(*, request_id: int | None = None) -> dict[str, Any]:
 
 
 async def reprocess_unprocessed(request_id: int, *, user_id: int) -> dict[str, Any]:
-    """Kick forge again for a cancelled/failed/skipped sweep book."""
+    """Kick forge again for a cancelled/failed/skipped sweep book (background).
+
+    Prepares / restages synchronously, then runs forge in a background task so the
+    admin HTTP call returns immediately and does not block on metadata matching.
+    """
+    # Validate + restage + set metadata_forge without awaiting the full forge.
     try:
-        result = await library_ingest.reprocess_local_ingest(
+        prepared = await library_ingest.reprocess_local_ingest(
             request_id,
             handoff_m4b=True,
+            kick_forge=False,
         )
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         raise
-    except ValueError as e:
+    except ValueError:
         raise
+
+    if not prepared.get("ok", True):
+        return {
+            "ok": False,
+            "result": prepared,
+            "status": await get_status(),
+        }
+
+    async def _forge() -> None:
+        try:
+            from app.services.forge_pipeline import (
+                resolve_staging_dir,
+                run_forge_after_download,
+            )
+
+            async with async_session() as db:
+                result = await db.execute(
+                    select(DownloadRequest).where(DownloadRequest.id == request_id)
+                )
+                req = result.scalar_one_or_none()
+                if not req:
+                    return
+                uid = int(req.user_id)
+                title = req.title or "Untitled"
+                author = req.author
+                staging_raw = (req.staging_path or "").strip()
+
+            if not staging_raw:
+                logger.error("Reprocess %s: staging_path missing after prepare", request_id)
+                return
+            staging = resolve_staging_dir(staging_raw)
+            await run_forge_after_download(
+                request_id,
+                staging=staging,
+                user_id=uid,
+                title=title,
+                author=author,
+                resume_from="metadata",
+                handoff_m4b=True,
+            )
+        except Exception:
+            logger.exception("Background reprocess failed for request %s", request_id)
+
+    asyncio.create_task(_forge(), name=f"sweep-reprocess-{request_id}")
+    await _refresh_current_from_db(request_id)
+
     return {
-        "ok": bool(result.get("ok", True)),
-        "result": result,
+        "ok": True,
+        "result": prepared,
+        "status": await get_status(),
+    }
+
+
+async def dismiss_unprocessed(
+    request_ids: list[int] | int,
+) -> dict[str, Any]:
+    """Mark unprocessed sweep book(s) dismissed so they leave the Unprocessed tab.
+
+    Does not delete library files or ABS items — only the DownloadRequest status.
+    """
+    ids = [request_ids] if isinstance(request_ids, int) else list(request_ids)
+    ids = [int(i) for i in ids if i is not None]
+    if not ids:
+        raise ValueError("No request ids to dismiss")
+
+    dismissed: list[int] = []
+    skipped: list[dict[str, Any]] = []
+    async with async_session() as db:
+        for rid in ids:
+            result = await db.execute(
+                select(DownloadRequest).where(DownloadRequest.id == rid)
+            )
+            req = result.scalar_one_or_none()
+            if not req:
+                skipped.append({"id": rid, "reason": "not_found"})
+                continue
+            if (req.source or "").strip().lower() != library_ingest.SOURCE_SWEEP:
+                skipped.append({"id": rid, "reason": "not_sweep"})
+                continue
+            if req.status not in library_ingest._UNPROCESSED_STATUSES:
+                skipped.append({"id": rid, "reason": f"status_{req.status}"})
+                continue
+            req.status = library_ingest.STATUS_SWEEP_DISMISSED
+            req.status_detail = "Removed from Unprocessed queue"
+            dismissed.append(rid)
+        await db.commit()
+
+    return {
+        "ok": True,
+        "dismissed": dismissed,
+        "skipped": skipped,
         "status": await get_status(),
     }
 
@@ -757,7 +851,7 @@ async def _process_one_item(
         await _record_sweep_result(job_id, result, scan_index=scan_index)
         return
 
-    if existing and existing.status == "completed":
+    if existing and existing.status in library_ingest._SWEEP_WALK_SKIP_STATUSES:
         await _update_job(job_id, scanned=scan_index + 1)
         return
 

@@ -12,6 +12,7 @@ import {
   RefreshCw,
   SkipForward,
   RotateCcw,
+  X,
 } from "lucide-react";
 import api from "../../api/client";
 import { useToast } from "../../contexts/ToastContext";
@@ -436,20 +437,47 @@ export default function LibrarySweepTab() {
   const reprocessMutation = useMutation({
     mutationFn: async (requestId: number) => {
       const { data } = await api.post(`/admin/library-sweep/reprocess/${requestId}`);
-      return data as { ok?: boolean; result?: { id?: number; status?: string }; status?: SweepStatus };
+      return data as {
+        ok?: boolean;
+        result?: { id?: number; status?: string; reason?: string };
+        status?: SweepStatus;
+      };
     },
     onSuccess: (data) => {
       if (data.status) queryClient.setQueryData(STATUS_KEY, data.status);
       invalidateAll();
-      toast("Reprocess started", "success");
-      const rid = data.result?.id;
-      if (rid != null) {
-        setQueueTab("needs-review");
-        selectItem(rid, { openWizard: true });
+      if (data.ok === false) {
+        const reason = data.result?.reason;
+        toast(
+          reason === "staging_missing" || reason === "missing_staging"
+            ? "Cannot reprocess — staging folder missing and ABS restage failed"
+            : reason
+              ? `Reprocess failed: ${reason}`
+              : "Reprocess failed",
+          "error",
+        );
+        return;
       }
+      // Stay on Unprocessed — do not open Needs Review / set review cursor.
+      toast("Reprocess started for this book", "success");
     },
     onError: (err: { response?: { data?: { detail?: string } } }) => {
       toast(err?.response?.data?.detail || "Failed to reprocess", "error");
+    },
+  });
+
+  const dismissMutation = useMutation({
+    mutationFn: async (requestId: number) => {
+      const { data } = await api.post(`/admin/library-sweep/dismiss/${requestId}`);
+      return data as { ok?: boolean; dismissed?: number[]; status?: SweepStatus };
+    },
+    onSuccess: (data) => {
+      if (data.status) queryClient.setQueryData(STATUS_KEY, data.status);
+      invalidateAll();
+      toast("Removed from Unprocessed", "info");
+    },
+    onError: (err: { response?: { data?: { detail?: string } } }) => {
+      toast(err?.response?.data?.detail || "Failed to remove", "error");
     },
   });
 
@@ -938,20 +966,51 @@ export default function LibrarySweepTab() {
                       {item.status_detail ? ` · ${item.status_detail}` : ""}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    className={iconBtnClass()}
-                    title="Reprocess (forge only)"
-                    aria-label={`Reprocess ${item.title || item.id}`}
-                    disabled={reprocessMutation.isPending}
-                    onClick={() => reprocessMutation.mutate(item.id)}
-                  >
-                    {reprocessMutation.isPending && reprocessMutation.variables === item.id ? (
-                      <Loader2 size={16} className="animate-spin" />
-                    ) : (
-                      <RotateCcw size={16} />
-                    )}
-                  </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      className={iconBtnClass()}
+                      title="Reprocess (forge only)"
+                      aria-label={`Reprocess ${item.title || item.id}`}
+                      disabled={
+                        reprocessMutation.isPending || dismissMutation.isPending
+                      }
+                      onClick={() => reprocessMutation.mutate(item.id)}
+                    >
+                      {reprocessMutation.isPending &&
+                      reprocessMutation.variables === item.id ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <RotateCcw size={16} />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className={iconBtnClass()}
+                      title="Remove from Unprocessed"
+                      aria-label={`Remove ${item.title || item.id} from Unprocessed`}
+                      disabled={
+                        reprocessMutation.isPending || dismissMutation.isPending
+                      }
+                      onClick={() => {
+                        if (
+                          !window.confirm(
+                            `Remove “${item.title || `Request #${item.id}`}” from Unprocessed? Library files are kept.`,
+                          )
+                        ) {
+                          return;
+                        }
+                        dismissMutation.mutate(item.id);
+                      }}
+                    >
+                      {dismissMutation.isPending &&
+                      dismissMutation.variables === item.id ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <X size={16} />
+                      )}
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>

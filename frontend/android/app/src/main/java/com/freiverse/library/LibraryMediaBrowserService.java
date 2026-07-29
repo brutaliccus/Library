@@ -184,8 +184,13 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
         if (mediaSession != null) {
             MediaButtonReceiver.handleIntent(mediaSession, intent);
         }
-        if (LibraryAutoBridge.getInstance().isActive()) {
-            promoteToForeground();
+        // We may have been started via startForegroundService() — Android kills
+        // the whole process (ForegroundServiceDidNotStartInTimeException) unless
+        // startForeground() is called promptly, even when no session is active.
+        promoteToForeground();
+        if (!LibraryAutoBridge.getInstance().isActive()) {
+            // Contract satisfied; nothing to show — drop foreground + notification.
+            stopForegroundPlayback();
         }
         return START_STICKY;
     }
@@ -228,16 +233,29 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             return;
         }
         Notification notification = buildNotification();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                );
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+            foregroundActive = true;
+        } catch (Exception e) {
+            // Android 12+ ForegroundServiceStartNotAllowedException: gearhead can
+            // bind-create this service while the app is background-restricted.
+            // Crashing here put the process in an hourly START_STICKY crash loop.
+            // Run un-promoted — the MediaSession still works for AA; a later play
+            // (media-button exempt) retries the promotion.
+            android.util.Log.w(
+                "LibraryMediaBrowser",
+                "startForeground rejected; continuing without FGS",
+                e
             );
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
         }
-        foregroundActive = true;
     }
 
     void updateForegroundNotification() {

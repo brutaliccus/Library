@@ -129,8 +129,21 @@ public final class LibraryNativePlayer {
     private String coverUrl = "";
     private String lastAuthToken = "";
     private long totalDurationMs = 0;
-    private boolean owning = false;
+    private volatile boolean owning = false;
     private final Runnable tickRunnable = this::tickPosition;
+
+    /**
+     * Main-thread mirror of ExoPlayer state for off-main readers. ExoPlayer
+     * hard-crashes ("Player is accessed on the wrong thread") when touched from
+     * the CapacitorPlugins thread — which is exactly where
+     * getNativePlaybackState() runs when the app UI attaches mid-AA-play.
+     * Refreshed by every emitState()/tick (~2s) on the main thread.
+     */
+    private volatile boolean mirrorPlaying = false;
+    private volatile long mirrorPositionMs = 0;
+    private volatile long mirrorPositionAtElapsed = 0;
+    private volatile float mirrorSpeed = 1f;
+    private volatile int mirrorTrackIndex = 0;
 
     private LibraryNativePlayer() {}
 
@@ -161,6 +174,11 @@ public final class LibraryNativePlayer {
     }
 
     public boolean isPlaying() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            // Never touch ExoPlayer off-main — it throws IllegalStateException
+            // and takes the whole app down mid-playback.
+            return owning && mirrorPlaying;
+        }
         return player != null && player.isPlaying();
     }
 
@@ -170,6 +188,14 @@ public final class LibraryNativePlayer {
     }
 
     public long getPositionMs() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            long base = mirrorPositionMs;
+            long at = mirrorPositionAtElapsed;
+            if (mirrorPlaying && at > 0) {
+                base += (long) ((android.os.SystemClock.elapsedRealtime() - at) * mirrorSpeed);
+            }
+            return Math.max(0, base);
+        }
         if (player == null) {
             return 0;
         }
@@ -290,6 +316,7 @@ public final class LibraryNativePlayer {
             boolean was = owning;
             owning = false;
             mediaId = "";
+            mirrorPlaying = false;
             if (was) {
                 for (Listener l : copyListeners()) {
                     l.onNativeStopped();
@@ -313,6 +340,7 @@ public final class LibraryNativePlayer {
                 }
             }
             owning = false;
+            mirrorPlaying = false;
             Log.i(TAG, "Handed off to WebView at posMs=" + pos);
         });
     }
@@ -486,6 +514,7 @@ public final class LibraryNativePlayer {
     public void release() {
         mainHandler.post(() -> {
             owning = false;
+            mirrorPlaying = false;
             releasePlayerOnly();
         });
     }
@@ -518,6 +547,12 @@ public final class LibraryNativePlayer {
         if (dur <= 0 && player != null && player.getDuration() > 0) {
             dur = player.getDuration() + trackStartOffsetMs(trackIndex);
         }
+        // Refresh the off-main mirror before notifying listeners.
+        mirrorPlaying = playing;
+        mirrorPositionMs = pos;
+        mirrorPositionAtElapsed = android.os.SystemClock.elapsedRealtime();
+        mirrorSpeed = speed > 0 ? speed : 1f;
+        mirrorTrackIndex = trackIndex;
         for (Listener l : copyListeners()) {
             l.onNativePlaying(
                 mediaId,

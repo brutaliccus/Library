@@ -103,3 +103,6 @@ Thumbs.db
 .idea/
 *.swp
 *~
+
+# Device crash logs pulled by scripts/aa_crash_harvest.ps1
+aa-crash-evidence/

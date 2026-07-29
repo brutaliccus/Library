@@ -3,8 +3,6 @@ package com.freiverse.library;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
-import android.webkit.CookieManager;
-import android.webkit.WebStorage;
 import android.webkit.WebView;
 import androidx.core.content.pm.PackageInfoCompat;
 import com.getcapacitor.Bridge;
@@ -23,12 +21,11 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ThemeIconPlugin.class);
         // Heal aliases disabled by older builds; do not switch launcher icons.
         ThemeIconHelper.ensureSafeAliases(this);
-        // Wipe Chromium/SW caches BEFORE Bridge loads the SPA — clearing after
-        // onCreate leaves a stale first paint and can mark the version "cleared"
-        // without ever reloading new android_asset files.
-        boolean wiped = wipeWebViewDataIfVersionChanged(/* allowMark */ false);
+        // Bust HTTP/resource caches BEFORE Bridge loads the SPA so new
+        // android_asset files win — without wiping localStorage / IndexedDB.
+        boolean refreshed = refreshWebAssetCacheIfVersionChanged(/* allowMark */ false);
         super.onCreate(savedInstanceState);
-        if (wiped) {
+        if (refreshed) {
             markWebViewCacheCleared();
             reloadBridgeWebView();
         } else {
@@ -55,18 +52,18 @@ public class MainActivity extends BridgeActivity {
     }
 
     /**
-     * After an APK install, Chromium may keep stale bundled SPA assets (and old
-     * service-worker Cache Storage from earlier builds). Clear once per
-     * versionCode so the new webDir contents load.
+     * After an APK install, Chromium may keep stale bundled SPA assets.
+     * Clear HTTP/resource cache once per versionCode and reload — keep
+     * localStorage (login), IndexedDB (offline books), and cookies intact.
      */
     private void clearWebViewCacheOnVersionChange() {
-        if (wipeWebViewDataIfVersionChanged(/* allowMark */ true)) {
+        if (refreshWebAssetCacheIfVersionChanged(/* allowMark */ true)) {
             reloadBridgeWebView();
         }
     }
 
-    /** @return true if a wipe ran for a new versionCode */
-    private boolean wipeWebViewDataIfVersionChanged(boolean allowMark) {
+    /** @return true if a cache refresh ran for a new versionCode */
+    private boolean refreshWebAssetCacheIfVersionChanged(boolean allowMark) {
         try {
             long code = currentVersionCode();
             SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -74,7 +71,7 @@ public class MainActivity extends BridgeActivity {
             if (prev == code) {
                 return false;
             }
-            wipeWebViewData();
+            refreshWebAssetCache();
             if (allowMark) {
                 prefs.edit().putLong(KEY_VERSION_CODE, code).apply();
             }
@@ -100,13 +97,11 @@ public class MainActivity extends BridgeActivity {
         );
     }
 
-    private void wipeWebViewData() {
+    private void refreshWebAssetCache() {
         // Temporary WebView works before Bridge exists (pre-super.onCreate).
         try {
             WebView probe = new WebView(this);
             probe.clearCache(true);
-            probe.clearFormData();
-            probe.clearHistory();
             probe.destroy();
         } catch (Exception ignored) {
             /* WebView provider may not be ready */
@@ -116,28 +111,14 @@ public class MainActivity extends BridgeActivity {
             WebView webView = bridge != null ? bridge.getWebView() : null;
             if (webView != null) {
                 webView.clearCache(true);
-                webView.clearFormData();
-                webView.clearHistory();
             }
         } catch (Exception ignored) {
             /* bridge not ready */
         }
-        try {
-            CookieManager cookies = CookieManager.getInstance();
-            cookies.removeAllCookies(null);
-            cookies.flush();
-        } catch (Exception ignored) {
-            /* ignore */
-        }
-        try {
-            WebStorage.getInstance().deleteAllData();
-        } catch (Exception ignored) {
-            /* ignore */
-        }
-        // Drop leftover Chromium cache / service-worker directories under the app.
+        // Drop Chromium HTTP cache dir only — never delete WebView profile /
+        // Local Storage / IndexedDB under app_webview or files/WebView.
         deleteDir(new File(getCacheDir(), "WebView"));
-        deleteDir(getDir("webview", MODE_PRIVATE));
-        deleteDir(new File(getFilesDir(), "WebView"));
+        deleteDir(new File(getCacheDir(), "org.chromium.android_webview"));
     }
 
     private void reloadBridgeWebView() {

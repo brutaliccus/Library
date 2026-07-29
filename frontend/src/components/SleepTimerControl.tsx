@@ -14,7 +14,7 @@ interface Props {
 function SleepTimerIcon({ minutes, size }: { minutes: number | null; size: number }) {
   const active = minutes != null;
   const label = active ? String(minutes) : "–";
-  const fontSize = minutes != null && minutes >= 10 ? 11 : 13;
+  const fontSize = minutes != null && minutes >= 10 ? 13.5 : 16;
   // Tick marks around the dial
   const ticks = Array.from({ length: 12 }, (_, i) => {
     const a = (i / 12) * Math.PI * 2 - Math.PI / 2;
@@ -50,14 +50,14 @@ function SleepTimerIcon({ minutes, size }: { minutes: number | null; size: numbe
         cx="18"
         cy="22"
         r="13"
-        fill={active ? "rgb(var(--brand-500) / 0.12)" : "transparent"}
+        fill="transparent"
         stroke="currentColor"
         strokeWidth={active ? 1.85 : 1.55}
       />
       {ticks}
       <text
         x="18"
-        y="26.4"
+        y="26.8"
         textAnchor="middle"
         fill="currentColor"
         fontSize={fontSize}
@@ -66,14 +66,17 @@ function SleepTimerIcon({ minutes, size }: { minutes: number | null; size: numbe
       >
         {label}
       </text>
-      {/* Large exponent-style Z (single letter, top-right). */}
+      {/* Large exponent-style Z — stroked for a thicker line weight. */}
       <text
         x="31.5"
         y="14"
         textAnchor="middle"
         fill="currentColor"
-        fontSize={active ? 16 : 13}
-        fontWeight={800}
+        stroke="currentColor"
+        strokeWidth={active ? 1.35 : 0.9}
+        paintOrder="stroke fill"
+        fontSize={active ? 17 : 14}
+        fontWeight={900}
         fontFamily="ui-rounded, Segoe UI, system-ui, sans-serif"
         opacity={active ? 0.95 : 0.4}
       >
@@ -108,8 +111,8 @@ export default function SleepTimerControl({
         compact ? "p-1.5" : "p-2"
       } ${
         active
-          ? "text-brand-400 bg-brand-500/10 ring-1 ring-brand-500/40 shadow-[0_0_14px_rgb(var(--brand-500)/0.45)]"
-          : "text-gray-400 hover:text-white hover:bg-gray-800/80"
+          ? "text-brand-400 drop-shadow-[0_0_8px_rgb(var(--brand-500)/0.75)]"
+          : "text-gray-400 hover:text-white"
       }`}
       title={title}
       aria-label={title}

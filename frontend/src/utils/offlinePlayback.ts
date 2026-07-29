@@ -64,6 +64,8 @@ export interface OfflineProgress {
   time: number;
   trackIndex: number;
   trackLocal: number;
+  /** Per-book speed override when set offline / mirrored from server. */
+  playbackRate?: number | null;
   updatedAt: number;
 }
 
@@ -282,6 +284,12 @@ export function getOfflineProgress(key: string): OfflineProgress | null {
   migrateLegacyIfNeeded();
   const all = readJson<Record<string, OfflineProgress>>(progressKey(), {});
   return all[key] ?? null;
+}
+
+/** Wipe a single book's local resume point (used by Clear Progress). */
+export function clearOfflineProgress(key: string): void {
+  if (!key) return;
+  removeOfflineProgress(key);
 }
 
 function removeOfflineProgress(key: string): void {

@@ -2,10 +2,11 @@ import { usePlayer } from "../contexts/PlayerContext";
 import { X, Maximize2, Volume2 } from "lucide-react";
 import AudiobookTransport from "./AudiobookTransport";
 import PlaybackScrubber from "./PlaybackScrubber";
+import PlaybackSpeedControl from "./PlaybackSpeedControl";
+import SleepTimerControl from "./SleepTimerControl";
 import CoverImage from "./CoverImage";
 import { chapterNavAvailability, playbackScope, seekTimeFromScope } from "../utils/playerNav";
 
-const SLEEP_TIMER_MINUTES = [5, 10, 15, 20, 25, 30, 60] as const;
 const SKIP_SECONDS = 15;
 
 function formatTime(s: number): string {
@@ -16,14 +17,6 @@ function formatTime(s: number): string {
   const pad = (n: number) => n.toString().padStart(2, "0");
   return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
-
-function formatCountdown(sec: number): string {
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 
 export default function MiniPlayer() {
   const {
@@ -108,42 +101,14 @@ export default function MiniPlayer() {
           canNextChapter={canNextChapter}
         />
 
-        <div className="flex items-center gap-1 shrink-0">
-          <select
-            value={playbackRate}
-            onChange={(e) => setPlaybackRate(parseFloat(e.target.value))}
-            className="text-[11px] bg-gray-800 border border-gray-700 text-gray-200 rounded px-1.5 py-1 max-w-[3.5rem] focus:outline-none focus:ring-1 focus:ring-brand-500"
-            title="Playback speed"
-            aria-label="Playback speed"
-          >
-            {SPEED_OPTIONS.map((s) => (
-              <option key={s} value={s}>
-                {s}x
-              </option>
-            ))}
-          </select>
-          <select
-            value={sleepTimerPresetMinutes ?? ""}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === "") setSleepTimer(null);
-              else setSleepTimer(Number(v));
-            }}
-            className="text-[11px] bg-gray-800 border border-gray-700 text-gray-200 rounded px-1.5 py-1 max-w-[4.75rem] sm:max-w-[6rem] focus:outline-none focus:ring-1 focus:ring-brand-500"
-            title={
-              sleepTimerSecondsRemaining != null && sleepTimerSecondsRemaining > 0
-                ? `Pauses in ${formatCountdown(sleepTimerSecondsRemaining)}`
-                : "Sleep timer"
-            }
-            aria-label="Sleep timer"
-          >
-            <option value="">Sleep</option>
-            {SLEEP_TIMER_MINUTES.map((m) => (
-              <option key={m} value={m}>
-                {m}m
-              </option>
-            ))}
-          </select>
+        <div className="flex items-center gap-0.5 shrink-0">
+          <PlaybackSpeedControl rate={playbackRate} onChange={setPlaybackRate} compact />
+          <SleepTimerControl
+            minutes={sleepTimerPresetMinutes}
+            secondsRemaining={sleepTimerSecondsRemaining}
+            onChange={setSleepTimer}
+            compact
+          />
         </div>
 
         <div className="hidden md:flex items-center gap-2 w-28">

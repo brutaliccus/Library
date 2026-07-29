@@ -717,6 +717,8 @@ async def play_library_item(
         "progressSeconds": task.get("progress_seconds", 0),
         "currentTrackIndex": task.get("current_track_index", 0),
         "trackPositionSeconds": task.get("track_position_seconds", 0),
+        "playbackRate": task.get("playback_rate"),
+        "updatedAt": task.get("updated_at"),
     }
 
 
@@ -2011,6 +2013,9 @@ class EbookProgressBody(BaseModel):
 
 
 def _serialize_ebook_progress(row) -> dict:
+    last = row.last_read_at
+    if last is not None and getattr(last, "tzinfo", None) is None:
+        last = last.replace(tzinfo=timezone.utc)
     return {
         "chapterId": row.chapter_id,
         "page": int(row.page or 0),
@@ -2021,7 +2026,7 @@ def _serialize_ebook_progress(row) -> dict:
         "seriesName": row.series_name,
         "coverUrl": row.cover_url or "",
         "hidden": bool(row.hidden),
-        "lastReadAt": int(row.last_read_at.timestamp() * 1000) if row.last_read_at else 0,
+        "lastReadAt": int(last.timestamp() * 1000) if last else 0,
     }
 
 
@@ -2081,11 +2086,15 @@ async def upsert_reading_progress(
 
     if existing:
         # Keep server row if it is newer than the client's stamp.
+        # Normalize naive SQLite datetimes so aware/naive compare never 500s.
+        existing_ts = existing.last_read_at
+        if existing_ts is not None and existing_ts.tzinfo is None:
+            existing_ts = existing_ts.replace(tzinfo=timezone.utc)
         if (
-            existing.last_read_at
+            existing_ts
             and client_ts
-            and existing.last_read_at > client_ts
-            and (existing.last_read_at - client_ts).total_seconds() > 2
+            and existing_ts > client_ts
+            and (existing_ts - client_ts).total_seconds() > 2
         ):
             return {"item": _serialize_ebook_progress(existing), "kept": "server"}
         existing.page = int(body.page or 0)
@@ -2118,7 +2127,36 @@ async def upsert_reading_progress(
         last_read_at=last_read,
     )
     db.add(row)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        # Concurrent insert race on (user_id, chapter_id) — retry as update.
+        await db.rollback()
+        existing = (
+            await db.execute(
+                select(EbookReadingProgress).where(
+                    EbookReadingProgress.user_id == user.id,
+                    EbookReadingProgress.chapter_id == cid,
+                )
+            )
+        ).scalar_one_or_none()
+        if not existing:
+            raise
+        existing.page = int(body.page or 0)
+        existing.viewport_page = int(body.viewport_page or 0)
+        existing.total_viewport_pages = body.total_viewport_pages
+        existing.total_kavita_pages = body.total_kavita_pages
+        if body.book_title:
+            existing.book_title = body.book_title[:512]
+        if body.series_name is not None:
+            existing.series_name = (body.series_name or None) and body.series_name[:512]
+        if body.cover_url:
+            existing.cover_url = body.cover_url[:1024]
+        existing.hidden = bool(body.hidden)
+        existing.last_read_at = last_read
+        await db.commit()
+        await db.refresh(existing)
+        return {"item": _serialize_ebook_progress(existing), "kept": "client"}
     await db.refresh(row)
     return {"item": _serialize_ebook_progress(row), "kept": "client"}
 

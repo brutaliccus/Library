@@ -15,6 +15,15 @@ import {
   hydrateReadingProgressFromServer,
 } from "../utils/readingProgress";
 import { clearBookCache, clearAbsBookCache } from "../utils/audioCache";
+import {
+  clearOfflineProgress,
+  progressKeyForAbs,
+  progressKeyForRd,
+  removeAbsOfflineManifest,
+  removeRdOfflineManifest,
+} from "../utils/offlinePlayback";
+import { clearEbookCache } from "../utils/ebookCache";
+import { clearAaResumeIfMatching } from "../media/aaResumeSnapshot";
 
 interface InProgressItem {
   itemId: string;
@@ -25,6 +34,7 @@ interface InProgressItem {
   currentTime: number;
   duration: number;
   isFinished: boolean;
+  playbackRate?: number | null;
 }
 
 interface RDHistoryItem {
@@ -37,6 +47,7 @@ interface RDHistoryItem {
   currentTrackIndex: number;
   trackPositionSeconds: number;
   status: string;
+  playbackRate?: number | null;
   tracks: Array<{
     index: number;
     title: string;
@@ -110,15 +121,25 @@ export default function ContinueShelves() {
       setMenuTarget(null);
       try {
         if (target.kind === "abs") {
-          await api.post(`/stream/abs/${encodeURIComponent(String(target.id))}/clear-progress`);
-          void clearAbsBookCache(String(target.id));
+          const id = String(target.id);
+          await api.post(`/stream/abs/${encodeURIComponent(id)}/clear-progress`);
+          clearOfflineProgress(progressKeyForAbs(id));
+          removeAbsOfflineManifest(id);
+          clearAaResumeIfMatching({ itemId: id });
+          void clearAbsBookCache(id);
           queryClient.invalidateQueries({ queryKey: ["in-progress"] });
         } else if (target.kind === "rd") {
-          await api.post(`/stream/rd/history/${target.id}/clear-progress`);
-          void clearBookCache("h", Number(target.id));
+          const histId = Number(target.id);
+          await api.post(`/stream/rd/history/${histId}/clear-progress`);
+          clearOfflineProgress(progressKeyForRd({ streamHistoryId: histId }) || "");
+          removeRdOfflineManifest({ streamHistoryId: histId });
+          clearAaResumeIfMatching({ streamHistoryId: histId });
+          void clearBookCache("h", histId);
           queryClient.invalidateQueries({ queryKey: ["rd-in-progress"] });
         } else {
-          clearReadingProgress(Number(target.id));
+          const chapterId = Number(target.id);
+          clearReadingProgress(chapterId);
+          void clearEbookCache(chapterId);
           setContinueReading(getContinueReading(6));
         }
         toast(`Progress cleared for "${target.title}"`, "success");
@@ -282,7 +303,9 @@ export default function ContinueShelves() {
                         startAt: item.progressSeconds,
                         trackIndex: item.currentTrackIndex,
                         trackPositionSeconds: item.trackPositionSeconds,
-                      }
+                      },
+                      undefined,
+                      item.playbackRate
                     );
                   }
                 }}

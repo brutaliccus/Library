@@ -114,6 +114,7 @@ class ABSPlaybackResponse(BaseModel):
     title: str
     author: str
     duration: float
+    playbackRate: float | None = None
 
 
 class RDResolveRequest(BaseModel):
@@ -138,6 +139,10 @@ class SyncRequest(BaseModel):
     duration: float
 
 
+class PlaybackRateBody(BaseModel):
+    playback_rate: float | None = None
+
+
 class SmartStreamRequest(BaseModel):
     title: str
     author: str = ""
@@ -156,6 +161,8 @@ class RDProgressSyncRequest(BaseModel):
     # Optional: per-track durations discovered by the client, so future resumes
     # can locate the right track even before probing.
     track_durations: Optional[list[float]] = None
+    # Per-book speed override; omit to leave unchanged.
+    playback_rate: Optional[float] = None
 
 
 # --------------- Stream History & Smart Stream ---------------
@@ -373,6 +380,9 @@ async def _apply_progress_sync(body: RDProgressSyncRequest, user: User, db: Asyn
                     item.tracks_json = json.dumps(tracks)
         except Exception:
             pass
+    if body.playback_rate is not None:
+        rate = float(body.playback_rate)
+        item.playback_rate = max(0.5, min(3.0, rate)) if rate > 0 else None
     await db.commit()
 
 
@@ -419,6 +429,7 @@ async def clear_rd_progress(
     item.progress_seconds = 0.0
     item.current_track_index = 0
     item.track_position_seconds = 0.0
+    item.playback_rate = None
     item.status = "resolved"
     item.hidden = False
     await db.commit()
@@ -557,12 +568,14 @@ async def start_abs_playback(
     )
     row = existing.scalar_one_or_none()
     now = datetime.now(timezone.utc)
+    book_rate = None
     if row:
         row.title = play_title
         row.author = play_author
         row.hidden = False  # playing again un-hides it from Continue Listening
         # Always bump — SQLAlchemy onupdate skips when no other columns dirty.
         row.last_played_at = now
+        book_rate = row.playback_rate
     else:
         db.add(ABSPlayTracking(
             user_id=user.id,
@@ -581,6 +594,7 @@ async def start_abs_playback(
         title=play_title,
         author=play_author,
         duration=total_duration,
+        playbackRate=book_rate,
     )
 
 
@@ -1058,6 +1072,41 @@ async def clear_abs_progress(
     return {"status": "ok", "absReset": abs_ok}
 
 
+@router.put("/abs/{item_id}/playback-rate")
+async def set_abs_playback_rate(
+    item_id: str,
+    body: PlaybackRateBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist a per-book playback speed override (or clear with null)."""
+    result = await db.execute(
+        select(ABSPlayTracking).where(
+            ABSPlayTracking.user_id == user.id,
+            ABSPlayTracking.abs_item_id == item_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    rate = None
+    if body.playback_rate is not None:
+        rate = max(0.5, min(3.0, float(body.playback_rate)))
+    if not row:
+        if rate is None:
+            return {"status": "ok", "playbackRate": None}
+        row = ABSPlayTracking(
+            user_id=user.id,
+            abs_item_id=item_id,
+            title="",
+            author="",
+            playback_rate=rate,
+        )
+        db.add(row)
+    else:
+        row.playback_rate = rate
+    await db.commit()
+    return {"status": "ok", "playbackRate": rate}
+
+
 @router.get("/abs/in-progress")
 async def get_in_progress(
     user: User = Depends(get_current_user),
@@ -1091,7 +1140,20 @@ async def get_in_progress(
             "duration": progress.get("duration") or media.get("duration") or 0,
             "isFinished": progress.get("isFinished", False),
             "updatedAt": progress.get("lastUpdate") or progress.get("updatedAt") or "",
+            "playbackRate": None,
         })
+    # Overlay per-book speed from local tracking rows.
+    rate_rows = (
+        await db.execute(
+            select(ABSPlayTracking).where(
+                ABSPlayTracking.user_id == user.id,
+                ABSPlayTracking.abs_item_id.in_(tracked_ids) if tracked_ids else False,
+            )
+        )
+    ).scalars().all() if tracked_ids else []
+    rates = {r.abs_item_id: r.playback_rate for r in rate_rows}
+    for item in results:
+        item["playbackRate"] = rates.get(item["itemId"])
     return {"items": results}
 
 
@@ -1565,6 +1627,8 @@ async def _save_stream_history(
         task["progress_seconds"] = hist.progress_seconds
         task["current_track_index"] = hist.current_track_index
         task["track_position_seconds"] = hist.track_position_seconds
+        task["playback_rate"] = hist.playback_rate
+        task["updated_at"] = hist.updated_at.isoformat() if hist.updated_at else None
 
 
 async def _smart_stream_background(
@@ -1847,6 +1911,7 @@ def _serialize_history(h: StreamHistory) -> dict:
         "totalSeconds": h.total_seconds,
         "currentTrackIndex": h.current_track_index,
         "trackPositionSeconds": h.track_position_seconds,
+        "playbackRate": h.playback_rate,
         "hidden": h.hidden,
         "status": h.status,
         "createdAt": h.created_at.isoformat() if h.created_at else "",

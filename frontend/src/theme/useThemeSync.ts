@@ -10,11 +10,13 @@ import {
   readCachedTheme,
   type ThemeId,
 } from "./themes";
+import { setCachedDefaultPlaybackRate } from "../utils/playbackRatePrefs";
 
 interface UserSettingsTheme {
   theme: string | null;
   library_default_theme?: string;
   effective_theme?: string;
+  default_playback_rate?: number;
 }
 
 /**
@@ -56,6 +58,13 @@ export function useThemeSync() {
     if (!settingsReady) return;
     applyThemeToDocument(effective);
   }, [effective, settingsReady]);
+
+  useEffect(() => {
+    const rate = settingsQuery.data?.default_playback_rate;
+    if (rate != null && isFinite(rate)) {
+      setCachedDefaultPlaybackRate(rate);
+    }
+  }, [settingsQuery.data?.default_playback_rate]);
 
   return {
     effectiveTheme: effective,

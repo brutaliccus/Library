@@ -337,6 +337,7 @@ class UserSettingsResponse(BaseModel):
     library_default_theme: str = DEFAULT_THEME
     effective_theme: str = DEFAULT_THEME
     available_themes: list[str] = list(THEME_IDS)
+    default_playback_rate: float = 1.0
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -345,6 +346,7 @@ class UpdateSettingsRequest(BaseModel):
     # Pass null / "default" to clear personal override
     theme: str | None = None
     clear_theme: bool = False
+    default_playback_rate: float | None = None
 
 async def _settings_response(user: User, db: AsyncSession | None = None) -> UserSettingsResponse:
     from app.services import debrid, debrid_tokens
@@ -360,6 +362,8 @@ async def _settings_response(user: User, db: AsyncSession | None = None) -> User
             lib_theme = normalize_theme(getattr(group, "default_theme", None)) or DEFAULT_THEME
     user_theme = normalize_theme(getattr(user, "theme", None), allow_null=True)
     effective = user_theme or lib_theme
+    rate = float(getattr(user, "default_playback_rate", 1.0) or 1.0)
+    rate = max(0.5, min(3.0, rate))
     return UserSettingsResponse(
         private_mode=user.private_mode,
         preferred_debrid=getattr(user, "preferred_debrid", "rd") or "rd",
@@ -368,6 +372,7 @@ async def _settings_response(user: User, db: AsyncSession | None = None) -> User
         library_default_theme=lib_theme,
         effective_theme=effective,
         available_themes=list(THEME_IDS),
+        default_playback_rate=rate,
     )
 
 
@@ -401,6 +406,8 @@ async def update_settings(
             if tid is None:
                 raise HTTPException(status_code=400, detail="Unknown theme")
             user.theme = tid
+    if body.default_playback_rate is not None:
+        user.default_playback_rate = max(0.5, min(3.0, float(body.default_playback_rate)))
     await db.commit()
     await db.refresh(user)
     return await _settings_response(user, db)

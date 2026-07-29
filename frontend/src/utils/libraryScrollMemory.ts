@@ -3,6 +3,7 @@
 export type LibraryTab = "abs" | "collection" | "ebooks" | "downloaded" | "want" | "finished";
 export type LibraryTabView = "all" | "genre" | "series" | "author";
 export type LibraryMediaFilter = "all" | "audiobooks" | "ebooks";
+export type LibrarySortMode = "recent" | "az";
 
 export interface LibraryScrollMemory {
   tab: LibraryTab;
@@ -14,6 +15,7 @@ export interface LibraryScrollMemory {
   filterSeries: string;
   filterAuthor: string;
   searchQuery: string;
+  sortMode?: LibrarySortMode;
   scrollY: number;
 }
 
@@ -64,6 +66,7 @@ export function loadLibraryScrollMemory(): LibraryScrollMemory | null {
       filterSeries: typeof parsed.filterSeries === "string" ? parsed.filterSeries : "",
       filterAuthor: typeof parsed.filterAuthor === "string" ? parsed.filterAuthor : "",
       searchQuery: typeof parsed.searchQuery === "string" ? parsed.searchQuery : "",
+      sortMode: parsed.sortMode === "az" ? "az" : "recent",
       scrollY: typeof parsed.scrollY === "number" && parsed.scrollY > 0 ? parsed.scrollY : 0,
     };
   } catch {

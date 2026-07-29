@@ -1,10 +1,4 @@
-import { useState } from "react";
-import { Headphones, Info, BookOpen, RefreshCw } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
-import api from "../api/client";
-import { useToast } from "../contexts/ToastContext";
-import { useAuth } from "../hooks/useAuth";
-import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
+import { Headphones, Info, BookOpen } from "lucide-react";
 import CoverImage from "./CoverImage";
 import ShelfCardMeta from "./ShelfCardMeta";
 
@@ -49,29 +43,6 @@ export default function ABSBookCard({
   seriesName,
   sequence,
 }: Props) {
-  const { toast } = useToast();
-  const { user } = useAuth();
-  const queryClient = useQueryClient();
-  const [rematching, setRematching] = useState(false);
-
-  const handleRematch = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setRematching(true);
-    try {
-      await api.post(`/admin/abs/rematch/${itemId}`);
-      await softRefreshLibraryCollectionQueries(queryClient);
-      toast("Audible Quick Match ran (fills missing fields only; does not force overwrite).", "success");
-    } catch (err: unknown) {
-      const detail =
-        (err as { response?: { data?: { detail?: string }; status?: number } })?.response?.data
-          ?.detail || "Failed to re-match book";
-      const status = (err as { response?: { status?: number } })?.response?.status;
-      toast(detail, status === 409 ? "info" : "error");
-    } finally {
-      setRematching(false);
-    }
-  };
-
   const openDetails = () => {
     if (onNavigate) onNavigate(title, author, { absItemId: itemId });
   };
@@ -109,17 +80,6 @@ export default function ABSBookCard({
             <div className="h-full bg-emerald-500" style={{ width: `${Math.round(progress * 100)}%` }} />
           </div>
         )}
-        <div className="absolute top-0.5 right-0.5 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          {user?.role === "admin" && (
-            <span
-              onClick={handleRematch}
-              className="p-1 bg-black/60 rounded hover:bg-black/80 transition-colors cursor-pointer"
-              title="Quick Match via Audible (fills missing fields only; skipped when ASIN is set)"
-            >
-              <RefreshCw size={10} className={`text-emerald-400 ${rematching ? "animate-spin" : ""}`} />
-            </span>
-          )}
-        </div>
         <div className="absolute bottom-1 right-1 flex items-center gap-0.5">
           {hasEbook && <BookOpen size={10} className="text-amber-400 drop-shadow" />}
           <Headphones size={10} className="text-emerald-400 drop-shadow" />

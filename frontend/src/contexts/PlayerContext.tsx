@@ -29,10 +29,13 @@ import {
   getOfflineProgress,
   isLikelyOffline,
   progressKeyForAbs,
+  progressKeyForRd,
   saveAbsOfflineManifest,
   saveOfflineProgress,
   saveRdOfflineManifest,
 } from "../utils/offlinePlayback";
+import { snapPlaybackSpeed } from "../utils/playbackSpeed";
+import { resolveBookPlaybackRate } from "../utils/playbackRatePrefs";
 import { pickResumeSeconds } from "../utils/resumeProgress";
 import { usePlayerProgressSync } from "../hooks/usePlayerProgressSync";
 import { usePlayerMediaSession } from "../hooks/usePlayerMediaSession";
@@ -124,7 +127,8 @@ interface PlayerActions {
     coverUrl?: string,
     streamHistoryId?: number,
     resume?: number | RDResumeInfo,
-    libraryItemId?: number
+    libraryItemId?: number,
+    playbackRate?: number | null
   ) => void;
   togglePlay: () => void;
   seek: (time: number) => void;
@@ -289,9 +293,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const getNowPlaying = useCallback(() => stateRef.current.nowPlaying, []);
   const getPosition = useCallback(() => lastPosRef.current, []);
+  const getPlaybackRate = useCallback(() => stateRef.current.playbackRate, []);
   const { syncProgress, persistPlaybackProgress } = usePlayerProgressSync({
     getNowPlaying,
     getPosition,
+    getPlaybackRate,
   });
 
   const getAudio = useCallback(() => {
@@ -616,12 +622,37 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         loadTrack(np, ti + 1, 0);
       } else {
         playIntentRef.current = false;
-        setState((s) => ({ ...s, isPlaying: false, wantPlaying: false }));
+        setState((s) => ({
+          ...s,
+          isPlaying: false,
+          wantPlaying: false,
+          playbackRate: resolveBookPlaybackRate(undefined),
+        }));
+        getAudio().playbackRate = resolveBookPlaybackRate(undefined);
         if (np.source === "abs" && np.sessionId) {
           api
             .post(`/stream/abs/${np.sessionId}/close`, {
               currentTime: np.totalDuration,
               duration: np.totalDuration,
+            })
+            .catch(() => {});
+        }
+        // Book finished — drop per-book speed override so the next listen uses the user default.
+        if (np.source === "abs" && np.itemId && !isLikelyOffline()) {
+          void api
+            .put(`/stream/abs/${encodeURIComponent(np.itemId)}/playback-rate`, {
+              playback_rate: null,
+            })
+            .catch(() => {});
+        } else if (np.source === "rd" && np.streamHistoryId && !isLikelyOffline()) {
+          void api
+            .post("/stream/rd/history/sync", {
+              stream_history_id: np.streamHistoryId,
+              progress_seconds: np.totalDuration || 0,
+              total_seconds: np.totalDuration || 0,
+              current_track_index: ti,
+              track_position_seconds: 0,
+              playback_rate: null,
             })
             .catch(() => {});
         }
@@ -787,6 +818,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           localStart = Math.max(0, local.trackLocal);
         }
 
+        const rate = resolveBookPlaybackRate(local?.playbackRate);
         setState((s) => ({
           ...s,
           nowPlaying: np,
@@ -794,7 +826,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           duration: np.totalDuration,
           currentTrackIndex: trackIdx,
           expanded: false,
+          playbackRate: rate,
         }));
+        getAudio().playbackRate = rate;
         loadTrack(np, trackIdx, localStart);
         void cacheAbsPlayable(
           itemId,
@@ -850,10 +884,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               time: startOffset,
               trackIndex: local.trackIndex,
               trackLocal: local.trackLocal,
+              playbackRate: data.playbackRate ?? local.playbackRate,
             });
           }
         }
 
+        const rate = resolveBookPlaybackRate(data.playbackRate ?? local?.playbackRate);
         setState((s) => ({
           ...s,
           nowPlaying: np,
@@ -861,7 +897,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           duration: data.duration,
           currentTrackIndex: 0,
           expanded: false,
+          playbackRate: rate,
         }));
+        getAudio().playbackRate = rate;
 
         let trackIdx = 0;
         let localStart = startOffset;
@@ -950,7 +988,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       coverUrl?: string,
       streamHistoryId?: number,
       resume: number | RDResumeInfo = 0,
-      libraryItemId?: number
+      libraryItemId?: number,
+      playbackRate?: number | null
     ) => {
       probeAbortRef.current?.abort();
       retryCountRef.current = 0;
@@ -1002,6 +1041,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         ? (tracksCopy[trackIdx]?.startOffset ?? 0) + localStart
         : startAt;
 
+      const rate = resolveBookPlaybackRate(playbackRate);
       setState((s) => ({
         ...s,
         nowPlaying: np,
@@ -1009,7 +1049,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         duration: totalDuration,
         currentTrackIndex: trackIdx,
         expanded: false,
+        playbackRate: rate,
       }));
+      getAudio().playbackRate = rate;
       loadTrack(np, trackIdx, localStart);
       // With unknown track durations the loadTrack-computed global time is off;
       // keep the saved global progress until real playback ticks refine it.
@@ -1250,8 +1292,59 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const setPlaybackRate = useCallback(
     (rate: number) => {
-      getAudio().playbackRate = rate;
-      setState((s) => ({ ...s, playbackRate: rate }));
+      const snapped = snapPlaybackSpeed(rate);
+      getAudio().playbackRate = snapped;
+      setState((s) => ({ ...s, playbackRate: snapped }));
+      const np = stateRef.current.nowPlaying;
+      if (!np) return;
+      // Mirror into local resume so offline / clear-progress stays consistent.
+      const time = stateRef.current.currentTime;
+      const trackIndex = stateRef.current.currentTrackIndex;
+      const trackLocal = Math.max(
+        0,
+        time - (np.tracks[trackIndex]?.startOffset ?? 0)
+      );
+      if (np.source === "abs" && np.itemId) {
+        saveOfflineProgress(progressKeyForAbs(np.itemId), {
+          time,
+          trackIndex,
+          trackLocal,
+          playbackRate: snapped,
+        });
+      } else if (np.source === "rd") {
+        const key = progressKeyForRd({
+          libraryItemId: np.libraryItemId,
+          streamHistoryId: np.streamHistoryId,
+        });
+        if (key) {
+          saveOfflineProgress(key, {
+            time,
+            trackIndex,
+            trackLocal,
+            playbackRate: snapped,
+          });
+        }
+      }
+      if (isLikelyOffline()) return;
+      // Persist as a per-book override until progress is cleared / book finishes.
+      if (np.source === "abs" && np.itemId) {
+        void api
+          .put(`/stream/abs/${encodeURIComponent(np.itemId)}/playback-rate`, {
+            playback_rate: snapped,
+          })
+          .catch(() => {});
+      } else if (np.source === "rd" && np.streamHistoryId) {
+        void api
+          .post("/stream/rd/history/sync", {
+            stream_history_id: np.streamHistoryId,
+            progress_seconds: time,
+            total_seconds: np.totalDuration || 0,
+            current_track_index: trackIndex,
+            track_position_seconds: trackLocal,
+            playback_rate: snapped,
+          })
+          .catch(() => {});
+      }
     },
     [getAudio]
   );

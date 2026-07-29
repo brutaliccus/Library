@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import AudiobookTransport from "../components/AudiobookTransport";
 import PlaybackScrubber from "../components/PlaybackScrubber";
+import PlaybackSpeedControl from "../components/PlaybackSpeedControl";
+import SleepTimerControl from "../components/SleepTimerControl";
 import CoverImage from "../components/CoverImage";
 import {
   chapterNavAvailability,
@@ -19,8 +21,6 @@ import {
   seekTimeFromScope,
 } from "../utils/playerNav";
 
-const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-const SLEEP_TIMER_MINUTES = [5, 10, 15, 20, 25, 30, 60] as const;
 const SKIP_SECONDS = 15;
 
 function formatTime(s: number): string {
@@ -30,15 +30,6 @@ function formatTime(s: number): string {
   const sec = Math.floor(s % 60);
   const pad = (n: number) => n.toString().padStart(2, "0");
   return `${h}:${pad(m)}:${pad(sec)}`;
-}
-
-function formatSleepRemaining(sec: number): string {
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  if (h > 0) return `${h}:${pad(m)}:${pad(s)}`;
-  return `${m}:${pad(s)}`;
 }
 
 export default function PlayerPage() {
@@ -215,20 +206,12 @@ export default function PlayerPage() {
           />
 
           <div className="flex items-center gap-6 w-full">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-500">Speed</span>
-              <select
-                value={playbackRate}
-                onChange={(e) => setPlaybackRate(parseFloat(e.target.value))}
-                className="bg-gray-800 border border-gray-700 text-gray-200 text-xs rounded-lg px-2 py-1 focus:outline-none focus:ring-1 focus:ring-brand-500"
-              >
-                {SPEED_OPTIONS.map((s) => (
-                  <option key={s} value={s}>
-                    {s}x
-                  </option>
-                ))}
-              </select>
-            </div>
+            <PlaybackSpeedControl rate={playbackRate} onChange={setPlaybackRate} />
+            <SleepTimerControl
+              minutes={sleepTimerPresetMinutes}
+              secondsRemaining={sleepTimerSecondsRemaining}
+              onChange={setSleepTimer}
+            />
 
             <div className="flex-1 flex items-center gap-2 justify-end">
               <Volume2 size={14} className="text-gray-500 shrink-0" />
@@ -241,34 +224,6 @@ export default function PlayerPage() {
                 onChange={(e) => setVolume(parseFloat(e.target.value))}
                 className="w-32 accent-brand-500 h-1"
               />
-            </div>
-          </div>
-
-          <div className="w-full flex flex-col gap-2 pt-2">
-            <span className="text-xs text-gray-500">Sleep timer</span>
-            <div className="flex flex-wrap items-center gap-3">
-              <select
-                value={sleepTimerPresetMinutes ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === "") setSleepTimer(null);
-                  else setSleepTimer(Number(v));
-                }}
-                className="bg-gray-800 border border-gray-700 text-gray-200 text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-brand-500 min-w-[11rem]"
-                aria-label="Sleep timer"
-              >
-                <option value="">Off</option>
-                {SLEEP_TIMER_MINUTES.map((m) => (
-                  <option key={m} value={m}>
-                    {m} minutes
-                  </option>
-                ))}
-              </select>
-              {sleepTimerSecondsRemaining != null && sleepTimerSecondsRemaining > 0 && (
-                <span className="text-sm text-brand-300 tabular-nums">
-                  Pauses in {formatSleepRemaining(sleepTimerSecondsRemaining)}
-                </span>
-              )}
             </div>
           </div>
         </div>

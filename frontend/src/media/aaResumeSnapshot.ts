@@ -68,3 +68,23 @@ export function clearAaResumeSnapshot(): void {
     /* ignore */
   }
 }
+
+/** Drop the AA resume snapshot only when it points at the cleared book. */
+export function clearAaResumeIfMatching(opts: {
+  itemId?: string;
+  streamHistoryId?: number;
+}): void {
+  const snap = loadAaResumeSnapshot();
+  if (!snap) return;
+  if (opts.itemId && snap.source === "abs" && snap.itemId === opts.itemId) {
+    clearAaResumeSnapshot();
+    return;
+  }
+  if (
+    opts.streamHistoryId != null &&
+    snap.source === "rd" &&
+    snap.streamHistoryId === opts.streamHistoryId
+  ) {
+    clearAaResumeSnapshot();
+  }
+}

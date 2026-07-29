@@ -22,8 +22,17 @@ import { resolveInviteShareUrl } from "../api/inviteLink";
 import {
   Settings as SettingsIcon, EyeOff, Shield, Zap, HardDrive, Trash2,
   Library, Copy, RefreshCw, KeyRound, ChevronUp, ChevronDown,
-  Smartphone, Download, ExternalLink, ImagePlus, Palette,
+  Smartphone, Download, ExternalLink, ImagePlus, Palette, Gauge,
 } from "lucide-react";
+import {
+  formatPlaybackSpeed,
+  PLAYBACK_SPEED_STEPS,
+  snapPlaybackSpeed,
+} from "../utils/playbackSpeed";
+import {
+  getCachedDefaultPlaybackRate,
+  setCachedDefaultPlaybackRate,
+} from "../utils/playbackRatePrefs";
 import {
   fetchAndroidAppUpdateInfo,
   getInstalledAndroidVersion,
@@ -52,6 +61,7 @@ interface UserSettings {
   effective_theme: string;
   available_themes: string[];
   clear_theme?: boolean;
+  default_playback_rate?: number;
 }
 
 const DEBRID_LABELS: Record<string, string> = {
@@ -835,6 +845,9 @@ export default function Settings() {
     },
     onSuccess: (data) => {
       queryClient.setQueryData(["user-settings"], data);
+      if (data.default_playback_rate != null) {
+        setCachedDefaultPlaybackRate(data.default_playback_rate);
+      }
       toast("Settings updated", "success");
     },
     onError: (err: any) => {
@@ -898,6 +911,50 @@ export default function Settings() {
                   updateSettings.mutate({ theme: v });
                 }}
               />
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <div className="flex items-start gap-4">
+            <div className="p-2 bg-gray-800 rounded-lg shrink-0">
+              <Gauge size={20} className="text-brand-400" />
+            </div>
+            <div className="flex-1 min-w-0 space-y-3">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-100">Default playback speed</h3>
+                <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+                  Used for new books. Per-book speed from the player overrides this until you
+                  finish the book or clear its progress.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={snapPlaybackSpeed(
+                    settings?.default_playback_rate ?? getCachedDefaultPlaybackRate()
+                  )}
+                  disabled={updateSettings.isPending}
+                  onChange={(e) => {
+                    const rate = snapPlaybackSpeed(parseFloat(e.target.value));
+                    setCachedDefaultPlaybackRate(rate);
+                    updateSettings.mutate({ default_playback_rate: rate });
+                  }}
+                  className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500"
+                  aria-label="Default playback speed"
+                >
+                  {PLAYBACK_SPEED_STEPS.map((s) => (
+                    <option key={s} value={s}>
+                      {formatPlaybackSpeed(s)}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-xs text-gray-500">
+                  Current default:{" "}
+                  {formatPlaybackSpeed(
+                    settings?.default_playback_rate ?? getCachedDefaultPlaybackRate()
+                  )}
+                </span>
+              </div>
             </div>
           </div>
         </div>

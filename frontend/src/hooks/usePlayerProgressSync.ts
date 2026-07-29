@@ -24,15 +24,13 @@ function persistLocalProgress(
   np: NowPlaying,
   time: number,
   trackIndex: number,
-  trackLocalTime?: number
+  trackLocalTime?: number,
+  playbackRate?: number | null
 ): void {
   const trackLocal = trackLocalTime ?? Math.max(0, time - (np.tracks[trackIndex]?.startOffset ?? 0));
+  const payload = { time, trackIndex, trackLocal, playbackRate };
   if (np.source === "abs" && np.itemId) {
-    saveOfflineProgress(progressKeyForAbs(np.itemId), {
-      time,
-      trackIndex,
-      trackLocal,
-    });
+    saveOfflineProgress(progressKeyForAbs(np.itemId), payload);
     return;
   }
   if (np.source === "rd") {
@@ -41,20 +39,12 @@ function persistLocalProgress(
       streamHistoryId: np.streamHistoryId,
     });
     if (key) {
-      saveOfflineProgress(key, { time, trackIndex, trackLocal });
+      saveOfflineProgress(key, payload);
     }
     // Also mirror under the alternate key so lib↔history lookups both resume.
     if (np.libraryItemId != null && np.streamHistoryId != null) {
-      saveOfflineProgress(progressKeyForRd({ streamHistoryId: np.streamHistoryId })!, {
-        time,
-        trackIndex,
-        trackLocal,
-      });
-      saveOfflineProgress(progressKeyForRd({ libraryItemId: np.libraryItemId })!, {
-        time,
-        trackIndex,
-        trackLocal,
-      });
+      saveOfflineProgress(progressKeyForRd({ streamHistoryId: np.streamHistoryId })!, payload);
+      saveOfflineProgress(progressKeyForRd({ libraryItemId: np.libraryItemId })!, payload);
     }
   }
 }
@@ -64,9 +54,15 @@ interface ProgressSyncSources {
   getNowPlaying: () => NowPlaying | null;
   /** Last known-good playback position (never a still-buffering element's 0:00). */
   getPosition: () => PlaybackPosition | null;
+  /** Current playback rate for local resume mirroring. */
+  getPlaybackRate?: () => number;
 }
 
-export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSyncSources) {
+export function usePlayerProgressSync({
+  getNowPlaying,
+  getPosition,
+  getPlaybackRate,
+}: ProgressSyncSources) {
   const { toast } = useToast();
 
   /** Returns true when the progress save succeeded (or there was nothing to save). */
@@ -78,7 +74,7 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
       trackLocalTime?: number
     ): Promise<boolean> => {
       // Always keep a local resume point so offline replay works without ABS/API.
-      persistLocalProgress(np, time, trackIndex, trackLocalTime);
+      persistLocalProgress(np, time, trackIndex, trackLocalTime, getPlaybackRate?.());
 
       // Offline / no live session: local save is enough.
       if (isLikelyOffline()) return true;
@@ -114,7 +110,7 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
       }
       return true;
     },
-    []
+    [getPlaybackRate]
   );
 
   const persistPlaybackProgress = useCallback(
@@ -164,7 +160,7 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
       const pos = getPosition();
       if (!np || pos?.key !== npKey(np)) return;
       // Always persist locally first (works offline).
-      persistLocalProgress(np, pos.time, pos.trackIndex, pos.trackLocal);
+      persistLocalProgress(np, pos.time, pos.trackIndex, pos.trackLocal, getPlaybackRate?.());
       if (isLikelyOffline()) return;
       const token = localStorage.getItem("access_token") || "";
       if (np.source === "abs" && np.sessionId) {
@@ -215,7 +211,7 @@ export function usePlayerProgressSync({ getNowPlaying, getPosition }: ProgressSy
       window.removeEventListener("pagehide", onUnload);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [getNowPlaying, getPosition]);
+  }, [getNowPlaying, getPosition, getPlaybackRate]);
 
   return { syncProgress, persistPlaybackProgress };
 }

@@ -31,6 +31,7 @@ import {
   CheckCircle2,
   SlidersHorizontal,
   Upload,
+  ArrowDownAZ,
 } from "lucide-react";
 import LibraryFilterDrawer, {
   type BrowseByView,
@@ -39,6 +40,7 @@ import ContinueShelves from "../components/ContinueShelves";
 import { getProgress, clearProgress } from "../utils/readingProgress";
 import { pickResumeSeconds } from "../utils/resumeProgress";
 import { isBookCached } from "../utils/audioCache";
+import { clearEbookCache } from "../utils/ebookCache";
 import {
   getOfflineProgress,
   getRdOfflineManifest,
@@ -71,7 +73,14 @@ import {
   loadLibraryScrollMemory,
   saveLibraryScrollMemory,
   type LibraryScrollMemory,
+  type LibrarySortMode,
 } from "../utils/libraryScrollMemory";
+import {
+  FLOATING_SEARCH_ACTION,
+  FLOATING_SEARCH_INNER,
+  FLOATING_SEARCH_INPUT,
+  FLOATING_SEARCH_WRAP,
+} from "../components/floatingSearchStyles";
 
 interface LibraryItem {
   id: number;
@@ -295,6 +304,9 @@ export default function MyLibrary() {
   const [filterAuthor, setFilterAuthor] = useState(() => savedUi?.filterAuthor ?? "");
   const [searchQuery, setSearchQuery] = useState(() => savedUi?.searchQuery ?? "");
   const [debouncedQuery, setDebouncedQuery] = useState(() => savedUi?.searchQuery ?? "");
+  const [sortMode, setSortMode] = useState<LibrarySortMode>(
+    () => savedUi?.sortMode ?? "recent"
+  );
   const [resolvingId, setResolvingId] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
   const [cachedAbsIds, setCachedAbsIds] = useState<Set<string>>(new Set());
@@ -329,6 +341,7 @@ export default function MyLibrary() {
         filterSeries,
         filterAuthor,
         searchQuery,
+        sortMode,
         scrollY: y,
       });
     },
@@ -342,6 +355,7 @@ export default function MyLibrary() {
       filterSeries,
       filterAuthor,
       searchQuery,
+      sortMode,
     ]
   );
 
@@ -717,7 +731,8 @@ export default function MyLibrary() {
             trackIndex: local?.trackIndex || 0,
             trackPositionSeconds: local?.trackLocal || 0,
           },
-          item.id
+          item.id,
+          local?.playbackRate
         );
         return true;
       };
@@ -758,7 +773,8 @@ export default function MyLibrary() {
           item.coverUrl,
           data.streamHistoryId ?? undefined,
           resume,
-          item.id
+          item.id,
+          data.playbackRate ?? local?.playbackRate
         );
       } catch {
         if (await startOffline()) return;
@@ -797,6 +813,7 @@ export default function MyLibrary() {
   const handleStartFromBeginning = useCallback(
     (chapterId: number) => {
       clearProgress(chapterId);
+      void clearEbookCache(chapterId);
       setContinueModal(null);
       persistLibraryUi();
       navigate(`/read/${chapterId}`);
@@ -906,8 +923,11 @@ export default function MyLibrary() {
     if (!absCollection) return [] as ABSItem[];
     const items = [...Object.values(absCollection.genres).flat(), ...absCollection.ungrouped];
     const deduped = items.filter((item, idx, arr) => arr.findIndex((i) => i.itemId === item.itemId) === idx);
+    if (sortMode === "az") {
+      return deduped.sort((a, b) => (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" }));
+    }
     return deduped.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
-  }, [absCollection]);
+  }, [absCollection, sortMode]);
 
   const absFilterOptions = useMemo(() => {
     const genres = new Set<string>();
@@ -940,9 +960,12 @@ export default function MyLibrary() {
       const ac = cachedAbsIds.has(a.itemId) ? 0 : 1;
       const bc = cachedAbsIds.has(b.itemId) ? 0 : 1;
       if (ac !== bc) return ac - bc;
+      if (sortMode === "az") {
+        return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
+      }
       return (b.addedAt || 0) - (a.addedAt || 0);
     });
-  }, [allAbsItems, filterGenre, filterSeries, filterAuthor, cachedAbsIds]);
+  }, [allAbsItems, filterGenre, filterSeries, filterAuthor, cachedAbsIds, sortMode]);
 
   const absByGenre = useMemo(() => {
     const groups: Record<string, ABSItem[]> = {};
@@ -984,8 +1007,13 @@ export default function MyLibrary() {
 
   const allEbookItems = useMemo(() => {
     const items = [...(kavitaCollection?.items || [])];
+    if (sortMode === "az") {
+      return items.sort((a, b) =>
+        (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" })
+      );
+    }
     return items.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
-  }, [kavitaCollection]);
+  }, [kavitaCollection, sortMode]);
 
   const ebookFilterOptions = useMemo(() => {
     const genres = new Set<string>();
@@ -1015,9 +1043,12 @@ export default function MyLibrary() {
       const ac = a.chapterId != null && cachedEbookIds.has(a.chapterId) ? 0 : 1;
       const bc = b.chapterId != null && cachedEbookIds.has(b.chapterId) ? 0 : 1;
       if (ac !== bc) return ac - bc;
+      if (sortMode === "az") {
+        return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
+      }
       return (b.addedAt || 0) - (a.addedAt || 0);
     });
-  }, [allEbookItems, filterGenre, filterSeries, filterAuthor, cachedEbookIds]);
+  }, [allEbookItems, filterGenre, filterSeries, filterAuthor, cachedEbookIds, sortMode]);
 
   const ebookByGenre = useMemo(() => {
     const groups: Record<string, KavitaItem[]> = {};
@@ -1044,12 +1075,17 @@ export default function MyLibrary() {
 
   const collectionItemsSorted = useMemo(() => {
     const items = [...(rdLibrary?.items || [])];
+    if (sortMode === "az") {
+      return items.sort((a, b) =>
+        (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" })
+      );
+    }
     return items.sort((a, b) => {
       const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
       return tb - ta;
     });
-  }, [rdLibrary]);
+  }, [rdLibrary, sortMode]);
 
   const collectionFilterOptions = useMemo(() => {
     const genres = new Set<string>();
@@ -1083,11 +1119,14 @@ export default function MyLibrary() {
       const ac = cachedRdIds.has(a.id) ? 0 : 1;
       const bc = cachedRdIds.has(b.id) ? 0 : 1;
       if (ac !== bc) return ac - bc;
+      if (sortMode === "az") {
+        return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
+      }
       const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
       return tb - ta;
     });
-  }, [collectionItemsSorted, filterGenre, filterSeries, filterAuthor, cachedRdIds]);
+  }, [collectionItemsSorted, filterGenre, filterSeries, filterAuthor, cachedRdIds, sortMode]);
 
   const collectionByGenre = useMemo(() => {
     const groups: Record<string, LibraryItem[]> = {};
@@ -1237,64 +1276,83 @@ export default function MyLibrary() {
   const renderTabChrome = () =>
     !isSearching ? (
     <>
-      <div className="flex flex-nowrap gap-1 bg-gray-800/50 p-1 rounded-lg overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-full">
-        <button
-          onClick={() => setTab("abs")}
-          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-            tab === "abs" ? "bg-emerald-600 text-white" : "text-gray-400 hover:text-gray-200"
-          }`}
-        >
-          <Headphones size={14} />
-          Audiobooks
-        </button>
-        <button
-          onClick={() => setTab("ebooks")}
-          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-            tab === "ebooks" ? "bg-amber-600 text-white" : "text-gray-400 hover:text-gray-200"
-          }`}
-        >
-          <BookOpen size={14} />
-          eBooks
-        </button>
-        <button
-          onClick={() => setTab("collection")}
-          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-            tab === "collection" ? "bg-teal-700 text-white" : "text-gray-400 hover:text-gray-200"
-          }`}
-        >
-          <Layers size={14} />
-          My Collection
-        </button>
-        <button
-          onClick={() => setTab("downloaded")}
-          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-            tab === "downloaded" ? "bg-brand-600 text-white" : "text-gray-400 hover:text-gray-200"
-          }`}
-        >
-          <Download size={14} />
-          Downloads
-          {downloadedItems.length > 0 && (
-            <span className="text-[10px] opacity-80">({downloadedItems.length})</span>
-          )}
-        </button>
-        <button
-          onClick={() => setTab("want")}
-          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-            tab === "want" ? "bg-rose-700 text-white" : "text-gray-400 hover:text-gray-200"
-          }`}
-        >
-          <Heart size={14} />
-          Want
-        </button>
-        <button
-          onClick={() => setTab("finished")}
-          className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-            tab === "finished" ? "bg-violet-700 text-white" : "text-gray-400 hover:text-gray-200"
-          }`}
-        >
-          <CheckCircle2 size={14} />
-          Finished
-        </button>
+      <div className="flex items-center gap-2">
+        <div className="flex flex-nowrap gap-1 bg-gray-800/50 p-1 rounded-lg overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-full flex-1 min-w-0">
+          <button
+            onClick={() => setTab("abs")}
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+              tab === "abs" ? "bg-emerald-600 text-white" : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            <Headphones size={14} />
+            Audiobooks
+          </button>
+          <button
+            onClick={() => setTab("ebooks")}
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+              tab === "ebooks" ? "bg-amber-600 text-white" : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            <BookOpen size={14} />
+            eBooks
+          </button>
+          <button
+            onClick={() => setTab("collection")}
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+              tab === "collection" ? "bg-teal-700 text-white" : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            <Layers size={14} />
+            My Collection
+          </button>
+          <button
+            onClick={() => setTab("downloaded")}
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+              tab === "downloaded" ? "bg-brand-600 text-white" : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            <Download size={14} />
+            Downloads
+            {downloadedItems.length > 0 && (
+              <span className="text-[10px] opacity-80">({downloadedItems.length})</span>
+            )}
+          </button>
+          <button
+            onClick={() => setTab("want")}
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+              tab === "want" ? "bg-rose-700 text-white" : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            <Heart size={14} />
+            Want
+          </button>
+          <button
+            onClick={() => setTab("finished")}
+            className={`flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
+              tab === "finished" ? "bg-violet-700 text-white" : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            <CheckCircle2 size={14} />
+            Finished
+          </button>
+        </div>
+        {(tab === "abs" || tab === "ebooks" || tab === "collection") && (
+          <button
+            type="button"
+            onClick={() => setSortMode((m) => (m === "az" ? "recent" : "az"))}
+            className={`shrink-0 inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-medium border transition-colors ${
+              sortMode === "az"
+                ? "bg-brand-600/20 border-brand-500/50 text-brand-300"
+                : "bg-gray-800/60 border-gray-700 text-gray-400 hover:text-gray-200"
+            }`}
+            title={sortMode === "az" ? "Sorted A–Z — click for recently added" : "Sorted recently added — click for A–Z"}
+            aria-label={sortMode === "az" ? "Sort by recently added" : "Sort A to Z"}
+            aria-pressed={sortMode === "az"}
+          >
+            <ArrowDownAZ size={14} />
+            <span className="hidden sm:inline">{sortMode === "az" ? "A–Z" : "Recent"}</span>
+          </button>
+        )}
       </div>
     </>
   ) : null;
@@ -1478,23 +1536,18 @@ export default function MyLibrary() {
       )}
 
       {/* Mobile: bottom floating pill. Desktop: sticky search + tabs under nav. */}
-      <div
-        className={`lg:hidden z-40 fixed left-0 right-0 px-4 pointer-events-none ${
-          liftForMini
-            ? "bottom-[calc(5rem+0.75rem+env(safe-area-inset-bottom,0px))]"
-            : "bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))]"
-        }`}
-      >
-        <div className="pointer-events-auto relative max-w-xl mx-auto">
+      <div className={FLOATING_SEARCH_WRAP(liftForMini)}>
+        <div className={FLOATING_SEARCH_INNER}>
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={offline ? "Search unavailable offline" : "Search your library..."}
             disabled={offline}
-            className={`w-full pl-5 py-3 bg-gray-900/90 backdrop-blur-md border border-gray-700/70 rounded-full text-sm text-gray-100 shadow-lg shadow-black/40 focus:outline-none focus:ring-2 focus:ring-brand-500/80 focus:border-brand-500/50 placeholder:text-gray-500 disabled:opacity-50 ${
-              filterableTab && !isSearching ? "pr-[6.5rem]" : "pr-14"
-            }`}
+            className={FLOATING_SEARCH_INPUT({
+              hasFilter: Boolean(filterableTab && !isSearching),
+              disabled: offline,
+            })}
             aria-label="Search your library"
           />
           {filterTrigger && (
@@ -1510,10 +1563,7 @@ export default function MyLibrary() {
               <X size={18} />
             </button>
           ) : (
-            <span
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-brand-600/90 text-white pointer-events-none shadow-md shadow-brand-900/30"
-              aria-hidden
-            >
+            <span className={`${FLOATING_SEARCH_ACTION} pointer-events-none`} aria-hidden>
               <Search size={18} strokeWidth={2.25} />
             </span>
           )}

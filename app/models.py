@@ -51,6 +51,8 @@ class User(Base):
     private_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     # Preferred debrid provider when a torrent is cached on neither/both: "rd" | "torbox"
     preferred_debrid: Mapped[str] = mapped_column(String(16), default="rd")
+    # Default audiobook playback speed for books without a per-book override.
+    default_playback_rate: Mapped[float] = mapped_column(Float, default=1.0)
     # Personal UI theme override; NULL = use library default_theme.
     theme: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Library group whose debrid API keys this user streams/downloads with.
@@ -173,6 +175,8 @@ class StreamHistory(Base):
     # Position within the current track (seconds). Needed for accurate resume when
     # per-track durations are unknown (global progress alone can't locate the track).
     track_position_seconds: Mapped[float] = mapped_column(Float, default=0.0)
+    # Per-book speed override; NULL = use the user's default_playback_rate.
+    playback_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Hidden from the Continue Listening shelf (progress preserved)
     hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(32), default="resolved")
@@ -202,6 +206,8 @@ class ABSPlayTracking(Base):
     abs_item_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(512), default="")
     author: Mapped[str] = mapped_column(String(256), default="")
+    # Per-book speed override; NULL = use the user's default_playback_rate.
+    playback_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Hidden from the Continue Listening shelf (ABS progress preserved)
     hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     last_played_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)

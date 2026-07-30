@@ -528,7 +528,119 @@ export default function MyLibrary() {
       return data as { results: SearchResult[] };
     },
     enabled: !offline && debouncedQuery.length >= 2,
+    // Local shelves are the snappy path; server enriches RD / warm-cache hits.
+    staleTime: 30_000,
   });
+
+  /** Instant client-side index over already-loaded ABS / Kavita / RD shelves. */
+  const localSearchResults = useMemo(() => {
+    if (debouncedQuery.length < 2) return [] as SearchResult[];
+    const tokens = debouncedQuery
+      .toLowerCase()
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (!tokens.length) return [] as SearchResult[];
+
+    const match = (...parts: Array<string | undefined | null | string[]>) => {
+      const blob = parts
+        .flatMap((p) => (Array.isArray(p) ? p : [p || ""]))
+        .join(" ")
+        .toLowerCase();
+      return tokens.every((t) => blob.includes(t));
+    };
+
+    const out: SearchResult[] = [];
+    const wantAbs = mediaFilter === "all" || mediaFilter === "audiobooks";
+    const wantEbook = mediaFilter === "all" || mediaFilter === "ebooks";
+
+    if (wantAbs && absCollection) {
+      const items = [...Object.values(absCollection.genres).flat(), ...absCollection.ungrouped];
+      const seen = new Set<string>();
+      for (const item of items) {
+        if (!item.itemId || seen.has(item.itemId)) continue;
+        if (
+          !match(
+            item.title,
+            item.author,
+            item.narrator,
+            item.seriesName,
+            item.genres,
+            ...(item.series || []).map((s) => s.name)
+          )
+        ) {
+          continue;
+        }
+        seen.add(item.itemId);
+        out.push({
+          title: item.title,
+          author: item.author,
+          coverUrl: item.coverUrl,
+          source: "abs",
+          itemId: item.itemId,
+        });
+      }
+    }
+
+    if (wantEbook && kavitaCollection?.items) {
+      const seen = new Set<number>();
+      for (const item of kavitaCollection.items as KavitaItem[]) {
+        if (item.seriesId == null || seen.has(item.seriesId)) continue;
+        if (
+          !match(
+            item.title,
+            item.author,
+            item.seriesName,
+            item.genres,
+            ...(item.series || []).map((s) => s.name)
+          )
+        ) {
+          continue;
+        }
+        seen.add(item.seriesId);
+        out.push({
+          title: item.title,
+          author: item.author,
+          coverUrl: item.coverUrl,
+          source: "kavita",
+          seriesId: item.seriesId,
+          chapterId: item.chapterId ?? undefined,
+        });
+      }
+    }
+
+    if (wantAbs && rdLibrary?.items) {
+      for (const item of rdLibrary.items) {
+        if (!match(item.title, item.author, item.genre, (item as { seriesName?: string }).seriesName)) {
+          continue;
+        }
+        out.push({
+          title: item.title || "",
+          author: item.author || "",
+          coverUrl: item.coverUrl || "",
+          source: "rd",
+          libraryItemId: item.id,
+          googleVolumeId: item.googleVolumeId,
+          streamStatus: item.streamStatus,
+        });
+      }
+    }
+
+    return out;
+  }, [debouncedQuery, mediaFilter, absCollection, kavitaCollection, rdLibrary]);
+
+  /** Prefer instant local hits; merge any extra server hits (e.g. warm ABS cache / RD). */
+  const mergedSearchResults = useMemo(() => {
+    const byKey = new Map<string, SearchResult>();
+    const keyOf = (r: SearchResult) =>
+      `${r.source}:${r.itemId || r.libraryItemId || r.seriesId || r.title}`;
+    for (const r of localSearchResults) byKey.set(keyOf(r), r);
+    for (const r of searchResults?.results || []) {
+      const k = keyOf(r);
+      if (!byKey.has(k)) byKey.set(k, r);
+    }
+    return Array.from(byKey.values());
+  }, [localSearchResults, searchResults]);
 
   const refreshCacheFlags = useCallback(async () => {
     const absIds = new Set<string>();
@@ -1620,7 +1732,9 @@ export default function MyLibrary() {
         <div>
           <div className="flex items-center gap-3 mb-3 flex-wrap">
             <h2 className="text-sm font-medium text-gray-400">
-              {searchLoading ? "Searching..." : `Results for "${debouncedQuery}"`}
+              {searchLoading && mergedSearchResults.length === 0
+                ? "Searching..."
+                : `Results for "${debouncedQuery}"`}
             </h2>
             <div className="flex gap-1 bg-gray-800/30 p-0.5 rounded-md">
               {(["all", "audiobooks", "ebooks"] as const).map((m) => (
@@ -1636,9 +1750,9 @@ export default function MyLibrary() {
               ))}
             </div>
           </div>
-          {searchResults?.results && searchResults.results.length > 0 ? (
+          {mergedSearchResults.length > 0 ? (
             <div className="space-y-1">
-              {searchResults.results.map((r, i) => (
+              {mergedSearchResults.map((r, i) => (
                 <button
                   key={`${r.source}-${r.itemId || r.libraryItemId || r.seriesId || i}`}
                   onClick={() => {
@@ -1699,7 +1813,7 @@ export default function MyLibrary() {
                 </button>
               ))}
             </div>
-          ) : !searchLoading ? (
+          ) : !searchLoading || localSearchResults.length === 0 ? (
             <p className="text-sm text-gray-500 text-center py-12">No results found</p>
           ) : null}
         </div>

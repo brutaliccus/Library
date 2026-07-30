@@ -7,8 +7,9 @@ import {
   useEffect,
   type ReactNode,
 } from "react";
+import axios from "axios";
 import api from "../api/client";
-import { toAbsoluteUrl } from "../api/instanceUrl";
+import { getApiBaseUrl, toAbsoluteUrl } from "../api/instanceUrl";
 import { clearMediaSessionPlayback } from "../media/playerMediaSession";
 import { indexOfChapterAtTime } from "../utils/playerNav";
 import {
@@ -850,8 +851,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
 
       // Guest share link: public play payload, no ABS session / server progress.
+      // Use bare axios so a stale library JWT cannot 401 → bounce to /libraries.
       if (opts?.shareToken) {
-        const { data } = await api.post(`/share/${encodeURIComponent(opts.shareToken)}/play`);
+        const { data } = await axios.post(
+          `${getApiBaseUrl()}/share/${encodeURIComponent(opts.shareToken)}/play`
+        );
         const np = withAbsoluteMediaUrls({
           source: "abs",
           itemId,

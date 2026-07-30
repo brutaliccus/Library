@@ -1128,24 +1128,27 @@ async def search_library_unified(
                 "itemId": iid,
             })
 
-        all_abs = await audiobookshelf.get_all_items()
-        for item in all_abs:
-            iid = item.get("itemId", "")
-            if iid in seen_abs_ids:
-                continue
-            title = item.get("title", "")
-            if _is_hidden(title, hidden_titles):
-                continue
-            if not _tokens_match_metadata(item, tokens):
-                continue
-            seen_abs_ids.add(iid)
-            results.append({
-                "title": title,
-                "author": item.get("author", ""),
-                "coverUrl": item.get("coverUrl", ""),
-                "source": "abs",
-                "itemId": iid,
-            })
+        # Enrich from warm ABS cache only — never block search on a full library pull
+        # (that was ~20s cold). Genre/narrator/ASIN matches still work when cache is warm.
+        cached_abs = audiobookshelf.peek_cached_all_items()
+        if cached_abs:
+            for item in cached_abs:
+                iid = item.get("itemId", "")
+                if iid in seen_abs_ids:
+                    continue
+                title = item.get("title", "")
+                if _is_hidden(title, hidden_titles):
+                    continue
+                if not _tokens_match_metadata(item, tokens):
+                    continue
+                seen_abs_ids.add(iid)
+                results.append({
+                    "title": title,
+                    "author": item.get("author", ""),
+                    "coverUrl": item.get("coverUrl", ""),
+                    "source": "abs",
+                    "itemId": iid,
+                })
 
     if include_ebooks:
         # Prefer collection items (seriesName / genres already stamped).
@@ -1176,45 +1179,9 @@ async def search_library_unified(
                     "chapterId": item.get("chapterId"),
                 })
         else:
-            kavita_series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS)
-            for s in kavita_series:
-                name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
-                if not name or _is_hidden(name, hidden_titles):
-                    continue
-                author = (s.get("authors") or [{}])[0].get("name", "") if s.get("authors") else ""
-                probe = {"title": name, "author": author}
-                if not _tokens_match_metadata(probe, tokens):
-                    continue
-                sid = s.get("id")
-                if sid in seen_kavita_ids:
-                    continue
-                seen_kavita_ids.add(sid)
-                volumes = await kavita.get_series_volumes(sid)
-                book_num = kavita_ebook_match._book_number_from_text(name)
-                chapter_id = kavita_ebook_match._pick_chapter_id(volumes, book_num)
-                volume_id: int | None = None
-                for vol in volumes:
-                    chapters = vol.get("chapters", [])
-                    if chapters and chapters[0].get("id") == chapter_id:
-                        volume_id = vol.get("id")
-                        break
-                    if chapter_id is None and chapters:
-                        chapter_id = chapters[0].get("id")
-                        volume_id = vol.get("id")
-                        break
-                cover_url = f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else ""
-                if cover_url and volume_id:
-                    cover_url += f"&volumeId={volume_id}"
-                if cover_url and chapter_id:
-                    cover_url += f"&chapterId={chapter_id}"
-                results.append({
-                    "title": name,
-                    "author": author,
-                    "coverUrl": cover_url,
-                    "source": "kavita",
-                    "seriesId": sid,
-                    "chapterId": chapter_id,
-                })
+            # Avoid per-series volume fetches during search (very slow). Collection
+            # is the indexed path; if it's empty, return ABS/RD hits only.
+            logger.debug("Kavita collection empty during search; skipping series fallback")
 
     # RD streaming library: include for "all" or "audiobooks"
     if media in ("all", "audiobooks"):

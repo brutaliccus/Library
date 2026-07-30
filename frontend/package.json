@@ -22,6 +22,7 @@
     "@capgo/capacitor-media-session": "^8.0.28",
     "@tanstack/react-query": "^5.62.0",
     "axios": "^1.7.9",
+    "foliate-js": "^1.0.1",
     "lucide-react": "^0.468.0",
     "pdfjs-dist": "^6.1.200",
     "react": "^18.3.1",

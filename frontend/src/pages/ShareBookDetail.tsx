@@ -135,8 +135,8 @@ export default function ShareBookDetail() {
     return (
       <div className="max-w-5xl mx-auto px-4 py-16 text-center">
         <p className="text-gray-400">This shared book link is invalid or no longer available.</p>
-        <Link to="/libraries" className="text-brand-400 hover:text-brand-300 mt-4 inline-block">
-          Go to Libraries
+        <Link to="/" className="text-brand-400 hover:text-brand-300 mt-4 inline-block">
+          Back to home
         </Link>
       </div>
     );

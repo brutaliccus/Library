@@ -105,7 +105,17 @@ api.interceptors.response.use(
           localStorage.removeItem("username");
           localStorage.removeItem("must_change_password");
           localStorage.removeItem("must_set_email");
-          window.location.href = "/libraries";
+          // Guest share / shared-read must not dump users on the library picker.
+          const path = window.location.pathname || "";
+          const qs = window.location.search || "";
+          const onShareSurface =
+            path.startsWith("/share/") ||
+            path.startsWith("/libraries") ||
+            path.startsWith("/login") ||
+            (path.startsWith("/read/") && /[?&]share=/.test(qs));
+          if (!onShareSurface) {
+            window.location.href = "/libraries";
+          }
         }
       } else {
         if (isLikelyOffline()) {
@@ -116,10 +126,13 @@ api.interceptors.response.use(
         localStorage.removeItem("username");
         localStorage.removeItem("must_change_password");
         localStorage.removeItem("must_set_email");
+        const path = window.location.pathname || "";
+        const qs = window.location.search || "";
         if (
-          !window.location.pathname.startsWith("/login") &&
-          !window.location.pathname.startsWith("/libraries") &&
-          !window.location.pathname.startsWith("/share/")
+          !path.startsWith("/login") &&
+          !path.startsWith("/libraries") &&
+          !path.startsWith("/share/") &&
+          !(path.startsWith("/read/") && /[?&]share=/.test(qs))
         ) {
           window.location.href = "/libraries";
         }

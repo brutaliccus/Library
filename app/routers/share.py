@@ -394,3 +394,33 @@ async def share_ebook_book_page(
     if html is None:
         raise HTTPException(status_code=404, detail="Page not found")
     return Response(content=html, media_type="text/html; charset=utf-8")
+
+@router.get("/{token}/ebook/file")
+async def share_ebook_file(token: str, db: AsyncSession = Depends(get_db)):
+    """Public: stream source EPUB/PDF for guest Read (foliate-js / pdf.js)."""
+    from fastapi.responses import FileResponse
+
+    share = await _get_active_share(db, token)
+    if (share.media_type or "") != "ebook" or not share.kavita_chapter_id:
+        raise HTTPException(status_code=404, detail="Ebook share not found")
+    path = await kavita.get_chapter_file_path(share.kavita_chapter_id)
+    if not path or not path.is_file():
+        raise HTTPException(status_code=404, detail="Book file not found")
+    media_types = {
+        ".pdf": "application/pdf",
+        ".epub": "application/epub+zip",
+        ".mobi": "application/x-mobipocket-ebook",
+        ".azw3": "application/vnd.amazon.ebook",
+        ".cbz": "application/vnd.comicbook+zip",
+        ".cbr": "application/vnd.comicbook-rar",
+    }
+    media_type = media_types.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "Content-Disposition": "inline",
+            "Accept-Ranges": "bytes",
+        },
+    )

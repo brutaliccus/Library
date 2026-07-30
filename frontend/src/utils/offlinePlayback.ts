@@ -321,7 +321,9 @@ export async function isEbookOfflineReady(chapterId: number): Promise<boolean> {
     return isEbookCached(chapterId, true);
   }
   if (m.isPdf) return isEbookCached(chapterId, true);
-  // EPUB needs Kavita HTML pages offline — source .epub alone is not enough.
+  // EPUB reader opens the source file via foliate-js.
+  if (await isEbookCached(chapterId, false)) return true;
+  // Legacy HTML-page cache from the old custom pager.
   if (m.pagesCached) return true;
   if (await areEbookPagesCached(chapterId, m.pages)) return true;
   return false;

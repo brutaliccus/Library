@@ -25,7 +25,6 @@ import {
   saveEbookOfflineManifest,
   saveRdOfflineManifest,
 } from "./offlinePlayback";
-import { cacheAllEbookPages } from "./ebookPageCache";
 import type { AbsChapter, Track } from "../types/player";
 
 /** Kavita MangaFormat Pdf = 4 */
@@ -264,25 +263,21 @@ export async function downloadEbookOffline(opts: {
     return;
   }
 
-  // EPUB: cache source file (optional re-open) + all HTML pages for the reader.
-  void cacheBookEbook(opts.chapterId, false, { immediate: true });
-  if (pages <= 0) {
-    throw new Error("Could not determine ebook page count — try again while online");
+  // EPUB: cache the source .epub for foliate-js (same pattern as PDF).
+  opts.onProgress?.(0, 1);
+  const ok = await cacheBookEbook(opts.chapterId, false, { immediate: true });
+  if (!ok && !(await isEbookCached(opts.chapterId, false))) {
+    throw new Error("Ebook download failed — try again while online");
   }
-  const pagesOk = await cacheAllEbookPages(opts.chapterId, pages, {
-    onProgress: opts.onProgress,
-  });
-  if (!pagesOk) {
-    throw new Error("Ebook download incomplete — try again while online");
-  }
+  opts.onProgress?.(1, 1);
   saveEbookOfflineManifest({
     chapterId: opts.chapterId,
     title,
     author: opts.author || "",
     coverUrl: opts.coverUrl || "",
     isPdf: false,
-    pages,
-    pagesCached: true,
+    pages: pages || undefined,
+    pagesCached: false,
   });
 }
 

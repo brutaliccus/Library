@@ -4,11 +4,13 @@ import axios from "axios";
 import api from "../api/client";
 import { getApiBaseUrl, toAbsoluteUrl } from "../api/instanceUrl";
 import PdfViewer from "../components/PdfViewer";
-import { cacheBookEbook } from "../utils/ebookCache";
-import {
-  cacheEbookPageHtml,
-  getCachedEbookPage,
-} from "../utils/ebookPageCache";
+import EpubViewer, {
+  epubViewGo,
+  epubViewGoTo,
+  type EpubLocation,
+  type EpubTocItem,
+} from "../components/EpubViewer";
+import { cacheBookEbook, getCachedEbookObjectUrl } from "../utils/ebookCache";
 import {
   getEbookOfflineManifest,
   isEbookOfflineReady,
@@ -37,7 +39,6 @@ const FONT_SIZE_MAX = 32;
 const FONT_SIZE_STEP = 2;
 
 interface ReaderSettings {
-  /** Point size (10–32). Legacy small/medium/large values are migrated on load. */
   fontSize: number;
   fontFamily: "serif" | "sans-serif" | "monospace";
 }
@@ -98,82 +99,50 @@ interface BookInfo {
   seriesFormat?: number;
 }
 
-interface ChapterItem {
-  title?: string;
-  part?: string;
-  page: number;
-  children?: ChapterItem[];
-}
-
-const SWIPE_THRESHOLD = 60;
-
 export default function Ereader() {
   const { chapterId } = useParams<{ chapterId: string }>();
   const [searchParams] = useSearchParams();
   const shareToken = (searchParams.get("share") || "").trim() || null;
   const navigate = useNavigate();
+  const cid = chapterId ? parseInt(chapterId, 10) : NaN;
+
   const [bookInfo, setBookInfo] = useState<BookInfo | null>(null);
-  const [chapters, setChapters] = useState<ChapterItem[]>([]);
-  const [page, setPage] = useState(0);
-  const [content, setContent] = useState<string>("");
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [tocOpen, setTocOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettingsState] = useState<ReaderSettings>(loadSettings);
   const [fullscreen, setFullscreen] = useState(false);
-  /** In fullscreen, chrome (header/footer) is hidden until center-tap reveals it. */
   const [chromeHidden, setChromeHidden] = useState(false);
-  const [viewportPage, setViewportPage] = useState(0);
-  const [totalViewportPages, setTotalViewportPages] = useState(1);
-  const [pageHeight, setPageHeight] = useState(400);
-  const [pageOffsets, setPageOffsets] = useState<number[]>([0]);
-  const [contentHeight, setContentHeight] = useState(0);
+  const [epubSource, setEpubSource] = useState<File | Blob | string | null>(null);
+  const [epubToc, setEpubToc] = useState<EpubTocItem[]>([]);
+  const [locationLabel, setLocationLabel] = useState("");
+  const [pdfPage, setPdfPage] = useState(0);
   const [pdfPageCount, setPdfPageCount] = useState(0);
-  const pageCache = useRef<Map<number, string>>(new Map());
-  const pageObjectUrls = useRef<string[]>([]);
 
-  const contentRef = useRef<HTMLDivElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const touchStartX = useRef<number>(0);
-  const touchStartY = useRef<number>(0);
-  const pendingRestore = useRef<{ page: number; viewportPage: number } | null>(null);
-  /** Fraction through content (0–1) to restore after font-size / remasure. */
-  const positionAnchorRef = useRef<number | null>(null);
+  const epubHostRef = useRef<HTMLDivElement>(null);
+  const lastLocRef = useRef<EpubLocation | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const initialCfiRef = useRef<string | null>(null);
+
   const showChrome = !fullscreen || !chromeHidden;
-
-  const cid = chapterId ? parseInt(chapterId, 10) : NaN;
+  const isPdf = bookInfo?.seriesFormat === KAVITA_PDF_FORMAT;
 
   const readerGet = useCallback(
-    async <T,>(path: string, opts?: { responseType?: "text" | "json"; params?: Record<string, unknown> }) => {
+    async <T,>(path: string, config?: { params?: Record<string, unknown>; responseType?: "text" | "blob" | "json" }) => {
       if (shareToken) {
-        const base = getApiBaseUrl();
-        const url = `${base}/share/${encodeURIComponent(shareToken)}/ebook/${path}`;
-        const { data } = await axios.get(url, {
-          params: opts?.params,
-          responseType: opts?.responseType === "text" ? "text" : "json",
-        });
-        return data as T;
+        const { data } = await axios.get<T>(
+          `${getApiBaseUrl()}/share/${encodeURIComponent(shareToken)}/ebook/${path}`,
+          config
+        );
+        return data;
       }
-      const { data } = await api.get(`/library/reader/${cid}/${path}`, {
-        params: opts?.params,
-        responseType: opts?.responseType === "text" ? "text" : undefined,
-      });
-      return data as T;
+      const { data } = await api.get<T>(`/library/reader/${cid}/${path}`, config);
+      return data;
     },
-    [shareToken, cid]
+    [cid, shareToken]
   );
-
-  const revokePageObjectUrls = useCallback(() => {
-    for (const u of pageObjectUrls.current) {
-      try {
-        URL.revokeObjectURL(u);
-      } catch {
-        /* ignore */
-      }
-    }
-    pageObjectUrls.current = [];
-  }, []);
 
   const setSettings = useCallback((s: ReaderSettings | ((prev: ReaderSettings) => ReaderSettings)) => {
     setSettingsState((prev) => {
@@ -183,498 +152,193 @@ export default function Ereader() {
     });
   }, []);
 
-  const handlePdfReady = useCallback((total: number) => {
-    setPdfPageCount(total);
-  }, []);
-
-  const applyProgressRestore = useCallback((chapter: number) => {
-    const prog = getProgress(chapter);
-    if (prog) {
-      setPage(prog.page);
-      setViewportPage(prog.viewportPage);
-      pendingRestore.current = { page: prog.page, viewportPage: prog.viewportPage };
-    } else {
-      setPage(0);
-      setViewportPage(0);
-      pendingRestore.current = null;
-    }
-  }, []);
-
-  const loadBookInfo = useCallback(async () => {
-    if (!cid || isNaN(cid)) return;
-    try {
-      const data = await readerGet<BookInfo>("book-info");
-      setBookInfo(data);
-      applyProgressRestore(cid);
-      setError(null);
-    } catch (e: unknown) {
-      // Offline / unreachable: hydrate from Save-offline manifest (same idea as audio).
-      if (shareToken) {
-        setError("Failed to load shared book");
-        return;
-      }
-      const manifest = getEbookOfflineManifest(cid);
-      const ready = manifest ? await isEbookOfflineReady(cid) : false;
-      if (manifest && ready && (isLikelyOffline() || isNetworkError(e))) {
-        setBookInfo({
-          bookTitle: manifest.title,
-          seriesName: manifest.title,
-          pages: manifest.pages || (manifest.isPdf ? 0 : 1),
-          seriesFormat: manifest.isPdf ? KAVITA_PDF_FORMAT : 3,
-        });
-        applyProgressRestore(cid);
-        setError(null);
-        return;
-      }
-      setError(
-        ready
-          ? "Failed to load book"
-          : "Failed to load book — save this ebook while online to read offline"
-      );
-    }
-  }, [cid, applyProgressRestore, readerGet, shareToken]);
-
-  const loadChapters = useCallback(async () => {
-    if (!cid || isNaN(cid)) return;
-    try {
-      const data = await readerGet<ChapterItem[] | { chapters?: ChapterItem[] }>("chapters");
-      const list = Array.isArray(data) ? data : data?.chapters || [];
-      setChapters(list);
-    } catch {
-      setChapters([]);
-    }
-  }, [cid, readerGet]);
-
-  const loadPage = useCallback(
-    async (p: number) => {
-      if (!cid || isNaN(cid)) return;
-      const cached = pageCache.current.get(p);
-      if (cached) {
-        revokePageObjectUrls();
-        setContent(cached);
-        setViewportPage(0);
-        setLoading(false);
-        return;
-      }
-      setLoading(true);
+  const revokeObjectUrl = useCallback(() => {
+    if (objectUrlRef.current) {
       try {
-        const data = await readerGet<string>("book-page", {
-          params: { page: p },
-          responseType: "text",
-        });
-        pageCache.current.set(p, data);
-        revokePageObjectUrls();
-        setContent(data);
-        setViewportPage(0);
-        if (!shareToken) void cacheEbookPageHtml(cid, p, data);
+        URL.revokeObjectURL(objectUrlRef.current);
+      } catch {
+        /* ignore */
+      }
+      objectUrlRef.current = null;
+    }
+  }, []);
+
+  const persistEpubProgress = useCallback(() => {
+    if (!cid || !bookInfo || shareToken) return;
+    const loc = lastLocRef.current;
+    if (!loc?.cfi) return;
+    saveProgress({
+      chapterId: cid,
+      page: Math.max(0, Math.round((loc.fraction || 0) * 10000)),
+      viewportPage: Math.max(0, loc.sectionIndex || 0),
+      totalViewportPages: loc.locationTotal,
+      totalKavitaPages: bookInfo.pages,
+      bookTitle: bookInfo.bookTitle,
+      seriesName: bookInfo.seriesName,
+      coverUrl: toAbsoluteUrl(`/api/library/reader/cover/chapter/${cid}`),
+      cfi: loc.cfi,
+    });
+  }, [cid, bookInfo, shareToken]);
+
+  const persistPdfProgress = useCallback(() => {
+    if (!cid || !bookInfo || shareToken) return;
+    saveProgress({
+      chapterId: cid,
+      page: pdfPage,
+      viewportPage: 0,
+      totalViewportPages: 1,
+      totalKavitaPages: pdfPageCount || bookInfo.pages,
+      bookTitle: bookInfo.bookTitle,
+      seriesName: bookInfo.seriesName,
+      coverUrl: toAbsoluteUrl(`/api/library/reader/cover/chapter/${cid}`),
+    });
+  }, [cid, bookInfo, shareToken, pdfPage, pdfPageCount]);
+
+  useEffect(() => {
+    if (!cid || isNaN(cid)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await readerGet<BookInfo>("book-info");
+        if (cancelled) return;
+        setBookInfo(data);
+        setError(null);
+        const prog = getProgress(cid);
+        if (data.seriesFormat === KAVITA_PDF_FORMAT) {
+          setPdfPage(prog?.page ?? 0);
+        } else {
+          initialCfiRef.current = prog?.cfi || null;
+        }
       } catch (e: unknown) {
+        if (cancelled) return;
         if (shareToken) {
-          setError("Failed to load page");
-          setLoading(false);
+          setError("Failed to load shared book");
           return;
         }
-        const offlinePage = await getCachedEbookPage(cid, p);
-        if (offlinePage) {
-          pageCache.current.set(p, offlinePage.html);
-          revokePageObjectUrls();
-          pageObjectUrls.current = offlinePage.objectUrls;
-          setContent(offlinePage.html);
-          setViewportPage(0);
+        const manifest = getEbookOfflineManifest(cid);
+        const ready = manifest ? await isEbookOfflineReady(cid) : false;
+        if (manifest && ready && (isLikelyOffline() || isNetworkError(e))) {
+          setBookInfo({
+            bookTitle: manifest.title,
+            seriesName: manifest.title,
+            pages: manifest.pages || (manifest.isPdf ? 0 : 1),
+            seriesFormat: manifest.isPdf ? KAVITA_PDF_FORMAT : 3,
+          });
+          const prog = getProgress(cid);
+          if (manifest.isPdf) setPdfPage(prog?.page ?? 0);
+          else initialCfiRef.current = prog?.cfi || null;
           setError(null);
-        } else {
-          setError(
-            isLikelyOffline() || isNetworkError(e)
-              ? "Page not available offline — re-save this ebook while online"
-              : "Failed to load page"
-          );
+          return;
         }
-      } finally {
+        setError(
+          ready
+            ? "Failed to load book"
+            : "Failed to load book — save this ebook while online to read offline"
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cid, readerGet, shareToken]);
+
+  // Load EPUB bytes (cache → network).
+  useEffect(() => {
+    if (!bookInfo || isPdf || !cid || isNaN(cid)) return;
+    let cancelled = false;
+    setLoading(true);
+    setEpubSource(null);
+    revokeObjectUrl();
+
+    (async () => {
+      try {
+        if (!shareToken) {
+          const cached = await getCachedEbookObjectUrl(cid, false);
+          if (cancelled) {
+            if (cached) URL.revokeObjectURL(cached);
+            return;
+          }
+          if (cached) {
+            objectUrlRef.current = cached;
+            setEpubSource(cached);
+            setLoading(false);
+            return;
+          }
+        }
+
+        const blob = await readerGet<Blob>("file", { responseType: "blob" });
+        if (cancelled) return;
+        if (!(blob instanceof Blob) || blob.size < 100) {
+          throw new Error("Empty ebook file");
+        }
+        setEpubSource(blob);
+        setLoading(false);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        setError(
+          isLikelyOffline() || isNetworkError(e)
+            ? "Ebook not available offline — re-save while online"
+            : "Failed to load ebook file"
+        );
         setLoading(false);
       }
-    },
-    [cid, revokePageObjectUrls, readerGet, shareToken]
-  );
+    })();
 
-  // Prefetch next pages in background
-  const prefetchPages = useCallback(
-    (current: number) => {
-      if (!cid || isNaN(cid) || !bookInfo || bookInfo.seriesFormat === KAVITA_PDF_FORMAT) return;
-      const total = bookInfo.pages ?? 0;
-      for (let i = 1; i <= 2; i++) {
-        const next = current + i;
-        if (next < total && !pageCache.current.has(next)) {
-          readerGet<string>("book-page", { params: { page: next }, responseType: "text" })
-            .then((data) => {
-              pageCache.current.set(next, data);
-              if (!shareToken) void cacheEbookPageHtml(cid, next, data);
-            })
-            .catch(() => {});
-        }
-      }
-    },
-    [cid, bookInfo, readerGet, shareToken]
-  );
+    return () => {
+      cancelled = true;
+    };
+  }, [bookInfo, isPdf, cid, shareToken, readerGet, revokeObjectUrl]);
 
   useEffect(() => {
-    if (!cid || isNaN(cid)) {
-      setError("Invalid chapter");
-      setLoading(false);
-      return;
-    }
-    setError(null);
-    setLoading(true);
-    Promise.all([loadBookInfo(), loadChapters()]).finally(() => setLoading(false));
-  }, [cid, loadBookInfo, loadChapters]);
-
-  useEffect(() => {
-    if (cid && !isNaN(cid)) {
-      pageCache.current.clear();
-      setPdfPageCount(0);
-      revokePageObjectUrls();
-    }
-  }, [cid, revokePageObjectUrls]);
-
-  useEffect(() => () => revokePageObjectUrls(), [revokePageObjectUrls]);
-
-  useEffect(() => {
-    if (!bookInfo || !cid || isNaN(cid)) return;
+    if (!bookInfo || !cid || isNaN(cid) || shareToken) return;
     if (isLikelyOffline()) return;
-    const isPdf = bookInfo.seriesFormat === KAVITA_PDF_FORMAT;
     saveEbookOfflineManifest({
       chapterId: cid,
       title: bookInfo.bookTitle || bookInfo.seriesName || "Ebook",
       author: "",
       coverUrl: toAbsoluteUrl(`/api/library/reader/cover/chapter/${cid}`),
-      isPdf,
+      isPdf: !!isPdf,
       pages: bookInfo.pages,
-      pagesCached: isPdf ? undefined : getEbookOfflineManifest(cid)?.pagesCached,
     });
-    void cacheBookEbook(cid, isPdf);
-  }, [bookInfo, cid]);
+    void cacheBookEbook(cid, !!isPdf);
+  }, [bookInfo, cid, shareToken, isPdf]);
 
   useEffect(() => {
-    if (bookInfo?.seriesFormat === KAVITA_PDF_FORMAT) {
-      setError(null);
-      setLoading(false);
-      return;
-    }
-    if (bookInfo) {
-      loadPage(page);
-      prefetchPages(page);
-    }
-  }, [bookInfo, page, loadPage, prefetchPages]);
+    if (!cid || !bookInfo || loading || shareToken) return;
+    const save = isPdf ? persistPdfProgress : persistEpubProgress;
+    saveTimerRef.current = setTimeout(save, 500);
+    return () => clearTimeout(saveTimerRef.current);
+  }, [
+    cid,
+    bookInfo,
+    loading,
+    shareToken,
+    isPdf,
+    pdfPage,
+    pdfPageCount,
+    locationLabel,
+    persistPdfProgress,
+    persistEpubProgress,
+  ]);
 
   useEffect(() => {
-    if (bookInfo?.seriesFormat === KAVITA_PDF_FORMAT || loading) return;
-    if (bookInfo) {
-      prefetchPages(page);
-    }
-  }, [bookInfo, page, loading, prefetchPages]);
-
-  useEffect(() => {
-    if (content) {
-      // Keep offsets and page-count in sync so goNext cannot scroll past
-      // content (blank pages) or fall through into Kavita chapter jumps.
-      setPageOffsets([0]);
-      setTotalViewportPages(1);
-      setViewportPage(0);
-    }
-  }, [content]);
-
-  // Restore viewportPage after content and measure (for resume)
-  // Don't restore when totalViewportPages is still 1 (initial) — measure hasn't run yet and we'd clamp to 0
-  useEffect(() => {
-    const pending = pendingRestore.current;
-    if (!pending || loading || !content || totalViewportPages <= 0) return;
-    if (page !== pending.page) {
-      pendingRestore.current = null;
-      return;
-    }
-    if (totalViewportPages === 1 && pending.viewportPage > 0) return; // wait for measure
-    const target = Math.min(pending.viewportPage, totalViewportPages - 1);
-    setViewportPage(target);
-    pendingRestore.current = null;
-  }, [content, loading, page, totalViewportPages]);
-
-  // Save progress when page/viewportPage changes (debounced)
-  const saveProgressRef = useRef<ReturnType<typeof setTimeout>>();
-  const saveProgressImmediate = useCallback(() => {
-    if (!cid || !bookInfo) return;
-    saveProgress({
-      chapterId: cid,
-      page,
-      viewportPage,
-      totalViewportPages,
-      totalKavitaPages: bookInfo.pages,
-      bookTitle: bookInfo.bookTitle,
-      seriesName: bookInfo.seriesName,
-      coverUrl: toAbsoluteUrl(`/api/library/reader/cover/chapter/${cid}`),
-    });
-  }, [cid, bookInfo, page, viewportPage, totalViewportPages]);
-
-  useEffect(() => {
-    if (!cid || !bookInfo || loading) return;
-    saveProgressRef.current = setTimeout(saveProgressImmediate, 500);
-    return () => clearTimeout(saveProgressRef.current);
-  }, [cid, bookInfo, page, viewportPage, totalViewportPages, loading, saveProgressImmediate]);
-
-  // Save immediately when user leaves (tab close, navigate away) so we don't lose progress
-  useEffect(() => {
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "hidden") saveProgressImmediate();
+    const flush = () => {
+      if (isPdf) persistPdfProgress();
+      else persistEpubProgress();
     };
-    const onPageHide = () => saveProgressImmediate();
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    window.addEventListener("pagehide", onPageHide);
+    const onVis = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("pagehide", flush);
     return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("pagehide", flush);
     };
-  }, [saveProgressImmediate]);
+  }, [isPdf, persistPdfProgress, persistEpubProgress]);
 
-  // Measure viewport and split content into discrete pages at line boundaries (book-like).
-  // Chrome is an overlay — do not remasure when showChrome toggles (that was shifting pages).
-  useEffect(() => {
-    if (loading || !content) return;
-    const restoreFromAnchor = (offsets: number[], scrollH: number) => {
-      const anchor = positionAnchorRef.current;
-      if (anchor == null || scrollH <= 0 || offsets.length === 0) {
-        setViewportPage((prev) => Math.min(prev, offsets.length - 1));
-        return;
-      }
-      const targetY = anchor * scrollH;
-      let best = 0;
-      for (let i = 0; i < offsets.length; i++) {
-        if (offsets[i] <= targetY + 0.5) best = i;
-        else break;
-      }
-      setViewportPage(best);
-      positionAnchorRef.current = null;
-    };
-    const applyFixedPages = (scrollH: number, effectiveH: number) => {
-      setContentHeight(scrollH);
-      const total = Math.max(1, Math.ceil(scrollH / effectiveH));
-      const offsets = Array.from({ length: total }, (_, i) => i * effectiveH);
-      setPageOffsets(offsets);
-      setTotalViewportPages(total);
-      restoreFromAnchor(offsets, scrollH);
-    };
-    const measure = () => {
-      const containerEl = containerRef.current;
-      const contentEl = contentRef.current;
-      if (!containerEl || !contentEl) return;
-      const h = containerEl.clientHeight;
-      if (h <= 0) return;
-      const effectiveH = Math.max(1, h);
-      setPageHeight(effectiveH);
+  useEffect(() => () => revokeObjectUrl(), [revokeObjectUrl]);
 
-      // Get line rects via Range API for book-like pagination (no mid-line cuts)
-      const readerEl = contentEl.querySelector(".reader-content") ?? contentEl.firstElementChild;
-      if (!readerEl || !readerEl.childNodes.length) {
-        applyFixedPages(contentEl.scrollHeight, effectiveH);
-        return;
-      }
-
-      try {
-        const range = document.createRange();
-        range.selectNodeContents(readerEl);
-        const rects = range.getClientRects();
-        range.detach();
-
-        if (rects.length === 0) {
-          applyFixedPages(contentEl.scrollHeight, effectiveH);
-          return;
-        }
-
-        const contentTop = contentEl.getBoundingClientRect().top;
-        const lines: { top: number; bottom: number }[] = [];
-        for (let i = 0; i < rects.length; i++) {
-          const r = rects[i];
-          if (r.width > 0 && r.height > 0) {
-            lines.push({ top: r.top - contentTop, bottom: r.bottom - contentTop });
-          }
-        }
-
-        if (lines.length === 0) {
-          setContentHeight(contentEl.scrollHeight);
-          setPageOffsets([0]);
-          setTotalViewportPages(1);
-          return;
-        }
-
-        const EPS = 0.5;
-        const offsets: number[] = [0];
-        let pageStart = 0;
-        let pageBottom = effectiveH;
-
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          if (line.bottom <= pageBottom + EPS) continue;
-
-          // Oversized line at page start: keep it, break after it
-          if (line.top <= pageStart + EPS) {
-            if (i + 1 < lines.length) {
-              const nextStart = lines[i + 1].top;
-              if (nextStart > pageStart + EPS) {
-                offsets.push(nextStart);
-                pageStart = nextStart;
-                pageBottom = pageStart + effectiveH;
-              }
-            }
-            continue;
-          }
-
-          // Line does not fully fit — start next page here (no overlap with prior page)
-          offsets.push(line.top);
-          pageStart = line.top;
-          pageBottom = pageStart + effectiveH;
-        }
-
-        const scrollH = contentEl.scrollHeight;
-        setContentHeight(scrollH);
-        setPageOffsets(offsets);
-        setTotalViewportPages(offsets.length);
-        restoreFromAnchor(offsets, scrollH);
-      } catch {
-        applyFixedPages(contentEl.scrollHeight, effectiveH);
-      }
-    };
-    const timer = requestAnimationFrame(() => requestAnimationFrame(measure));
-    const ro = new ResizeObserver(measure);
-    const el = containerRef.current;
-    if (el) ro.observe(el);
-    return () => {
-      cancelAnimationFrame(timer);
-      ro.disconnect();
-    };
-  }, [content, loading, settings.fontSize, settings.fontFamily, fullscreen]);
-
-  const bumpFontSize = useCallback((delta: number) => {
-    setSettings((s) => {
-      const y = pageOffsets[viewportPage] ?? 0;
-      const h = contentHeight || 1;
-      positionAnchorRef.current = Math.min(1, Math.max(0, y / h));
-      return { ...s, fontSize: clampFontSize(s.fontSize + delta) };
-    });
-  }, [pageOffsets, viewportPage, contentHeight, setSettings]);
-
-  const flattenChapters = (items: ChapterItem[]): { title: string; page: number }[] => {
-    const out: { title: string; page: number }[] = [];
-    for (const c of items) {
-      out.push({ title: c.title || `Page ${c.page}`, page: c.page });
-      if (c.children?.length) {
-        out.push(...flattenChapters(c.children));
-      }
-    }
-    return out;
-  };
-
-  const flatToc = flattenChapters(chapters);
-  const isPdf = bookInfo?.seriesFormat === KAVITA_PDF_FORMAT;
-  const totalKavitaPages = isPdf
-    ? pdfPageCount || bookInfo?.pages || 0
-    : bookInfo?.pages ?? 0;
-
-  const scrollToViewport = useCallback((idx: number) => {
-    setViewportPage(idx);
-  }, []);
-
-  const goPrev = useCallback(() => {
-    if (isPdf) {
-      if (page > 0) setPage((p) => p - 1);
-      return;
-    }
-    // Prefer measured offsets length — totalViewportPages can briefly lag.
-    const last = Math.max(0, pageOffsets.length - 1);
-    const cur = Math.min(viewportPage, last);
-    if (cur > 0) {
-      scrollToViewport(cur - 1);
-    } else if (page > 0) {
-      setPage((p) => p - 1);
-    }
-  }, [isPdf, page, viewportPage, pageOffsets.length, scrollToViewport]);
-
-  const goNext = useCallback(() => {
-    if (isPdf) {
-      if (page < totalKavitaPages - 1) setPage((p) => p + 1);
-      return;
-    }
-    const last = Math.max(0, pageOffsets.length - 1);
-    const cur = Math.min(viewportPage, last);
-    if (cur < last) {
-      scrollToViewport(cur + 1);
-    } else if (page < totalKavitaPages - 1) {
-      setPage((p) => p + 1);
-    }
-  }, [isPdf, page, totalKavitaPages, viewportPage, pageOffsets.length, scrollToViewport]);
-
-  const canPrev = isPdf ? page > 0 : viewportPage > 0 || page > 0;
-  const canNext = isPdf
-    ? page < totalKavitaPages - 1
-    : viewportPage < Math.max(0, pageOffsets.length - 1) || page < totalKavitaPages - 1;
-
-  // Tap/click zones: left = prev, right = next, center = toggle chrome in fullscreen
-  const handleContentClick = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      // Ignore chrome/settings/TOC (and any leftover ghost clicks).
-      const t = e.target as HTMLElement | null;
-      if (t?.closest?.("[data-reader-chrome]")) return;
-      if (tocOpen || settingsOpen) return;
-      if (loading) return;
-      const target = e.currentTarget;
-      const rect = target.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const third = rect.width / 3;
-      if (x < third) goPrev();
-      else if (x > third * 2) goNext();
-      else if (fullscreen) setChromeHidden((h) => !h);
-    },
-    [goPrev, goNext, tocOpen, settingsOpen, fullscreen, loading]
-  );
-
-  // Swipe gestures
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    const t = e.target as HTMLElement | null;
-    if (t?.closest?.("[data-reader-chrome]")) {
-      touchStartX.current = 0;
-      touchStartY.current = 0;
-      return;
-    }
-    touchStartX.current = e.touches[0].clientX;
-    touchStartY.current = e.touches[0].clientY;
-  }, []);
-
-  const handleTouchEnd = useCallback(
-    (e: React.TouchEvent) => {
-      if (tocOpen || settingsOpen || loading) return;
-      const t = e.target as HTMLElement | null;
-      if (t?.closest?.("[data-reader-chrome]")) return;
-      if (!touchStartX.current && !touchStartY.current) return;
-      const endX = e.changedTouches[0].clientX;
-      const endY = e.changedTouches[0].clientY;
-      const diffX = endX - touchStartX.current;
-      const diffY = endY - touchStartY.current;
-      // Prefer horizontal swipe; ignore mostly-vertical moves
-      if (Math.abs(diffX) < SWIPE_THRESHOLD || Math.abs(diffX) < Math.abs(diffY)) return;
-      if (diffX > 0) goPrev();
-      else goNext();
-    },
-    [goPrev, goNext, tocOpen, settingsOpen, loading]
-  );
-
-  const jumpToKavitaPage = useCallback((rawPage: number) => {
-    // Kavita TOC page numbers match book-page indices (cover often page 0, first TOC at 1).
-    const max = Math.max(0, (bookInfo?.pages ?? 1) - 1);
-    const next = Math.min(max, Math.max(0, Math.floor(Number(rawPage) || 0)));
-    pendingRestore.current = null;
-    positionAnchorRef.current = null;
-    setViewportPage(0);
-    setPageOffsets([0]);
-    setTotalViewportPages(1);
-    setPage(next);
-  }, [bookInfo?.pages]);
-
-  // Fullscreen / locked reading mode — hide chrome so only text fills the viewport
   const toggleFullscreen = useCallback(async () => {
     try {
       if (document.fullscreenElement) {
@@ -687,9 +351,8 @@ export default function Ereader() {
         setChromeHidden(true);
       }
     } catch {
-      // Some WebViews block Fullscreen API — still enter locked chrome-hidden mode
-      setFullscreen((prev) => {
-        const next = !prev;
+      setFullscreen((f) => {
+        const next = !f;
         setChromeHidden(next);
         return next;
       });
@@ -697,41 +360,59 @@ export default function Ereader() {
   }, []);
 
   useEffect(() => {
-    const onFullscreenChange = () => {
-      const on = !!document.fullscreenElement;
-      setFullscreen(on);
-      if (!on) setChromeHidden(false);
-      else setChromeHidden(true);
+    const onFs = () => {
+      if (!document.fullscreenElement) {
+        setFullscreen(false);
+        setChromeHidden(false);
+      }
     };
-    document.addEventListener("fullscreenchange", onFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // Lock orientation to portrait on mobile (respects user preference to prevent unwanted rotation)
-  useEffect(() => {
-    let unlocked = false;
-    const orient = screen.orientation as ScreenOrientation & { lock?: (mode: string) => Promise<void>; unlock?: () => void };
-    const doLock = async () => {
-      try {
-        if (typeof orient?.lock === "function") {
-          await orient.lock("portrait");
-          unlocked = true;
-        }
-      } catch {
-        /* lock requires fullscreen on some browsers */
-      }
-    };
-    doLock();
-    return () => {
-      if (unlocked && typeof orient?.unlock === "function") {
-        try {
-          orient.unlock();
-        } catch {
-          /* ignore */
-        }
-      }
-    };
+  const goPrev = useCallback(() => {
+    if (isPdf) {
+      setPdfPage((p) => Math.max(0, p - 1));
+      return;
+    }
+    epubViewGo(epubHostRef.current, "prev");
+  }, [isPdf]);
+
+  const goNext = useCallback(() => {
+    if (isPdf) {
+      const max = Math.max(0, (pdfPageCount || bookInfo?.pages || 1) - 1);
+      setPdfPage((p) => Math.min(max, p + 1));
+      return;
+    }
+    epubViewGo(epubHostRef.current, "next");
+  }, [isPdf, pdfPageCount, bookInfo?.pages]);
+
+  const handleRelocate = useCallback((loc: EpubLocation) => {
+    lastLocRef.current = loc;
+    const pct = Math.round((loc.fraction || 0) * 100);
+    const label = loc.tocLabel || (loc.locationTotal ? `${loc.locationCurrent ?? "?"} / ${loc.locationTotal}` : "");
+    setLocationLabel(label ? `${label} · ${pct}%` : `${pct}%`);
   }, []);
+
+  const jumpToc = useCallback((href: string) => {
+    epubViewGoTo(epubHostRef.current, href);
+    setTocOpen(false);
+  }, []);
+
+  const renderToc = (items: EpubTocItem[], depth = 0) =>
+    items.map((item, i) => (
+      <div key={`${item.href}-${i}`}>
+        <button
+          type="button"
+          onClick={() => jumpToc(item.href)}
+          className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 rounded-lg"
+          style={{ paddingLeft: 12 + depth * 12 }}
+        >
+          {item.label}
+        </button>
+        {item.children?.length ? renderToc(item.children, depth + 1) : null}
+      </div>
+    ));
 
   if (error) {
     return (
@@ -739,10 +420,10 @@ export default function Ereader() {
         <div className="text-center">
           <p className="text-red-400 mb-4">{error}</p>
           <button
-            onClick={() => navigate("/my-library")}
+            onClick={() => navigate(shareToken ? `/share/${encodeURIComponent(shareToken)}` : "/my-library")}
             className="px-4 py-2 bg-gray-700 text-gray-200 rounded-lg hover:bg-gray-600"
           >
-            Back to Library
+            Back
           </button>
         </div>
       </div>
@@ -752,33 +433,17 @@ export default function Ereader() {
   const containerClass = fullscreen
     ? "fixed inset-0 z-[9999] bg-gray-950 flex flex-col"
     : "h-screen bg-gray-950 flex flex-col overflow-hidden";
-
-  const pageStart = pageOffsets[Math.min(viewportPage, Math.max(0, pageOffsets.length - 1))]
-    ?? Math.min(viewportPage, Math.max(0, pageOffsets.length - 1)) * pageHeight;
-  const safeViewport = Math.min(viewportPage, Math.max(0, pageOffsets.length - 1));
-  const pageEnd =
-    safeViewport + 1 < pageOffsets.length
-      ? pageOffsets[safeViewport + 1]
-      : contentHeight > pageStart
-        ? contentHeight
-        : pageStart + pageHeight;
-  const pageClipH = Math.max(1, Math.min(pageHeight, pageEnd - pageStart));
-
   const backTarget = shareToken ? `/share/${encodeURIComponent(shareToken)}` : "/my-library";
-
-  const stopChromeEvent = (e: React.SyntheticEvent) => {
-    e.stopPropagation();
-  };
+  const stopChrome = (e: React.SyntheticEvent) => e.stopPropagation();
 
   return (
     <div className={`${containerClass} relative`}>
-      {/* Header overlays content (does not reflow pagination). */}
       {showChrome && (
         <header
           data-reader-chrome
-          onClick={stopChromeEvent}
-          onTouchStart={stopChromeEvent}
-          onTouchEnd={stopChromeEvent}
+          onClick={stopChrome}
+          onTouchStart={stopChrome}
+          onTouchEnd={stopChrome}
           className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800"
         >
           <button
@@ -793,97 +458,81 @@ export default function Ereader() {
           </h1>
           <div className="flex items-center gap-1">
             <button
-              onClick={toggleFullscreen}
+              onClick={() => void toggleFullscreen()}
               className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
               title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
             >
               {fullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
             </button>
-            <button
-              onClick={() => setSettingsOpen((o) => !o)}
-              className={`p-2 rounded-lg transition-colors ${
-                settingsOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
-              }`}
-              title="Reader settings"
-            >
-              <Settings size={20} />
-            </button>
-            <button
-              onClick={() => setTocOpen((o) => !o)}
-              className={`p-2 rounded-lg transition-colors ${
-                tocOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
-              }`}
-              title="Table of Contents"
-            >
-              {tocOpen ? <X size={20} /> : <Menu size={20} />}
-            </button>
+            {!isPdf && (
+              <button
+                onClick={() => setSettingsOpen((o) => !o)}
+                className={`p-2 rounded-lg transition-colors ${
+                  settingsOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
+                }`}
+                title="Reader settings"
+              >
+                <Settings size={20} />
+              </button>
+            )}
+            {!isPdf && (
+              <button
+                onClick={() => setTocOpen((o) => !o)}
+                className={`p-2 rounded-lg transition-colors ${
+                  tocOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
+                }`}
+                title="Table of Contents"
+              >
+                {tocOpen ? <X size={20} /> : <Menu size={20} />}
+              </button>
+            )}
           </div>
         </header>
       )}
 
       <div className="flex flex-1 overflow-hidden min-h-0 relative">
-        {/* Settings panel (overlay) */}
-        {showChrome && settingsOpen && (
+        {showChrome && settingsOpen && !isPdf && (
           <aside
             data-reader-chrome
-            onClick={stopChromeEvent}
-            onTouchStart={stopChromeEvent}
-            onTouchEnd={stopChromeEvent}
+            onClick={stopChrome}
             className="absolute top-0 bottom-0 left-0 z-20 w-64 border-r border-gray-800 bg-gray-900/95 overflow-y-auto pt-14"
           >
             <div className="p-4 space-y-4">
               <h2 className="text-xs font-semibold text-gray-500 uppercase">Reader settings</h2>
               <div>
-                <label className="block text-xs text-gray-400 mb-2">Font size</label>
-                <div className="flex items-center gap-3">
+                <div className="text-xs text-gray-400 mb-2">Font size</div>
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      bumpFontSize(-FONT_SIZE_STEP);
-                    }}
-                    disabled={settings.fontSize <= FONT_SIZE_MIN}
-                    className="p-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-40"
-                    title="Smaller"
+                    className="p-2 rounded-lg bg-gray-800 text-gray-200"
+                    onClick={() => setSettings((s) => ({ ...s, fontSize: clampFontSize(s.fontSize - FONT_SIZE_STEP) }))}
                   >
                     <Minus size={16} />
                   </button>
-                  <span className="min-w-[3rem] text-center text-sm font-medium text-gray-100 tabular-nums">
-                    {settings.fontSize}
-                  </span>
+                  <span className="text-sm text-gray-200 w-10 text-center">{settings.fontSize}</span>
                   <button
                     type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      bumpFontSize(FONT_SIZE_STEP);
-                    }}
-                    disabled={settings.fontSize >= FONT_SIZE_MAX}
-                    className="p-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-40"
-                    title="Larger"
+                    className="p-2 rounded-lg bg-gray-800 text-gray-200"
+                    onClick={() => setSettings((s) => ({ ...s, fontSize: clampFontSize(s.fontSize + FONT_SIZE_STEP) }))}
                   >
                     <Plus size={16} />
                   </button>
                 </div>
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-2">Font</label>
-                <div className="flex flex-col gap-1">
-                  {(["serif", "sans-serif", "monospace"] as const).map((fam) => (
+                <div className="text-xs text-gray-400 mb-2">Font</div>
+                <div className="space-y-1">
+                  {(Object.keys(FONT_FAMILIES) as Array<keyof typeof FONT_FAMILIES>).map((key) => (
                     <button
+                      key={key}
                       type="button"
-                      key={fam}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const y = pageOffsets[viewportPage] ?? 0;
-                        const h = contentHeight || 1;
-                        positionAnchorRef.current = Math.min(1, Math.max(0, y / h));
-                        setSettings((s) => ({ ...s, fontFamily: fam }));
-                      }}
-                      className={`px-3 py-2 rounded text-sm text-left ${
-                        settings.fontFamily === fam ? "bg-amber-600 text-white" : "bg-gray-800 text-gray-300"
+                      onClick={() => setSettings((s) => ({ ...s, fontFamily: key }))}
+                      className={`w-full text-left px-3 py-2 rounded-lg text-sm ${
+                        settings.fontFamily === key ? "bg-amber-500/20 text-amber-300" : "text-gray-300 hover:bg-gray-800"
                       }`}
+                      style={{ fontFamily: FONT_FAMILIES[key] }}
                     >
-                      {fam === "serif" ? "Serif" : fam === "sans-serif" ? "Sans-serif" : "Monospace"}
+                      {key}
                     </button>
                   ))}
                 </div>
@@ -892,119 +541,82 @@ export default function Ereader() {
           </aside>
         )}
 
-        {/* TOC sidebar (overlay) */}
-        {showChrome && tocOpen && !settingsOpen && (
+        {showChrome && tocOpen && !isPdf && (
           <aside
             data-reader-chrome
-            onClick={stopChromeEvent}
-            onTouchStart={stopChromeEvent}
-            onTouchEnd={stopChromeEvent}
-            className="absolute top-0 bottom-0 left-0 z-20 w-64 border-r border-gray-800 bg-gray-900/95 overflow-y-auto pt-14"
+            onClick={stopChrome}
+            className="absolute top-0 bottom-0 right-0 z-20 w-72 border-l border-gray-800 bg-gray-900/95 overflow-y-auto pt-14"
           >
             <div className="p-3">
-              <h2 className="text-xs font-semibold text-gray-500 uppercase mb-2">Contents</h2>
-              <ul className="space-y-1">
-                {flatToc.map((c, i) => (
-                  <li key={i}>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        jumpToKavitaPage(c.page);
-                        setTocOpen(false);
-                      }}
-                      className={`w-full text-left px-2 py-1.5 rounded text-sm truncate transition-colors ${
-                        c.page === page ? "bg-amber-600/30 text-amber-400" : "text-gray-300 hover:bg-gray-800"
-                      }`}
-                    >
-                      {c.title}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <h2 className="text-xs font-semibold text-gray-500 uppercase px-2 mb-2">Contents</h2>
+              {epubToc.length ? renderToc(epubToc) : (
+                <p className="text-sm text-gray-500 px-2">No table of contents</p>
+              )}
             </div>
           </aside>
         )}
 
-        {/* Content fills the viewport; chrome overlays top/bottom lines when visible. */}
-        <main
-          onClick={handleContentClick}
-          onTouchStart={handleTouchStart}
-          onTouchEnd={handleTouchEnd}
-          className="flex-1 overflow-hidden flex flex-col items-center min-h-0 p-0 px-4 md:px-8"
-        >
-          {isPdf ? (
-            <PdfViewer chapterId={cid} page={page} onReady={handlePdfReady} />
+        <div className="flex-1 min-w-0 min-h-0 relative">
+          {isPdf && bookInfo ? (
+            <PdfViewer
+              chapterId={cid}
+              page={pdfPage}
+              onReady={(n) => {
+                setPdfPageCount(n);
+                setLoading(false);
+              }}
+            />
+          ) : epubSource ? (
+            <div ref={epubHostRef} className="absolute inset-0">
+              <EpubViewer
+                source={epubSource}
+                initialCfi={initialCfiRef.current}
+                fontSize={settings.fontSize}
+                fontFamily={FONT_FAMILIES[settings.fontFamily]}
+                chromeMarginPx={showChrome ? 64 : 28}
+                onReady={() => setLoading(false)}
+                onError={(msg) => setError(msg)}
+                onRelocate={handleRelocate}
+                onToc={setEpubToc}
+                onCenterTap={() => {
+                  if (fullscreen) setChromeHidden((h) => !h);
+                }}
+              />
+            </div>
           ) : (
-          <div
-            ref={containerRef}
-            className="relative w-full max-w-2xl flex-1 min-h-0 py-0"
-          >
-            {loading ? (
-              <div className="flex justify-center py-12 h-full items-center">
-                <div className="animate-pulse text-gray-500">Loading...</div>
-              </div>
-            ) : (
-              <div
-                className="overflow-hidden w-full"
-                style={{ height: pageClipH }}
-              >
-                <div
-                  ref={contentRef}
-                  className="transition-transform duration-150 ease-out"
-                  style={{
-                    fontFamily: FONT_FAMILIES[settings.fontFamily],
-                    fontSize: `${settings.fontSize}px`,
-                    transform: `translateY(-${pageStart}px)`,
-                  }}
-                >
-                  <div
-                    className="reader-content max-w-2xl w-full text-gray-100 leading-relaxed prose prose-invert prose-p:my-0 max-w-none select-none [&_img]:max-w-full [&_img]:h-auto bg-transparent rounded-none px-1 py-2"
-                    dangerouslySetInnerHTML={{ __html: content }}
-                    style={{ paddingBottom: "0.5rem" }}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
+            <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-sm">
+              {loading ? "Loading…" : "Preparing reader…"}
+            </div>
           )}
-        </main>
+        </div>
       </div>
 
-      {/* Footer overlays content */}
       {showChrome && (
         <footer
           data-reader-chrome
-          onClick={stopChromeEvent}
-          onTouchStart={stopChromeEvent}
-          onTouchEnd={stopChromeEvent}
+          onClick={stopChrome}
           className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800"
         >
           <button
+            type="button"
             onClick={goPrev}
-            disabled={!canPrev}
-            className="flex items-center gap-1 px-3 py-2 rounded-lg bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800"
+            title="Previous"
           >
-            <ChevronLeft size={18} /> Previous
+            <ChevronLeft size={20} />
           </button>
-          <span className="text-sm text-gray-500">
-            {isPdf ? (
-              <>Page {page + 1}{totalKavitaPages > 0 ? ` of ${totalKavitaPages}` : ""}</>
-            ) : (
-              <>
-                Page {safeViewport + 1} of {Math.max(1, pageOffsets.length)}
-                {totalKavitaPages > 1 && (
-                  <span className="text-gray-600 ml-1">· Ch. {page + 1}/{totalKavitaPages}</span>
-                )}
-              </>
-            )}
-          </span>
+          <div className="text-xs text-gray-400 truncate max-w-[60%] text-center">
+            {isPdf
+              ? `Page ${pdfPage + 1} of ${pdfPageCount || bookInfo?.pages || "?"}`
+              : locationLabel || "—"}
+          </div>
           <button
+            type="button"
             onClick={goNext}
-            disabled={!canNext}
-            className="flex items-center gap-1 px-3 py-2 rounded-lg bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800"
+            title="Next"
           >
-            Next <ChevronRight size={18} />
+            <ChevronRight size={20} />
           </button>
         </footer>
       )}

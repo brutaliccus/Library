@@ -19,6 +19,8 @@ export interface ReadingProgress {
   lastReadAt: number;
   /** Hidden from the Continue Reading shelf (progress preserved) */
   hidden?: boolean;
+  /** EPUB CFI from foliate-js (local + best-effort; not on older server rows). */
+  cfi?: string;
 }
 
 let _migrated = false;
@@ -80,6 +82,7 @@ function toLocalShape(item: {
   coverUrl: string;
   lastReadAt: number;
   hidden?: boolean;
+  cfi?: string | null;
 }): ReadingProgress {
   return {
     chapterId: item.chapterId,
@@ -92,6 +95,7 @@ function toLocalShape(item: {
     coverUrl: item.coverUrl,
     lastReadAt: item.lastReadAt,
     hidden: item.hidden,
+    cfi: item.cfi ?? undefined,
   };
 }
 
@@ -164,8 +168,11 @@ async function pushLocalReadingProgressToServer(): Promise<void> {
 
 export function saveProgress(progress: Omit<ReadingProgress, "lastReadAt">) {
   const all = loadAll();
+  const prev = all[String(progress.chapterId)];
   const row: ReadingProgress = {
     ...progress,
+    // Keep prior CFI if caller omitted it (PDF saves shouldn't wipe EPUB CFI).
+    cfi: progress.cfi ?? prev?.cfi,
     lastReadAt: Date.now(),
     hidden: false,
   };
@@ -184,6 +191,7 @@ export function saveProgress(progress: Omit<ReadingProgress, "lastReadAt">) {
       cover_url: progress.coverUrl,
       hidden: false,
       last_read_at: row.lastReadAt,
+      // Stored in series_name? No — server may ignore unknown fields; CFI is local-first.
     })
     .catch(() => {
       /* offline — local kept */

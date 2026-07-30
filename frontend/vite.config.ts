@@ -23,4 +23,7 @@ export default defineConfig({
     outDir: "../backend/static",
     emptyOutDir: true,
   },
+  optimizeDeps: {
+    include: ["foliate-js/view.js", "construct-style-sheets-polyfill"],
+  },
 });

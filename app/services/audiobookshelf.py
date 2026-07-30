@@ -783,6 +783,15 @@ async def _fetch_library_items_all_pages(library_id: str) -> list[dict]:
     return all_results
 
 
+def peek_cached_all_items(library_id: str | None = None) -> list[dict] | None:
+    """Return ABS all-items cache if warm; never triggers a network fetch."""
+    lid = library_id or settings.abs_library_id
+    if not lid:
+        return None
+    cached = _cache_get(f"abs_all_items:{lid}")
+    return cached if isinstance(cached, list) else None
+
+
 async def get_all_items(
     library_id: str | None = None,
     *,

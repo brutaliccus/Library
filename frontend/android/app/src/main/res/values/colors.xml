@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches capacitor.config.ts android.backgroundColor / gray-950 -->
+    <color name="app_background">#030712</color>
+    <color name="colorPrimary">#0f172a</color>
+    <color name="colorPrimaryDark">#030712</color>
+    <color name="colorAccent">#38bdf8</color>
+</resources>

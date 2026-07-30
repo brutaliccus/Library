@@ -1,9 +1,9 @@
-import { normalizeThemeId, type ThemeId } from "./themes";
+import { normalizePresetThemeId, type PresetThemeId } from "./themes";
 
-let lastFaviconTheme: ThemeId | null = null;
+let lastFaviconTheme: PresetThemeId | null = null;
 
 /** Hex accents used for meta theme-color (matches icon backgrounds). */
-const THEME_META: Record<ThemeId, { themeColor: string }> = {
+const THEME_META: Record<PresetThemeId, { themeColor: string }> = {
   ocean: { themeColor: "#030712" },
   ember: { themeColor: "#100b09" },
   forest: { themeColor: "#060c08" },
@@ -37,7 +37,7 @@ function ensureLink(rel: string, sizes?: string): HTMLLinkElement {
 /** Update browser tab / PWA icon links for the active theme. */
 export function applyThemedFavicons(themeRaw: string): void {
   if (typeof document === "undefined") return;
-  const theme = normalizeThemeId(themeRaw);
+  const theme = normalizePresetThemeId(themeRaw);
   if (lastFaviconTheme === theme) return;
   lastFaviconTheme = theme;
   const bust = `v=${theme}`;
@@ -55,9 +55,10 @@ export function applyThemedFavicons(themeRaw: string): void {
   const apple = ensureLink("apple-touch-icon");
   apple.href = icon192;
 
+  const meta = THEME_META[theme] ?? THEME_META.ocean;
   setMetaContent("msapplication-TileImage", icon192);
-  setMetaContent("theme-color", THEME_META[theme].themeColor);
-  setMetaContent("msapplication-TileColor", THEME_META[theme].themeColor);
+  setMetaContent("theme-color", meta.themeColor);
+  setMetaContent("msapplication-TileColor", meta.themeColor);
 }
 
 /**
@@ -71,7 +72,7 @@ export async function applyNativeAppIconTheme(themeRaw: string): Promise<void> {
     const ThemeIcon = registerPlugin<{
       setTheme(options: { theme: string }): Promise<{ theme: string }>;
     }>("ThemeIcon");
-    await ThemeIcon.setTheme({ theme: normalizeThemeId(themeRaw) });
+    await ThemeIcon.setTheme({ theme: normalizePresetThemeId(themeRaw) });
   } catch {
     /* plugin unavailable (web / older APK) */
   }

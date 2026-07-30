@@ -6,7 +6,7 @@ import { resolveShareOrigin } from "../api/inviteLink";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import {
-  ArrowLeft, BookOpen, Headphones, Loader2, Store, Trash2, Share2,
+  ArrowLeft, BookOpen, Headphones, Loader2, Store, Trash2, Share2, TabletSmartphone,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
@@ -39,6 +39,7 @@ export default function LibraryEbookDetail() {
   const [showDelete, setShowDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
+  const [ereaderBusy, setEreaderBusy] = useState(false);
 
   const { data: item, isLoading, error } = useQuery({
     queryKey: ["kavita-item-detail", seriesId],
@@ -106,6 +107,40 @@ export default function LibraryEbookDetail() {
   };
 
   const canShare = user?.role === "admin" || !!user?.canShareBooks;
+
+  const handleSendToEreader = async () => {
+    if (!item || item.chapterId == null || !Number.isFinite(seriesId)) return;
+    setEreaderBusy(true);
+    try {
+      const { data } = await api.post("/auth/ereader/shelf", {
+        series_id: seriesId,
+        chapter_id: item.chapterId,
+        title: item.title,
+        author: item.author,
+        cover_url: item.coverUrl,
+      });
+      const added = (data as { added?: { downloadUrl?: string } })?.added;
+      const downloadUrl = (added?.downloadUrl || "").trim();
+      if (downloadUrl) {
+        try {
+          await navigator.clipboard.writeText(downloadUrl);
+          toast("Added to ereader shelf — download link copied", "success");
+        } catch {
+          toast("Added to ereader shelf — open Settings → Ereader for OPDS", "success");
+        }
+      } else {
+        toast("Added to ereader shelf — open Settings → Ereader for OPDS", "success");
+      }
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Could not send to ereader";
+      toast(typeof detail === "string" ? detail : "Could not send to ereader", "error");
+    } finally {
+      setEreaderBusy(false);
+    }
+  };
+
   const handleShare = async () => {
     if (!item || item.chapterId == null || !Number.isFinite(seriesId)) return;
     setShareBusy(true);
@@ -195,6 +230,22 @@ export default function LibraryEbookDetail() {
         >
           <BookOpen size={16} />
           Read
+        </button>
+      )}
+      {item.chapterId != null && (
+        <button
+          type="button"
+          onClick={() => void handleSendToEreader()}
+          disabled={ereaderBusy || !online}
+          title="Add to OPDS ereader shelf and copy download link"
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
+        >
+          {ereaderBusy ? (
+            <Loader2 size={16} className="animate-spin" />
+          ) : (
+            <TabletSmartphone size={16} />
+          )}
+          Send to ereader
         </button>
       )}
       {canShare && item.chapterId != null && (

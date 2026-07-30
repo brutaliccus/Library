@@ -125,7 +125,10 @@ async def _serialize_group(group: LibraryGroup, user: User, db: AsyncSession) ->
         "id": group.id,
         "name": group.name,
         "coverUrl": f"/api/libraries/{group.id}/cover" if group.cover_path else None,
-        "defaultTheme": normalize_theme(getattr(group, "default_theme", None)) or DEFAULT_THEME,
+        "defaultTheme": normalize_theme(
+            getattr(group, "default_theme", None), allow_custom=False
+        )
+        or DEFAULT_THEME,
         "role": user.library_role,
         "isOwner": group.owner_user_id == user.id,
         "canManageKeys": user.library_role == "owner",
@@ -252,7 +255,7 @@ async def create_group(
         await _validate_tokens(rd, tb)
 
     old_group_id = user.library_group_id
-    theme = normalize_theme(body.default_theme) or DEFAULT_THEME
+    theme = normalize_theme(body.default_theme, allow_custom=False) or DEFAULT_THEME
     group = LibraryGroup(
         name=name,
         owner_user_id=user.id,
@@ -373,7 +376,9 @@ async def update_branding(
             raise HTTPException(status_code=400, detail="Library name is too long")
         group.name = name
     if body.default_theme is not None:
-        group.default_theme = normalize_theme(body.default_theme) or DEFAULT_THEME
+        group.default_theme = (
+            normalize_theme(body.default_theme, allow_custom=False) or DEFAULT_THEME
+        )
     await db.commit()
     return {"library": await _serialize_group(group, user, db)}
 

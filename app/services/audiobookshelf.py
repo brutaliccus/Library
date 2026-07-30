@@ -14,6 +14,9 @@ settings = get_settings()
 
 _cache: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 300  # 5 minutes
+# Coalesce concurrent scan_library_and_wait callers onto one in-flight ABS scan.
+_scan_lock = asyncio.Lock()
+_scan_result_fut: asyncio.Future | None = None
 
 # ABS iterates metadataPrecedence low→high; last entry wins. Keep absMetadata highest
 # so LibraForge / manual ABS edits are not replaced by folder names on scan.
@@ -114,9 +117,12 @@ async def scan_library_and_wait(
     ``LibraryScanner`` runs in the background. Completion is observable when the
     library's ``lastScan`` timestamp updates (set only after a non-canceled scan).
 
+    Concurrent callers share one in-flight wait (no stacked ``POST …/scan`` on Pi).
+
     Returns keys: ``scan_ran``, ``scan_complete``, ``timed_out``, ``items_total``,
-    ``waited_seconds``, ``last_scan``.
+    ``waited_seconds``, ``last_scan``, ``coalesced``.
     """
+    global _scan_result_fut
     lid = library_id or settings.abs_library_id
     empty = {
         "scan_ran": False,
@@ -125,98 +131,129 @@ async def scan_library_and_wait(
         "items_total": None,
         "waited_seconds": 0.0,
         "last_scan": None,
+        "coalesced": False,
     }
     if not lid:
         return empty
 
-    before_lib = await get_library(lid)
-    before_last = (before_lib or {}).get("lastScan")
-    started = time.monotonic()
+    async with _scan_lock:
+        if _scan_result_fut is not None and not _scan_result_fut.done():
+            fut = _scan_result_fut
+            join = True
+        else:
+            fut = asyncio.get_running_loop().create_future()
+            _scan_result_fut = fut
+            join = False
 
-    await scan_library(lid)
-    empty["scan_ran"] = True
+    if join:
+        result = await fut
+        if isinstance(result, dict):
+            return {**result, "coalesced": True}
+        return result
 
-    # Fallback: if lastScan never moves (already-scanning race, older ABS), treat
-    # a stable item total across several polls as "done enough".
-    stable_needed = 3
-    stable_hits = 0
-    last_total: int | None = None
-    after_last = before_last
-    items_total = await get_library_item_total(lid)
+    try:
+        before_lib = await get_library(lid)
+        before_last = (before_lib or {}).get("lastScan")
+        started = time.monotonic()
 
-    while True:
-        elapsed = time.monotonic() - started
-        if elapsed >= timeout_seconds:
-            logger.warning(
-                "ABS scan wait timed out after %.1fs (library=%s lastScan=%s→%s total=%s)",
-                elapsed,
-                lid,
-                before_last,
-                after_last,
-                items_total,
-            )
-            return {
-                "scan_ran": True,
-                "scan_complete": False,
-                "timed_out": True,
-                "items_total": items_total,
-                "waited_seconds": round(elapsed, 2),
-                "last_scan": after_last,
-            }
+        await scan_library(lid)
 
-        await asyncio.sleep(poll_interval)
-
-        lib = await get_library(lid)
-        after_last = (lib or {}).get("lastScan", after_last)
+        # Fallback: if lastScan never moves (already-scanning race, older ABS), treat
+        # a stable item total across several polls as "done enough".
+        stable_needed = 3
+        stable_hits = 0
+        last_total: int | None = None
+        after_last = before_last
         items_total = await get_library_item_total(lid)
+        out: dict[str, Any] | None = None
 
-        if before_last != after_last and after_last is not None:
-            # lastScan advances only after LibraryScanner finishes successfully.
+        while out is None:
             elapsed = time.monotonic() - started
-            logger.info(
-                "ABS scan complete for %s in %.1fs (lastScan %s → %s, items=%s)",
-                lid,
-                elapsed,
-                before_last,
-                after_last,
-                items_total,
-            )
-            invalidate_cache()
-            return {
-                "scan_ran": True,
-                "scan_complete": True,
-                "timed_out": False,
-                "items_total": items_total,
-                "waited_seconds": round(elapsed, 2),
-                "last_scan": after_last,
-            }
+            if elapsed >= timeout_seconds:
+                logger.warning(
+                    "ABS scan wait timed out after %.1fs (library=%s lastScan=%s→%s total=%s)",
+                    elapsed,
+                    lid,
+                    before_last,
+                    after_last,
+                    items_total,
+                )
+                out = {
+                    "scan_ran": True,
+                    "scan_complete": False,
+                    "timed_out": True,
+                    "items_total": items_total,
+                    "waited_seconds": round(elapsed, 2),
+                    "last_scan": after_last,
+                    "coalesced": False,
+                }
+                break
 
-        if items_total is not None:
-            if items_total == last_total:
-                stable_hits += 1
-            else:
-                stable_hits = 0
-                last_total = items_total
-            # Require some wall time so we don't declare "done" on a slow start.
-            if stable_hits >= stable_needed and elapsed >= max(8.0, poll_interval * stable_needed):
+            await asyncio.sleep(poll_interval)
+
+            lib = await get_library(lid)
+            after_last = (lib or {}).get("lastScan", after_last)
+            items_total = await get_library_item_total(lid)
+
+            if before_last != after_last and after_last is not None:
+                # lastScan advances only after LibraryScanner finishes successfully.
                 elapsed = time.monotonic() - started
                 logger.info(
-                    "ABS scan inferred complete via stable item total=%s for %s after %.1fs "
-                    "(lastScan unchanged at %s)",
-                    items_total,
+                    "ABS scan complete for %s in %.1fs (lastScan %s → %s, items=%s)",
                     lid,
                     elapsed,
+                    before_last,
                     after_last,
+                    items_total,
                 )
                 invalidate_cache()
-                return {
+                out = {
                     "scan_ran": True,
                     "scan_complete": True,
                     "timed_out": False,
                     "items_total": items_total,
                     "waited_seconds": round(elapsed, 2),
                     "last_scan": after_last,
+                    "coalesced": False,
                 }
+                break
+
+            if items_total is not None:
+                if items_total == last_total:
+                    stable_hits += 1
+                else:
+                    stable_hits = 0
+                    last_total = items_total
+                # Require some wall time so we don't declare "done" on a slow start.
+                if stable_hits >= stable_needed and elapsed >= max(8.0, poll_interval * stable_needed):
+                    elapsed = time.monotonic() - started
+                    logger.info(
+                        "ABS scan inferred complete via stable item total=%s for %s after %.1fs "
+                        "(lastScan unchanged at %s)",
+                        items_total,
+                        lid,
+                        elapsed,
+                        after_last,
+                    )
+                    invalidate_cache()
+                    out = {
+                        "scan_ran": True,
+                        "scan_complete": True,
+                        "timed_out": False,
+                        "items_total": items_total,
+                        "waited_seconds": round(elapsed, 2),
+                        "last_scan": after_last,
+                        "coalesced": False,
+                    }
+
+        assert out is not None
+        if not fut.done():
+            fut.set_result(out)
+        return out
+    except BaseException as e:
+        if not fut.done():
+            fut.set_exception(e)
+        raise
 
 
 async def match_all_items(library_id: str | None = None) -> bool:

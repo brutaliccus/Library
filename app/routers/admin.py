@@ -1397,6 +1397,14 @@ async def libraforge_status(_admin: User = Depends(require_admin)):
     }
 
 
+@router.get("/kavita/opds-status")
+async def kavita_opds_status(_admin: User = Depends(require_admin)):
+    """Probe Kavita's native OPDS feed using the configured API key."""
+    from app.services import opds as opds_svc
+
+    return await opds_svc.probe_kavita_opds()
+
+
 @router.get("/kavita-debug")
 async def kavita_debug(_admin: User = Depends(require_admin)):
     """Diagnostic endpoint for Kavita ebook loading. Returns raw API response and errors."""

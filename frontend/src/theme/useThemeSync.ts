@@ -7,6 +7,7 @@ import {
   applyThemeToDocument,
   DEFAULT_THEME,
   normalizeThemeId,
+  readCachedCustomColors,
   readCachedTheme,
   type ThemeId,
 } from "./themes";
@@ -56,7 +57,10 @@ export function useThemeSync() {
 
   useEffect(() => {
     if (!settingsReady) return;
-    applyThemeToDocument(effective);
+    applyThemeToDocument(
+      effective,
+      effective === "custom" ? readCachedCustomColors() : undefined
+    );
   }, [effective, settingsReady]);
 
   useEffect(() => {

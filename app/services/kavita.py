@@ -179,10 +179,14 @@ async def get_all_series(
 
 
 async def get_series_volumes(series_id: int) -> list[dict]:
-    """Get volumes and chapters for a series."""
+    """Get volumes and chapters for a series (short-TTL cached)."""
     url, key, _ = await _conn()
     if not key:
         return []
+    cache_key = f"kavita_vols:{series_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached if isinstance(cached, list) else []
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
@@ -192,7 +196,10 @@ async def get_series_volumes(series_id: int) -> list[dict]:
                 timeout=15,
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            volumes = data if isinstance(data, list) else []
+        _cache_set(cache_key, volumes)
+        return volumes
     except Exception as e:
         logger.warning("Failed to fetch Kavita volumes for series %s: %s", series_id, e)
         return []

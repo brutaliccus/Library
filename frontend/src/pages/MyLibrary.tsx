@@ -688,6 +688,7 @@ export default function MyLibrary() {
   });
 
   const handleRefreshLibrary = useCallback(async () => {
+    if (scanning) return;
     setScanning(true);
     try {
       // Fire-and-forget ABS wait: do not block UI on scan_library_and_wait (~30–240s).
@@ -703,8 +704,9 @@ export default function MyLibrary() {
         absResult.status === "fulfilled" &&
         Boolean((absResult.value.data as { deferred?: boolean } | undefined)?.deferred);
 
-      // Keep cached shelf visible; soft-refresh (invalidate + refetch) once immediately.
-      await softRefreshLibraryCollectionQueries(queryClient);
+      // Cache-first soft refresh — do NOT pass refresh=true (full rebuild + HC enrich)
+      // while ABS/Kavita are still scanning; that thundering-herd melted the Pi.
+      await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 0 });
 
       toast(
         deferred
@@ -713,12 +715,17 @@ export default function MyLibrary() {
         deferred ? "info" : "success",
       );
 
-      // Background soft-poll while ABS indexes — never purge (stale-while-revalidate).
+      // Sparse polls without cache bust; one short bust only on the final catch-up
+      // after ABS has had time to finish indexing.
       void (async () => {
-        for (let i = 0; i < 5; i++) {
-          await new Promise((r) => setTimeout(r, i < 2 ? 2500 : 5000));
+        const delays = [8_000, 20_000, 40_000];
+        for (let i = 0; i < delays.length; i++) {
+          await new Promise((r) => setTimeout(r, delays[i]));
           try {
-            await softRefreshLibraryCollectionQueries(queryClient);
+            const last = i === delays.length - 1;
+            await softRefreshLibraryCollectionQueries(queryClient, {
+              bustMs: last ? 5_000 : 0,
+            });
           } catch {
             // ignore background poll errors
           }
@@ -729,7 +736,7 @@ export default function MyLibrary() {
     } finally {
       setScanning(false);
     }
-  }, [queryClient, toast]);
+  }, [queryClient, toast, scanning]);
 
   // Reset shelf filters when switching media tabs (skip mount so restored filters survive).
   const tabFilterInitRef = useRef(false);

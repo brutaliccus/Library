@@ -12,7 +12,7 @@ import {
   takePendingInvite,
 } from "../api/inviteLink";
 import { isNativeApp } from "../api/instanceUrl";
-import { currentOrigin, upsertRememberedLibrary } from "../api/libraryRegistry";
+import { currentOrigin, upsertRememberedLibrary, inviteFieldsFromLibraryMe } from "../api/libraryRegistry";
 
 /**
  * /join/:code — shared invite link (invite-only signup).
@@ -132,6 +132,7 @@ export default function JoinInvite() {
               name: lib.data?.library?.name || libraryName || "Library",
               coverUrl: lib.data?.library?.coverUrl || null,
               email: em,
+              ...inviteFieldsFromLibraryMe(lib.data?.library),
             });
           }
         } catch {
@@ -156,6 +157,7 @@ export default function JoinInvite() {
                 name: lib.data?.library?.name || libraryName || "Library",
                 coverUrl: lib.data?.library?.coverUrl || null,
                 email: em,
+                ...inviteFieldsFromLibraryMe(lib.data?.library),
               });
             }
           } catch {

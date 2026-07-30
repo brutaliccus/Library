@@ -33,10 +33,38 @@ from app.routers.stream import tracks_with_stable_urls
 
 logger = logging.getLogger(__name__)
 
+# Coalesce concurrent full collection rebuilds (refresh=true storms on Pi).
+_collection_inflight: dict[str, asyncio.Future] = {}
+# Single background ABS scan+cleanup task for wait=false kicks.
+_bg_abs_scan_task: asyncio.Task | None = None
+
 # Build a lookup: lowercased sub-genre name/keyword -> top-level genre name
 # Same taxonomy as store `/books/genres` (GENRE_TAXONOMY).
 _GENRE_TO_TOPLEVEL: dict[str, str] = {}
 _TAXONOMY_TOP_NAMES: set[str] = set()
+
+
+async def _singleflight(key: str, factory):
+    """Share one in-flight coroutine result across concurrent callers."""
+    existing = _collection_inflight.get(key)
+    if existing is not None and not existing.done():
+        return await asyncio.shield(existing)
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    _collection_inflight[key] = fut
+    try:
+        result = await factory()
+        if not fut.done():
+            fut.set_result(result)
+        return result
+    except BaseException as e:
+        if not fut.done():
+            fut.set_exception(e)
+        raise
+    finally:
+        if _collection_inflight.get(key) is fut:
+            _collection_inflight.pop(key, None)
 
 
 def _build_genre_lookup() -> None:
@@ -738,53 +766,66 @@ async def abs_collection(
         if cached is not None:
             return cached
 
-    hidden_titles = await _get_private_titles_for_others(user.id, db)
-    raw_items = [
-        it for it in await audiobookshelf.get_all_items(force_refresh=refresh)
-        if not _is_hidden(it.get("title", ""), hidden_titles)
-    ]
-    # Drop ABS junk series labels; stamp seriesName from local metadata for filters.
-    cleaned: list[dict] = []
-    for item in raw_items:
-        series_bits = []
-        for s in item.get("series") or []:
-            name = (s.get("name") or "").strip()
-            if name and not is_junk_series_hint(name):
-                series_bits.append(s)
-        mapped = _normalize_item_genres(item.get("genres") or [])
-        cleaned.append(
-            _apply_local_series_fields({**item, "genres": mapped, "series": series_bits})
-        )
-    # Genres-only Hardcover enrich (fail-open); author/series stay local.
-    items = await _enrich_items_via_hardcover(cleaned)
+    async def _build() -> dict:
+        # Re-check TTL cache inside singleflight (first waiter may have filled it).
+        if not refresh:
+            hit = library_collection_cache.get(cache_key)
+            if hit is not None:
+                return hit
 
-    genres: dict[str, list] = {}
-    ungrouped: list = []
-    seen_in_genre: dict[str, set] = {}
-    for item in items:
-        mapped = item.get("genres") or []
-        if not mapped:
-            ungrouped.append(item)
-            continue
-        for top in mapped:
-            seen_in_genre.setdefault(top, set())
-            if item["itemId"] not in seen_in_genre[top]:
-                genres.setdefault(top, []).append(item)
-                seen_in_genre[top].add(item["itemId"])
-    # Unique books only — multi-genre titles appear in several buckets but must
-    # not inflate the My Library "N audiobooks" subtitle.
-    unique_count = len(items)
-    sorted_genres = dict(sorted(genres.items(), key=lambda x: x[0]))
-    for bucket in sorted_genres.values():
-        bucket.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
-    ungrouped.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
-    payload = {
-        "genres": sorted_genres,
-        "ungrouped": ungrouped,
-        "totalItems": unique_count,
-    }
-    library_collection_cache.set(cache_key, payload)
-    return payload
+        hidden_titles = await _get_private_titles_for_others(user.id, db)
+        raw_items = [
+            it for it in await audiobookshelf.get_all_items(force_refresh=refresh)
+            if not _is_hidden(it.get("title", ""), hidden_titles)
+        ]
+        # Drop ABS junk series labels; stamp seriesName from local metadata for filters.
+        cleaned: list[dict] = []
+        for item in raw_items:
+            series_bits = []
+            for s in item.get("series") or []:
+                name = (s.get("name") or "").strip()
+                if name and not is_junk_series_hint(name):
+                    series_bits.append(s)
+            mapped = _normalize_item_genres(item.get("genres") or [])
+            cleaned.append(
+                _apply_local_series_fields({**item, "genres": mapped, "series": series_bits})
+            )
+        # Skip HC enrich on forced refresh — it fans out 8 concurrent lookups and
+        # routinely times out on ~200 items, burning Pi CPU for no genre gain.
+        if refresh:
+            items = cleaned
+        else:
+            items = await _enrich_items_via_hardcover(cleaned)
+
+        genres: dict[str, list] = {}
+        ungrouped: list = []
+        seen_in_genre: dict[str, set] = {}
+        for item in items:
+            mapped = item.get("genres") or []
+            if not mapped:
+                ungrouped.append(item)
+                continue
+            for top in mapped:
+                seen_in_genre.setdefault(top, set())
+                if item["itemId"] not in seen_in_genre[top]:
+                    genres.setdefault(top, []).append(item)
+                    seen_in_genre[top].add(item["itemId"])
+        # Unique books only — multi-genre titles appear in several buckets but must
+        # not inflate the My Library "N audiobooks" subtitle.
+        unique_count = len(items)
+        sorted_genres = dict(sorted(genres.items(), key=lambda x: x[0]))
+        for bucket in sorted_genres.values():
+            bucket.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
+        ungrouped.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
+        payload = {
+            "genres": sorted_genres,
+            "ungrouped": ungrouped,
+            "totalItems": unique_count,
+        }
+        library_collection_cache.set(cache_key, payload)
+        return payload
+
+    return await _singleflight(f"abs_coll_build:{user.id}:{refresh}", _build)
 
 
 @router.get("/abs/series")
@@ -898,90 +939,99 @@ async def kavita_collection(
         if cached is not None:
             return cached
 
-    hidden_titles = await _get_private_titles_for_others(user.id, db)
-    series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS, force_refresh=refresh)
-    # Fetch volumes + metadata in parallel (limit 10 concurrent) to avoid 504 timeout
-    sem = asyncio.Semaphore(10)
+    async def _build() -> dict:
+        if not refresh:
+            hit = library_collection_cache.get(cache_key)
+            if hit is not None:
+                return hit
 
-    async def volumes_and_meta(s: dict) -> tuple[dict, list, dict]:
-        sid = s.get("id", 0)
-        async with sem:
-            volumes, meta = await asyncio.gather(
-                kavita.get_series_volumes(sid),
-                kavita.get_series_metadata(sid),
-            )
-        return s, volumes, meta or {}
+        hidden_titles = await _get_private_titles_for_others(user.id, db)
+        series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS, force_refresh=refresh)
+        # Limit fan-out: each series hits volumes+metadata; 10 concurrent melted the Pi.
+        sem = asyncio.Semaphore(3)
 
-    results = await asyncio.gather(*[volumes_and_meta(s) for s in series])
-    items: list[dict] = []
-    for s, volumes, meta in results:
-        name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
-        if not name or _is_hidden(name, hidden_titles):
-            continue
-        book_num = kavita_ebook_match._book_number_from_text(name)
-        chapter_id = kavita_ebook_match._pick_chapter_id(volumes, book_num)
-        volume_id: int | None = None
-        for vol in volumes:
-            chapters = vol.get("chapters", [])
-            if chapters and chapters[0].get("id") == chapter_id:
-                volume_id = vol.get("id")
-                break
-            if chapter_id is None and chapters:
-                chapter_id = chapters[0].get("id")
-                volume_id = vol.get("id")
-                break
-        sid = s.get("id")
-        cover_url = f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else ""
-        if cover_url and volume_id:
-            cover_url += f"&volumeId={volume_id}"
-        if cover_url and chapter_id:
-            cover_url += f"&chapterId={chapter_id}"
+        async def volumes_and_meta(s: dict) -> tuple[dict, list, dict]:
+            sid = s.get("id", 0)
+            async with sem:
+                volumes, meta = await asyncio.gather(
+                    kavita.get_series_volumes(sid),
+                    kavita.get_series_metadata(sid),
+                )
+            return s, volumes, meta or {}
 
-        writers = meta.get("writers") or s.get("authors") or []
-        author = ""
-        if writers:
-            author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
-        genres = _normalize_item_genres(meta.get("genres") or [])
-        # Local series from title cues (LibraForge-cleaned titles) — no Hardcover.
-        inferred = library_series_from_title(name)
-        sname = ""
-        seq = ""
-        if inferred and not is_junk_series_hint(inferred[0]):
-            sname, seq = inferred[0], str(inferred[1] or "")
+        results = await asyncio.gather(*[volumes_and_meta(s) for s in series])
+        items: list[dict] = []
+        for s, volumes, meta in results:
+            name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
+            if not name or _is_hidden(name, hidden_titles):
+                continue
+            book_num = kavita_ebook_match._book_number_from_text(name)
+            chapter_id = kavita_ebook_match._pick_chapter_id(volumes, book_num)
+            volume_id: int | None = None
+            for vol in volumes:
+                chapters = vol.get("chapters", [])
+                if chapters and chapters[0].get("id") == chapter_id:
+                    volume_id = vol.get("id")
+                    break
+                if chapter_id is None and chapters:
+                    chapter_id = chapters[0].get("id")
+                    volume_id = vol.get("id")
+                    break
+            sid = s.get("id")
+            cover_url = f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else ""
+            if cover_url and volume_id:
+                cover_url += f"&volumeId={volume_id}"
+            if cover_url and chapter_id:
+                cover_url += f"&chapterId={chapter_id}"
 
-        added_at = s.get("created") or s.get("lastChapterAdded") or meta.get("releaseYear") or 0
-        try:
-            # Kavita may return ISO strings or epoch ms
-            if isinstance(added_at, str) and added_at:
-                from datetime import datetime
-                added_ms = int(datetime.fromisoformat(added_at.replace("Z", "+00:00")).timestamp() * 1000)
-            else:
-                added_ms = int(added_at or 0)
-                if added_ms < 10_000_000_000:  # seconds → ms
-                    added_ms = added_ms * 1000 if added_ms else 0
-        except Exception:
-            added_ms = 0
+            writers = meta.get("writers") or s.get("authors") or []
+            author = ""
+            if writers:
+                author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
+            genres = _normalize_item_genres(meta.get("genres") or [])
+            # Local series from title cues (LibraForge-cleaned titles) — no Hardcover.
+            inferred = library_series_from_title(name)
+            sname = ""
+            seq = ""
+            if inferred and not is_junk_series_hint(inferred[0]):
+                sname, seq = inferred[0], str(inferred[1] or "")
 
-        items.append({
-            "seriesId": s.get("id"),
-            "title": name,
-            "author": author,
-            "coverUrl": cover_url,
-            "chapterId": chapter_id,
-            "genres": genres,
-            "seriesName": sname,
-            "sequence": seq,
-            "series": [{"name": sname, "sequence": seq}] if sname else [],
-            "addedAt": added_ms,
-            "source": "kavita",
-        })
-    # Genres-only Hardcover enrich (fail-open); author/series stay local.
-    items = await _enrich_items_via_hardcover(items)
-    # Newest first by default for the All shelf
-    items.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
-    payload = {"items": items, "totalItems": len(items)}
-    library_collection_cache.set(cache_key, payload)
-    return payload
+            added_at = s.get("created") or s.get("lastChapterAdded") or meta.get("releaseYear") or 0
+            try:
+                # Kavita may return ISO strings or epoch ms
+                if isinstance(added_at, str) and added_at:
+                    from datetime import datetime
+                    added_ms = int(datetime.fromisoformat(added_at.replace("Z", "+00:00")).timestamp() * 1000)
+                else:
+                    added_ms = int(added_at or 0)
+                    if added_ms < 10_000_000_000:  # seconds → ms
+                        added_ms = added_ms * 1000 if added_ms else 0
+            except Exception:
+                added_ms = 0
+
+            items.append({
+                "seriesId": s.get("id"),
+                "title": name,
+                "author": author,
+                "coverUrl": cover_url,
+                "chapterId": chapter_id,
+                "genres": genres,
+                "seriesName": sname,
+                "sequence": seq,
+                "series": [{"name": sname, "sequence": seq}] if sname else [],
+                "addedAt": added_ms,
+                "source": "kavita",
+            })
+        # Skip HC enrich on forced refresh (same Pi load reason as ABS collection).
+        if not refresh:
+            items = await _enrich_items_via_hardcover(items)
+        # Newest first by default for the All shelf
+        items.sort(key=lambda x: x.get("addedAt") or 0, reverse=True)
+        payload = {"items": items, "totalItems": len(items)}
+        library_collection_cache.set(cache_key, payload)
+        return payload
+
+    return await _singleflight(f"kavita_coll_build:{user.id}:{refresh}", _build)
 
 
 @router.get("/kavita/item/{series_id}")
@@ -1250,11 +1300,24 @@ async def trigger_abs_scan(
     user: User = Depends(get_current_user),
 ):
     """Trigger an ABS library scan; optionally wait for completion and clean orphans."""
+    global _bg_abs_scan_task
     try:
         if not wait:
-            # Single scan path in background — avoid double POST /scan.
-            audiobookshelf.invalidate_cache()
-            asyncio.create_task(_abs_scan_wait_and_cleanup())
+            # Coalesce: do not stack scan_library_and_wait + invalidate storms.
+            # Invalidate only after the background scan finishes (in cleanup helper).
+            if _bg_abs_scan_task is not None and not _bg_abs_scan_task.done():
+                return {
+                    "ok": True,
+                    "message": "Library scan already running in background",
+                    "scan_ran": True,
+                    "scan_complete": False,
+                    "timed_out": False,
+                    "deferred": True,
+                    "already_running": True,
+                    "waited_seconds": 0,
+                    "items_total": None,
+                }
+            _bg_abs_scan_task = asyncio.create_task(_abs_scan_wait_and_cleanup())
             return {
                 "ok": True,
                 "message": "Library scan started; cleanup continues in background",
@@ -1262,6 +1325,7 @@ async def trigger_abs_scan(
                 "scan_complete": False,
                 "timed_out": False,
                 "deferred": True,
+                "already_running": False,
                 "waited_seconds": 0,
                 "items_total": None,
             }

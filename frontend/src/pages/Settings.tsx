@@ -1,10 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../hooks/useAuth";
 import { useToast } from "../contexts/ToastContext";
 import { useLibraryGroup } from "../hooks/useLibraryGroup";
-import type { KeySource } from "../hooks/useLibraryGroup";
 import api from "../api/client";
 import {
   audioCacheUsageBytes,
@@ -13,16 +11,24 @@ import {
   clearAllAudioCache,
 } from "../utils/audioCache";
 import { ebookCacheUsageBytes, ebookCacheEntryCount, clearAllEbookCache } from "../utils/ebookCache";
-import CoverImage from "../components/CoverImage";
 import ThemePicker from "../components/ThemePicker";
-import { upsertRememberedLibrary, currentOrigin } from "../api/libraryRegistry";
-import { applyThemeToDocument, normalizeThemeId, type ThemeId } from "../theme/themes";
+import { currentOrigin } from "../api/libraryRegistry";
+import {
+  applyThemeToDocument,
+  normalizeThemeId,
+  readCachedCustomColors,
+  writeCachedCustomColors,
+  type CustomThemeColors,
+} from "../theme/themes";
 import { isNativeApp } from "../api/instanceUrl";
-import { resolveInviteShareUrl } from "../api/inviteLink";
+import {
+  resolveInviteShareUrl,
+  shareLibraryInvite,
+} from "../api/inviteLink";
 import {
   Settings as SettingsIcon, EyeOff, Shield, Zap, HardDrive, Trash2,
-  Library, Copy, RefreshCw, KeyRound, ChevronUp, ChevronDown,
-  Smartphone, Download, ExternalLink, ImagePlus, Palette, Gauge,
+  Copy, RefreshCw, KeyRound, Smartphone, Download, ExternalLink, Palette, Gauge,
+  Share2, TabletSmartphone, BookOpen,
 } from "lucide-react";
 import {
   formatPlaybackSpeed,
@@ -76,282 +82,25 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 }
 
-function keySourceLabel(source: KeySource, name: string): string {
-  if (source === "group") return `${name} key saved`;
-  if (source === "server") return `${name} via server (.env)`;
-  return `${name} not configured`;
-}
-
-function KeyStatusBadge({ source, label }: { source: KeySource; label: string }) {
-  const styles =
-    source === "group"
-      ? "bg-emerald-900/40 text-emerald-300 border-emerald-700/40"
-      : source === "server"
-        ? "bg-sky-900/40 text-sky-300 border-sky-700/40"
-        : "bg-gray-800 text-gray-400 border-gray-700";
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${styles}`}>
-      {label}
-    </span>
-  );
-}
-
-/** Prominent debrid key management — owners can add Torbox/RD any time after onboarding. */
-function DebridKeysSection() {
+/** Invite share link — owners and library admins only. */
+function InviteShareSection() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { data, isLoading } = useLibraryGroup();
-  const lib = data?.library;
-
-  const [rdToken, setRdToken] = useState("");
-  const [torboxToken, setTorboxToken] = useState("");
-
-  const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ["library-group"] });
-    queryClient.invalidateQueries({ queryKey: ["user-settings"] });
-  };
-
-  const updateKeys = useMutation({
-    mutationFn: async () =>
-      (
-        await api.put("/libraries/tokens", {
-          real_debrid_api_token: rdToken.trim() || null,
-          torbox_api_token: torboxToken.trim() || null,
-        })
-      ).data,
-    onSuccess: () => {
-      refresh();
-      setRdToken("");
-      setTorboxToken("");
-      toast("API keys updated", "success");
-    },
-    onError: (e: any) => toast(e.response?.data?.detail || "Failed to update keys", "error"),
-  });
-
-  if (isLoading) return null;
-  if (!lib) return null;
-
-  if (!lib.canManageKeys) {
-    return (
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-        <div className="flex items-start gap-4">
-          <div className="p-2 bg-gray-800 rounded-lg shrink-0">
-            <KeyRound size={20} className="text-amber-400" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-gray-100">Debrid API Keys</h3>
-            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-              You joined <span className="text-gray-200">{lib.name}</span> with an invite code, so
-              streaming uses the library owner's Real-Debrid / Torbox accounts. Only the owner can
-              change those keys.
-            </p>
-            <p className="text-xs text-gray-400 mt-2 leading-relaxed">
-              Want to use your own keys instead?
-            </p>
-            <Link
-              to="/onboarding?mode=create"
-              className="inline-flex items-center gap-1.5 mt-2 px-3 py-2 bg-brand-600 text-white text-xs font-medium rounded-lg hover:bg-brand-500 transition-colors"
-            >
-              <KeyRound size={14} />
-              Create your own library
-            </Link>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-      <div className="flex items-start gap-4">
-        <div className="p-2 bg-gray-800 rounded-lg shrink-0">
-          <KeyRound size={20} className="text-amber-400" />
-        </div>
-        <div className="flex-1 min-w-0 space-y-3">
-          <div>
-            <h3 className="text-sm font-semibold text-gray-100">Debrid API Keys</h3>
-            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-              Keys for <span className="text-gray-200">{lib.name}</span>. Everyone in your library
-              streams with these accounts. Leave a field blank to keep the current key.
-            </p>
-            <div className="flex flex-wrap gap-2 mt-2">
-              <KeyStatusBadge
-                source={lib.rdKeySource}
-                label={keySourceLabel(lib.rdKeySource, "Real-Debrid")}
-              />
-              <KeyStatusBadge
-                source={lib.torboxKeySource}
-                label={keySourceLabel(lib.torboxKeySource, "Torbox")}
-              />
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1">
-                Real-Debrid API key{" "}
-                <a
-                  href="https://real-debrid.com/apitoken"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-brand-400 hover:underline"
-                >
-                  (get token)
-                </a>
-              </label>
-              <input
-                value={rdToken}
-                onChange={(e) => setRdToken(e.target.value)}
-                placeholder={
-                  lib.rdKeySource === "none"
-                    ? "Paste your Real-Debrid API key"
-                    : "Leave blank to keep current key"
-                }
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-500 font-mono"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1">
-                Torbox API key{" "}
-                <a
-                  href="https://torbox.app/settings"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-brand-400 hover:underline"
-                >
-                  (get token)
-                </a>
-              </label>
-              <input
-                value={torboxToken}
-                onChange={(e) => setTorboxToken(e.target.value)}
-                placeholder={
-                  lib.torboxKeySource === "none"
-                    ? "Paste your Torbox API key"
-                    : "Leave blank to keep current key"
-                }
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-500 font-mono"
-              />
-            </div>
-          </div>
-
-          <button
-            onClick={() => updateKeys.mutate()}
-            disabled={updateKeys.isPending || (!rdToken.trim() && !torboxToken.trim())}
-            className="flex items-center gap-1.5 px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-500 disabled:opacity-50 transition-colors"
-          >
-            {updateKeys.isPending ? "Verifying keys..." : "Save API keys"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LibraryGroupSection() {
-  const { toast } = useToast();
-  const queryClient = useQueryClient();
-  const { user } = useAuth();
   const { data } = useLibraryGroup();
   const lib = data?.library;
-  const [brandName, setBrandName] = useState("");
-  const [savingBrand, setSavingBrand] = useState(false);
-  const [uploadingCover, setUploadingCover] = useState(false);
-  const [savingTheme, setSavingTheme] = useState(false);
-
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ["library-group"] });
-
-  useEffect(() => {
-    if (lib?.name) setBrandName(lib.name);
-  }, [lib?.name]);
-
-  const syncRegistry = (next: { name?: string; coverUrl?: string | null }) => {
-    const origin = currentOrigin();
-    const email = user?.email || localStorage.getItem("user_email") || "";
-    if (!origin || !email) return;
-    upsertRememberedLibrary({
-      origin,
-      name: next.name || lib?.name || "Library",
-      coverUrl: next.coverUrl !== undefined ? next.coverUrl : lib?.coverUrl || null,
-      email,
-    });
-  };
 
   const regenInvite = useMutation({
     mutationFn: async () => (await api.post("/libraries/regenerate-invite")).data,
     onSuccess: () => {
-      refresh();
+      queryClient.invalidateQueries({ queryKey: ["library-group"] });
       toast("New invite code generated — the old one no longer works", "success");
     },
     onError: (e: any) => toast(e.response?.data?.detail || "Failed to regenerate code", "error"),
   });
 
-  const setRole = useMutation({
-    mutationFn: async ({ id, role }: { id: number; role: string }) =>
-      (await api.post(`/libraries/members/${id}/role`, { library_role: role })).data,
-    onSuccess: () => refresh(),
-    onError: (e: any) => toast(e.response?.data?.detail || "Failed to update member", "error"),
-  });
-
-  const saveBranding = async () => {
-    const name = brandName.trim();
-    if (!name) {
-      toast("Library name is required", "error");
-      return;
-    }
-    setSavingBrand(true);
-    try {
-      const { data: res } = await api.put("/libraries/branding", { name });
-      syncRegistry({ name: res.library?.name || name, coverUrl: res.library?.coverUrl });
-      await refresh();
-      toast("Library name saved", "success");
-    } catch (e: any) {
-      toast(e.response?.data?.detail || "Failed to save library name", "error");
-    } finally {
-      setSavingBrand(false);
-    }
-  };
-
-  const uploadCover = async (file: File | null) => {
-    if (!file) return;
-    setUploadingCover(true);
-    try {
-      const form = new FormData();
-      form.append("cover", file);
-      const { data: res } = await api.post("/libraries/branding/cover", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      syncRegistry({
-        name: res.library?.name || lib?.name,
-        coverUrl: res.library?.coverUrl,
-      });
-      await refresh();
-      toast("Cover art updated", "success");
-    } catch (e: any) {
-      toast(e.response?.data?.detail || "Failed to upload cover", "error");
-    } finally {
-      setUploadingCover(false);
-    }
-  };
-
-  const saveDefaultTheme = async (themeId: ThemeId) => {
-    setSavingTheme(true);
-    try {
-      await api.put("/libraries/branding", { default_theme: themeId });
-      applyThemeToDocument(themeId);
-      await refresh();
-      await queryClient.invalidateQueries({ queryKey: ["user-settings"] });
-      toast("Library default theme updated", "success");
-    } catch (e: any) {
-      toast(e.response?.data?.detail || "Failed to update theme", "error");
-    } finally {
-      setSavingTheme(false);
-    }
-  };
-
   if (!lib) return null;
-  const isOwner = lib.role === "owner";
   const canInvite = lib.role === "owner" || lib.role === "admin";
+  if (!canInvite || !lib.inviteCode) return null;
 
   const inviteLink = resolveInviteShareUrl(lib.inviteLink, lib.inviteCode);
   const inviteLooksBroken =
@@ -361,205 +110,239 @@ function LibraryGroupSection() {
       /library\.example\.com/i.test(inviteLink) ||
       /localhost|127\.0\.0\.1/i.test(inviteLink));
 
-  const copyInviteLink = () => {
-    if (!inviteLink || inviteLink === lib.inviteCode) {
-      toast(
-        "Set App URL in Admin → Config (or APP_URL in .env) to your public https:// address, then copy again",
-        "error"
-      );
-      return;
-    }
-    navigator.clipboard?.writeText(inviteLink).then(
-      () => toast("Invite link copied", "success"),
-      () => toast("Couldn't copy — long-press to copy manually", "error"),
-    );
-  };
+  const shareInviteLink = () =>
+    void shareLibraryInvite({
+      libraryName: lib.name,
+      inviteCode: lib.inviteCode!,
+      inviteLink: lib.inviteLink,
+      toast,
+    });
 
-  const shareInviteLink = async () => {
-    if (!inviteLink || inviteLink === lib.inviteCode) {
-      copyInviteLink();
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+      <div className="flex items-start gap-4">
+        <div className="p-2 bg-gray-800 rounded-lg shrink-0">
+          <Share2 size={20} className="text-brand-400" />
+        </div>
+        <div className="flex-1 min-w-0 space-y-2">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-100">Invite link</h3>
+            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+              Share this full URL so friends can join{" "}
+              <span className="text-gray-200">{lib.name}</span> (opens the Android app when
+              installed).
+            </p>
+          </div>
+          {inviteLooksBroken && (
+            <p className="text-xs text-amber-400/90 leading-relaxed">
+              Set <span className="font-medium">App URL</span> in Admin → Settings (or{" "}
+              <code className="text-amber-300">APP_URL</code> in{" "}
+              <code className="text-amber-300">.env</code>) to your public address, e.g.{" "}
+              <code className="text-amber-300">https://library.yourdomain.com</code>, then
+              reload. Invite links are built from that URL.
+            </p>
+          )}
+          <div className="flex items-start gap-2">
+            <code className="flex-1 min-w-0 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-[11px] text-brand-300 font-mono break-all select-all">
+              {inviteLink || lib.inviteCode}
+            </code>
+            <button
+              type="button"
+              onClick={shareInviteLink}
+              className="p-2 bg-brand-600 text-white rounded-lg hover:bg-brand-500 transition-colors shrink-0"
+              title="Share or copy invite link"
+            >
+              <Copy size={15} />
+            </button>
+            {lib.role === "owner" && (
+              <button
+                type="button"
+                onClick={() => regenInvite.mutate()}
+                disabled={regenInvite.isPending}
+                className="p-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors shrink-0"
+                title="Generate a new code (old one stops working)"
+              >
+                <RefreshCw size={15} className={regenInvite.isPending ? "animate-spin" : ""} />
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-gray-500">
+            Code inside the link:{" "}
+            <span className="font-mono text-gray-400">{lib.inviteCode}</span>
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface EreaderInfo {
+  opdsUrl: string;
+  shelfUrl: string;
+  libraryUrl: string;
+  appUrlConfigured: boolean;
+  shelfCount: number;
+  shelf: Array<{
+    id: number;
+    title: string;
+    author: string;
+    downloadUrl: string;
+  }>;
+  instructions: {
+    koreader: string;
+    moonreader: string;
+    kindle: string;
+  };
+}
+
+function EreaderConnectSection() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["ereader-settings"],
+    queryFn: async () => {
+      const { data: res } = await api.get("/auth/ereader");
+      return res as EreaderInfo;
+    },
+  });
+
+  const rotate = useMutation({
+    mutationFn: async () => (await api.post("/auth/ereader/rotate-token")).data as EreaderInfo,
+    onSuccess: (res) => {
+      queryClient.setQueryData(["ereader-settings"], res);
+      toast("OPDS URL rotated — update your ereader catalog", "success");
+    },
+    onError: (e: any) => toast(e.response?.data?.detail || "Could not rotate OPDS token", "error"),
+  });
+
+  const removeItem = useMutation({
+    mutationFn: async (id: number) =>
+      (await api.delete(`/auth/ereader/shelf/${id}`)).data as EreaderInfo,
+    onSuccess: (res) => {
+      queryClient.setQueryData(["ereader-settings"], res);
+      toast("Removed from ereader shelf", "success");
+    },
+    onError: (e: any) => toast(e.response?.data?.detail || "Could not remove item", "error"),
+  });
+
+  const copyUrl = async (url: string, label: string) => {
+    if (!url) {
+      toast("Set App URL in Admin → Config first", "error");
       return;
     }
     try {
-      if (navigator.share) {
-        await navigator.share({
-          title: `Join ${lib.name}`,
-          text: `Join my Library — create your account with this invite:`,
-          url: inviteLink,
-        });
-        return;
-      }
+      await navigator.clipboard.writeText(url);
+      toast(`${label} copied`, "success");
     } catch {
-      // user cancelled or share failed — fall through to copy
+      toast("Could not copy", "error");
     }
-    copyInviteLink();
   };
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
       <div className="flex items-start gap-4">
-        <div className="w-14 aspect-[2/3] rounded-lg overflow-hidden bg-gray-800 shrink-0 flex items-center justify-center">
-          <CoverImage
-            src={lib.coverUrl}
-            alt={lib.name}
-            className="w-full h-full object-cover"
-            fallback={<Library size={20} className="text-brand-400" />}
-          />
+        <div className="p-2 bg-gray-800 rounded-lg shrink-0">
+          <TabletSmartphone size={20} className="text-amber-400" />
         </div>
-        <div className="flex-1 min-w-0 space-y-4">
+        <div className="flex-1 min-w-0 space-y-3">
           <div>
-            <h3 className="text-sm font-semibold text-gray-100">{lib.name}</h3>
-            <p className="text-xs text-gray-400 mt-1">
-              Your role: <span className="text-gray-200 capitalize">{lib.role}</span>
+            <h3 className="text-sm font-semibold text-gray-100">Ereader (OPDS)</h3>
+            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+              Connect KOReader, Moon+ Reader, or other OPDS clients. Your personal feed lists
+              books you send from ebook pages, plus the full ebook library. Kindle needs email —
+              not supported here yet.
             </p>
           </div>
 
-          {isOwner && (
-            <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950/50 p-3">
-              <p className="text-xs font-medium text-gray-400">Library card (name & cover)</p>
-              <div>
-                <label className="block text-[11px] text-gray-500 mb-1">Display name</label>
-                <div className="flex gap-2">
-                  <input
-                    value={brandName}
-                    onChange={(e) => setBrandName(e.target.value)}
-                    className="flex-1 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:border-brand-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void saveBranding()}
-                    disabled={savingBrand || brandName.trim() === lib.name}
-                    className="px-3 py-1.5 bg-brand-600 text-white text-xs font-medium rounded-lg hover:bg-brand-500 disabled:opacity-40"
-                  >
-                    {savingBrand ? "Saving…" : "Save"}
-                  </button>
-                </div>
-              </div>
-              <div>
-                <label className="block text-[11px] text-gray-500 mb-1">Cover art</label>
-                <div className="flex items-center gap-2">
-                  <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-gray-200 text-xs rounded-lg hover:bg-gray-700 cursor-pointer">
-                    <ImagePlus size={14} />
-                    {uploadingCover ? "Uploading…" : lib.coverUrl ? "Replace cover" : "Upload cover"}
-                    <input
-                      type="file"
-                      accept="image/jpeg,image/png,image/webp,image/gif"
-                      className="hidden"
-                      disabled={uploadingCover}
-                      onChange={(e) => {
-                        const f = e.target.files?.[0] || null;
-                        e.target.value = "";
-                        void uploadCover(f);
-                      }}
-                    />
-                  </label>
-                  <span className="text-[11px] text-gray-500">JPEG, PNG, WebP, or GIF · under 8 MB</span>
-                </div>
-              </div>
-              <div>
-                <label className="block text-[11px] text-gray-500 mb-1.5">Default theme for members</label>
-                <ThemePicker
-                  value={normalizeThemeId(lib.defaultTheme)}
-                  onChange={(v) => {
-                    if (v === "default") return;
-                    void saveDefaultTheme(v);
-                  }}
-                  disabled={savingTheme}
-                />
-              </div>
-            </div>
+          {isLoading && <p className="text-xs text-gray-500">Loading…</p>}
+
+          {data && !data.appUrlConfigured && (
+            <p className="text-xs text-amber-400/90 leading-relaxed">
+              Ask an admin to set <span className="font-medium">App URL</span> in Admin → Config
+              so your OPDS link uses a public address ereaders can reach.
+            </p>
           )}
 
-          {canInvite && lib.inviteCode && (
+          {data?.opdsUrl && (
             <div className="space-y-2">
-              <p className="text-xs font-medium text-gray-400">
-                Invite link — share this full URL so friends can join (opens the Android app when
-                installed)
-              </p>
-              {inviteLooksBroken && (
-                <p className="text-xs text-amber-400/90 leading-relaxed">
-                  Set <span className="font-medium">App URL</span> in Admin → Config (or{" "}
-                  <code className="text-amber-300">APP_URL</code> in{" "}
-                  <code className="text-amber-300">.env</code>) to your public address, e.g.{" "}
-                  <code className="text-amber-300">https://library.yourdomain.com</code>, then
-                  reload. Invite links are built from that URL.
-                </p>
-              )}
+              <p className="text-[11px] text-gray-500 uppercase tracking-wide">OPDS catalog URL</p>
               <div className="flex items-start gap-2">
-                <code className="flex-1 min-w-0 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-[11px] text-brand-300 font-mono break-all select-all">
-                  {inviteLink || lib.inviteCode}
+                <code className="flex-1 min-w-0 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-[11px] text-amber-300/90 font-mono break-all select-all">
+                  {data.opdsUrl}
                 </code>
                 <button
                   type="button"
-                  onClick={shareInviteLink}
+                  onClick={() => void copyUrl(data.opdsUrl, "OPDS URL")}
                   className="p-2 bg-brand-600 text-white rounded-lg hover:bg-brand-500 transition-colors shrink-0"
-                  title="Share or copy invite link"
+                  title="Copy OPDS URL"
                 >
                   <Copy size={15} />
                 </button>
-                {isOwner && (
-                  <button
-                    type="button"
-                    onClick={() => regenInvite.mutate()}
-                    disabled={regenInvite.isPending}
-                    className="p-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors shrink-0"
-                    title="Generate a new code (old one stops working)"
-                  >
-                    <RefreshCw size={15} className={regenInvite.isPending ? "animate-spin" : ""} />
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Rotate your OPDS token? Existing ereader catalogs will stop working until you paste the new URL."
+                      )
+                    ) {
+                      rotate.mutate();
+                    }
+                  }}
+                  disabled={rotate.isPending}
+                  className="p-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors shrink-0"
+                  title="Rotate OPDS token"
+                >
+                  <RefreshCw size={15} className={rotate.isPending ? "animate-spin" : ""} />
+                </button>
               </div>
-              <p className="text-[11px] text-gray-500">
-                Code inside the link:{" "}
-                <span className="font-mono text-gray-400">{lib.inviteCode}</span>
-              </p>
+              <ul className="text-xs text-gray-500 space-y-1.5 list-disc pl-4">
+                <li>{data.instructions.koreader}</li>
+                <li>{data.instructions.moonreader}</li>
+                <li>{data.instructions.kindle}</li>
+              </ul>
             </div>
           )}
 
-          {canInvite && (lib.members?.length ?? 0) > 0 && (
-            <div>
-              <p className="text-xs font-medium text-gray-400 mb-1.5">Members</p>
-              <div className="space-y-1.5">
-                {lib.members!.map((m) => (
-                  <div
-                    key={m.id}
-                    className="flex items-center justify-between gap-3 px-3 py-2 bg-gray-800/60 rounded-lg"
+          {data && data.shelfCount > 0 && (
+            <div className="space-y-2 pt-1">
+              <p className="text-[11px] text-gray-500 uppercase tracking-wide">
+                Send to ereader shelf ({data.shelfCount})
+              </p>
+              <ul className="space-y-1.5">
+                {data.shelf.slice(0, 8).map((item) => (
+                  <li
+                    key={item.id}
+                    className="flex items-center gap-2 text-xs text-gray-300 bg-gray-800/60 rounded-lg px-2.5 py-1.5"
                   >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-sm text-gray-200 truncate">{m.username}</span>
-                      <span
-                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
-                          m.libraryRole === "owner"
-                            ? "bg-amber-900/50 text-amber-300"
-                            : m.libraryRole === "admin"
-                              ? "bg-purple-900/50 text-purple-300"
-                              : "bg-gray-700 text-gray-400"
-                        }`}
-                      >
-                        {m.libraryRole}
-                      </span>
-                    </div>
-                    {isOwner && !m.isOwner && (
-                      <button
-                        onClick={() =>
-                          setRole.mutate({
-                            id: m.id,
-                            role: m.libraryRole === "admin" ? "member" : "admin",
-                          })
-                        }
-                        disabled={setRole.isPending}
-                        className="flex items-center gap-1 px-2 py-1 bg-gray-700 text-gray-300 text-xs rounded-md hover:bg-gray-600 disabled:opacity-50 transition-colors shrink-0"
-                      >
-                        {m.libraryRole === "admin" ? (
-                          <><ChevronDown size={12} /> Demote</>
-                        ) : (
-                          <><ChevronUp size={12} /> Make admin</>
-                        )}
-                      </button>
-                    )}
-                  </div>
+                    <BookOpen size={12} className="text-amber-400/80 shrink-0" />
+                    <span className="flex-1 min-w-0 truncate">
+                      {item.title || "Ebook"}
+                      {item.author ? (
+                        <span className="text-gray-500"> · {item.author}</span>
+                      ) : null}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void copyUrl(item.downloadUrl, "Download link")}
+                      className="text-gray-400 hover:text-gray-200 shrink-0"
+                      title="Copy download URL"
+                    >
+                      <Copy size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeItem.mutate(item.id)}
+                      disabled={removeItem.isPending}
+                      className="text-gray-500 hover:text-red-400 shrink-0 disabled:opacity-50"
+                      title="Remove from shelf"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </li>
                 ))}
-              </div>
+              </ul>
             </div>
           )}
         </div>
@@ -755,6 +538,9 @@ export default function Settings() {
     origin && unlockEmail ? hasOfflineUnlock(origin, unlockEmail) : false
   );
   const [bioSupported, setBioSupported] = useState(false);
+  const [customColors, setCustomColors] = useState<CustomThemeColors>(() =>
+    readCachedCustomColors()
+  );
 
   useEffect(() => {
     void biometricAvailable().then(setBioSupported);
@@ -880,8 +666,8 @@ export default function Settings() {
 
       <div className="space-y-4">
         <AndroidApkSettings />
-        <DebridKeysSection />
-        <LibraryGroupSection />
+        <InviteShareSection />
+        <EreaderConnectSection />
 
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
           <div className="flex items-start gap-4">
@@ -892,19 +678,29 @@ export default function Settings() {
               <div>
                 <h3 className="text-sm font-semibold text-gray-100">Appearance</h3>
                 <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-                  Choose your look. “Library default” follows what the owner set for this library.
+                  Choose your look, including a custom 3-color theme. “Library default” follows
+                  what the owner set for this library.
                 </p>
               </div>
               <ThemePicker
                 allowDefault
+                allowCustom
                 libraryDefaultLabel="Library default"
                 value={settings?.theme ? normalizeThemeId(settings.theme) : "default"}
+                customColors={customColors}
                 disabled={updateSettings.isPending}
-                onChange={(v) => {
+                onChange={(v, colors) => {
                   if (v === "default") {
                     updateSettings.mutate({ clear_theme: true, theme: null });
                     const libTheme = normalizeThemeId(settings?.library_default_theme);
                     applyThemeToDocument(libTheme);
+                    return;
+                  }
+                  if (v === "custom" && colors) {
+                    setCustomColors(colors);
+                    writeCachedCustomColors(colors);
+                    applyThemeToDocument("custom", colors);
+                    updateSettings.mutate({ theme: "custom" });
                     return;
                   }
                   applyThemeToDocument(v);
@@ -955,22 +751,6 @@ export default function Settings() {
                   )}
                 </span>
               </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-          <div className="flex items-start gap-4">
-            <div className="p-2 bg-gray-800 rounded-lg shrink-0">
-              <HardDrive size={20} className="text-sky-400" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="text-sm font-semibold text-gray-100">Offline & car listening</h3>
-              <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-                Progress syncs across devices when you’re online. Use Save offline on a book to
-                keep audio for flights or dead zones. On Android Auto, open Continue for in-progress
-                titles or browse A–Z from the library tree.
-              </p>
             </div>
           </div>
         </div>
@@ -1034,7 +814,8 @@ export default function Settings() {
                 </p>
                 {(settings?.available_debrid_providers?.length ?? 0) < 2 && (
                   <p className="text-xs text-amber-400/90 mt-2">
-                    Add a Torbox key in Debrid API Keys above to enable both services.
+                    Ask the library owner to add a Torbox key in Admin → Settings to enable both
+                    services.
                   </p>
                 )}
                 <div className="mt-3 flex gap-2">

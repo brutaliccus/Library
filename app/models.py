@@ -73,6 +73,8 @@ class User(Base):
     allow_audiobook_upload: Mapped[bool] = mapped_column(Boolean, default=False)
     # Per-user gate for creating public book share links (admins always allowed).
     can_share_books: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Long-lived OPDS catalog token (Library Site proxied feed for ereaders).
+    opds_token: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True, index=True)
 
     download_requests: Mapped[list["DownloadRequest"]] = relationship(back_populates="user")
 
@@ -361,3 +363,18 @@ class EbookReadingProgress(Base):
     cover_url: Mapped[str] = mapped_column(String(1024), default="")
     hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     last_read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class UserEreaderItem(Base):
+    """Books a user sent to their personal OPDS ereader shelf."""
+
+    __tablename__ = "user_ereader_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    kavita_series_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    kavita_chapter_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(512), default="")
+    author: Mapped[str] = mapped_column(String(256), default="")
+    cover_url: Mapped[str] = mapped_column(String(1024), default="")
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

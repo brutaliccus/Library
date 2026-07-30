@@ -20,6 +20,7 @@ import {
   saveSessionForOrigin,
   switchToLibrary,
   upsertRememberedLibrary,
+  inviteFieldsFromLibraryMe,
   type LibrarySession,
 } from "../api/libraryRegistry";
 import { hasOfflineUnlock } from "../utils/offlineUnlock";
@@ -177,6 +178,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         name: lib?.name || "Library",
         coverUrl: lib?.coverUrl || null,
         email,
+        ...inviteFieldsFromLibraryMe(lib),
       });
     } catch {
       upsertRememberedLibrary({
@@ -273,6 +275,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                   name: lib.data?.library?.name || "Library",
                   coverUrl: lib.data?.library?.coverUrl || null,
                   email: data.email,
+                  ...inviteFieldsFromLibraryMe(lib.data?.library),
                 });
               } catch {
                 /* ignore */
@@ -322,6 +325,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           name: lib.data?.library?.name || "Library",
           coverUrl: lib.data?.library?.coverUrl || null,
           email: identity,
+          ...inviteFieldsFromLibraryMe(lib.data?.library),
         });
       } catch {
         upsertRememberedLibrary({
@@ -371,6 +375,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             name: lib.data?.library?.name || "Library",
             coverUrl: lib.data?.library?.coverUrl || null,
             email,
+            ...inviteFieldsFromLibraryMe(lib.data?.library),
           });
         })
         .catch(() => {
@@ -418,6 +423,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             name: lib.data?.library?.name || "Library",
             coverUrl: lib.data?.library?.coverUrl || null,
             email: data.email,
+            ...inviteFieldsFromLibraryMe(lib.data?.library),
           });
         } catch {
           /* ignore */

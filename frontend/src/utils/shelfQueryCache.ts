@@ -242,16 +242,31 @@ export function shouldBustLibraryCollectionCache(): boolean {
   return Date.now() < _collectionBustUntil;
 }
 
-/** Open a short window where collection fetches request refresh=true. */
-export function markLibraryCollectionCacheBust(ms = 35_000): void {
+/**
+ * Open a short window where collection fetches request refresh=true.
+ * Prefer a single short bust after a scan settles — do not re-extend on every poll
+ * (that caused Pi load spikes via repeated full ABS/Kavita rebuilds).
+ */
+export function markLibraryCollectionCacheBust(ms = 8_000): void {
+  if (ms <= 0) return;
   _collectionBustUntil = Math.max(_collectionBustUntil, Date.now() + ms);
 }
 
+/**
+ * Invalidate + refetch My Library collection queries (stale-while-revalidate).
+ *
+ * Default is cache-friendly: no refresh=true bust. Pass bustMs only once after a
+ * scan is expected to have finished; background polls must use bustMs: 0.
+ */
 export async function softRefreshLibraryCollectionQueries(
   queryClient: QueryClient,
   opts?: { refetch?: boolean; bustMs?: number },
 ): Promise<void> {
-  markLibraryCollectionCacheBust(opts?.bustMs ?? 35_000);
+  // Default 0: rely on server-side cache invalidation after ABS/Kavita scans.
+  // Explicit bustMs > 0 is for a single post-scan catch-up only.
+  if (opts?.bustMs != null && opts.bustMs > 0) {
+    markLibraryCollectionCacheBust(opts.bustMs);
+  }
   const keys = LIBRARY_COLLECTION_PREFIXES.map((p) => [p] as const);
   await Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
   queryClient.invalidateQueries({ queryKey: ["abs-series"] });

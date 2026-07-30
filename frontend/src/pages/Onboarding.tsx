@@ -23,7 +23,7 @@ import {
 import { isNativeApp } from "../api/instanceUrl";
 import { upsertRememberedLibrary, currentOrigin } from "../api/libraryRegistry";
 import ThemePicker from "../components/ThemePicker";
-import { applyThemeToDocument, DEFAULT_THEME, type ThemeId } from "../theme/themes";
+import { applyThemeToDocument, DEFAULT_THEME, type PresetThemeId } from "../theme/themes";
 import {
   biometricAvailable,
   enrollOfflineUnlock,
@@ -51,7 +51,7 @@ export default function Onboarding() {
   const [busy, setBusy] = useState(false);
 
   const [name, setName] = useState("");
-  const [theme, setTheme] = useState<ThemeId>(DEFAULT_THEME);
+  const [theme, setTheme] = useState<PresetThemeId>(DEFAULT_THEME);
   const [coverFile, setCoverFile] = useState<File | null>(null);
   const [coverPreview, setCoverPreview] = useState<string | null>(null);
   const [rdToken, setRdToken] = useState("");
@@ -126,7 +126,16 @@ export default function Onboarding() {
     user?.email || localStorage.getItem("user_email") || "";
 
   const rememberLibrary = (
-    lib: { name?: string; coverUrl?: string | null } | null | undefined
+    lib:
+      | {
+          name?: string;
+          coverUrl?: string | null;
+          role?: string | null;
+          inviteCode?: string | null;
+          inviteLink?: string | null;
+        }
+      | null
+      | undefined
   ) => {
     const origin = currentOrigin();
     const email = accountEmail();
@@ -136,6 +145,9 @@ export default function Onboarding() {
       name: lib?.name || name.trim() || pendingLibName || "Library",
       coverUrl: lib?.coverUrl || null,
       email,
+      libraryRole: lib?.role ?? null,
+      inviteCode: lib?.inviteCode ?? null,
+      inviteLink: lib?.inviteLink ?? null,
     });
   };
 
@@ -261,7 +273,7 @@ export default function Onboarding() {
           });
           library = uploaded.data.library || library;
         } catch {
-          toast("Library created, but cover upload failed — you can add it later in Settings.", "error");
+          toast("Library created, but cover upload failed — you can add it later in Admin → Settings.", "error");
         }
       }
       const link = resolveInviteShareUrl(
@@ -277,7 +289,7 @@ export default function Onboarding() {
         }
       } else {
         toast(
-          "Library created! Set App URL in Admin → Config, then copy the invite link from Settings.",
+          "Library created! Set App URL in Admin → Settings, then copy the invite link from Settings.",
           "success"
         );
       }
@@ -398,8 +410,9 @@ export default function Onboarding() {
               </p>
               <ThemePicker
                 value={theme}
+                allowCustom={false}
                 onChange={(v) => {
-                  if (v === "default") return;
+                  if (v === "default" || v === "custom") return;
                   setTheme(v);
                   applyThemeToDocument(v);
                 }}
@@ -408,7 +421,7 @@ export default function Onboarding() {
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-400 mb-1.5">
-                Cover art <span className="text-gray-500 font-normal">(optional — add later in Settings)</span>
+                Cover art <span className="text-gray-500 font-normal">(optional — add later in Admin → Settings)</span>
               </label>
               <div className="flex items-center gap-3">
                 <div className="w-16 aspect-[2/3] rounded-lg overflow-hidden bg-gray-800 border border-gray-700 shrink-0 flex items-center justify-center">

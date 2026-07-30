@@ -14,6 +14,12 @@ export interface RememberedLibrary {
   coverUrl: string | null;
   email: string;
   lastUsedAt: number;
+  /** Library-group role from last /libraries/me sync (owner | admin | member). */
+  libraryRole?: string | null;
+  /** Invite code when the user can invite (owner/admin); null otherwise. */
+  inviteCode?: string | null;
+  /** Server-built invite URL when available. */
+  inviteLink?: string | null;
 }
 
 export interface LibrarySession {
@@ -71,6 +77,10 @@ export function upsertRememberedLibrary(entry: {
   name: string;
   coverUrl?: string | null;
   email: string;
+  /** Pass to refresh invite-share cache; omit to keep any previously stored values. */
+  libraryRole?: string | null;
+  inviteCode?: string | null;
+  inviteLink?: string | null;
 }): RememberedLibrary {
   const origin = entry.origin.replace(/\/+$/, "");
   const email = entry.email.trim().toLowerCase();
@@ -81,17 +91,52 @@ export function upsertRememberedLibrary(entry: {
       ? `${origin}${entry.coverUrl}`
       : entry.coverUrl || null;
   const existing = reg.libraries.findIndex((l) => l.origin === origin && l.email === email);
+  const prev = existing >= 0 ? reg.libraries[existing] : null;
   const row: RememberedLibrary = {
     origin,
     name: entry.name || "Library",
     coverUrl: cover,
     email,
     lastUsedAt: Date.now(),
+    libraryRole:
+      entry.libraryRole !== undefined ? entry.libraryRole : prev?.libraryRole ?? null,
+    inviteCode:
+      entry.inviteCode !== undefined ? entry.inviteCode : prev?.inviteCode ?? null,
+    inviteLink:
+      entry.inviteLink !== undefined ? entry.inviteLink : prev?.inviteLink ?? null,
   };
   if (existing >= 0) reg.libraries[existing] = row;
   else reg.libraries.push(row);
   saveRegistry(reg);
   return row;
+}
+
+/** Map a /libraries/me `library` object into remembered-library invite fields. */
+export function inviteFieldsFromLibraryMe(
+  lib:
+    | {
+        role?: string | null;
+        inviteCode?: string | null;
+        inviteLink?: string | null;
+      }
+    | null
+    | undefined
+): Pick<RememberedLibrary, "libraryRole" | "inviteCode" | "inviteLink"> {
+  return {
+    libraryRole: lib?.role ?? null,
+    inviteCode: lib?.inviteCode ?? null,
+    inviteLink: lib?.inviteLink ?? null,
+  };
+}
+
+/** Same gate as Settings invite share: owner/admin with an invite code. */
+export function canShareLibraryInvite(
+  libraryRole: string | null | undefined,
+  inviteCode: string | null | undefined
+): boolean {
+  return (
+    (libraryRole === "owner" || libraryRole === "admin") && !!inviteCode
+  );
 }
 
 export function saveSessionForOrigin(origin: string, session: LibrarySession): void {

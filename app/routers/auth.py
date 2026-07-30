@@ -386,7 +386,10 @@ async def _settings_response(user: User, db: AsyncSession | None = None) -> User
             await db.execute(select(LibraryGroup).where(LibraryGroup.id == user.library_group_id))
         ).scalar_one_or_none()
         if group:
-            lib_theme = normalize_theme(getattr(group, "default_theme", None)) or DEFAULT_THEME
+            lib_theme = (
+                normalize_theme(getattr(group, "default_theme", None), allow_custom=False)
+                or DEFAULT_THEME
+            )
     user_theme = normalize_theme(getattr(user, "theme", None), allow_null=True)
     effective = user_theme or lib_theme
     rate = float(getattr(user, "default_playback_rate", 1.0) or 1.0)
@@ -480,3 +483,130 @@ async def set_email(
     await db.commit()
     await db.refresh(user)
     return _token_response(user)
+
+
+# --------------- Ereader / OPDS ---------------
+
+
+class EreaderSendBody(BaseModel):
+    series_id: int
+    chapter_id: int
+    title: str = ""
+    author: str = ""
+    cover_url: str = ""
+
+
+async def _ereader_payload(user: User, db: AsyncSession) -> dict:
+    from app.services import opds as opds_svc
+
+    token = await opds_svc.ensure_user_opds_token(db, user)
+    base = await opds_svc.public_app_base()
+    root = f"{base}/api/opds/{token}" if base else ""
+    items = await opds_svc.list_shelf_items(db, user.id)
+    return {
+        "opdsUrl": root,
+        "shelfUrl": f"{root}/shelf" if root else "",
+        "libraryUrl": f"{root}/library" if root else "",
+        "tokenConfigured": bool(token),
+        "appUrlConfigured": bool(base),
+        "shelfCount": len(items),
+        "shelf": [
+            {
+                "id": it.id,
+                "seriesId": it.kavita_series_id,
+                "chapterId": it.kavita_chapter_id,
+                "title": it.title,
+                "author": it.author,
+                "coverUrl": it.cover_url,
+                "downloadUrl": f"{root}/download/{it.kavita_chapter_id}" if root else "",
+                "addedAt": it.added_at.isoformat() if it.added_at else None,
+            }
+            for it in items
+        ],
+        "instructions": {
+            "koreader": (
+                "KOReader: Search → OPDS catalog → Add → paste your OPDS URL. "
+                "Open “Send to ereader” (or All ebooks) and download."
+            ),
+            "moonreader": (
+                "Moon+ Reader: Net Library → New catalog → paste OPDS URL (leave login blank)."
+            ),
+            "kindle": (
+                "Kindle does not use OPDS. Use Send to Kindle email or copy the EPUB "
+                "download link from an ebook’s Send to ereader action."
+            ),
+        },
+    }
+
+
+@router.get("/ereader")
+async def get_ereader_settings(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Personal OPDS catalog URL + ereader shelf for connecting devices."""
+    return await _ereader_payload(user, db)
+
+
+@router.post("/ereader/rotate-token")
+async def rotate_ereader_token(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Invalidate the current OPDS URL and issue a new token."""
+    from app.services import opds as opds_svc
+
+    await opds_svc.rotate_user_opds_token(db, user)
+    return await _ereader_payload(user, db)
+
+
+@router.post("/ereader/shelf")
+async def add_ereader_shelf_item(
+    body: EreaderSendBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add (or bump) an ebook on the user's Send to ereader OPDS shelf."""
+    from app.services import opds as opds_svc
+
+    if body.series_id <= 0 or body.chapter_id <= 0:
+        raise HTTPException(status_code=400, detail="series_id and chapter_id are required")
+    await opds_svc.ensure_user_opds_token(db, user)
+    item = await opds_svc.add_shelf_item(
+        db,
+        user=user,
+        series_id=body.series_id,
+        chapter_id=body.chapter_id,
+        title=body.title,
+        author=body.author,
+        cover_url=body.cover_url,
+    )
+    payload = await _ereader_payload(user, db)
+    download_url = next(
+        (s["downloadUrl"] for s in payload["shelf"] if s["id"] == item.id),
+        "",
+    )
+    return {
+        **payload,
+        "added": {
+            "id": item.id,
+            "seriesId": item.kavita_series_id,
+            "chapterId": item.kavita_chapter_id,
+            "title": item.title,
+            "downloadUrl": download_url,
+        },
+    }
+
+
+@router.delete("/ereader/shelf/{item_id}")
+async def delete_ereader_shelf_item(
+    item_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services import opds as opds_svc
+
+    ok = await opds_svc.remove_shelf_item(db, user.id, item_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Shelf item not found")
+    return await _ereader_payload(user, db)

@@ -52,14 +52,31 @@ def test_my_library_soft_refreshes_without_purge_on_refresh():
     assert "mergeAbsCollection" in src
     assert "wait: false" in src or 'wait: false' in src or "wait: false" in src.replace(" ", "")
     # Refresh must not hard-purge before the first refetch.
-    refresh_fn = src[src.index("handleRefreshLibrary") : src.index("handleRefreshLibrary") + 1200]
+    refresh_fn = src[src.index("handleRefreshLibrary") : src.index("handleRefreshLibrary") + 2200]
     assert "purgeLibraryCollectionQueries" not in refresh_fn
     assert "softRefreshLibraryCollectionQueries" in refresh_fn
+    # Must not thundering-herd refresh=true on every poll (Pi load).
+    assert "bustMs: 0" in refresh_fn
+    assert "bustMs: last ? 5_000 : 0" in refresh_fn or "bustMs: last ? 5000 : 0" in refresh_fn.replace(
+        "_", ""
+    )
+
+
+def test_soft_refresh_defaults_to_no_cache_bust():
+    """Polls must not re-extend a refresh=true bust window by default."""
+    util = UTIL.read_text(encoding="utf-8")
+    # Default path must not call markLibraryCollectionCacheBust unconditionally.
+    assert "opts?.bustMs != null && opts.bustMs > 0" in util or (
+        "opts?.bustMs" in util and "bustMs > 0" in util
+    )
+    assert "opts?.bustMs ?? 35_000" not in util
 
 
 def test_admin_fix_metadata_soft_refreshes_collection_cache():
     src = ADMIN.read_text(encoding="utf-8")
     assert "softRefreshLibraryCollectionQueries" in src
+    assert "bustMs: 5_000" in src or "bustMs: 5000" in src.replace("_", "")
+    assert "bustMs: 0" in src
 
 
 def test_abs_scan_supports_deferred_wait_false():
@@ -67,6 +84,11 @@ def test_abs_scan_supports_deferred_wait_false():
     assert "wait: bool" in src or "wait: bool =" in src.replace(" ", "")
     assert "deferred" in src
     assert "_abs_scan_wait_and_cleanup" in src
+    assert "already_running" in src
+    assert "_singleflight" in src
+    # Forced refresh must not run Hardcover enrich (Pi CPU).
+    assert "if refresh:" in src
+    assert "items = cleaned" in src
 
 
 def test_abs_collection_signature_logic_orphan_detection():

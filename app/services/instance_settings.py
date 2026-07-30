@@ -157,6 +157,11 @@ REGISTRY: list[SettingDef] = [
         label="Kavita API key",
         env_attr="kavita_api_key",
         secret=True,
+        help=(
+            "Server API key for Kavita (scans, covers, reader). The same key powers Kavita’s "
+            "native OPDS at /api/opds/{apiKey}. Library Site never exposes this key to members — "
+            "users get a personal proxied OPDS URL under Settings → Ereader."
+        ),
     ),
     SettingDef(
         key="config.kavita_library_id",

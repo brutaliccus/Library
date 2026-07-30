@@ -7,6 +7,7 @@ import PdfViewer from "../components/PdfViewer";
 import EpubViewer, {
   epubViewGo,
   epubViewGoTo,
+  epubViewIgnoreTaps,
   type EpubLocation,
   type EpubTocItem,
 } from "../components/EpubViewer";
@@ -41,11 +42,14 @@ const FONT_SIZE_STEP = 2;
 interface ReaderSettings {
   fontSize: number;
   fontFamily: "serif" | "sans-serif" | "monospace";
+  /** Desktop spread; mobile always forces 1. */
+  columnCount: 1 | 2;
 }
 
 const defaultSettings: ReaderSettings = {
   fontSize: 16,
   fontFamily: "serif",
+  columnCount: 2,
 };
 
 function clampFontSize(n: number): number {
@@ -66,9 +70,11 @@ function loadSettings(): ReaderSettings {
     const s = localStorage.getItem(READER_SETTINGS_KEY);
     if (s) {
       const parsed = JSON.parse(s) as Partial<ReaderSettings> & { fontSize?: unknown };
+      const cols = parsed.columnCount === 1 || parsed.columnCount === 2 ? parsed.columnCount : defaultSettings.columnCount;
       return {
         fontFamily: parsed.fontFamily || defaultSettings.fontFamily,
         fontSize: migrateFontSize(parsed.fontSize),
+        columnCount: cols,
       };
     }
   } catch {
@@ -85,11 +91,26 @@ function saveSettings(s: ReaderSettings) {
   }
 }
 
-const FONT_FAMILIES = {
-  serif: "Georgia, 'Times New Roman', serif",
-  "sans-serif": "system-ui, -apple-system, sans-serif",
-  monospace: "'JetBrains Mono', 'Fira Code', monospace",
+const FONT_FAMILIES: Record<ReaderSettings["fontFamily"], { label: string; stack: string }> = {
+  serif: { label: "Serif", stack: "Georgia, 'Times New Roman', serif" },
+  "sans-serif": { label: "Sans-serif", stack: "system-ui, -apple-system, sans-serif" },
+  monospace: { label: "Monospace", stack: "'JetBrains Mono', 'Fira Code', monospace" },
 };
+
+/** Mobile / narrow viewports always get a single centered column. */
+function useForcedSingleColumn(): boolean {
+  const [narrow, setNarrow] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 900px)").matches : true
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 900px)");
+    const apply = () => setNarrow(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+  return narrow;
+}
 
 interface BookInfo {
   bookTitle: string;
@@ -128,6 +149,8 @@ export default function Ereader() {
 
   const showChrome = !fullscreen || !chromeHidden;
   const isPdf = bookInfo?.seriesFormat === KAVITA_PDF_FORMAT;
+  const forceSingleColumn = useForcedSingleColumn();
+  const effectiveColumns: 1 | 2 = forceSingleColumn ? 1 : settings.columnCount;
 
   const readerGet = useCallback(
     async <T,>(path: string, config?: { params?: Record<string, unknown>; responseType?: "text" | "blob" | "json" }) => {
@@ -339,36 +362,52 @@ export default function Ereader() {
 
   useEffect(() => () => revokeObjectUrl(), [revokeObjectUrl]);
 
+  const readerRootRef = useRef<HTMLDivElement>(null);
+
+  const nudgeLayout = useCallback(() => {
+    // Foliate/paginator sizes from the container; fullscreen changes need a remasure.
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+  }, []);
+
   const toggleFullscreen = useCallback(async () => {
+    const root = readerRootRef.current;
     try {
       if (document.fullscreenElement) {
         await document.exitFullscreen();
         setFullscreen(false);
         setChromeHidden(false);
       } else {
-        await document.documentElement.requestFullscreen();
+        // Fullscreen the reader shell (not <html>) so layout stays viewport-bound.
+        if (root && typeof root.requestFullscreen === "function") {
+          await root.requestFullscreen();
+        }
         setFullscreen(true);
         setChromeHidden(true);
       }
     } catch {
+      // Capacitor / iOS: immersive chrome-hide without Fullscreen API.
       setFullscreen((f) => {
         const next = !f;
         setChromeHidden(next);
         return next;
       });
     }
-  }, []);
+    nudgeLayout();
+  }, [nudgeLayout]);
 
   useEffect(() => {
     const onFs = () => {
-      if (!document.fullscreenElement) {
-        setFullscreen(false);
-        setChromeHidden(false);
-      }
+      const active = Boolean(document.fullscreenElement);
+      setFullscreen(active);
+      if (!active) setChromeHidden(false);
+      else setChromeHidden(true);
+      nudgeLayout();
     };
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
-  }, []);
+  }, [nudgeLayout]);
 
   const goPrev = useCallback(() => {
     if (isPdf) {
@@ -394,9 +433,18 @@ export default function Ereader() {
     setLocationLabel(label ? `${label} · ${pct}%` : `${pct}%`);
   }, []);
 
-  const jumpToc = useCallback((href: string) => {
-    epubViewGoTo(epubHostRef.current, href);
+  const jumpToc = useCallback(async (
+    href: string,
+    label: string,
+    e?: React.MouseEvent | React.TouchEvent,
+  ) => {
+    e?.preventDefault();
+    e?.stopPropagation();
+    // Block right-third ghost taps BEFORE the TOC overlay unmounts.
+    epubViewIgnoreTaps(epubHostRef.current, 800);
     setTocOpen(false);
+    setSettingsOpen(false);
+    await epubViewGoTo(epubHostRef.current, href, label);
   }, []);
 
   const renderToc = (items: EpubTocItem[], depth = 0) =>
@@ -404,7 +452,8 @@ export default function Ereader() {
       <div key={`${item.href}-${i}`}>
         <button
           type="button"
-          onClick={() => jumpToc(item.href)}
+          onClick={(ev) => void jumpToc(item.href, item.label, ev)}
+          onMouseDown={(ev) => ev.preventDefault()}
           className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 rounded-lg"
           style={{ paddingLeft: 12 + depth * 12 }}
         >
@@ -416,7 +465,7 @@ export default function Ereader() {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center" style={{ backgroundColor: "rgb(var(--gray-950))" }}>
         <div className="text-center">
           <p className="text-red-400 mb-4">{error}</p>
           <button
@@ -430,14 +479,16 @@ export default function Ereader() {
     );
   }
 
-  const containerClass = fullscreen
-    ? "fixed inset-0 z-[9999] bg-gray-950 flex flex-col"
-    : "h-screen bg-gray-950 flex flex-col overflow-hidden";
+  // Always pin to the visual viewport (100dvh). Immersive mode only hides chrome /
+  // uses Fullscreen API on this root — never documentElement (that shoved content off-screen).
+  const containerClass =
+    "fixed inset-0 z-[9999] flex flex-col overflow-hidden bg-gray-950 " +
+    "h-[100dvh] max-h-[100dvh] w-full max-w-[100vw]";
   const backTarget = shareToken ? `/share/${encodeURIComponent(shareToken)}` : "/my-library";
   const stopChrome = (e: React.SyntheticEvent) => e.stopPropagation();
 
   return (
-    <div className={`${containerClass} relative`}>
+    <div ref={readerRootRef} className={`${containerClass} relative`} style={{ backgroundColor: "rgb(var(--gray-950))" }}>
       {showChrome && (
         <header
           data-reader-chrome
@@ -530,13 +581,34 @@ export default function Ereader() {
                       className={`w-full text-left px-3 py-2 rounded-lg text-sm ${
                         settings.fontFamily === key ? "bg-amber-500/20 text-amber-300" : "text-gray-300 hover:bg-gray-800"
                       }`}
-                      style={{ fontFamily: FONT_FAMILIES[key] }}
+                      style={{ fontFamily: FONT_FAMILIES[key].stack }}
                     >
-                      {key}
+                      {FONT_FAMILIES[key].label}
                     </button>
                   ))}
                 </div>
               </div>
+              {!forceSingleColumn && (
+                <div>
+                  <div className="text-xs text-gray-400 mb-2">Columns</div>
+                  <div className="flex gap-2">
+                    {([1, 2] as const).map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setSettings((s) => ({ ...s, columnCount: n }))}
+                        className={`flex-1 px-3 py-2 rounded-lg text-sm ${
+                          settings.columnCount === n
+                            ? "bg-amber-500/20 text-amber-300"
+                            : "text-gray-300 hover:bg-gray-800 bg-gray-800/50"
+                        }`}
+                      >
+                        {n === 1 ? "1 column" : "2 columns"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </aside>
         )}
@@ -567,13 +639,17 @@ export default function Ereader() {
               }}
             />
           ) : epubSource ? (
-            <div ref={epubHostRef} className="absolute inset-0">
+            <div
+              ref={epubHostRef}
+              className={`absolute inset-0 ${tocOpen || settingsOpen ? "pointer-events-none" : ""}`}
+            >
               <EpubViewer
                 source={epubSource}
                 initialCfi={initialCfiRef.current}
                 fontSize={settings.fontSize}
-                fontFamily={FONT_FAMILIES[settings.fontFamily]}
-                chromeMarginPx={showChrome ? 64 : 28}
+                fontFamily={FONT_FAMILIES[settings.fontFamily].stack}
+                columnCount={effectiveColumns}
+                chromeMarginPx={showChrome ? 72 : 16}
                 onReady={() => setLoading(false)}
                 onError={(msg) => setError(msg)}
                 onRelocate={handleRelocate}

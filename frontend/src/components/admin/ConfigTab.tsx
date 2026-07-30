@@ -515,6 +515,8 @@ export default function ConfigTab({
             />
           )}
 
+          {effectiveGroup === "libraries" && <KavitaOpdsProbe />}
+
           {current.map((s) => {
             const draft = drafts[s.key];
             const show = showSecrets[s.key];
@@ -961,6 +963,67 @@ function OlCatalogPanel({
           Generate with editions (very large)
         </button>
       </div>
+    </div>
+  );
+}
+
+function KavitaOpdsProbe() {
+  const { toast } = useToast();
+  const [status, setStatus] = useState<{
+    configured?: boolean;
+    ok?: boolean;
+    error?: string | null;
+    note?: string;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const runProbe = async () => {
+    setLoading(true);
+    try {
+      const { data } = await api.get("/admin/kavita/opds-status");
+      setStatus(data);
+      if (data?.ok) toast("Kavita OPDS responded OK", "success");
+      else toast(data?.error || "Kavita OPDS not reachable", "error");
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "OPDS probe failed";
+      toast(typeof detail === "string" ? detail : "OPDS probe failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="p-3 rounded-xl border border-sky-900/50 bg-sky-950/20 space-y-2">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium text-gray-100">Kavita OPDS</p>
+          <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
+            Kavita’s OPDS feed uses the same API key as above. Members connect via Library Site’s
+            proxied feed (Settings → Ereader) so the key stays private.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void runProbe()}
+          disabled={loading}
+          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-sky-800/60 text-xs text-sky-200 hover:border-sky-600 disabled:opacity-40"
+        >
+          {loading ? "Testing…" : "Test OPDS"}
+        </button>
+      </div>
+      {status && (
+        <p
+          className={`text-xs ${
+            status.ok ? "text-emerald-400" : status.configured ? "text-amber-400" : "text-gray-500"
+          }`}
+        >
+          {status.ok
+            ? "OPDS feed reachable with the configured key."
+            : status.error || "Not configured"}
+        </p>
+      )}
     </div>
   );
 }

@@ -36,6 +36,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
+import LibraryAdminSettings from "../components/admin/LibraryAdminSettings";
 import ScraperTab from "../components/admin/ScraperTab";
 import ConfigTab from "../components/admin/ConfigTab";
 import StagingFilesViewer from "../components/admin/StagingFilesViewer";
@@ -368,12 +369,15 @@ export default function AdminPage() {
           )}
           {activeTab === "integrations" && <IntegrationsPanel />}
           {activeTab === "settings" && (
-            <ConfigTab
-              omitGroups={["pipeline", "catalog"]}
-              initialGroup={settingsSection}
-              title="Settings"
-              description="Core instance settings, libraries, indexers, debrid defaults, VPN, notifications, Android, discovery flags, and storage paths. Pipeline and Catalog APIs are under their own Admin sections."
-            />
+            <div className="space-y-2 min-w-0">
+              <LibraryAdminSettings />
+              <ConfigTab
+                omitGroups={["pipeline", "catalog"]}
+                initialGroup={settingsSection}
+                title="Instance settings"
+                description="Core instance settings, libraries paths, indexers, debrid defaults, VPN, notifications, Android, discovery flags, and storage. Pipeline and Catalog APIs are under their own Admin sections."
+              />
+            </div>
           )}
         </div>
       </div>
@@ -473,8 +477,8 @@ function UsersTab() {
     <div className="space-y-6 min-w-0">
       <p className="text-sm text-gray-400">
         New members join with an invite link from Settings — no approval step. You can reset
-        passwords, promote/demote admins, toggle per-user audiobook upload, disable accounts, or
-        permanently delete them here.
+        passwords, promote/demote admins, toggle per-user audiobook upload and book sharing,
+        disable accounts, or permanently delete them here.
       </p>
 
       <div className="relative">
@@ -1280,10 +1284,12 @@ function HealthTab() {
     },
     onSuccess: async (data) => {
       const softPollAbs = async () => {
-        for (let i = 0; i < 4; i++) {
-          // Stale-while-revalidate: keep shelf visible while ABS finishes indexing.
-          await softRefreshLibraryCollectionQueries(queryClient);
-          if (i < 3) await new Promise((r) => setTimeout(r, 2500));
+        // Backend already waited for the scan; one short bust then sparse cache-first polls.
+        // Do not re-extend refresh=true on every tick (Pi load spike).
+        await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 5_000 });
+        for (const delay of [10_000, 25_000]) {
+          await new Promise((r) => setTimeout(r, delay));
+          await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 0 });
         }
       };
       void softPollAbs();

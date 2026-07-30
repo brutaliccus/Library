@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   BookOpen,
@@ -10,7 +10,9 @@ import {
   Loader2,
   X,
   WifiOff,
+  Share2,
 } from "lucide-react";
+import axios from "axios";
 import { useAuth } from "../hooks/useAuth";
 import CoverImage from "../components/CoverImage";
 import OfflineUnlockModal from "../components/OfflineUnlockModal";
@@ -21,11 +23,14 @@ import {
   loadRegistry,
   removeRememberedLibrary,
   upsertRememberedLibrary,
+  canShareLibraryInvite,
+  inviteFieldsFromLibraryMe,
   type RememberedLibrary,
 } from "../api/libraryRegistry";
 import {
   applyInvitePaste,
   normalizeInviteCode,
+  shareLibraryInvite,
 } from "../api/inviteLink";
 import { applyApiBaseUrl } from "../api/client";
 import api from "../api/client";
@@ -74,6 +79,45 @@ export default function LibrariesPage() {
   /** Post-login one-time prompt may be dismissed; intentional setup from Open may not. */
   const [unlockAllowSkip, setUnlockAllowSkip] = useState(false);
   const [removeLib, setRemoveLib] = useState<RememberedLibrary | null>(null);
+  const [shareBusyOrigin, setShareBusyOrigin] = useState<string | null>(null);
+
+  // Refresh invite-share cache for remembered libraries (so the share icon can appear).
+  useEffect(() => {
+    if (!online || !sessionReady) return;
+    let cancelled = false;
+    const run = async () => {
+      const libs = listRememberedLibraries();
+      let changed = false;
+      await Promise.all(
+        libs.map(async (lib) => {
+          const session = getSessionForOrigin(lib.origin);
+          if (!session?.access_token) return;
+          try {
+            const { data } = await axios.get(`${lib.origin}/api/libraries/me`, {
+              headers: { Authorization: `Bearer ${session.access_token}` },
+              timeout: 12_000,
+            });
+            const group = data?.library;
+            upsertRememberedLibrary({
+              origin: lib.origin,
+              name: group?.name || lib.name,
+              coverUrl: group?.coverUrl ?? lib.coverUrl,
+              email: lib.email,
+              ...inviteFieldsFromLibraryMe(group),
+            });
+            changed = true;
+          } catch {
+            /* keep cached invite fields */
+          }
+        })
+      );
+      if (!cancelled && changed) setTick((t) => t + 1);
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [online, sessionReady]);
 
   if (!sessionReady) {
     return (
@@ -203,6 +247,57 @@ export default function LibrariesPage() {
     setEditLib(lib);
     setEditName(lib.name);
     setEditOrigin(lib.origin);
+  };
+
+  const shareFromCard = async (lib: RememberedLibrary, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (shareBusyOrigin) return;
+    setShareBusyOrigin(lib.origin);
+    try {
+      let inviteCode = lib.inviteCode ?? null;
+      let inviteLink = lib.inviteLink ?? null;
+      let libraryRole = lib.libraryRole ?? null;
+      let libraryName = lib.name;
+      const session = getSessionForOrigin(lib.origin);
+      if (online && session?.access_token) {
+        try {
+          const { data } = await axios.get(`${lib.origin}/api/libraries/me`, {
+            headers: { Authorization: `Bearer ${session.access_token}` },
+            timeout: 12_000,
+          });
+          const group = data?.library;
+          if (group) {
+            upsertRememberedLibrary({
+              origin: lib.origin,
+              name: group.name || lib.name,
+              coverUrl: group.coverUrl ?? lib.coverUrl,
+              email: lib.email,
+              ...inviteFieldsFromLibraryMe(group),
+            });
+            setTick((t) => t + 1);
+            inviteCode = group.inviteCode ?? null;
+            inviteLink = group.inviteLink ?? null;
+            libraryRole = group.role ?? null;
+            libraryName = group.name || libraryName;
+          }
+        } catch {
+          /* fall back to cached invite */
+        }
+      }
+      if (!canShareLibraryInvite(libraryRole, inviteCode) || !inviteCode) {
+        toast("Only library owners and admins can share the invite link", "error");
+        return;
+      }
+      await shareLibraryInvite({
+        libraryName,
+        inviteCode,
+        inviteLink,
+        origin: lib.origin,
+        toast,
+      });
+    } finally {
+      setShareBusyOrigin(null);
+    }
   };
 
   const saveEdit = () => {
@@ -371,6 +466,7 @@ export default function LibrariesPage() {
             {libraries.map((lib) => {
               const status = libraryStatus(lib);
               const disabledOffline = !online && !status.canOpenOffline;
+              const showShare = canShareLibraryInvite(lib.libraryRole, lib.inviteCode);
               return (
                 <button
                   key={`${lib.origin}:${lib.email}`}
@@ -396,6 +492,22 @@ export default function LibrariesPage() {
                       </div>
                     )}
                     <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      {showShare && (
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => void shareFromCard(lib, e)}
+                          className="p-1.5 rounded-lg bg-black/60 text-gray-300 hover:text-brand-300"
+                          title="Share invite link"
+                          aria-label="Share invite link"
+                        >
+                          {shareBusyOrigin === lib.origin ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Share2 size={14} />
+                          )}
+                        </span>
+                      )}
                       <span
                         role="button"
                         tabIndex={0}

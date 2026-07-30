@@ -101,6 +101,71 @@ export function resolveInviteShareUrl(
   return fromServer || "";
 }
 
+export type InviteShareToast = (
+  message: string,
+  type?: "success" | "error" | "info"
+) => void;
+
+/** Copy the invite HTTPS URL (same messaging as Settings). */
+export function copyLibraryInviteLink(opts: {
+  inviteCode: string;
+  inviteLink?: string | null;
+  origin?: string | null;
+  toast: InviteShareToast;
+}): void {
+  const inviteLink = resolveInviteShareUrl(
+    opts.inviteLink,
+    opts.inviteCode,
+    opts.origin
+  );
+  if (!inviteLink || inviteLink === opts.inviteCode) {
+    opts.toast(
+      "Set App URL in Admin → Settings (or APP_URL in .env) to your public https:// address, then copy again",
+      "error"
+    );
+    return;
+  }
+  navigator.clipboard?.writeText(inviteLink).then(
+    () => opts.toast("Invite link copied", "success"),
+    () => opts.toast("Couldn't copy — long-press to copy manually", "error")
+  );
+}
+
+/**
+ * Share via the system sheet when available; otherwise copy the invite link.
+ * Matches Settings invite share behavior.
+ */
+export async function shareLibraryInvite(opts: {
+  libraryName: string;
+  inviteCode: string;
+  inviteLink?: string | null;
+  origin?: string | null;
+  toast: InviteShareToast;
+}): Promise<void> {
+  const inviteLink = resolveInviteShareUrl(
+    opts.inviteLink,
+    opts.inviteCode,
+    opts.origin
+  );
+  if (!inviteLink || inviteLink === opts.inviteCode) {
+    copyLibraryInviteLink(opts);
+    return;
+  }
+  try {
+    if (navigator.share) {
+      await navigator.share({
+        title: `Join ${opts.libraryName}`,
+        text: `Join my Library — create your account with this invite:`,
+        url: inviteLink,
+      });
+      return;
+    }
+  } catch {
+    // user cancelled or share failed — fall through to copy
+  }
+  copyLibraryInviteLink(opts);
+}
+
 /** Custom-scheme link that opens the Android app when installed. */
 export function buildAppInviteLink(code: string, origin?: string | null): string {
   const normalized = normalizeInviteCode(code);

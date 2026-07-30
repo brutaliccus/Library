@@ -12,6 +12,7 @@ def test_scan_library_and_wait_completes_when_last_scan_changes():
     async def _run():
         lid = "lib_test"
         lib_calls = {"n": 0}
+        abs_svc._scan_result_fut = None
 
         async def fake_get_library(_library_id: str):
             lib_calls["n"] += 1
@@ -35,6 +36,55 @@ def test_scan_library_and_wait_completes_when_last_scan_changes():
         assert out["timed_out"] is False
         assert out["items_total"] == 42
         assert out["last_scan"] == 2000
+        assert out.get("coalesced") is False
+
+    asyncio.run(_run())
+
+
+def test_scan_library_and_wait_coalesces_concurrent_callers():
+    async def _run():
+        lid = "lib_test"
+        abs_svc._scan_result_fut = None
+        entered_wait = asyncio.Event()
+        finish_scan = asyncio.Event()
+        sleep_count = {"n": 0}
+
+        async def fake_get_library(_library_id: str):
+            last = 2000 if finish_scan.is_set() else 1000
+            return {"id": lid, "lastScan": last}
+
+        async def gated_sleep(_t):
+            sleep_count["n"] += 1
+            if sleep_count["n"] == 1:
+                entered_wait.set()
+                await finish_scan.wait()
+            # Later polls (after lastScan advances) return immediately.
+
+        with (
+            patch.object(abs_svc, "get_library", side_effect=fake_get_library),
+            patch.object(abs_svc, "get_library_item_total", new=AsyncMock(return_value=7)),
+            patch.object(abs_svc, "scan_library", new=AsyncMock()) as scan_mock,
+            patch.object(abs_svc.asyncio, "sleep", side_effect=gated_sleep),
+        ):
+            leader = asyncio.create_task(
+                abs_svc.scan_library_and_wait(lid, timeout_seconds=30, poll_interval=0.01)
+            )
+            await entered_wait.wait()
+            assert abs_svc._scan_result_fut is not None
+            assert not abs_svc._scan_result_fut.done()
+            joiner = asyncio.create_task(
+                abs_svc.scan_library_and_wait(lid, timeout_seconds=30, poll_interval=0.01)
+            )
+            # Real sleep so the joiner attaches before the leader finishes.
+            await asyncio.sleep(0.05)
+            assert not joiner.done()
+            finish_scan.set()
+            a, b = await asyncio.gather(leader, joiner)
+
+        scan_mock.assert_awaited_once_with(lid)
+        assert a["scan_complete"] is True
+        assert b["scan_complete"] is True
+        assert {a.get("coalesced"), b.get("coalesced")} == {False, True}
 
     asyncio.run(_run())
 
@@ -42,6 +92,7 @@ def test_scan_library_and_wait_completes_when_last_scan_changes():
 def test_scan_library_and_wait_times_out_with_clear_status():
     async def _run():
         lid = "lib_test"
+        abs_svc._scan_result_fut = None
 
         with (
             patch.object(

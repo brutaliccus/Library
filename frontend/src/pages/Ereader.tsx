@@ -372,7 +372,13 @@ export default function Ereader() {
   }, [bookInfo, page, loading, prefetchPages]);
 
   useEffect(() => {
-    if (content) setPageOffsets([0]);
+    if (content) {
+      // Keep offsets and page-count in sync so goNext cannot scroll past
+      // content (blank pages) or fall through into Kavita chapter jumps.
+      setPageOffsets([0]);
+      setTotalViewportPages(1);
+      setViewportPage(0);
+    }
   }, [content]);
 
   // Restore viewportPage after content and measure (for resume)
@@ -568,8 +574,6 @@ export default function Ereader() {
   const totalKavitaPages = isPdf
     ? pdfPageCount || bookInfo?.pages || 0
     : bookInfo?.pages ?? 0;
-  const canPrevKavita = page > 0;
-  const canNextKavita = page < totalKavitaPages - 1;
 
   const scrollToViewport = useCallback((idx: number) => {
     setViewportPage(idx);
@@ -580,32 +584,43 @@ export default function Ereader() {
       if (page > 0) setPage((p) => p - 1);
       return;
     }
-    if (viewportPage > 0) {
-      scrollToViewport(viewportPage - 1);
-    } else if (canPrevKavita) {
+    // Prefer measured offsets length — totalViewportPages can briefly lag.
+    const last = Math.max(0, pageOffsets.length - 1);
+    const cur = Math.min(viewportPage, last);
+    if (cur > 0) {
+      scrollToViewport(cur - 1);
+    } else if (page > 0) {
       setPage((p) => p - 1);
     }
-  }, [isPdf, page, viewportPage, canPrevKavita, scrollToViewport]);
+  }, [isPdf, page, viewportPage, pageOffsets.length, scrollToViewport]);
 
   const goNext = useCallback(() => {
     if (isPdf) {
       if (page < totalKavitaPages - 1) setPage((p) => p + 1);
       return;
     }
-    if (viewportPage < totalViewportPages - 1) {
-      scrollToViewport(viewportPage + 1);
-    } else if (canNextKavita) {
+    const last = Math.max(0, pageOffsets.length - 1);
+    const cur = Math.min(viewportPage, last);
+    if (cur < last) {
+      scrollToViewport(cur + 1);
+    } else if (page < totalKavitaPages - 1) {
       setPage((p) => p + 1);
     }
-  }, [isPdf, page, totalKavitaPages, viewportPage, totalViewportPages, canNextKavita, scrollToViewport]);
+  }, [isPdf, page, totalKavitaPages, viewportPage, pageOffsets.length, scrollToViewport]);
 
-  const canPrev = isPdf ? page > 0 : viewportPage > 0 || canPrevKavita;
-  const canNext = isPdf ? page < totalKavitaPages - 1 : viewportPage < totalViewportPages - 1 || canNextKavita;
+  const canPrev = isPdf ? page > 0 : viewportPage > 0 || page > 0;
+  const canNext = isPdf
+    ? page < totalKavitaPages - 1
+    : viewportPage < Math.max(0, pageOffsets.length - 1) || page < totalKavitaPages - 1;
 
   // Tap/click zones: left = prev, right = next, center = toggle chrome in fullscreen
   const handleContentClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
+      // Ignore chrome/settings/TOC (and any leftover ghost clicks).
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("[data-reader-chrome]")) return;
       if (tocOpen || settingsOpen) return;
+      if (loading) return;
       const target = e.currentTarget;
       const rect = target.getBoundingClientRect();
       const x = e.clientX - rect.left;
@@ -614,17 +629,27 @@ export default function Ereader() {
       else if (x > third * 2) goNext();
       else if (fullscreen) setChromeHidden((h) => !h);
     },
-    [goPrev, goNext, tocOpen, settingsOpen, fullscreen]
+    [goPrev, goNext, tocOpen, settingsOpen, fullscreen, loading]
   );
 
   // Swipe gestures
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    const t = e.target as HTMLElement | null;
+    if (t?.closest?.("[data-reader-chrome]")) {
+      touchStartX.current = 0;
+      touchStartY.current = 0;
+      return;
+    }
     touchStartX.current = e.touches[0].clientX;
     touchStartY.current = e.touches[0].clientY;
   }, []);
 
   const handleTouchEnd = useCallback(
     (e: React.TouchEvent) => {
+      if (tocOpen || settingsOpen || loading) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("[data-reader-chrome]")) return;
+      if (!touchStartX.current && !touchStartY.current) return;
       const endX = e.changedTouches[0].clientX;
       const endY = e.changedTouches[0].clientY;
       const diffX = endX - touchStartX.current;
@@ -634,8 +659,20 @@ export default function Ereader() {
       if (diffX > 0) goPrev();
       else goNext();
     },
-    [goPrev, goNext]
+    [goPrev, goNext, tocOpen, settingsOpen, loading]
   );
+
+  const jumpToKavitaPage = useCallback((rawPage: number) => {
+    // Kavita TOC page numbers match book-page indices (cover often page 0, first TOC at 1).
+    const max = Math.max(0, (bookInfo?.pages ?? 1) - 1);
+    const next = Math.min(max, Math.max(0, Math.floor(Number(rawPage) || 0)));
+    pendingRestore.current = null;
+    positionAnchorRef.current = null;
+    setViewportPage(0);
+    setPageOffsets([0]);
+    setTotalViewportPages(1);
+    setPage(next);
+  }, [bookInfo?.pages]);
 
   // Fullscreen / locked reading mode — hide chrome so only text fills the viewport
   const toggleFullscreen = useCallback(async () => {
@@ -716,10 +753,12 @@ export default function Ereader() {
     ? "fixed inset-0 z-[9999] bg-gray-950 flex flex-col"
     : "h-screen bg-gray-950 flex flex-col overflow-hidden";
 
-  const pageStart = pageOffsets[viewportPage] ?? viewportPage * pageHeight;
+  const pageStart = pageOffsets[Math.min(viewportPage, Math.max(0, pageOffsets.length - 1))]
+    ?? Math.min(viewportPage, Math.max(0, pageOffsets.length - 1)) * pageHeight;
+  const safeViewport = Math.min(viewportPage, Math.max(0, pageOffsets.length - 1));
   const pageEnd =
-    viewportPage + 1 < pageOffsets.length
-      ? pageOffsets[viewportPage + 1]
+    safeViewport + 1 < pageOffsets.length
+      ? pageOffsets[safeViewport + 1]
       : contentHeight > pageStart
         ? contentHeight
         : pageStart + pageHeight;
@@ -727,11 +766,21 @@ export default function Ereader() {
 
   const backTarget = shareToken ? `/share/${encodeURIComponent(shareToken)}` : "/my-library";
 
+  const stopChromeEvent = (e: React.SyntheticEvent) => {
+    e.stopPropagation();
+  };
+
   return (
     <div className={`${containerClass} relative`}>
       {/* Header overlays content (does not reflow pagination). */}
       {showChrome && (
-        <header className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800">
+        <header
+          data-reader-chrome
+          onClick={stopChromeEvent}
+          onTouchStart={stopChromeEvent}
+          onTouchEnd={stopChromeEvent}
+          className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800"
+        >
           <button
             onClick={() => navigate(backTarget)}
             className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
@@ -775,7 +824,13 @@ export default function Ereader() {
       <div className="flex flex-1 overflow-hidden min-h-0 relative">
         {/* Settings panel (overlay) */}
         {showChrome && settingsOpen && (
-          <aside className="absolute top-0 bottom-0 left-0 z-20 w-64 border-r border-gray-800 bg-gray-900/95 overflow-y-auto pt-14">
+          <aside
+            data-reader-chrome
+            onClick={stopChromeEvent}
+            onTouchStart={stopChromeEvent}
+            onTouchEnd={stopChromeEvent}
+            className="absolute top-0 bottom-0 left-0 z-20 w-64 border-r border-gray-800 bg-gray-900/95 overflow-y-auto pt-14"
+          >
             <div className="p-4 space-y-4">
               <h2 className="text-xs font-semibold text-gray-500 uppercase">Reader settings</h2>
               <div>
@@ -783,7 +838,10 @@ export default function Ereader() {
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    onClick={() => bumpFontSize(-FONT_SIZE_STEP)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      bumpFontSize(-FONT_SIZE_STEP);
+                    }}
                     disabled={settings.fontSize <= FONT_SIZE_MIN}
                     className="p-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-40"
                     title="Smaller"
@@ -795,7 +853,10 @@ export default function Ereader() {
                   </span>
                   <button
                     type="button"
-                    onClick={() => bumpFontSize(FONT_SIZE_STEP)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      bumpFontSize(FONT_SIZE_STEP);
+                    }}
                     disabled={settings.fontSize >= FONT_SIZE_MAX}
                     className="p-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-40"
                     title="Larger"
@@ -809,8 +870,10 @@ export default function Ereader() {
                 <div className="flex flex-col gap-1">
                   {(["serif", "sans-serif", "monospace"] as const).map((fam) => (
                     <button
+                      type="button"
                       key={fam}
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         const y = pageOffsets[viewportPage] ?? 0;
                         const h = contentHeight || 1;
                         positionAnchorRef.current = Math.min(1, Math.max(0, y / h));
@@ -831,15 +894,23 @@ export default function Ereader() {
 
         {/* TOC sidebar (overlay) */}
         {showChrome && tocOpen && !settingsOpen && (
-          <aside className="absolute top-0 bottom-0 left-0 z-20 w-64 border-r border-gray-800 bg-gray-900/95 overflow-y-auto pt-14">
+          <aside
+            data-reader-chrome
+            onClick={stopChromeEvent}
+            onTouchStart={stopChromeEvent}
+            onTouchEnd={stopChromeEvent}
+            className="absolute top-0 bottom-0 left-0 z-20 w-64 border-r border-gray-800 bg-gray-900/95 overflow-y-auto pt-14"
+          >
             <div className="p-3">
               <h2 className="text-xs font-semibold text-gray-500 uppercase mb-2">Contents</h2>
               <ul className="space-y-1">
                 {flatToc.map((c, i) => (
                   <li key={i}>
                     <button
-                      onClick={() => {
-                        setPage(c.page);
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        jumpToKavitaPage(c.page);
                         setTocOpen(false);
                       }}
                       className={`w-full text-left px-2 py-1.5 rounded text-sm truncate transition-colors ${
@@ -902,7 +973,13 @@ export default function Ereader() {
 
       {/* Footer overlays content */}
       {showChrome && (
-        <footer className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800">
+        <footer
+          data-reader-chrome
+          onClick={stopChromeEvent}
+          onTouchStart={stopChromeEvent}
+          onTouchEnd={stopChromeEvent}
+          className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800"
+        >
           <button
             onClick={goPrev}
             disabled={!canPrev}
@@ -915,7 +992,7 @@ export default function Ereader() {
               <>Page {page + 1}{totalKavitaPages > 0 ? ` of ${totalKavitaPages}` : ""}</>
             ) : (
               <>
-                Page {viewportPage + 1} of {totalViewportPages}
+                Page {safeViewport + 1} of {Math.max(1, pageOffsets.length)}
                 {totalKavitaPages > 1 && (
                   <span className="text-gray-600 ml-1">· Ch. {page + 1}/{totalKavitaPages}</span>
                 )}

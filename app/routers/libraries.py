@@ -429,7 +429,10 @@ async def regenerate_invite(
     group = await _get_group(user, db)
     if not group:
         raise HTTPException(status_code=404, detail="You're not in a library")
+    from datetime import datetime, timezone
+
     group.invite_code = _invite_code()
+    group.invite_rotated_at = datetime.now(timezone.utc)
     await db.commit()
     base = await _public_app_base()
     return {

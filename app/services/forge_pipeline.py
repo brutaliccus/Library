@@ -2439,20 +2439,28 @@ async def run_forge_after_download(
     # Ensure unorganized leftovers are gone on E2E success. When Folder Forge
     # reported moves, force-delete the req_* tree (samples/extras included).
     # Otherwise only wipe empty/junk trees — never soft-fail audio.
-    if organizer_report and libraforge.organizer_moved_files(organizer_report):
+    organizer_did_move = bool(
+        organizer_report and libraforge.organizer_moved_files(organizer_report)
+    )
+    if organizer_did_move:
         delete_request_staging_tree(request_id, staging_path_for_libraforge(staging))
     elif staging.is_dir():
         _cleanup_staging_after_folder_forge(staging, force=False)
 
+    source_library_path: str | None = None
     async with async_session() as db:
         await p._update_status(db, request_id, "completed", "Ready in Audiobookshelf")
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
         req = result.scalar_one_or_none()
         if not req:
             return
+        source_library_path = (getattr(req, "source_library_path", None) or "").strip() or None
         # Clear staging_path after success (tree wiped when organize completed).
         req.staging_path = None
         req.quarantine_reason = None
+        if organizer_did_move and source_library_path:
+            # Source folder is superseded once Folder Forge lands files elsewhere.
+            req.source_library_path = None
         await db.commit()
         user_result = await db.execute(select(User).where(User.id == req.user_id))
         user = user_result.scalar_one_or_none()
@@ -2470,6 +2478,87 @@ async def run_forge_after_download(
             await push.notify_download_complete(req.user_id, title, "Audiobookshelf", db)
         except Exception as e:
             logger.warning("Push notification failed (non-fatal): %s", e)
+
+    # After commit: delete the pre-forge library folder when Folder Forge moved
+    # the book to a new path (sweep hardlinks otherwise leave 2–4 copies).
+    if organizer_did_move and source_library_path:
+        try:
+            _delete_superseded_source_library(
+                source_library_path,
+                organizer_report,
+            )
+        except Exception as e:
+            logger.warning(
+                "Could not delete superseded source library for request %s: %s",
+                request_id,
+                e,
+            )
+
+
+def _delete_superseded_source_library(
+    source_library_path: str,
+    organizer_report: dict[str, Any] | None,
+) -> None:
+    """Remove the original library folder after Folder Forge relocates the book.
+
+    Safe guards: must sit under audiobook_dir, must not be staging, must not be
+    equal to (or an ancestor of) any move target, and at least one target must
+    still contain audio before deletion.
+    """
+    from app.services.library_media_delete import delete_tree_under_library
+
+    raw = (source_library_path or "").strip()
+    if not raw:
+        return
+    root = Path(settings.audiobook_dir).resolve()
+    src = Path(raw).resolve()
+    forbidden = unorganized_dirnames()
+    try:
+        rel = src.relative_to(root)
+    except ValueError:
+        logger.info("Skip source delete (outside library): %s", src)
+        return
+    if any(part in forbidden for part in rel.parts):
+        logger.info("Skip source delete (staging path): %s", src)
+        return
+    if src == root:
+        return
+
+    targets = [Path(t).resolve() for t in libraforge.organizer_move_targets(organizer_report or {})]
+    if not targets:
+        logger.info("Skip source delete (no move targets): %s", src)
+        return
+
+    for target in targets:
+        if src == target:
+            logger.info("Skip source delete (organized in place): %s", src)
+            return
+        try:
+            target.relative_to(src)
+            # Target lives under source — deleting source would wipe the move.
+            logger.info(
+                "Skip source delete (target under source): src=%s target=%s",
+                src,
+                target,
+            )
+            return
+        except ValueError:
+            pass
+
+    # Confirm at least one destination still has audio before removing source.
+    has_keeper = False
+    for target in targets:
+        if not target.is_dir():
+            continue
+        if any(p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS for p in target.rglob("*")):
+            has_keeper = True
+            break
+    if not has_keeper:
+        logger.warning("Skip source delete (no audio at targets): %s", src)
+        return
+
+    delete_tree_under_library(src, root, forbidden)
+    logger.info("Deleted superseded source library folder: %s", src)
 
 
 def delete_request_staging_tree(

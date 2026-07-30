@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -183,18 +183,31 @@ async def me(user: User = Depends(get_current_user)):
 
 @router.post("/heartbeat")
 async def heartbeat(
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Lightweight presence ping from the SPA while the tab is open/focused."""
     now = datetime.now(timezone.utc)
     user.last_seen_at = now
+    try:
+        from app.services.admin_whitelist import client_ip_from_request
+
+        ip = client_ip_from_request(request)
+        if ip and ip != (user.last_client_ip or ""):
+            user.last_client_ip = ip
+    except Exception:
+        pass
     await db.commit()
     return {"ok": True, "last_seen_at": now.isoformat()}
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(
+    body: LoginRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     # Prefer email; also accept username in either field for legacy accounts.
     user = await _find_user_for_login(db, body.email, body.username)
     if not user or not verify_password(body.password, user.hashed_password):
@@ -210,6 +223,14 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
         if taken is None:
             user.email = em
     user.last_seen_at = datetime.now(timezone.utc)
+    try:
+        from app.services.admin_whitelist import client_ip_from_request
+
+        ip = client_ip_from_request(request)
+        if ip:
+            user.last_client_ip = ip
+    except Exception:
+        pass
     await db.commit()
     await db.refresh(user)
 

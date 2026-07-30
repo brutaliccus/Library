@@ -298,6 +298,15 @@ async def _resolve_or_restage_sweep(
 
     staging = audiobook_staging_dir(request_id, title or "Untitled")
     method = stage_tree_from_library(library_dir, staging, prefer_hardlink=True)
+    async with async_session() as db:
+        row = (
+            await db.execute(
+                select(DownloadRequest).where(DownloadRequest.id == request_id)
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            row.source_library_path = str(library_dir.resolve())[:1024]
+            await db.commit()
     logger.info(
         "Reprocess %s restaged from ABS %s via %s → %s",
         request_id,
@@ -396,8 +405,10 @@ async def create_ingest_request(
     ingest_fingerprint: str | None = None,
     cover_url: str | None = None,
     indexer: str | None = None,
+    source_library_path: str | None = None,
 ) -> DownloadRequest:
     """Insert a DownloadRequest for sweep/upload. Does **not** call process_download."""
+    src_path = (source_library_path or "").strip() or None
     async with async_session() as db:
         req = DownloadRequest(
             user_id=user_id,
@@ -412,6 +423,7 @@ async def create_ingest_request(
             abs_item_id=abs_item_id,
             ingest_fingerprint=ingest_fingerprint,
             cover_url=(cover_url or None) and cover_url[:1024],
+            source_library_path=src_path[:1024] if src_path else None,
             is_private=False,
         )
         db.add(req)
@@ -522,6 +534,7 @@ async def ingest_from_library_folder(
         abs_item_id=abs_item_id,
         ingest_fingerprint=ingest_fingerprint,
         cover_url=cover_url,
+        source_library_path=str(library_dir.resolve()) if library_dir else None,
     )
     if on_request_created is not None:
         maybe = on_request_created(req.id)

@@ -31,6 +31,7 @@ class LibraryGroup(Base):
     default_theme: Mapped[str] = mapped_column(String(32), default="ocean")
     owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     invite_code: Mapped[str] = mapped_column(String(24), unique=True, index=True, default=_invite_code)
+    invite_rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Empty string = fall back to the server-wide env tokens (default library)
     real_debrid_api_token: Mapped[str] = mapped_column(Text, default="")
     torbox_api_token: Mapped[str] = mapped_column(Text, default="")
@@ -61,6 +62,8 @@ class User(Base):
     # Role within the library group: "owner" | "admin" | "member"
     # (owner/admin see the invite code; owner manages members and API keys)
     library_role: Mapped[str] = mapped_column(String(16), default="member")
+    # Last observed client IP (for LibraForge admin whitelist).
+    last_client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     # Updated by client heartbeat while the SPA is open/focused.
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -112,6 +115,8 @@ class DownloadRequest(Base):
     # Ingest provenance: null/request (debrid download) | sweep | upload
     source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     abs_item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    # Absolute library folder staged for sweep/upload — deleted after Folder Forge moves.
+    source_library_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     # Idempotency key for Library Sweep (e.g. abs:{itemId})
     ingest_fingerprint: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
 
@@ -200,12 +205,17 @@ class PushSubscription(Base):
 
 
 class BookShare(Base):
-    """Public share link for a single ABS audiobook (guest listen via token URL)."""
+    """Public share link for one audiobook (ABS) or ebook (Kavita)."""
     __tablename__ = "book_shares"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
-    abs_item_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    # "audiobook" | "ebook"
+    media_type: Mapped[str] = mapped_column(String(16), default="audiobook")
+    abs_item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    kavita_series_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    kavita_chapter_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

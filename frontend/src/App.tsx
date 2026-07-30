@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useState, useCallback, useEffect } from "react";
 import { useAuth } from "./hooks/useAuth";
 import { usePlayer } from "./contexts/PlayerContext";
@@ -82,6 +82,14 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/onboarding" />;
   }
   return <>{children}</>;
+}
+
+/** Guest ebook Read via /read/:id?share=TOKEN (public share links). */
+function ReaderRoute({ children }: { children: React.ReactNode }) {
+  const [params] = useSearchParams();
+  const share = (params.get("share") || "").trim();
+  if (share) return <>{children}</>;
+  return <ProtectedRoute>{children}</ProtectedRoute>;
 }
 
 function OnboardingRoute({ children }: { children: React.ReactNode }) {
@@ -325,9 +333,9 @@ export default function App() {
         <Route
           path="/read/:chapterId"
           element={
-            <ProtectedRoute>
+            <ReaderRoute>
               <Ereader />
-            </ProtectedRoute>
+            </ReaderRoute>
           }
         />
         <Route

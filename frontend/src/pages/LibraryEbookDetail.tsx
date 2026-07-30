@@ -2,10 +2,11 @@ import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import api from "../api/client";
+import { resolveShareOrigin } from "../api/inviteLink";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import {
-  ArrowLeft, BookOpen, Headphones, Loader2, Store, Trash2,
+  ArrowLeft, BookOpen, Headphones, Loader2, Store, Trash2, Share2,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
@@ -37,6 +38,7 @@ export default function LibraryEbookDetail() {
   const [storeLoading, setStoreLoading] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
 
   const { data: item, isLoading, error } = useQuery({
     queryKey: ["kavita-item-detail", seriesId],
@@ -103,6 +105,45 @@ export default function LibraryEbookDetail() {
     }
   };
 
+  const canShare = user?.role === "admin" || !!user?.canShareBooks;
+  const handleShare = async () => {
+    if (!item || item.chapterId == null || !Number.isFinite(seriesId)) return;
+    setShareBusy(true);
+    try {
+      const { data } = await api.post("/share", {
+        media_type: "ebook",
+        series_id: seriesId,
+        chapter_id: item.chapterId,
+        title: item.title,
+      });
+      const share = data as { path?: string; token?: string; url?: string };
+      const path = share.path || (share.token ? `/share/${share.token}` : "");
+      const serverUrl = (share.url || "").trim();
+      const origin = resolveShareOrigin();
+      const url = serverUrl.startsWith("http")
+        ? serverUrl
+        : origin
+          ? `${origin}${path}`
+          : `${window.location.origin}${path}`;
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: item.title || "Shared ebook", text: `Read ${item.title}`, url });
+          toast("Share sheet opened", "success");
+          return;
+        } catch (err) {
+          if ((err as { name?: string })?.name === "AbortError") return;
+        }
+      }
+      await navigator.clipboard.writeText(url);
+      toast("Share link copied", "success");
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "Could not create share link";
+      toast(typeof detail === "string" ? detail : "Could not create share link", "error");
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="max-w-5xl mx-auto px-4 py-8">
@@ -154,6 +195,18 @@ export default function LibraryEbookDetail() {
         >
           <BookOpen size={16} />
           Read
+        </button>
+      )}
+      {canShare && item.chapterId != null && (
+        <button
+          type="button"
+          onClick={() => void handleShare()}
+          disabled={shareBusy}
+          title="Share read link"
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
+        >
+          {shareBusy ? <Loader2 size={16} className="animate-spin" /> : <Share2 size={16} />}
+          Share
         </button>
       )}
       {item.absItemId && (

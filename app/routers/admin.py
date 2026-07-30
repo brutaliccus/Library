@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -484,6 +484,7 @@ async def patch_user(
             user.is_active = body.is_active
             changed.append("enabled" if user.is_active else "disabled")
 
+    promoted_to_admin = False
     if body.role is not None:
         new_role = (body.role or "").strip().lower()
         if new_role not in ("admin", "user"):
@@ -495,6 +496,8 @@ async def patch_user(
                 await _ensure_not_last_active_admin(db, user, action="demote")
             user.role = new_role
             changed.append(f"role={new_role}")
+            if new_role == "admin":
+                promoted_to_admin = True
 
     if body.allow_audiobook_upload is not None:
         user.allow_audiobook_upload = bool(body.allow_audiobook_upload)
@@ -519,12 +522,28 @@ async def patch_user(
 
     await db.commit()
     await db.refresh(user)
+
+    whitelist_added = False
+    whitelist_ip = getattr(user, "last_client_ip", None)
+    if promoted_to_admin:
+        try:
+            from app.services import admin_whitelist
+
+            sync = await admin_whitelist.sync_admin_ips(db)
+            whitelist_added = bool(
+                whitelist_ip and whitelist_ip in (sync.get("ips") or [])
+            )
+        except Exception as e:
+            logger.warning("LibraForge whitelist sync failed: %s", e)
+
     return {
         "message": f"Updated {user.username} ({', '.join(changed)})",
         "is_active": user.is_active,
         "role": user.role,
         "allow_audiobook_upload": bool(user.allow_audiobook_upload),
         "can_share_books": bool(user.can_share_books),
+        "libraforge_whitelist_added": whitelist_added,
+        "libraforge_whitelist_ip": whitelist_ip,
     }
 
 
@@ -2288,3 +2307,287 @@ async def library_sweep_dismiss_bulk(
         return await library_sweep.dismiss_unprocessed(ids)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# --- Launch ops: backups, activity, shares, whitelist ---
+
+@router.get("/backups")
+async def list_backups(_admin: User = Depends(require_admin)):
+    from app.services import db_backup
+
+    try:
+        targets = db_backup.backup_targets()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"targets": targets}
+
+
+@router.post("/backups/now")
+@router.post("/backups/{target_id}")
+async def run_backup_now(
+    target_id: str = "app.db",
+    _admin: User = Depends(require_admin),
+):
+    from app.services import db_backup
+
+    if target_id not in ("app.db", "now", ""):
+        # Accept path-style ids from the UI; only app.db is supported today.
+        if target_id != "app.db":
+            raise HTTPException(status_code=404, detail="Unknown backup target")
+    try:
+        result = db_backup.create_backup_now()
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"ok": True, "backup": result, "targets": db_backup.backup_targets()}
+
+
+@router.get("/activity")
+async def admin_activity(
+    limit: int = 100,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Chronological feed of meaningful server activity for admins."""
+    from app.models import BookShare
+
+    lim = max(1, min(int(limit or 100), 300))
+    events: list[dict] = []
+
+    users = (
+        await db.execute(select(User).order_by(User.created_at.desc()).limit(lim))
+    ).scalars().all()
+    for u in users:
+        events.append(
+            {
+                "id": f"user-join-{u.id}",
+                "kind": "user_joined",
+                "type": "user_joined",
+                "title": f"{u.username} joined",
+                "message": f"{u.username} created an account",
+                "username": u.username,
+                "created_at": _iso(u.created_at),
+                "at": _iso(u.created_at),
+            }
+        )
+
+    reqs = (
+        await db.execute(
+            select(DownloadRequest).order_by(DownloadRequest.created_at.desc()).limit(lim)
+        )
+    ).scalars().all()
+    user_ids = {r.user_id for r in reqs}
+    unames: dict[int, str] = {}
+    if user_ids:
+        for u in (
+            await db.execute(select(User).where(User.id.in_(user_ids)))
+        ).scalars().all():
+            unames[u.id] = u.username
+    for r in reqs:
+        status = (r.status or "").lower()
+        kind = "request_created"
+        msg = f"Requested {r.title}"
+        if status == "completed":
+            kind = "request_completed"
+            msg = f"Completed {r.title}"
+        elif status in ("failed", "admin_rejected", "quarantined"):
+            kind = "request_failed"
+            msg = f"{status.replace('_', ' ').title()}: {r.title}"
+        ts = r.completed_at or r.created_at
+        events.append(
+            {
+                "id": f"req-{r.id}-{status}",
+                "kind": kind,
+                "type": kind,
+                "title": msg,
+                "message": msg,
+                "username": unames.get(r.user_id),
+                "created_at": _iso(ts),
+                "at": _iso(ts),
+                "meta": {"request_id": r.id, "status": r.status, "media_type": r.media_type},
+            }
+        )
+
+    streams = (
+        await db.execute(
+            select(StreamHistory).order_by(StreamHistory.updated_at.desc()).limit(lim)
+        )
+    ).scalars().all()
+    stream_uids = {s.user_id for s in streams}
+    if stream_uids:
+        for u in (
+            await db.execute(select(User).where(User.id.in_(stream_uids)))
+        ).scalars().all():
+            unames[u.id] = u.username
+    for s in streams:
+        status = (s.status or "").lower()
+        if status == "playing":
+            kind, verb = "stream_started", "started listening to"
+        elif status == "finished":
+            kind, verb = "stream_ended", "finished"
+        elif status == "paused":
+            kind, verb = "stream_paused", "paused"
+        else:
+            kind, verb = "stream_activity", "streamed"
+        msg = f"{verb} {s.title}"
+        events.append(
+            {
+                "id": f"stream-{s.id}-{status}",
+                "kind": kind,
+                "type": kind,
+                "title": msg,
+                "message": msg,
+                "username": unames.get(s.user_id),
+                "created_at": _iso(s.updated_at or s.created_at),
+                "at": _iso(s.updated_at or s.created_at),
+            }
+        )
+
+    shares = (
+        await db.execute(select(BookShare).order_by(BookShare.created_at.desc()).limit(lim))
+    ).scalars().all()
+    share_uids = {s.created_by_user_id for s in shares}
+    if share_uids:
+        for u in (
+            await db.execute(select(User).where(User.id.in_(share_uids)))
+        ).scalars().all():
+            unames[u.id] = u.username
+    for s in shares:
+        title = s.title or s.abs_item_id or f"series {s.kavita_series_id}" or "book"
+        events.append(
+            {
+                "id": f"share-create-{s.id}",
+                "kind": "share_created",
+                "type": "share_created",
+                "title": f"Shared {title}",
+                "message": f"Shared {title}",
+                "username": unames.get(s.created_by_user_id),
+                "created_at": _iso(s.created_at),
+                "at": _iso(s.created_at),
+            }
+        )
+        if s.revoked_at is not None:
+            events.append(
+                {
+                    "id": f"share-revoke-{s.id}",
+                    "kind": "share_revoked",
+                    "type": "share_revoked",
+                    "title": f"Revoked share of {title}",
+                    "message": f"Revoked share of {title}",
+                    "username": unames.get(s.created_by_user_id),
+                    "created_at": _iso(s.revoked_at),
+                    "at": _iso(s.revoked_at),
+                }
+            )
+
+    def _sort_key(ev: dict):
+        return ev.get("at") or ev.get("created_at") or ""
+
+    events.sort(key=_sort_key, reverse=True)
+    events = events[:lim]
+    return {"events": events, "activity": events, "items": events}
+
+
+@router.get("/shares")
+async def list_shares(
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models import BookShare
+    from app.routers.share import _public_share_url
+
+    rows = (
+        await db.execute(
+            select(BookShare)
+            .where(BookShare.revoked_at.is_(None))
+            .order_by(BookShare.created_at.desc())
+        )
+    ).scalars().all()
+    uids = {r.created_by_user_id for r in rows}
+    unames: dict[int, str] = {}
+    if uids:
+        for u in (
+            await db.execute(select(User).where(User.id.in_(uids)))
+        ).scalars().all():
+            unames[u.id] = u.username
+    out = []
+    for r in rows:
+        path = f"/share/{r.token}"
+        out.append(
+            {
+                "id": r.id,
+                "token": r.token,
+                "media_type": r.media_type or "audiobook",
+                "title": r.title or r.abs_item_id or f"Series {r.kavita_series_id}",
+                "abs_item_id": r.abs_item_id,
+                "kavita_series_id": r.kavita_series_id,
+                "kavita_chapter_id": r.kavita_chapter_id,
+                "created_by": unames.get(r.created_by_user_id),
+                "username": unames.get(r.created_by_user_id),
+                "created_at": _iso(r.created_at),
+                "revoked_at": _iso(r.revoked_at),
+                "path": path,
+                "url": await _public_share_url(path),
+            }
+        )
+    return {"shares": out}
+
+
+@router.delete("/shares/{share_id}")
+async def revoke_share(
+    share_id: str,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models import BookShare
+
+    row = None
+    if share_id.isdigit():
+        row = (
+            await db.execute(select(BookShare).where(BookShare.id == int(share_id)))
+        ).scalar_one_or_none()
+    if row is None:
+        row = (
+            await db.execute(select(BookShare).where(BookShare.token == share_id))
+        ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Share not found")
+    if row.revoked_at is None:
+        row.revoked_at = datetime.now(timezone.utc)
+        await db.commit()
+    return {"ok": True, "id": row.id, "revoked_at": _iso(row.revoked_at)}
+
+
+@router.post("/shares/revoke-all")
+async def revoke_all_shares(
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models import BookShare
+
+    now = datetime.now(timezone.utc)
+    rows = (
+        await db.execute(select(BookShare).where(BookShare.revoked_at.is_(None)))
+    ).scalars().all()
+    for r in rows:
+        r.revoked_at = now
+    await db.commit()
+    return {"ok": True, "revoked": len(rows)}
+
+
+@router.get("/libraforge-whitelist")
+async def get_libraforge_whitelist(_admin: User = Depends(require_admin)):
+    from app.services import admin_whitelist
+
+    return admin_whitelist.read_whitelist()
+
+
+@router.post("/libraforge-whitelist/sync")
+async def sync_libraforge_whitelist(
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services import admin_whitelist
+
+    return await admin_whitelist.sync_admin_ips(db)

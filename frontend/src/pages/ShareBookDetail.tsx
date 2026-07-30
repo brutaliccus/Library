@@ -6,7 +6,7 @@ import { getApiBaseUrl, toAbsoluteUrl } from "../api/instanceUrl";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
 import {
-  Headphones, Loader2, Mic, Clock,
+  BookOpen, Headphones, Loader2, Mic, Clock,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
@@ -19,7 +19,12 @@ import type { AbsChapter } from "../types/player";
 
 interface ShareBookDetail {
   token: string;
+  media_type?: "audiobook" | "ebook";
   itemId: string;
+  series_id?: number;
+  seriesId?: number;
+  chapter_id?: number | null;
+  chapterId?: number | null;
   title: string;
   subtitle: string;
   author: string;
@@ -79,7 +84,7 @@ export default function ShareBookDetail() {
       );
       return data as { chapters: AbsChapter[] };
     },
-    enabled: !!token && online,
+    enabled: !!token && online && item?.media_type !== "ebook",
     staleTime: 10 * 60 * 1000,
     retry: 1,
   });
@@ -143,11 +148,12 @@ export default function ShareBookDetail() {
     .join(" · ");
 
   const coverSrc = item.coverUrl ? toAbsoluteUrl(item.coverUrl) : "";
+  const isEbook = item.media_type === "ebook";
   const cover = coverSrc ? (
     <CoverImage src={coverSrc} alt={item.title} className="w-full rounded-xl shadow-2xl shadow-black/40" />
   ) : (
     <div className="w-full aspect-[2/3] bg-gray-800 rounded-xl flex items-center justify-center text-gray-700">
-      <Headphones size={48} />
+      {isEbook ? <BookOpen size={48} /> : <Headphones size={48} />}
     </div>
   );
 
@@ -155,16 +161,37 @@ export default function ShareBookDetail() {
 
   const actions = (
     <>
-      <button
-        type="button"
-        onClick={() => void handlePlay()}
-        disabled={playLoading}
-        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
-      >
-        {playLoading ? <Loader2 size={16} className="animate-spin" /> : <Headphones size={16} />}
-        {listenLabel}
-      </button>
-      {item.itemId && (
+      {isEbook ? (
+        <div className="space-y-2">
+          {(item.chapterId ?? item.chapter_id) != null ? (
+            <Link
+              to={`/read/${item.chapterId ?? item.chapter_id}?share=${encodeURIComponent(token || "")}`}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-amber-600 text-white hover:bg-amber-500 transition-colors"
+            >
+              <BookOpen size={16} /> Read
+            </Link>
+          ) : (
+            <Link
+              to="/login"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-amber-600 text-white hover:bg-amber-500 transition-colors"
+            >
+              <BookOpen size={16} /> Read
+            </Link>
+          )}
+          <p className="text-xs text-amber-200/80 mt-1">Shared ebook · progress stays on this device</p>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => void handlePlay()}
+          disabled={playLoading}
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
+        >
+          {playLoading ? <Loader2 size={16} className="animate-spin" /> : <Headphones size={16} />}
+          {listenLabel}
+        </button>
+      )}
+      {!isEbook && item.itemId && (
         <SaveOfflineButton
           target={{ kind: "abs", itemId: item.itemId }}
           shareToken={token}
@@ -175,7 +202,9 @@ export default function ShareBookDetail() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
-      <p className="text-xs text-gray-500 mb-6">Shared audiobook · progress stays on this device</p>
+      <p className="text-xs text-gray-500 mb-6">
+        Shared {isEbook ? "ebook" : "audiobook"}{isEbook ? "" : " · progress stays on this device"}
+      </p>
 
       <div className="flex gap-4 mb-5 md:hidden">
         <div className="w-[7.5rem] shrink-0">{cover}</div>
@@ -194,7 +223,7 @@ export default function ShareBookDetail() {
           )}
           {seriesLine && <p className="text-sm text-brand-400 mt-1">{seriesLine}</p>}
 
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-xs text-gray-400">
+          {!isEbook && <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-xs text-gray-400">
             {item.narrator && (
               <span className="inline-flex items-center gap-1">
                 <Mic size={12} /> {item.narrator}
@@ -206,7 +235,7 @@ export default function ShareBookDetail() {
               </span>
             )}
             {item.publishedYear && <span>{item.publishedYear}</span>}
-          </div>
+          </div>}
 
           {(item.genres?.length ?? 0) > 0 && (
             <div className="flex flex-wrap gap-1.5 mt-3">
@@ -230,7 +259,7 @@ export default function ShareBookDetail() {
             </div>
           )}
 
-          {(chaptersData?.chapters?.length ?? 0) > 0 && (
+          {!isEbook && (chaptersData?.chapters?.length ?? 0) > 0 && (
             <div className="mt-8">
               <h2 className="text-lg font-semibold text-gray-100 mb-3">Chapters</h2>
               <ul className="space-y-1 max-h-80 overflow-y-auto pr-1">

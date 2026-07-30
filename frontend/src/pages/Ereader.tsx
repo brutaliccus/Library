@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import axios from "axios";
 import api from "../api/client";
-import { toAbsoluteUrl } from "../api/instanceUrl";
+import { getApiBaseUrl, toAbsoluteUrl } from "../api/instanceUrl";
 import PdfViewer from "../components/PdfViewer";
 import { cacheBookEbook } from "../utils/ebookCache";
 import {
@@ -19,6 +20,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Menu,
+  Minus,
+  Plus,
   X,
   Maximize2,
   Minimize2,
@@ -29,23 +32,43 @@ import {
 const KAVITA_PDF_FORMAT = 4;
 
 const READER_SETTINGS_KEY = "ereader-settings";
+const FONT_SIZE_MIN = 10;
+const FONT_SIZE_MAX = 32;
+const FONT_SIZE_STEP = 2;
 
 interface ReaderSettings {
-  fontSize: "small" | "medium" | "large";
+  /** Point size (10–32). Legacy small/medium/large values are migrated on load. */
+  fontSize: number;
   fontFamily: "serif" | "sans-serif" | "monospace";
 }
 
 const defaultSettings: ReaderSettings = {
-  fontSize: "medium",
+  fontSize: 16,
   fontFamily: "serif",
 };
+
+function clampFontSize(n: number): number {
+  const stepped = Math.round(n / FONT_SIZE_STEP) * FONT_SIZE_STEP;
+  return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, stepped));
+}
+
+function migrateFontSize(raw: unknown): number {
+  if (typeof raw === "number" && Number.isFinite(raw)) return clampFontSize(raw);
+  if (raw === "small") return 12;
+  if (raw === "large") return 20;
+  if (raw === "medium") return 16;
+  return defaultSettings.fontSize;
+}
 
 function loadSettings(): ReaderSettings {
   try {
     const s = localStorage.getItem(READER_SETTINGS_KEY);
     if (s) {
-      const parsed = JSON.parse(s) as Partial<ReaderSettings>;
-      return { ...defaultSettings, ...parsed };
+      const parsed = JSON.parse(s) as Partial<ReaderSettings> & { fontSize?: unknown };
+      return {
+        fontFamily: parsed.fontFamily || defaultSettings.fontFamily,
+        fontSize: migrateFontSize(parsed.fontSize),
+      };
     }
   } catch {
     /* ignore */
@@ -60,12 +83,6 @@ function saveSettings(s: ReaderSettings) {
     /* ignore */
   }
 }
-
-const FONT_SIZES = {
-  small: "0.875rem",
-  medium: "1rem",
-  large: "1.25rem",
-};
 
 const FONT_FAMILIES = {
   serif: "Georgia, 'Times New Roman', serif",
@@ -92,6 +109,8 @@ const SWIPE_THRESHOLD = 60;
 
 export default function Ereader() {
   const { chapterId } = useParams<{ chapterId: string }>();
+  const [searchParams] = useSearchParams();
+  const shareToken = (searchParams.get("share") || "").trim() || null;
   const navigate = useNavigate();
   const [bookInfo, setBookInfo] = useState<BookInfo | null>(null);
   const [chapters, setChapters] = useState<ChapterItem[]>([]);
@@ -119,9 +138,31 @@ export default function Ereader() {
   const touchStartX = useRef<number>(0);
   const touchStartY = useRef<number>(0);
   const pendingRestore = useRef<{ page: number; viewportPage: number } | null>(null);
+  /** Fraction through content (0–1) to restore after font-size / remasure. */
+  const positionAnchorRef = useRef<number | null>(null);
   const showChrome = !fullscreen || !chromeHidden;
 
   const cid = chapterId ? parseInt(chapterId, 10) : NaN;
+
+  const readerGet = useCallback(
+    async <T,>(path: string, opts?: { responseType?: "text" | "json"; params?: Record<string, unknown> }) => {
+      if (shareToken) {
+        const base = getApiBaseUrl();
+        const url = `${base}/share/${encodeURIComponent(shareToken)}/ebook/${path}`;
+        const { data } = await axios.get(url, {
+          params: opts?.params,
+          responseType: opts?.responseType === "text" ? "text" : "json",
+        });
+        return data as T;
+      }
+      const { data } = await api.get(`/library/reader/${cid}/${path}`, {
+        params: opts?.params,
+        responseType: opts?.responseType === "text" ? "text" : undefined,
+      });
+      return data as T;
+    },
+    [shareToken, cid]
+  );
 
   const revokePageObjectUrls = useCallback(() => {
     for (const u of pageObjectUrls.current) {
@@ -162,12 +203,16 @@ export default function Ereader() {
   const loadBookInfo = useCallback(async () => {
     if (!cid || isNaN(cid)) return;
     try {
-      const { data } = await api.get(`/library/reader/${cid}/book-info`);
+      const data = await readerGet<BookInfo>("book-info");
       setBookInfo(data);
       applyProgressRestore(cid);
       setError(null);
     } catch (e: unknown) {
       // Offline / unreachable: hydrate from Save-offline manifest (same idea as audio).
+      if (shareToken) {
+        setError("Failed to load shared book");
+        return;
+      }
       const manifest = getEbookOfflineManifest(cid);
       const ready = manifest ? await isEbookOfflineReady(cid) : false;
       if (manifest && ready && (isLikelyOffline() || isNetworkError(e))) {
@@ -187,17 +232,18 @@ export default function Ereader() {
           : "Failed to load book — save this ebook while online to read offline"
       );
     }
-  }, [cid, applyProgressRestore]);
+  }, [cid, applyProgressRestore, readerGet, shareToken]);
 
   const loadChapters = useCallback(async () => {
     if (!cid || isNaN(cid)) return;
     try {
-      const { data } = await api.get(`/library/reader/${cid}/chapters`);
-      setChapters(Array.isArray(data) ? data : []);
+      const data = await readerGet<ChapterItem[] | { chapters?: ChapterItem[] }>("chapters");
+      const list = Array.isArray(data) ? data : data?.chapters || [];
+      setChapters(list);
     } catch {
       setChapters([]);
     }
-  }, [cid]);
+  }, [cid, readerGet]);
 
   const loadPage = useCallback(
     async (p: number) => {
@@ -212,7 +258,7 @@ export default function Ereader() {
       }
       setLoading(true);
       try {
-        const { data } = await api.get(`/library/reader/${cid}/book-page`, {
+        const data = await readerGet<string>("book-page", {
           params: { page: p },
           responseType: "text",
         });
@@ -220,8 +266,13 @@ export default function Ereader() {
         revokePageObjectUrls();
         setContent(data);
         setViewportPage(0);
-        void cacheEbookPageHtml(cid, p, data);
+        if (!shareToken) void cacheEbookPageHtml(cid, p, data);
       } catch (e: unknown) {
+        if (shareToken) {
+          setError("Failed to load page");
+          setLoading(false);
+          return;
+        }
         const offlinePage = await getCachedEbookPage(cid, p);
         if (offlinePage) {
           pageCache.current.set(p, offlinePage.html);
@@ -241,7 +292,7 @@ export default function Ereader() {
         setLoading(false);
       }
     },
-    [cid, revokePageObjectUrls]
+    [cid, revokePageObjectUrls, readerGet, shareToken]
   );
 
   // Prefetch next pages in background
@@ -252,17 +303,16 @@ export default function Ereader() {
       for (let i = 1; i <= 2; i++) {
         const next = current + i;
         if (next < total && !pageCache.current.has(next)) {
-          api
-            .get(`/library/reader/${cid}/book-page`, { params: { page: next }, responseType: "text" })
-            .then(({ data }) => {
+          readerGet<string>("book-page", { params: { page: next }, responseType: "text" })
+            .then((data) => {
               pageCache.current.set(next, data);
-              void cacheEbookPageHtml(cid, next, data);
+              if (!shareToken) void cacheEbookPageHtml(cid, next, data);
             })
             .catch(() => {});
         }
       }
     },
-    [cid, bookInfo]
+    [cid, bookInfo, readerGet, shareToken]
   );
 
   useEffect(() => {
@@ -377,16 +427,31 @@ export default function Ereader() {
   }, [saveProgressImmediate]);
 
   // Measure viewport and split content into discrete pages at line boundaries (book-like).
-  // Pages never overlap: a line that doesn't fully fit moves entirely to the next page,
-  // and the viewport clips exactly to the next page offset.
+  // Chrome is an overlay — do not remasure when showChrome toggles (that was shifting pages).
   useEffect(() => {
     if (loading || !content) return;
+    const restoreFromAnchor = (offsets: number[], scrollH: number) => {
+      const anchor = positionAnchorRef.current;
+      if (anchor == null || scrollH <= 0 || offsets.length === 0) {
+        setViewportPage((prev) => Math.min(prev, offsets.length - 1));
+        return;
+      }
+      const targetY = anchor * scrollH;
+      let best = 0;
+      for (let i = 0; i < offsets.length; i++) {
+        if (offsets[i] <= targetY + 0.5) best = i;
+        else break;
+      }
+      setViewportPage(best);
+      positionAnchorRef.current = null;
+    };
     const applyFixedPages = (scrollH: number, effectiveH: number) => {
       setContentHeight(scrollH);
       const total = Math.max(1, Math.ceil(scrollH / effectiveH));
-      setPageOffsets(Array.from({ length: total }, (_, i) => i * effectiveH));
+      const offsets = Array.from({ length: total }, (_, i) => i * effectiveH);
+      setPageOffsets(offsets);
       setTotalViewportPages(total);
-      setViewportPage((prev) => Math.min(prev, total - 1));
+      restoreFromAnchor(offsets, scrollH);
     };
     const measure = () => {
       const containerEl = containerRef.current;
@@ -394,10 +459,7 @@ export default function Ereader() {
       if (!containerEl || !contentEl) return;
       const h = containerEl.clientHeight;
       if (h <= 0) return;
-      const style = getComputedStyle(containerEl);
-      const padTop = parseFloat(style.paddingTop) || 0;
-      const padBottom = parseFloat(style.paddingBottom) || 0;
-      const effectiveH = Math.max(1, h - padTop - padBottom);
+      const effectiveH = Math.max(1, h);
       setPageHeight(effectiveH);
 
       // Get line rects via Range API for book-like pagination (no mid-line cuts)
@@ -462,10 +524,11 @@ export default function Ereader() {
           pageBottom = pageStart + effectiveH;
         }
 
-        setContentHeight(contentEl.scrollHeight);
+        const scrollH = contentEl.scrollHeight;
+        setContentHeight(scrollH);
         setPageOffsets(offsets);
         setTotalViewportPages(offsets.length);
-        setViewportPage((prev) => Math.min(prev, offsets.length - 1));
+        restoreFromAnchor(offsets, scrollH);
       } catch {
         applyFixedPages(contentEl.scrollHeight, effectiveH);
       }
@@ -478,7 +541,16 @@ export default function Ereader() {
       cancelAnimationFrame(timer);
       ro.disconnect();
     };
-  }, [content, loading, settings.fontSize, settings.fontFamily, showChrome, fullscreen]);
+  }, [content, loading, settings.fontSize, settings.fontFamily, fullscreen]);
+
+  const bumpFontSize = useCallback((delta: number) => {
+    setSettings((s) => {
+      const y = pageOffsets[viewportPage] ?? 0;
+      const h = contentHeight || 1;
+      positionAnchorRef.current = Math.min(1, Math.max(0, y / h));
+      return { ...s, fontSize: clampFontSize(s.fontSize + delta) };
+    });
+  }, [pageOffsets, viewportPage, contentHeight, setSettings]);
 
   const flattenChapters = (items: ChapterItem[]): { title: string; page: number }[] => {
     const out: { title: string; page: number }[] = [];
@@ -653,15 +725,17 @@ export default function Ereader() {
         : pageStart + pageHeight;
   const pageClipH = Math.max(1, Math.min(pageHeight, pageEnd - pageStart));
 
+  const backTarget = shareToken ? `/share/${encodeURIComponent(shareToken)}` : "/my-library";
+
   return (
-    <div className={containerClass}>
-      {/* Header — hidden in fullscreen locked mode until center-tap */}
+    <div className={`${containerClass} relative`}>
+      {/* Header overlays content (does not reflow pagination). */}
       {showChrome && (
-        <header className="sticky top-0 z-10 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800 shrink-0">
+        <header className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800">
           <button
-            onClick={() => navigate("/my-library")}
+            onClick={() => navigate(backTarget)}
             className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
-            title="Back to Library"
+            title="Back"
           >
             <ChevronLeft size={20} />
           </button>
@@ -698,26 +772,36 @@ export default function Ereader() {
         </header>
       )}
 
-      <div className="flex flex-1 overflow-hidden min-h-0">
-        {/* Settings panel */}
+      <div className="flex flex-1 overflow-hidden min-h-0 relative">
+        {/* Settings panel (overlay) */}
         {showChrome && settingsOpen && (
-          <aside className="w-64 shrink-0 border-r border-gray-800 bg-gray-900/50 overflow-y-auto">
+          <aside className="absolute top-0 bottom-0 left-0 z-20 w-64 border-r border-gray-800 bg-gray-900/95 overflow-y-auto pt-14">
             <div className="p-4 space-y-4">
               <h2 className="text-xs font-semibold text-gray-500 uppercase">Reader settings</h2>
               <div>
                 <label className="block text-xs text-gray-400 mb-2">Font size</label>
-                <div className="flex gap-2">
-                  {(["small", "medium", "large"] as const).map((size) => (
-                    <button
-                      key={size}
-                      onClick={() => setSettings((s) => ({ ...s, fontSize: size }))}
-                      className={`px-3 py-1.5 rounded text-sm capitalize ${
-                        settings.fontSize === size ? "bg-amber-600 text-white" : "bg-gray-800 text-gray-300"
-                      }`}
-                    >
-                      {size}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => bumpFontSize(-FONT_SIZE_STEP)}
+                    disabled={settings.fontSize <= FONT_SIZE_MIN}
+                    className="p-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-40"
+                    title="Smaller"
+                  >
+                    <Minus size={16} />
+                  </button>
+                  <span className="min-w-[3rem] text-center text-sm font-medium text-gray-100 tabular-nums">
+                    {settings.fontSize}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => bumpFontSize(FONT_SIZE_STEP)}
+                    disabled={settings.fontSize >= FONT_SIZE_MAX}
+                    className="p-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-40"
+                    title="Larger"
+                  >
+                    <Plus size={16} />
+                  </button>
                 </div>
               </div>
               <div>
@@ -726,7 +810,12 @@ export default function Ereader() {
                   {(["serif", "sans-serif", "monospace"] as const).map((fam) => (
                     <button
                       key={fam}
-                      onClick={() => setSettings((s) => ({ ...s, fontFamily: fam }))}
+                      onClick={() => {
+                        const y = pageOffsets[viewportPage] ?? 0;
+                        const h = contentHeight || 1;
+                        positionAnchorRef.current = Math.min(1, Math.max(0, y / h));
+                        setSettings((s) => ({ ...s, fontFamily: fam }));
+                      }}
                       className={`px-3 py-2 rounded text-sm text-left ${
                         settings.fontFamily === fam ? "bg-amber-600 text-white" : "bg-gray-800 text-gray-300"
                       }`}
@@ -740,9 +829,9 @@ export default function Ereader() {
           </aside>
         )}
 
-        {/* TOC sidebar */}
+        {/* TOC sidebar (overlay) */}
         {showChrome && tocOpen && !settingsOpen && (
-          <aside className="w-64 shrink-0 border-r border-gray-800 bg-gray-900/50 overflow-y-auto">
+          <aside className="absolute top-0 bottom-0 left-0 z-20 w-64 border-r border-gray-800 bg-gray-900/95 overflow-y-auto pt-14">
             <div className="p-3">
               <h2 className="text-xs font-semibold text-gray-500 uppercase mb-2">Contents</h2>
               <ul className="space-y-1">
@@ -766,23 +855,19 @@ export default function Ereader() {
           </aside>
         )}
 
-        {/* Content - tap zones and swipe, viewport pagination */}
+        {/* Content fills the viewport; chrome overlays top/bottom lines when visible. */}
         <main
           onClick={handleContentClick}
           onTouchStart={handleTouchStart}
           onTouchEnd={handleTouchEnd}
-          className={`flex-1 overflow-hidden flex flex-col items-center min-h-0 ${
-            showChrome
-              ? "p-4 md:p-6"
-              : "p-0 pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] px-[env(safe-area-inset-left,0px)]"
-          }`}
+          className="flex-1 overflow-hidden flex flex-col items-center min-h-0 p-0 px-4 md:px-8"
         >
           {isPdf ? (
             <PdfViewer chapterId={cid} page={page} onReady={handlePdfReady} />
           ) : (
           <div
             ref={containerRef}
-            className={`relative w-full max-w-2xl flex-1 min-h-0 ${showChrome ? "py-2" : "py-0"}`}
+            className="relative w-full max-w-2xl flex-1 min-h-0 py-0"
           >
             {loading ? (
               <div className="flex justify-center py-12 h-full items-center">
@@ -798,16 +883,14 @@ export default function Ereader() {
                   className="transition-transform duration-150 ease-out"
                   style={{
                     fontFamily: FONT_FAMILIES[settings.fontFamily],
-                    fontSize: FONT_SIZES[settings.fontSize],
+                    fontSize: `${settings.fontSize}px`,
                     transform: `translateY(-${pageStart}px)`,
                   }}
                 >
                   <div
-                    className={`reader-content max-w-2xl w-full text-gray-100 leading-relaxed prose prose-invert prose-p:my-0 max-w-none select-none [&_img]:max-w-full [&_img]:h-auto ${
-                      showChrome ? "bg-gray-900/30 rounded-lg p-6 md:p-10" : "bg-transparent rounded-none px-4 py-2 md:px-8"
-                    }`}
+                    className="reader-content max-w-2xl w-full text-gray-100 leading-relaxed prose prose-invert prose-p:my-0 max-w-none select-none [&_img]:max-w-full [&_img]:h-auto bg-transparent rounded-none px-1 py-2"
                     dangerouslySetInnerHTML={{ __html: content }}
-                    style={{ paddingBottom: showChrome ? "2rem" : "0.5rem" }}
+                    style={{ paddingBottom: "0.5rem" }}
                   />
                 </div>
               </div>
@@ -817,9 +900,9 @@ export default function Ereader() {
         </main>
       </div>
 
-      {/* Footer nav — hidden in fullscreen locked mode until center-tap */}
+      {/* Footer overlays content */}
       {showChrome && (
-        <footer className="sticky bottom-0 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800 shrink-0">
+        <footer className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800">
           <button
             onClick={goPrev}
             disabled={!canPrev}

@@ -29,6 +29,10 @@ import {
   Menu,
   Database,
   Wand2,
+  HardDrive,
+  Share2,
+  Clock3,
+  Server,
   type LucideIcon,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
@@ -56,6 +60,9 @@ type AdminTab =
   | "overview"
   | "requests"
   | "users"
+  | "backups"
+  | "activity"
+  | "shared"
   | "discovery"
   | "catalog"
   | "library-sweep"
@@ -78,6 +85,9 @@ const ADMIN_NAV: NavGroup[] = [
       { id: "overview", label: "Health", icon: Activity },
       { id: "requests", label: "Requests", icon: Download },
       { id: "users", label: "Users", icon: Users },
+      { id: "backups", label: "Backups", icon: HardDrive },
+      { id: "activity", label: "Activity", icon: Clock3 },
+      { id: "shared", label: "Shared", icon: Share2 },
     ],
   },
   {
@@ -337,6 +347,9 @@ export default function AdminPage() {
           {activeTab === "overview" && <HealthTab />}
           {activeTab === "requests" && <AllRequestsTab />}
           {activeTab === "users" && <UsersTab />}
+          {activeTab === "backups" && <BackupsTab />}
+          {activeTab === "activity" && <ActivityTab />}
+          {activeTab === "shared" && <SharedTab />}
           {activeTab === "discovery" && <ScraperTab />}
           {activeTab === "catalog" && (
             <ConfigTab
@@ -418,6 +431,9 @@ function UsersTab() {
       queryClient.invalidateQueries({ queryKey: ["admin-users"] });
       setDisableUserModal(null);
       toast(data.message, "success");
+      if (data.role === "admin" && (data as any).libraforge_whitelist_added) {
+        toast("Their IP was added to the LibraForge whitelist file.", "info");
+      }
     },
     onError: (err: any) => {
       toast(err.response?.data?.detail || "Failed to update user", "error");
@@ -1053,6 +1069,187 @@ function AllRequestsTab() {
   );
 }
 
+function BackupsTab() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["admin-backups"],
+    queryFn: async () => {
+      const response = await api.get("/admin/backups");
+      return response.data as any;
+    },
+    refetchInterval: 30_000,
+  });
+  const targets = Array.isArray(data) ? data : data?.targets || data?.backups || [];
+  const backupNow = useMutation({
+    mutationFn: async (target: any) => {
+      const endpoint = target.backup_url || target.action_url || `/admin/backups/${encodeURIComponent(target.id || target.name)}`;
+      return api.post(endpoint);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-backups"] });
+      toast("Backup started. Status will refresh shortly.", "success");
+    },
+    onError: (err: any) => toast(err.response?.data?.detail || "Failed to start backup", "error"),
+  });
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-lg font-semibold text-gray-100 flex items-center gap-2"><HardDrive size={18} /> Backups</h2>
+        <p className="text-xs text-gray-500 mt-1">Backup targets and their most recent completed snapshot.</p>
+      </div>
+      {isLoading ? <p className="text-gray-500">Loading backups…</p> : isError ? (
+        <p className="rounded-xl border border-amber-800/60 bg-amber-900/20 p-4 text-sm text-amber-300">
+          Backup status is unavailable. Configure the admin backups endpoint to enable this panel.
+        </p>
+      ) : !targets.length ? <p className="text-center py-10 text-gray-500">No backup targets configured</p> : (
+        <div className="grid gap-3">
+          {targets.map((target: any, index: number) => {
+            const status = String(target.status || (target.ok ? "ready" : "unknown"));
+            const healthy = ["ok", "ready", "complete", "completed", "success"].includes(status.toLowerCase());
+            return (
+              <div key={target.id || target.name || index} className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex flex-col sm:flex-row gap-4 sm:items-center">
+                <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${healthy ? "bg-emerald-400" : "bg-amber-400"}`} />
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-gray-100">{target.name || target.label || `Backup target ${index + 1}`}</p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {status} · Last backed up {formatRelativeTime(target.last_backed_up_at || target.last_backup_at || target.updated_at)}
+                    {target.size_bytes != null || target.file_size != null ? ` · ${formatFileSize(target.size_bytes ?? target.file_size)}` : ""}
+                  </p>
+                  {target.error && <p className="text-xs text-red-400 mt-1">{target.error}</p>}
+                </div>
+                <button type="button" onClick={() => backupNow.mutate(target)} disabled={backupNow.isPending}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-50">
+                  <HardDrive size={14} /> {backupNow.isPending ? "Starting…" : "Backup now"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActivityTab() {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["admin-activity"],
+    queryFn: async () => (await api.get("/admin/activity")).data as any,
+    refetchInterval: 30_000,
+  });
+  const events = Array.isArray(data) ? data : data?.events || data?.activity || [];
+  const iconFor = (kind: string) => {
+    const key = kind.toLowerCase();
+    if (key.includes("share")) return Share2;
+    if (key.includes("stream") || key.includes("listen") || key.includes("read")) return Headphones;
+    if (key.includes("user") || key.includes("invite")) return Users;
+    return key.includes("request") || key.includes("download") ? Download : Activity;
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-lg font-semibold text-gray-100 flex items-center gap-2"><Clock3 size={18} /> Activity</h2>
+        <p className="text-xs text-gray-500 mt-1">Recent requests, membership events, streams, and shares.</p>
+      </div>
+      {isLoading ? <p className="text-gray-500">Loading activity…</p> : isError ? (
+        <p className="rounded-xl border border-amber-800/60 bg-amber-900/20 p-4 text-sm text-amber-300">Activity is unavailable.</p>
+      ) : !events.length ? <p className="text-center py-10 text-gray-500">No activity recorded yet</p> : (
+        <ol className="space-y-2">
+          {events.map((event: any, index: number) => {
+            const Icon = iconFor(String(event.kind || event.type || ""));
+            const timestamp = event.created_at || event.at || event.timestamp;
+            return <li key={event.id || `${timestamp}-${index}`} className="bg-gray-800 border border-gray-700 rounded-xl p-3 flex gap-3">
+              <div className="p-2 rounded-lg bg-gray-900 text-brand-400 h-fit"><Icon size={16} /></div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm text-gray-200">{event.message || event.summary || event.title || event.kind || "Activity"}</p>
+                <p className="text-xs text-gray-500 mt-1">{event.user || event.username ? `${event.user || event.username} · ` : ""}{formatRelativeTime(timestamp)}</p>
+              </div>
+            </li>;
+          })}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function SharedTab() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [confirmAll, setConfirmAll] = useState(false);
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["admin-shares"],
+    queryFn: async () => (await api.get("/admin/shares")).data as any,
+  });
+  const shares = Array.isArray(data) ? data : data?.shares || [];
+  const revoke = useMutation({
+    mutationFn: async (share: any) => api.delete(`/admin/shares/${encodeURIComponent(share.id || share.token)}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-shares"] });
+      toast("Share link revoked", "success");
+    },
+    onError: (err: any) => toast(err.response?.data?.detail || "Failed to revoke share", "error"),
+  });
+  const revokeAll = useMutation({
+    mutationFn: async () => api.post("/admin/shares/revoke-all"),
+    onSuccess: () => {
+      setConfirmAll(false);
+      void queryClient.invalidateQueries({ queryKey: ["admin-shares"] });
+      toast("All share links revoked", "success");
+    },
+    onError: (err: any) => toast(err.response?.data?.detail || "Failed to revoke all shares", "error"),
+  });
+
+  return <div className="space-y-4">
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 className="text-lg font-semibold text-gray-100 flex items-center gap-2"><Share2 size={18} /> Shared</h2>
+        <p className="text-xs text-gray-500 mt-1">Public links can be revoked at any time.</p>
+      </div>
+      <button type="button" onClick={() => setConfirmAll(true)} disabled={!shares.length}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-red-800/60 text-red-300 hover:bg-red-900/30 disabled:opacity-50">
+        <Trash2 size={14} /> Revoke all
+      </button>
+    </div>
+    <p className="text-xs text-gray-500">Invite code auto-rotation is configured in Settings as “Invite code auto-rotation (minutes)” (60–43200).</p>
+    {isLoading ? <p className="text-gray-500">Loading shared links…</p> : isError ? (
+      <p className="rounded-xl border border-amber-800/60 bg-amber-900/20 p-4 text-sm text-amber-300">Share management is unavailable.</p>
+    ) : !shares.length ? <p className="text-center py-10 text-gray-500">No active shares</p> : (
+      <div className="space-y-2">
+        {shares.map((share: any, index: number) => (
+          <div key={share.id || share.token || index} className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex flex-col sm:flex-row gap-3 sm:items-center">
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-gray-100 truncate">{share.title || "Shared item"} <span className="text-xs font-normal text-gray-500 capitalize">· {share.media_type || share.type || "audiobook"}</span></p>
+              <p className="text-xs text-gray-500 mt-1">Created {formatRelativeTime(share.created_at)}{share.created_by || share.username ? ` by ${share.created_by || share.username}` : ""}</p>
+              {(share.url || share.path) && <p className="text-xs text-brand-400 truncate mt-1">{share.url || share.path}</p>}
+            </div>
+            <button type="button" onClick={() => revoke.mutate(share)} disabled={revoke.isPending}
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-red-800/60 text-red-300 hover:bg-red-900/30 disabled:opacity-50">
+              <Trash2 size={14} /> Revoke
+            </button>
+          </div>
+        ))}
+      </div>
+    )}
+    <Modal title="Revoke all shares" show={confirmAll} onClose={() => !revokeAll.isPending && setConfirmAll(false)}>
+      <p className="text-sm text-gray-400 mb-4">Revoke every active public share link? This cannot be undone.</p>
+      <div className="flex justify-end gap-2">
+        <button type="button" onClick={() => setConfirmAll(false)} disabled={revokeAll.isPending} className="px-3 py-1.5 text-gray-300 hover:bg-gray-700 rounded-lg">Cancel</button>
+        <button type="button" onClick={() => revokeAll.mutate()} disabled={revokeAll.isPending} className="px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-500 disabled:opacity-50">{revokeAll.isPending ? "Revoking…" : "Revoke all"}</button>
+      </div>
+    </Modal>
+  </div>;
+}
+
+function formatFileSize(bytes: unknown): string {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const unit = value === 0 ? 0 : Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  return `${(value / 1024 ** unit).toFixed(unit ? 1 : 0)} ${units[unit]}`;
+}
+
 function HealthTab() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1161,6 +1358,7 @@ function HealthTab() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <UptimeCard />
         <HealthCard
           title="Real-Debrid"
           configured={svc("real_debrid").configured !== false}
@@ -1341,6 +1539,35 @@ function HealthTab() {
           ]}
         />
       </div>
+    </div>
+  );
+}
+
+function UptimeCard() {
+  const { data, isFetching, isError, refetch } = useQuery({
+    queryKey: ["uptime-check"],
+    queryFn: async () => {
+      const started = performance.now();
+      const { data } = await api.get("/health");
+      return { payload: data as any, latency: Math.round(performance.now() - started) };
+    },
+    retry: 1,
+  });
+  const ok = !isError && (!!data || isFetching);
+  return (
+    <div className="bg-gray-800 border border-gray-700 rounded-xl p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <div className={`w-2 h-2 rounded-full ${ok ? "bg-green-500" : "bg-red-500"}`} />
+        <h3 className="font-semibold text-gray-100 flex items-center gap-2"><Server size={16} /> Uptime check</h3>
+        <span className="ml-auto text-xs text-gray-500">{isFetching ? "Checking…" : ok ? "OK" : "Down"}</span>
+      </div>
+      <p className="text-sm text-gray-400">
+        {isError ? "The liveness endpoint did not respond." : data ? `${data.latency} ms` : "Check application liveness and response time."}
+      </p>
+      <button type="button" onClick={() => void refetch()} disabled={isFetching}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 mt-3 text-sm rounded-lg bg-gray-900 text-gray-300 border border-gray-700 hover:bg-gray-700 disabled:opacity-50">
+        <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} /> Refresh
+      </button>
     </div>
   );
 }

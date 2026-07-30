@@ -64,6 +64,18 @@ REGISTRY: list[SettingDef] = [
         help="JWT signing secret — set in .env only, never exposed in full.",
     ),
     SettingDef(
+        key="config.invite_rotation_minutes",
+        group="core",
+        label="Invite code auto-rotation (minutes)",
+        value_type="int",
+        env_fallback=False,
+        help=(
+            "Automatically rotate each library invite code on this interval "
+            "(60 minutes to 43200 = 30 days). Default 10080 = 7 days."
+        ),
+        placeholder="10080",
+    ),
+    SettingDef(
         key="config.android_apk_github_repo",
         group="mobile",
         label="Android APK GitHub repo",

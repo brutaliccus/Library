@@ -21,6 +21,22 @@ settings = get_settings()
 _shelf_refresh_task: asyncio.Task | None = None
 _ol_dumps_check_task: asyncio.Task | None = None
 _ol_scheduled_build_task: asyncio.Task | None = None
+_invite_rotation_task: asyncio.Task | None = None
+
+
+async def _invite_rotation_loop() -> None:
+    """Rotate library invite codes when older than the configured interval."""
+    await asyncio.sleep(45)
+    while True:
+        try:
+            from app.services.invite_rotation import rotate_due_invites
+
+            n = await rotate_due_invites()
+            if n:
+                logger.info("Invite rotation: rotated %s library group(s)", n)
+        except Exception as e:
+            logger.warning("Invite rotation loop error: %s", e)
+        await asyncio.sleep(60)
 
 
 async def _daily_shelf_refresh_loop() -> None:
@@ -72,6 +88,7 @@ async def _ol_scheduled_build_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _shelf_refresh_task, _ol_dumps_check_task, _ol_scheduled_build_task
+    global _invite_rotation_task
     logger.info("Starting up -- initializing database")
     await init_db()
     try:
@@ -97,6 +114,7 @@ async def lifespan(app: FastAPI):
     _shelf_refresh_task = asyncio.create_task(_daily_shelf_refresh_loop())
     _ol_dumps_check_task = asyncio.create_task(_ol_dumps_check_loop())
     _ol_scheduled_build_task = asyncio.create_task(_ol_scheduled_build_loop())
+    _invite_rotation_task = asyncio.create_task(_invite_rotation_loop())
     yield
     if _shelf_refresh_task and not _shelf_refresh_task.done():
         _shelf_refresh_task.cancel()
@@ -104,6 +122,8 @@ async def lifespan(app: FastAPI):
         _ol_dumps_check_task.cancel()
     if _ol_scheduled_build_task and not _ol_scheduled_build_task.done():
         _ol_scheduled_build_task.cancel()
+    if _invite_rotation_task and not _invite_rotation_task.done():
+        _invite_rotation_task.cancel()
     stop_scraper()
     logger.info("Shutting down")
 

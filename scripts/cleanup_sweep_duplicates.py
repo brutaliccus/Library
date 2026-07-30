@@ -37,6 +37,9 @@ def iter_book_dirs(root: Path):
             yield p, names
 
 
+_DUP_SUFFIX = re.compile(r"(?:[-_ ](?:copy|\d+)| \(\d+\))$", re.IGNORECASE)
+
+
 def pick_keeper(m4bs: list[Path]) -> Path:
     def score(p: Path):
         try:
@@ -47,7 +50,12 @@ def pick_keeper(m4bs: list[Path]) -> Path:
             size, mtime = 0, 0
         # Prefer forged / ASIN-named paths, then larger, then newer.
         asin = 1 if ASIN_IN_NAME.search(p.name) or ASIN_IN_NAME.search(str(p.parent)) else 0
-        return (asin, size, mtime, len(p.name))
+        # Prefer clean names over "...-2.m4b" / "... (1).m4b" collision copies.
+        stem = p.stem
+        clean = 0 if _DUP_SUFFIX.search(stem) else 1
+        # Prefer deeper series/title folders over flat author dumps when tied.
+        depth = len(p.parts)
+        return (asin, clean, size, mtime, depth, -len(p.name))
 
     return max(m4bs, key=score)
 

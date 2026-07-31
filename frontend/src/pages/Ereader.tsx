@@ -260,10 +260,12 @@ export default function Ereader() {
   const effectiveColumns: 1 | 2 = forceSingleColumn ? 1 : settings.columnCount;
   const safeInset = useSafeAreaMaxInset();
   // Foliate's margin is one symmetric top/bottom value. Include notch/home insets
-  // so immersive (chrome-hidden) text is not clipped under the status bar.
-  const chromeMarginPx = showChrome
-    ? Math.max(72, 52 + Math.ceil(safeInset))
-    : Math.max(36, 20 + Math.ceil(safeInset));
+  // so text is not clipped under the status bar. In fullscreen, keep this margin
+  // stable when chrome is revealed — header/footer are absolute overlays and must
+  // not remasure Foliate (that reflows the page).
+  const chromeMarginPx = fullscreen
+    ? Math.max(36, 20 + Math.ceil(safeInset))
+    : Math.max(72, 52 + Math.ceil(safeInset));
 
   const readerGet = useCallback(
     async <T,>(path: string, config?: { params?: Record<string, unknown>; responseType?: "text" | "blob" | "json" }) => {
@@ -612,57 +614,65 @@ export default function Ereader() {
 
   return (
     <div ref={readerRootRef} className={`${containerClass} relative`} style={{ backgroundColor: "rgb(var(--gray-950))" }}>
-      {showChrome && (
-        <header
-          data-reader-chrome
-          onClick={stopChrome}
-          onTouchStart={stopChrome}
-          onTouchEnd={stopChrome}
-          className="absolute top-0 left-0 right-0 z-40 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800 pointer-events-auto"
+      <header
+        data-reader-chrome
+        onClick={stopChrome}
+        onTouchStart={stopChrome}
+        onTouchEnd={stopChrome}
+        aria-hidden={!showChrome}
+        className={
+          "absolute top-0 left-0 right-0 z-40 flex items-center justify-between px-4 py-2 " +
+          "pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800 " +
+          "transition-opacity duration-150 " +
+          (showChrome ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none")
+        }
+      >
+        <button
+          onClick={() => navigate(backTarget)}
+          className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
+          title="Back"
+          tabIndex={showChrome ? 0 : -1}
         >
+          <ChevronLeft size={20} />
+        </button>
+        <h1 className="text-sm font-medium text-gray-200 truncate max-w-[40%]">
+          {bookInfo?.bookTitle || bookInfo?.seriesName || "Loading..."}
+        </h1>
+        <div className="flex items-center gap-1">
           <button
-            onClick={() => navigate(backTarget)}
+            onClick={() => void toggleFullscreen()}
             className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
-            title="Back"
+            title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            tabIndex={showChrome ? 0 : -1}
           >
-            <ChevronLeft size={20} />
+            {fullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
           </button>
-          <h1 className="text-sm font-medium text-gray-200 truncate max-w-[40%]">
-            {bookInfo?.bookTitle || bookInfo?.seriesName || "Loading..."}
-          </h1>
-          <div className="flex items-center gap-1">
+          {!isPdf && (
             <button
-              onClick={() => void toggleFullscreen()}
-              className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
-              title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+              onClick={() => setSettingsOpen((o) => !o)}
+              className={`p-2 rounded-lg transition-colors ${
+                settingsOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
+              }`}
+              title="Reader settings"
+              tabIndex={showChrome ? 0 : -1}
             >
-              {fullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
+              <Settings size={20} />
             </button>
-            {!isPdf && (
-              <button
-                onClick={() => setSettingsOpen((o) => !o)}
-                className={`p-2 rounded-lg transition-colors ${
-                  settingsOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
-                }`}
-                title="Reader settings"
-              >
-                <Settings size={20} />
-              </button>
-            )}
-            {!isPdf && (
-              <button
-                onClick={() => setTocOpen((o) => !o)}
-                className={`p-2 rounded-lg transition-colors ${
-                  tocOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
-                }`}
-                title="Table of Contents"
-              >
-                {tocOpen ? <X size={20} /> : <Menu size={20} />}
-              </button>
-            )}
-          </div>
-        </header>
-      )}
+          )}
+          {!isPdf && (
+            <button
+              onClick={() => setTocOpen((o) => !o)}
+              className={`p-2 rounded-lg transition-colors ${
+                tocOpen ? "text-amber-400 bg-gray-800" : "text-gray-400 hover:text-white hover:bg-gray-800"
+              }`}
+              title="Table of Contents"
+              tabIndex={showChrome ? 0 : -1}
+            >
+              {tocOpen ? <X size={20} /> : <Menu size={20} />}
+            </button>
+          )}
+        </div>
+      </header>
 
       <div className="flex flex-1 overflow-hidden min-h-0 relative">
         {showChrome && settingsOpen && !isPdf && (
@@ -803,17 +813,23 @@ export default function Ereader() {
         </div>
       </div>
 
-      {showChrome && (
-        <footer
-          data-reader-chrome
-          onClick={stopChrome}
-          className="absolute bottom-0 left-0 right-0 z-40 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800 pointer-events-auto"
-        >
+      <footer
+        data-reader-chrome
+        onClick={stopChrome}
+        aria-hidden={!showChrome}
+        className={
+          "absolute bottom-0 left-0 right-0 z-40 flex items-center justify-between px-4 py-2 " +
+          "pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800 " +
+          "transition-opacity duration-150 " +
+          (showChrome ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none")
+        }
+      >
           <button
             type="button"
             onClick={goPrev}
             className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800"
             title="Previous"
+            tabIndex={showChrome ? 0 : -1}
           >
             <ChevronLeft size={20} />
           </button>
@@ -827,11 +843,11 @@ export default function Ereader() {
             onClick={goNext}
             className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800"
             title="Next"
+            tabIndex={showChrome ? 0 : -1}
           >
             <ChevronRight size={20} />
           </button>
-        </footer>
-      )}
+      </footer>
     </div>
   );
 }

@@ -191,6 +191,91 @@ function turnFromVisiblePageClick(
   else onCenterTap?.();
 }
 
+const TAP_MOVE_PX = 14;
+
+/**
+ * Foliate calls preventDefault on touchmove, which often suppresses the synthetic
+ * click on mobile. Handle a stationary pointer/touch end as a page-turn tap, then
+ * ignore the follow-up click so desktop/mouse paths do not double-turn.
+ */
+function attachTapPager(
+  target: EventTarget,
+  host: () => HTMLElement | null,
+  onTap: (clientX: number, ev: Event) => void
+): () => void {
+  let startX = 0;
+  let startY = 0;
+  let active = false;
+  let ignoreClickUntil = 0;
+
+  const onStart = (ev: Event) => {
+    if (tapsBlocked(host())) return;
+    // Duck-type: iframe events fail `instanceof PointerEvent` across realms.
+    const pe = ev as PointerEvent;
+    if ("pointerType" in ev && typeof pe.clientX === "number") {
+      if (pe.pointerType === "mouse" && pe.button !== 0) return;
+      startX = pe.clientX;
+      startY = pe.clientY;
+      active = true;
+      return;
+    }
+    const te = ev as TouchEvent;
+    if (!te.changedTouches?.length) return;
+    startX = te.changedTouches[0].clientX;
+    startY = te.changedTouches[0].clientY;
+    active = true;
+  };
+
+  const onEnd = (ev: Event) => {
+    if (!active) return;
+    active = false;
+    if (tapsBlocked(host())) return;
+    let x = startX;
+    let y = startY;
+    const pe = ev as PointerEvent;
+    if ("pointerType" in ev && typeof pe.clientX === "number") {
+      x = pe.clientX;
+      y = pe.clientY;
+    } else {
+      const te = ev as TouchEvent;
+      if (!te.changedTouches?.length) return;
+      x = te.changedTouches[0].clientX;
+      y = te.changedTouches[0].clientY;
+    }
+    if (Math.hypot(x - startX, y - startY) > TAP_MOVE_PX) return;
+    const t = (ev as Event & { target?: EventTarget | null }).target as Element | null;
+    if (t?.closest?.("a[href]")) return;
+    ignoreClickUntil = Date.now() + 450;
+    onTap(x, ev);
+  };
+
+  const onClick = (ev: Event) => {
+    if (Date.now() < ignoreClickUntil || tapsBlocked(host())) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
+    const t = (ev as Event & { target?: EventTarget | null }).target as Element | null;
+    if (t?.closest?.("a[href]")) return;
+    onTap((ev as MouseEvent).clientX, ev);
+  };
+
+  const opts: AddEventListenerOptions = { passive: true };
+  target.addEventListener("pointerdown", onStart as EventListener, opts);
+  target.addEventListener("pointerup", onEnd as EventListener, opts);
+  target.addEventListener("touchstart", onStart as EventListener, opts);
+  target.addEventListener("touchend", onEnd as EventListener, opts);
+  target.addEventListener("click", onClick as EventListener);
+
+  return () => {
+    target.removeEventListener("pointerdown", onStart as EventListener, opts);
+    target.removeEventListener("pointerup", onEnd as EventListener, opts);
+    target.removeEventListener("touchstart", onStart as EventListener, opts);
+    target.removeEventListener("touchend", onEnd as EventListener, opts);
+    target.removeEventListener("click", onClick as EventListener);
+  };
+}
+
 export default function EpubViewer({
   source,
   initialCfi,
@@ -246,37 +331,33 @@ export default function EpubViewer({
         }) as EventListener);
 
         // Side/center taps on foliate chrome margins (outside the iframe).
-        view.addEventListener("click", ((ev: Event) => {
-          if (tapsBlocked(hostRef.current)) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            return;
-          }
-          const me = ev as MouseEvent;
+        const detachViewTaps = attachTapPager(view, () => hostRef.current, (clientX) => {
           const rect = view!.getBoundingClientRect();
           const w = Math.max(1, rect.width);
-          const x = me.clientX - rect.left;
+          const x = clientX - rect.left;
           if (x < w / 3) void view?.goLeft();
           else if (x > (2 * w) / 3) void view?.goRight();
           else callbacks.current.onCenterTap?.();
-        }) as EventListener);
+        });
 
+        const docCleanups: Array<() => void> = [];
         view.addEventListener("load", ((e: Event) => {
           const doc = (e as CustomEvent).detail?.doc as Document | undefined;
           if (!doc) return;
-          doc.addEventListener("click", (ev) => {
-            if (tapsBlocked(hostRef.current)) {
-              ev.preventDefault();
-              ev.stopPropagation();
-              return;
-            }
-            const t = ev.target as Element | null;
-            if (t?.closest?.("a[href]")) return;
-            turnFromVisiblePageClick(view, doc, (ev as MouseEvent).clientX, () =>
+          const detach = attachTapPager(doc, () => hostRef.current, (clientX) => {
+            turnFromVisiblePageClick(view, doc, clientX, () =>
               callbacks.current.onCenterTap?.()
             );
           });
+          docCleanups.push(detach);
         }) as EventListener);
+        (view as FoliateView & { __tapCleanups?: Array<() => void> }).__tapCleanups = [
+          detachViewTaps,
+          () => {
+            for (const c of docCleanups) c();
+            docCleanups.length = 0;
+          },
+        ];
 
         await view.open(toOpenable(source));
         if (cancelled) return;
@@ -313,6 +394,12 @@ export default function EpubViewer({
     void run();
     return () => {
       cancelled = true;
+      try {
+        const cleanups = (view as FoliateView & { __tapCleanups?: Array<() => void> } | null)?.__tapCleanups;
+        if (cleanups) for (const c of cleanups) c();
+      } catch {
+        /* ignore */
+      }
       try {
         view?.close();
       } catch {
@@ -569,7 +656,7 @@ export async function epubViewGoTo(
 ): Promise<void> {
   const view = getView(host);
   if (!view || !href) return;
-  epubViewIgnoreTaps(host, 700);
+  epubViewIgnoreTaps(host, 500);
   try {
     const trimmedLabel = (label || "").trim();
     if (trimmedLabel && tocHrefNeedsLabelRefine(view, href)) {
@@ -592,7 +679,7 @@ export async function epubViewGoTo(
     }
     await view.goTo(href);
   } finally {
-    epubViewIgnoreTaps(host, 500);
+    epubViewIgnoreTaps(host, 350);
   }
 }
 

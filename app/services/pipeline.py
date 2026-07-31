@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".ogg", ".opus", ".flac", ".wav", ".wma", ".aac", ".mp4"}
+# Sibling encode folders — not separate titles (matches forge_pipeline).
+_FORMAT_DIR_NAMES = frozenset({
+    "mp3", "m4a", "m4b", "aac", "flac", "ogg", "opus", "wma", "wav", "audio", "audiobook",
+})
 
 _progress_db_throttle: dict[int, float] = {}
 # request_id → providers to skip on the next process_download (retry after failure)
@@ -332,9 +336,46 @@ def _looks_like_chapter_folder(name: str) -> bool:
     return bool(_CHAPTER_FOLDER_RE.search(name.strip()))
 
 
+def _looks_like_whole_book_dir(d: Path) -> bool:
+    """Nested folder that is its own audiobook, not a chapter/part/format folder.
+
+    Prevents a leftover nested title (e.g. Author/Book/Book/other.m4b) from being
+    flattened into — or scanned as tracks of — the parent book.
+    """
+    if not d.is_dir():
+        return False
+    name = d.name.strip()
+    if name.lower() in _FORMAT_DIR_NAMES:
+        return False
+    if _looks_like_chapter_folder(name):
+        return False
+    audio = [f for f in d.rglob("*") if f.is_file() and _is_audio(f)]
+    if not audio:
+        return False
+    # Any nested .m4b under a non-chapter folder is almost always a whole book.
+    if any(f.suffix.lower() == ".m4b" for f in audio):
+        return True
+    # Non-chapter-named tree with its own multi-file audio set.
+    loose = [f for f in d.iterdir() if _is_audio(f)]
+    nested_audio_dirs = [
+        c for c in d.iterdir()
+        if c.is_dir() and any(_is_audio(f) for f in c.rglob("*"))
+    ]
+    if len(loose) >= 2:
+        return True
+    if loose and nested_audio_dirs:
+        return True
+    # Single large-ish audio file with a title-like folder name.
+    if len(loose) == 1 and len(name) >= 3:
+        return True
+    return False
+
+
 def _chapter_subdirs_eligible_for_flatten(audio_sub_dirs: list[Path]) -> bool:
     """Allow Artwork/Lyrics subfolders; allow one extra nesting level if each folder has few audio files."""
     for d in audio_sub_dirs:
+        if _looks_like_whole_book_dir(d):
+            return False
         files = [f for f in d.rglob("*") if f.is_file() and _is_audio(f)]
         if not files:
             return False
@@ -353,6 +394,8 @@ def _flatten_chapter_subdirs(parent: Path) -> None:
     sub_dirs = [d for d in parent.iterdir() if d.is_dir()]
     loose_audio = [f for f in parent.iterdir() if _is_audio(f)]
     audio_sub_dirs = [d for d in sub_dirs if any(_is_audio(f) for f in d.rglob("*"))]
+    # Never pull a nested whole book into the parent playlist.
+    audio_sub_dirs = [d for d in audio_sub_dirs if not _looks_like_whole_book_dir(d)]
     if len(audio_sub_dirs) < 2:
         return
 
@@ -413,6 +456,11 @@ def _flatten_mixed_folder(parent: Path) -> None:
             if not folder_name:
                 continue
             new_dir = parent / folder_name
+            # Avoid dropping a loose m4b into an existing nested whole-book folder
+            # that happens to share the same stem (e.g. Timeline/Timeline/).
+            if new_dir.exists() and _looks_like_whole_book_dir(new_dir):
+                folder_name = f"{folder_name} (file)"
+                new_dir = parent / folder_name
             new_dir.mkdir(exist_ok=True)
             shutil.move(str(f), str(new_dir / f.name))
             logger.info(f"Flattened whole-book file into {folder_name}/")
@@ -462,6 +510,21 @@ def _collect_book_dirs(dest_dir: Path) -> list[Path]:
     if top_audio_files and not audio_sub_dirs:
         return [dest_dir]
     if top_audio_files and audio_sub_dirs:
+        nested_books = [d for d in audio_sub_dirs if _looks_like_whole_book_dir(d)]
+        if nested_books:
+            # Parent loose audio is one book; nested title folders are separate books.
+            # Return deeper paths first so _split_collection moves them out before the parent.
+            books: list[Path] = []
+            for bd in nested_books:
+                nested = _collect_book_dirs(bd)
+                books.extend(nested if nested else [bd])
+            books.append(dest_dir)
+            logger.info(
+                "Split nested whole-book folder(s) under %s: %s",
+                dest_dir.name,
+                ", ".join(b.name for b in nested_books),
+            )
+            return books
         return [dest_dir]
 
     return []
@@ -514,20 +577,49 @@ def _split_collection(dest_dir: Path, author: str, series_override: str | None =
     if len(book_dirs_to_move) > 1:
         logger.info(f"Collection detected: {len(book_dirs_to_move)} book subdirs in {dest_dir.name}")
         results = []
-        for bd in book_dirs_to_move:
-            final = base_dir / _sanitize(bd.name)
+        # Deeper / nested books first so parent rglob does not re-ingest them.
+        ordered = sorted(
+            book_dirs_to_move,
+            key=lambda p: (0 if p.resolve() == dest_dir.resolve() else 1, len(p.parts)),
+            reverse=True,
+        )
+        used_names: set[str] = set()
+        for bd in ordered:
+            base_name = _sanitize(bd.name)
+            final_name = base_name
+            n = 2
+            while final_name.lower() in used_names or (
+                (base_dir / final_name).exists()
+                and (base_dir / final_name).resolve() != bd.resolve()
+            ):
+                final_name = f"{base_name} ({n})"
+                n += 1
+            used_names.add(final_name.lower())
+            final = base_dir / final_name
             if final.resolve() != bd.resolve():
                 final.mkdir(parents=True, exist_ok=True)
                 for item in bd.rglob("*"):
                     if item.is_file():
+                        # Skip files already moved out with an earlier nested book.
+                        try:
+                            if not item.exists():
+                                continue
+                        except OSError:
+                            continue
                         target = final / item.name
                         if target != item:
                             target.parent.mkdir(parents=True, exist_ok=True)
+                            if target.exists():
+                                target = final / f"{item.parent.name} - {item.name}"
                             shutil.move(str(item), str(target))
-                shutil.rmtree(bd, ignore_errors=True)
+                if bd.resolve() != dest_dir.resolve():
+                    shutil.rmtree(bd, ignore_errors=True)
             results.append(final)
         if dest_dir.exists():
-            shutil.rmtree(dest_dir, ignore_errors=True)
+            # Parent may still hold covers / empty dirs after audio moved out.
+            still_audio = any(_is_audio(f) for f in dest_dir.rglob("*") if f.is_file())
+            if not still_audio:
+                shutil.rmtree(dest_dir, ignore_errors=True)
         _group_into_series(base_dir, series_override)
         return results
 

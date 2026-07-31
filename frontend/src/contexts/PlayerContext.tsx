@@ -37,7 +37,7 @@ import {
 } from "../utils/offlinePlayback";
 import { snapPlaybackSpeed } from "../utils/playbackSpeed";
 import { resolveBookPlaybackRate } from "../utils/playbackRatePrefs";
-import { pickResumeSeconds } from "../utils/resumeProgress";
+import { pickResumeSeconds, resolveTrackResume } from "../utils/resumeProgress";
 import { usePlayerProgressSync } from "../hooks/usePlayerProgressSync";
 import { usePlayerMediaSession } from "../hooks/usePlayerMediaSession";
 import {
@@ -792,32 +792,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         });
 
         let startOffset = opts?.startAt ?? local?.time ?? 0;
-        let trackIdx = local?.trackIndex ?? 0;
-        let localStart = local?.trackLocal ?? 0;
-        if (opts?.startAt != null) {
-          trackIdx = 0;
-          localStart = opts.startAt;
-          for (let i = 0; i < np.tracks.length; i++) {
-            const t = np.tracks[i];
-            if (opts.startAt >= t.startOffset && opts.startAt < t.startOffset + t.duration) {
-              trackIdx = i;
-              localStart = opts.startAt - t.startOffset;
-              break;
-            }
-          }
-        } else if (local == null && startOffset > 0) {
-          for (let i = 0; i < np.tracks.length; i++) {
-            const t = np.tracks[i];
-            if (startOffset >= t.startOffset && startOffset < t.startOffset + t.duration) {
-              trackIdx = i;
-              localStart = startOffset - t.startOffset;
-              break;
-            }
-          }
-        } else if (local != null) {
-          trackIdx = Math.min(Math.max(0, local.trackIndex), np.tracks.length - 1);
-          localStart = Math.max(0, local.trackLocal);
-        }
+        const resume = resolveTrackResume({
+          tracks: np.tracks,
+          globalSeconds: startOffset,
+          trackIndex: opts?.startAt != null ? null : local?.trackIndex,
+          trackLocal: opts?.startAt != null ? null : local?.trackLocal,
+        });
+        const trackIdx = resume.trackIndex;
+        const localStart = resume.trackLocal;
+        startOffset = resume.globalSeconds;
 
         const rate = resolveBookPlaybackRate(local?.playbackRate);
         setState((s) => ({
@@ -867,33 +850,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         });
         const local = getOfflineProgress(progressKeyForAbs(itemId));
         let startOffset = opts?.startAt ?? local?.time ?? 0;
-        let trackIdx = local?.trackIndex ?? 0;
-        let localStart = local?.trackLocal ?? 0;
-        if (opts?.startAt != null) {
-          trackIdx = 0;
-          localStart = opts.startAt;
-          for (let i = 0; i < np.tracks.length; i++) {
-            const tr = np.tracks[i];
-            if (opts.startAt >= tr.startOffset && opts.startAt < tr.startOffset + tr.duration) {
-              trackIdx = i;
-              localStart = opts.startAt - tr.startOffset;
-              break;
-            }
-          }
-        } else if (local != null) {
-          trackIdx = Math.min(Math.max(0, local.trackIndex), np.tracks.length - 1);
-          localStart = Math.max(0, local.trackLocal);
-          startOffset = (np.tracks[trackIdx]?.startOffset ?? 0) + localStart;
-        } else if (startOffset > 0) {
-          for (let i = 0; i < np.tracks.length; i++) {
-            const tr = np.tracks[i];
-            if (startOffset >= tr.startOffset && startOffset < tr.startOffset + tr.duration) {
-              trackIdx = i;
-              localStart = startOffset - tr.startOffset;
-              break;
-            }
-          }
-        }
+        const resume = resolveTrackResume({
+          tracks: np.tracks,
+          globalSeconds: startOffset,
+          trackIndex: opts?.startAt != null ? null : local?.trackIndex,
+          trackLocal: opts?.startAt != null ? null : local?.trackLocal,
+        });
+        const trackIdx = resume.trackIndex;
+        const localStart = resume.trackLocal;
+        startOffset = (np.tracks[trackIdx]?.startOffset ?? 0) + localStart;
         const rate = resolveBookPlaybackRate(local?.playbackRate);
         setState((s) => ({
           ...s,
@@ -975,12 +940,32 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             localUpdatedAtMs: local.updatedAt,
             offline,
           });
-          // When online and server wins, refresh local so devices converge.
-          if (!offline && Math.abs(startOffset - local.time) > 2) {
+        }
+
+        const resume = resolveTrackResume({
+          tracks: np.tracks,
+          globalSeconds: startOffset,
+          trackIndex: opts?.startAt != null ? null : local?.trackIndex,
+          trackLocal: opts?.startAt != null ? null : local?.trackLocal,
+        });
+        const trackIdx = resume.trackIndex;
+        const localStart = resume.trackLocal;
+        startOffset = (np.tracks[trackIdx]?.startOffset ?? 0) + localStart;
+
+        // When online and server/local converge on global time, rewrite track
+        // fields so a later layout change cannot revive stale index/local.
+        if (local && opts?.startAt == null) {
+          const offline = isLikelyOffline();
+          if (
+            !offline &&
+            (Math.abs((local.time || 0) - startOffset) > 2 ||
+              local.trackIndex !== trackIdx ||
+              Math.abs((local.trackLocal || 0) - localStart) > 2)
+          ) {
             saveOfflineProgress(progressKeyForAbs(itemId), {
               time: startOffset,
-              trackIndex: local.trackIndex,
-              trackLocal: local.trackLocal,
+              trackIndex: trackIdx,
+              trackLocal: localStart,
               playbackRate: data.playbackRate ?? local.playbackRate,
             });
           }
@@ -992,27 +977,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           nowPlaying: np,
           currentTime: startOffset,
           duration: data.duration,
-          currentTrackIndex: 0,
+          currentTrackIndex: trackIdx,
           expanded: false,
           playbackRate: rate,
         }));
         getAudio().playbackRate = rate;
 
-        let trackIdx = 0;
-        let localStart = startOffset;
-        if (opts?.startAt == null && local && Math.abs(local.time - startOffset) < 2) {
-          trackIdx = Math.min(Math.max(0, local.trackIndex), np.tracks.length - 1);
-          localStart = Math.max(0, local.trackLocal);
-        } else {
-          for (let i = 0; i < np.tracks.length; i++) {
-            const t = np.tracks[i];
-            if (startOffset >= t.startOffset && startOffset < t.startOffset + t.duration) {
-              trackIdx = i;
-              localStart = startOffset - t.startOffset;
-              break;
-            }
-          }
-        }
         loadTrack(np, trackIdx, localStart);
 
         saveAbsOfflineManifest({
@@ -1109,30 +1079,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const startAt = info.startAt ?? 0;
       const durationsKnown = tracksCopy.every((t) => t.duration > 0);
 
-      let trackIdx = 0;
-      let localStart = 0;
-      if (
-        info.trackIndex != null &&
-        info.trackIndex >= 0 &&
-        info.trackIndex < tracksCopy.length &&
-        (!durationsKnown || info.trackPositionSeconds != null)
-      ) {
-        // Track-based resume: reliable even when track durations are unknown
-        // (a global offset alone would land in the wrong file).
-        trackIdx = info.trackIndex;
-        localStart = Math.max(0, info.trackPositionSeconds ?? 0);
-      } else if (startAt > 0 && durationsKnown) {
-        for (let i = 0; i < tracksCopy.length; i++) {
-          const t = tracksCopy[i];
-          if (startAt >= t.startOffset && startAt < t.startOffset + t.duration) {
-            trackIdx = i;
-            localStart = startAt - t.startOffset;
-            break;
-          }
-        }
-      } else if (startAt > 0 && tracksCopy.length === 1) {
-        localStart = startAt;
-      }
+      const mapped = resolveTrackResume({
+        tracks: tracksCopy,
+        globalSeconds: startAt,
+        trackIndex: info.trackIndex,
+        trackLocal: info.trackPositionSeconds,
+        // Without durations, index+local is the only reliable RD resume signal.
+        preferTrackHints: !durationsKnown,
+      });
+      const trackIdx = mapped.trackIndex;
+      const localStart = mapped.trackLocal;
 
       const initialGlobalTime = durationsKnown
         ? (tracksCopy[trackIdx]?.startOffset ?? 0) + localStart

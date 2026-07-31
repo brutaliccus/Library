@@ -112,6 +112,37 @@ function useForcedSingleColumn(): boolean {
   return narrow;
 }
 
+/** Max safe-area inset (px). Foliate margin is symmetric, so we pad for the largest edge. */
+function useSafeAreaMaxInset(): number {
+  const [inset, setInset] = useState(0);
+  useEffect(() => {
+    const el = document.createElement("div");
+    el.setAttribute("aria-hidden", "true");
+    el.style.cssText =
+      "position:fixed;left:0;top:0;width:0;height:0;overflow:hidden;visibility:hidden;pointer-events:none;" +
+      "padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);" +
+      "padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px);";
+    document.body.appendChild(el);
+    const measure = () => {
+      const cs = getComputedStyle(el);
+      const t = parseFloat(cs.paddingTop) || 0;
+      const b = parseFloat(cs.paddingBottom) || 0;
+      const l = parseFloat(cs.paddingLeft) || 0;
+      const r = parseFloat(cs.paddingRight) || 0;
+      setInset(Math.max(t, b, l, r));
+    };
+    measure();
+    window.visualViewport?.addEventListener("resize", measure);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.visualViewport?.removeEventListener("resize", measure);
+      window.removeEventListener("resize", measure);
+      el.remove();
+    };
+  }, []);
+  return inset;
+}
+
 interface BookInfo {
   bookTitle: string;
   seriesName: string;
@@ -151,6 +182,12 @@ export default function Ereader() {
   const isPdf = bookInfo?.seriesFormat === KAVITA_PDF_FORMAT;
   const forceSingleColumn = useForcedSingleColumn();
   const effectiveColumns: 1 | 2 = forceSingleColumn ? 1 : settings.columnCount;
+  const safeInset = useSafeAreaMaxInset();
+  // Foliate's margin is one symmetric top/bottom value. Include notch/home insets
+  // so immersive (chrome-hidden) text is not clipped under the status bar.
+  const chromeMarginPx = showChrome
+    ? Math.max(72, 52 + Math.ceil(safeInset))
+    : Math.max(36, 20 + Math.ceil(safeInset));
 
   const readerGet = useCallback(
     async <T,>(path: string, config?: { params?: Record<string, unknown>; responseType?: "text" | "blob" | "json" }) => {
@@ -436,12 +473,13 @@ export default function Ereader() {
   const jumpToc = useCallback(async (
     href: string,
     label: string,
-    e?: React.MouseEvent | React.TouchEvent,
+    e?: React.SyntheticEvent,
   ) => {
     e?.preventDefault();
     e?.stopPropagation();
     // Block right-third ghost taps BEFORE the TOC overlay unmounts.
-    epubViewIgnoreTaps(epubHostRef.current, 800);
+    // Keep the window short enough that mobile chapter jumps still feel snappy.
+    epubViewIgnoreTaps(epubHostRef.current, 450);
     setTocOpen(false);
     setSettingsOpen(false);
     await epubViewGoTo(epubHostRef.current, href, label);
@@ -453,8 +491,12 @@ export default function Ereader() {
         <button
           type="button"
           onClick={(ev) => void jumpToc(item.href, item.label, ev)}
-          onMouseDown={(ev) => ev.preventDefault()}
-          className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 rounded-lg"
+          // Desktop only: prevent mousedown→focus from synthesizing a click that
+          // lands on the book after the overlay closes. Touch must keep defaults.
+          onPointerDown={(ev) => {
+            if (ev.pointerType === "mouse") ev.preventDefault();
+          }}
+          className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 rounded-lg touch-manipulation"
           style={{ paddingLeft: 12 + depth * 12 }}
         >
           {item.label}
@@ -649,7 +691,7 @@ export default function Ereader() {
                 fontSize={settings.fontSize}
                 fontFamily={FONT_FAMILIES[settings.fontFamily].stack}
                 columnCount={effectiveColumns}
-                chromeMarginPx={showChrome ? 72 : 16}
+                chromeMarginPx={chromeMarginPx}
                 onReady={() => setLoading(false)}
                 onError={(msg) => setError(msg)}
                 onRelocate={handleRelocate}

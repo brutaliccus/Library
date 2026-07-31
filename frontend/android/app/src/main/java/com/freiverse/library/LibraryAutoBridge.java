@@ -99,6 +99,8 @@ public final class LibraryAutoBridge {
     private Bitmap artwork;
     private boolean active = false;
     private boolean playing = false;
+    /** True while AA selected a title and native/WebView audio is still starting. */
+    private boolean buffering = false;
     private long durationMs = 0;
     private long positionMs = 0;
     private float playbackSpeed = 1.0f;
@@ -335,6 +337,85 @@ public final class LibraryAutoBridge {
         return tryNativePlayFromMediaId(mid);
     }
 
+    /**
+     * Immediately publish Now Playing + BUFFERING so Android Auto leaves the
+     * browse "loading" spinner while ExoPlayer / WebView start the title.
+     */
+    public void beginPlayFromMediaId(String mediaId) {
+        if (mediaId == null || mediaId.isEmpty() || NOW_PLAYING_ID.equals(mediaId)) {
+            return;
+        }
+        persistMediaId(mediaId);
+        String nextTitle = title;
+        String nextArtist = artist;
+        long nextDuration = durationMs;
+        long nextPosition = positionMs;
+        LibraryNativePlayer.Playable playable = getPlayableCache(mediaId);
+        if (playable != null) {
+            nextTitle = playable.title != null ? playable.title : nextTitle;
+            nextArtist = playable.author != null ? playable.author : nextArtist;
+            nextDuration = Math.max(0, playable.totalDurationMs);
+            nextPosition = Math.max(0, playable.positionMs + trackOffset(playable));
+        } else {
+            AutoBrowseNode node = findCachedPlayableNode(mediaId);
+            if (node != null) {
+                if (node.title != null && !node.title.isEmpty()) {
+                    nextTitle = node.title;
+                }
+                if (node.subtitle != null) {
+                    nextArtist = node.subtitle;
+                }
+            }
+        }
+        if (nextTitle == null || nextTitle.isEmpty()) {
+            nextTitle = "Loading…";
+        }
+        this.buffering = true;
+        this.active = true;
+        this.playing = false;
+        this.title = nextTitle;
+        this.artist = nextArtist != null ? nextArtist : "";
+        this.durationMs = nextDuration;
+        this.positionMs = nextPosition;
+        ignorePausedSyncUntilElapsed =
+            SystemClock.elapsedRealtime() + PAUSED_SYNC_GRACE_MS;
+        refreshSession(true);
+        notifyRootChanged();
+        Log.i(TAG, "AA beginPlayFromMediaId mediaId=" + mediaId + " title=" + nextTitle);
+    }
+
+    @Nullable
+    private AutoBrowseNode findCachedPlayableNode(String mediaId) {
+        for (AutoBrowseNode n : getBrowseCache(CONTINUE_ID)) {
+            if (mediaId.equals(n.mediaId)) {
+                return n;
+            }
+        }
+        // Letter folders are cached as library/letter:X — scan recent prefs lightly.
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return null;
+        }
+        Map<String, ?> all =
+            ctx.getSharedPreferences(BROWSE_PREFS, Context.MODE_PRIVATE).getAll();
+        for (Map.Entry<String, ?> e : all.entrySet()) {
+            String key = e.getKey();
+            if (key == null || !key.startsWith("node:")) {
+                continue;
+            }
+            Object val = e.getValue();
+            if (!(val instanceof String) || ((String) val).isEmpty()) {
+                continue;
+            }
+            for (AutoBrowseNode n : getBrowseCache(key.substring("node:".length()))) {
+                if (mediaId.equals(n.mediaId)) {
+                    return n;
+                }
+            }
+        }
+        return null;
+    }
+
     public boolean tryNativePlayFromMediaId(String mediaId) {
         if (mediaId == null || mediaId.isEmpty()) {
             return false;
@@ -568,12 +649,15 @@ public final class LibraryAutoBridge {
         }
         this.active = active;
         this.playing = applyPlayingSync(playing);
+        if (!active) {
+            buffering = false;
+        }
         this.durationMs = Math.max(0, durationMs);
         this.positionMs = Math.max(0, positionMs);
         this.playbackSpeed = playbackSpeed > 0 ? playbackSpeed : 1.0f;
 
         boolean rootChanged =
-            wasActive != active || !previousRootKey.equals(nowPlayingRootKey());
+            wasActive != this.active || !previousRootKey.equals(nowPlayingRootKey());
         refreshSession(true);
         long now = System.currentTimeMillis();
         if (now - lastPersistSessionMs >= PERSIST_SESSION_MIN_INTERVAL_MS) {
@@ -587,10 +671,15 @@ public final class LibraryAutoBridge {
 
     /** Position / transport-only sync — avoids rebuilding browse tree artwork. */
     public void updatePosition(boolean playing, long positionMs, float playbackSpeed) {
+        // WebView may resume audio after BT reconnect while native still has
+        // active=false (session cleared). Promote so AA shows Now Playing.
+        if (playing && !active && (!title.isEmpty() || !nativeMediaId.isEmpty())) {
+            this.active = true;
+        }
         this.playing = applyPlayingSync(playing);
         this.positionMs = Math.max(0, positionMs);
         this.playbackSpeed = playbackSpeed > 0 ? playbackSpeed : 1.0f;
-        refreshSession(false);
+        refreshSession(playing || buffering);
         long now = System.currentTimeMillis();
         if (now - lastPersistSessionMs >= PERSIST_SESSION_MIN_INTERVAL_MS) {
             lastPersistSessionMs = now;
@@ -604,6 +693,7 @@ public final class LibraryAutoBridge {
             ignorePausedSyncUntilElapsed = 0;
             pausedAtElapsed = 0;
             deepIdlePlayLatched = false;
+            buffering = false;
             return true;
         }
         if (SystemClock.elapsedRealtime() < ignorePausedSyncUntilElapsed) {
@@ -612,6 +702,7 @@ public final class LibraryAutoBridge {
         if (this.playing) {
             pausedAtElapsed = SystemClock.elapsedRealtime();
         }
+        buffering = false;
         return false;
     }
 
@@ -629,11 +720,17 @@ public final class LibraryAutoBridge {
      * until the JS round-trip completes (seconds when the app is backgrounded).
      */
     public void setPlayingOptimistic(boolean playing) {
+        // Resume / car reconnect may fire play before JS re-syncs metadata.
+        // Promote a restored or buffering session so AA shows transport controls.
+        if (!active && playing && (!title.isEmpty() || !nativeMediaId.isEmpty())) {
+            this.active = true;
+        }
         if (!active) {
             return;
         }
         this.playing = playing;
         if (playing) {
+            buffering = false;
             // Sample before clearing pause timestamp — grace size depends on idle depth.
             boolean deep = isDeepIdlePause() || deepIdlePlayLatched;
             deepIdlePlayLatched = deep;
@@ -643,12 +740,13 @@ public final class LibraryAutoBridge {
             ignorePausedSyncUntilElapsed = now + PAUSED_SYNC_GRACE_MS;
             ignoreFocusLossUntilElapsed = now + grace;
         } else {
+            buffering = false;
             ignorePausedSyncUntilElapsed = 0;
             ignoreFocusLossUntilElapsed = 0;
             deepIdlePlayLatched = false;
             pausedAtElapsed = SystemClock.elapsedRealtime();
         }
-        refreshSession(false);
+        refreshSession(true);
     }
 
     /** Milliseconds since last pause; 0 if playing / never paused this session. */
@@ -709,6 +807,7 @@ public final class LibraryAutoBridge {
         ignoreFocusLossUntilElapsed = 0;
         pausedAtElapsed = 0;
         deepIdlePlayLatched = false;
+        buffering = false;
         lastNativeMetaKey = "";
         lastNativePlaying = null;
         lastSessionMetaSig = "";
@@ -1268,17 +1367,24 @@ public final class LibraryAutoBridge {
                 | PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID
                 | PlaybackStateCompat.ACTION_STOP;
 
-        int state = playing
-            ? PlaybackStateCompat.STATE_PLAYING
-            : (active ? PlaybackStateCompat.STATE_PAUSED : PlaybackStateCompat.STATE_NONE);
+        int state;
+        if (!active) {
+            state = PlaybackStateCompat.STATE_NONE;
+        } else if (playing) {
+            state = PlaybackStateCompat.STATE_PLAYING;
+        } else if (buffering) {
+            state = PlaybackStateCompat.STATE_BUFFERING;
+        } else {
+            state = PlaybackStateCompat.STATE_PAUSED;
+        }
 
         // Custom ±15 actions: AA often reserves side slots for chapter skip when
         // SKIP_TO_PREVIOUS/NEXT are set; custom actions keep seek buttons visible.
-        PlaybackStateCompat playbackState = new PlaybackStateCompat.Builder()
+        PlaybackStateCompat.Builder stateBuilder = new PlaybackStateCompat.Builder()
             .setActions(actions)
             // Explicit updateTime so AA keeps extrapolating position across
             // chapter metadata swaps (without it, some head units freeze the timer).
-            .setState(state, positionMs, playbackSpeed, SystemClock.elapsedRealtime())
+            .setState(state, positionMs, playing ? playbackSpeed : 0f, SystemClock.elapsedRealtime())
             .addCustomAction(
                 new PlaybackStateCompat.CustomAction.Builder(
                     CUSTOM_REWIND_15,
@@ -1292,9 +1398,16 @@ public final class LibraryAutoBridge {
                     "+15 seconds",
                     R.drawable.ic_media_forward_15
                 ).build()
-            )
-            .build();
-        session.setPlaybackState(playbackState);
+            );
+        String activeMediaId =
+            !nativeMediaId.isEmpty()
+                ? nativeMediaId
+                : (getPersistedMediaId() != null ? getPersistedMediaId() : "");
+        if (activeMediaId != null && !activeMediaId.isEmpty()) {
+            // Helps AA match browse selection → Now Playing / controls UI.
+            stateBuilder.setActiveQueueItemId(activeMediaId.hashCode() & 0xffffffffL);
+        }
+        session.setPlaybackState(stateBuilder.build());
 
         if (!active) {
             lastSessionMetaSig = "";
@@ -1313,8 +1426,9 @@ public final class LibraryAutoBridge {
                 (artwork != null && !artwork.isRecycled())
                     ? (artwork.getWidth() + "x" + artwork.getHeight() + "@" + System.identityHashCode(artwork))
                     : "noart";
+            String midForMeta = activeMediaId != null ? activeMediaId : "";
             String metaSig =
-                title + "|" + artist + "|" + album + "|" + durationMs + "|" + artSig;
+                title + "|" + artist + "|" + album + "|" + durationMs + "|" + midForMeta + "|" + artSig;
             if (!metaSig.equals(lastSessionMetaSig)) {
                 lastSessionMetaSig = metaSig;
                 MediaMetadataCompat.Builder metaBuilder = new MediaMetadataCompat.Builder()
@@ -1322,6 +1436,12 @@ public final class LibraryAutoBridge {
                     .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
                     .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
                     .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+                if (!midForMeta.isEmpty()) {
+                    metaBuilder.putString(
+                        MediaMetadataCompat.METADATA_KEY_MEDIA_ID,
+                        midForMeta
+                    );
+                }
                 // Never put a null bitmap — that clears cover art on many AA units.
                 // One bitmap key is enough; duplicating ALBUM_ART + DISPLAY_ICON
                 // copies the same pixels into the system binder payload twice.

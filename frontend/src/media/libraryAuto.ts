@@ -187,9 +187,29 @@ export async function registerAndroidAutoHandlers(
           const id = d?.mediaId;
           const ph = playHandlers;
           // Native ExoPlayer already started — attach UI only, do not loadTrack/blob.
-          if (d?.nativeStarted || nativeOwnsPlayback) {
+          if (d?.nativeStarted) {
             markOptimisticPlaying();
             if (lastNativeEvent) attachNativeHandler?.(lastNativeEvent);
+            return;
+          }
+          if (nativeOwnsPlayback) {
+            const currentId = lastNativeEvent?.mediaId || "";
+            // Same title: just mirror UI. Different title: release Exo and start new.
+            if (id && currentId && id === currentId) {
+              markOptimisticPlaying();
+              if (lastNativeEvent) attachNativeHandler?.(lastNativeEvent);
+              return;
+            }
+            void handOffNativeToWebView()
+              .catch(() => {})
+              .finally(() => {
+                nativeOwnsPlayback = false;
+                if (id && ph) {
+                  void withWebViewReady(() => {
+                    void handlePlayMediaId(id, ph);
+                  });
+                }
+              });
             return;
           }
           if (id && ph) {
@@ -234,7 +254,17 @@ export async function syncAndroidAutoPlayback(
   if (Capacitor.getPlatform() !== "android") return;
 
   // Native owns PCM — do not push HTML5 paused ticks into MediaSession.
-  if (nativeOwnsPlayback) return;
+  // Reconcile a stale JS flag after Exo handoff / missed nativeStopped events;
+  // otherwise WebView audio plays while AA never receives Now Playing updates.
+  if (nativeOwnsPlayback) {
+    try {
+      const st = await LibraryAuto.getNativePlaybackState();
+      if (st?.nativeOwner) return;
+      nativeOwnsPlayback = false;
+    } catch {
+      return;
+    }
+  }
 
   try {
     if (!np) {
@@ -254,9 +284,10 @@ export async function syncAndroidAutoPlayback(
 
     const d = scope.duration;
     const pos = scope.position;
+    const mediaId = aaMediaId(np);
     // Chapter label changes every few minutes — don't treat that as a full
     // metadata/artwork reload (native decode + MediaSession binder thrash).
-    const metaKey = `${np.title}|${np.author}|${np.coverUrl}|${trackIndex}|${trackLabel}|${d}`;
+    const metaKey = `${np.title}|${np.author}|${np.coverUrl}|${trackIndex}|${trackLabel}|${d}|${mediaId}`;
     const chapterKey = scope.label || "";
     const metaChanged = metaKey !== lastMetaKey;
     const now = Date.now();
@@ -266,6 +297,7 @@ export async function syncAndroidAutoPlayback(
       isPlaying || (lastPlayingSynced === true && now < ignorePausedSyncUntil);
     if (isPlaying) ignorePausedSyncUntil = 0;
     const playingChanged = lastPlayingSynced !== reportPlaying;
+    const becomingPlaying = reportPlaying && lastPlayingSynced !== true;
     const posDue = now - lastPosSyncAt >= POS_SYNC_INTERVAL_MS;
     const chapterChanged = chapterKey !== lastChapterKey;
 
@@ -287,7 +319,9 @@ export async function syncAndroidAutoPlayback(
       );
     }
 
-    if (metaChanged) {
+    // Full metadata on first sync, book change, or auto-resume→playing so AA
+    // always gets MEDIA_ID + title (position-only cannot revive a cold session).
+    if (metaChanged || becomingPlaying) {
       const artUrl = toAbsoluteArtworkUrl(np.coverUrl);
       const artwork = artUrl
         ? [
@@ -299,7 +333,7 @@ export async function syncAndroidAutoPlayback(
       await LibraryAuto.syncPlayback({
         active: true,
         playing: reportPlaying,
-        mediaId: aaMediaId(np),
+        mediaId,
         // Android Auto MediaSession: TITLE (large) + ARTIST (small).
         // Put chapter in artist so the car shows Book / Chapter, not Author / Chapter.
         title: np.title || "Audiobook",
@@ -318,7 +352,7 @@ export async function syncAndroidAutoPlayback(
       await LibraryAuto.syncPlayback({
         active: true,
         playing: reportPlaying,
-        mediaId: aaMediaId(np),
+        mediaId,
         title: np.title || "Audiobook",
         artist: scope.label || trackLabel || np.author || "",
         album: np.author || "",
@@ -332,6 +366,7 @@ export async function syncAndroidAutoPlayback(
     await LibraryAuto.syncPlayback({
       active: true,
       playing: reportPlaying,
+      mediaId,
       position: safePos,
       playbackRate: Math.max(playbackRate, 0.25),
       positionOnly: true,

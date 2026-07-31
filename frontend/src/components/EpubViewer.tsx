@@ -449,6 +449,10 @@ function markIgnore(el: HTMLElement | null | undefined, until: number): void {
   (el as HostWithIgnore).__ignoreTapUntil = until;
 }
 
+export function epubViewTapsBlocked(host: HTMLElement | null = null): boolean {
+  return tapsBlocked(host);
+}
+
 export function epubViewIgnoreTaps(host: HTMLElement | null, ms = 600): void {
   if (!host) return;
   const until = Date.now() + ms;
@@ -457,14 +461,21 @@ export function epubViewIgnoreTaps(host: HTMLElement | null, ms = 600): void {
   markIgnore(host.querySelector("[data-epub-root]") as HTMLElement | null, until);
   if (host.hasAttribute?.("data-epub-root")) markIgnore(host, until);
 
-  // Block pointer delivery into the iframe (TOC close ghost-taps on the right third).
-  host.style.pointerEvents = "none";
+  // Soften pointer-events blocking: host tap zones sit above the iframe and honor
+  // tapsBlocked. Only dim the inner foliate root so TOC/chrome stay interactive.
+  const root =
+    (host.matches?.("[data-epub-root]") ? host : null) ||
+    (host.querySelector("[data-epub-root]") as HTMLElement | null) ||
+    host;
+  root.style.pointerEvents = "none";
   const gen = ++ignorePeGen;
   window.setTimeout(() => {
-    // Only the latest ignore window clears pointer-events (overlapping TOC jumps).
     if (gen !== ignorePeGen) return;
-    if (!host.isConnected) return;
-    host.style.pointerEvents = "";
+    if (!root.isConnected) return;
+    root.style.pointerEvents = "";
+    if (host !== root && host.style.pointerEvents === "none") {
+      host.style.pointerEvents = "";
+    }
   }, ms + 50);
 }
 

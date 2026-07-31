@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { Capacitor } from "@capacitor/core";
 import axios from "axios";
 import api from "../api/client";
 import { getApiBaseUrl, toAbsoluteUrl } from "../api/instanceUrl";
@@ -8,6 +9,7 @@ import EpubViewer, {
   epubViewGo,
   epubViewGoTo,
   epubViewIgnoreTaps,
+  epubViewTapsBlocked,
   type EpubLocation,
   type EpubTocItem,
 } from "../components/EpubViewer";
@@ -110,6 +112,80 @@ function useForcedSingleColumn(): boolean {
     return () => mq.removeEventListener("change", apply);
   }, []);
   return narrow;
+}
+
+const HOST_TAP_MOVE_PX = 16;
+
+/**
+ * Invisible left/right/center tap zones above the foliate iframe.
+ * Android Capacitor WebView often never delivers iframe click/touchend to JS
+ * (foliate preventDefault on touchmove kills synthetic clicks).
+ */
+function HostSideTapZones({
+  hostRef,
+  onPrev,
+  onNext,
+  onCenter,
+  captureCenter,
+}: {
+  hostRef: React.RefObject<HTMLElement | null>;
+  onPrev: () => void;
+  onNext: () => void;
+  onCenter: () => void;
+  /** Fullscreen immersive: capture center taps to toggle chrome. Otherwise leave
+   * the middle open for foliate swipe / in-book links. */
+  captureCenter: boolean;
+}) {
+  const startRef = useRef<{ x: number; y: number; zone: "prev" | "next" | "center" } | null>(null);
+
+  const bindZone = (zone: "prev" | "next" | "center") => ({
+    onPointerDown: (ev: React.PointerEvent) => {
+      if (epubViewTapsBlocked(hostRef.current)) return;
+      if (ev.pointerType === "mouse" && ev.button !== 0) return;
+      startRef.current = { x: ev.clientX, y: ev.clientY, zone };
+    },
+    onPointerUp: (ev: React.PointerEvent) => {
+      const s = startRef.current;
+      startRef.current = null;
+      if (!s || s.zone !== zone) return;
+      if (epubViewTapsBlocked(hostRef.current)) return;
+      if (Math.hypot(ev.clientX - s.x, ev.clientY - s.y) > HOST_TAP_MOVE_PX) return;
+      if (zone === "prev") onPrev();
+      else if (zone === "next") onNext();
+      else onCenter();
+    },
+    onPointerCancel: () => {
+      startRef.current = null;
+    },
+  });
+
+  const zoneClass =
+    "absolute top-0 bottom-0 z-[15] touch-manipulation select-none";
+
+  return (
+    <>
+      <div
+        aria-hidden
+        className={`${zoneClass} left-0 w-[32%]`}
+        style={{ touchAction: "manipulation" }}
+        {...bindZone("prev")}
+      />
+      {captureCenter ? (
+        <div
+          aria-hidden
+          className={`${zoneClass} left-[32%] right-[32%]`}
+          style={{ touchAction: "manipulation" }}
+          {...bindZone("center")}
+        />
+      ) : null}
+      <div
+        aria-hidden
+        className={`${zoneClass} right-0 w-[32%]`}
+        style={{ touchAction: "manipulation" }}
+        {...bindZone("next")}
+      />
+    </>
+  );
 }
 
 /** Max safe-area inset (px). Foliate margin is symmetric, so we pad for the largest edge. */
@@ -477,11 +553,12 @@ export default function Ereader() {
   ) => {
     e?.preventDefault();
     e?.stopPropagation();
-    // Block right-third ghost taps BEFORE the TOC overlay unmounts.
-    // Keep the window short enough that mobile chapter jumps still feel snappy.
-    epubViewIgnoreTaps(epubHostRef.current, 450);
+    // Block ghost taps on host zones before the TOC overlay unmounts.
+    epubViewIgnoreTaps(epubHostRef.current, 400);
     setTocOpen(false);
     setSettingsOpen(false);
+    // Reveal chrome after a chapter jump so immersive mode doesn't trap the user.
+    setChromeHidden(false);
     await epubViewGoTo(epubHostRef.current, href, label);
   }, []);
 
@@ -496,7 +573,7 @@ export default function Ereader() {
           onPointerDown={(ev) => {
             if (ev.pointerType === "mouse") ev.preventDefault();
           }}
-          className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-800 rounded-lg touch-manipulation"
+          className="w-full text-left px-3 py-2.5 text-sm text-gray-200 hover:bg-gray-800 rounded-lg touch-manipulation pointer-events-auto"
           style={{ paddingLeft: 12 + depth * 12 }}
         >
           {item.label}
@@ -504,6 +581,10 @@ export default function Ereader() {
         {item.children?.length ? renderToc(item.children, depth + 1) : null}
       </div>
     ));
+
+  /** Capacitor WebView: iframe touch paging is unreliable — host zones sit above foliate. */
+  const useHostTapZones =
+    Capacitor.isNativePlatform() || forceSingleColumn;
 
   if (error) {
     return (
@@ -537,7 +618,7 @@ export default function Ereader() {
           onClick={stopChrome}
           onTouchStart={stopChrome}
           onTouchEnd={stopChrome}
-          className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800"
+          className="absolute top-0 left-0 right-0 z-40 flex items-center justify-between px-4 py-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] pb-2 bg-gray-900/95 border-b border-gray-800 pointer-events-auto"
         >
           <button
             onClick={() => navigate(backTarget)}
@@ -588,7 +669,8 @@ export default function Ereader() {
           <aside
             data-reader-chrome
             onClick={stopChrome}
-            className="absolute top-0 bottom-0 left-0 z-20 w-64 border-r border-gray-800 bg-gray-900/95 overflow-y-auto pt-14"
+            onPointerDown={stopChrome}
+            className="absolute top-0 bottom-0 left-0 z-30 w-64 border-r border-gray-800 bg-gray-900 pointer-events-auto overflow-y-auto overscroll-contain pt-[calc(3.5rem+env(safe-area-inset-top,0px))] pb-[env(safe-area-inset-bottom,0px)]"
           >
             <div className="p-4 space-y-4">
               <h2 className="text-xs font-semibold text-gray-500 uppercase">Reader settings</h2>
@@ -659,7 +741,9 @@ export default function Ereader() {
           <aside
             data-reader-chrome
             onClick={stopChrome}
-            className="absolute top-0 bottom-0 right-0 z-20 w-72 border-l border-gray-800 bg-gray-900/95 overflow-y-auto pt-14"
+            onPointerDown={stopChrome}
+            className="absolute top-0 bottom-0 right-0 z-30 w-72 max-w-[85vw] border-l border-gray-800 bg-gray-900 pointer-events-auto overflow-y-auto overscroll-contain pt-[calc(3.5rem+env(safe-area-inset-top,0px))] pb-[env(safe-area-inset-bottom,0px)]"
+            style={{ WebkitOverflowScrolling: "touch" }}
           >
             <div className="p-3">
               <h2 className="text-xs font-semibold text-gray-500 uppercase px-2 mb-2">Contents</h2>
@@ -700,6 +784,16 @@ export default function Ereader() {
                   if (fullscreen) setChromeHidden((h) => !h);
                 }}
               />
+              {/* Host-level tap zones over foliate — Capacitor WebView iframes drop clicks. */}
+              {useHostTapZones && !tocOpen && !settingsOpen && (
+                <HostSideTapZones
+                  hostRef={epubHostRef}
+                  onPrev={goPrev}
+                  onNext={goNext}
+                  captureCenter={fullscreen}
+                  onCenter={() => setChromeHidden((h) => !h)}
+                />
+              )}
             </div>
           ) : (
             <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-sm">
@@ -713,7 +807,7 @@ export default function Ereader() {
         <footer
           data-reader-chrome
           onClick={stopChrome}
-          className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800"
+          className="absolute bottom-0 left-0 right-0 z-40 flex items-center justify-between px-4 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] bg-gray-900/95 border-t border-gray-800 pointer-events-auto"
         >
           <button
             type="button"

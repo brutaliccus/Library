@@ -398,10 +398,22 @@ export async function handlePlayMediaId(
   mediaId: string,
   handlers: AutoPlayHandlers
 ): Promise<void> {
-  // If native ExoPlayer already owns this session, never start WebView audio.
+  // If native ExoPlayer already owns *this* mediaId, attach-only (no second decoder).
+  // A different mediaId must fall through so browse→play can switch titles.
   try {
-    const { isNativePlaybackOwner } = await import("./libraryAuto");
-    if (isNativePlaybackOwner()) return;
+    const { isNativePlaybackOwner, handOffNativeToWebView } = await import("./libraryAuto");
+    if (isNativePlaybackOwner()) {
+      try {
+        const st = await LibraryAuto.getNativePlaybackState();
+        if (st?.nativeOwner && st.mediaId && st.mediaId === mediaId) {
+          handlers.play();
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
+      await handOffNativeToWebView().catch(() => {});
+    }
   } catch {
     /* ignore */
   }

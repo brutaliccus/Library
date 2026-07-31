@@ -142,11 +142,12 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             public void onPlayFromMediaId(String mediaId, Bundle extras) {
                 LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
                 bridge.requestAudioFocusForPlay();
-                if (bridge.isActive()) {
-                    bridge.setPlayingOptimistic(true);
-                }
+                // Publish BUFFERING + metadata immediately so AA leaves the browse
+                // loading spinner and shows the player / Now Playing chrome.
+                bridge.beginPlayFromMediaId(mediaId);
                 // Native ExoPlayer first — locked phone must not depend on WebView.
                 if (bridge.tryNativePlayFromMediaId(mediaId)) {
+                    bridge.setPlayingOptimistic(true);
                     Bundle payload = new Bundle();
                     payload.putString("mediaId", mediaId);
                     payload.putBoolean("nativeStarted", true);

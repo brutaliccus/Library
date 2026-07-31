@@ -54,6 +54,61 @@ export function setNativePlaybackAttachHandler(
   attachNativeHandler = handler;
 }
 
+/**
+ * Reconcile the JS ownership flag with native truth.
+ * Missed nativeStopped events used to leave phone controls permanently no-op.
+ */
+export async function reconcileNativeOwnership(): Promise<boolean> {
+  if (Capacitor.getPlatform() !== "android") {
+    nativeOwnsPlayback = false;
+    return false;
+  }
+  try {
+    const st = await LibraryAuto.getNativePlaybackState();
+    nativeOwnsPlayback = st?.nativeOwner === true;
+    return nativeOwnsPlayback;
+  } catch {
+    nativeOwnsPlayback = false;
+    return false;
+  }
+}
+
+/** Pause ExoPlayer when it owns PCM (phone UI / lock screen). */
+export async function pauseNativePlayback(): Promise<boolean> {
+  try {
+    const r = await LibraryAuto.pauseNativePlayback();
+    return r?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Resume ExoPlayer when it owns PCM. */
+export async function resumeNativePlayback(): Promise<boolean> {
+  try {
+    const r = await LibraryAuto.resumeNativePlayback();
+    if (r?.ok) {
+      nativeOwnsPlayback = true;
+      markOptimisticPlaying();
+    }
+    return r?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Seek ExoPlayer to a book-global position (seconds). */
+export async function seekNativePlayback(positionSec: number): Promise<boolean> {
+  try {
+    const r = await LibraryAuto.seekNativePlayback({
+      position: Math.max(0, positionSec),
+    });
+    return r?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function handOffNativeToWebView(): Promise<void> {
   try {
     await LibraryAuto.handOffNativePlayback();
@@ -61,6 +116,26 @@ export async function handOffNativeToWebView(): Promise<void> {
     /* ignore */
   }
   nativeOwnsPlayback = false;
+}
+
+/** Silence the HTML5 element immediately — never leave it decoding beside Exo. */
+export function silenceWebViewAudio(): void {
+  try {
+    const nodes = document.querySelectorAll("audio");
+    nodes.forEach((el) => {
+      try {
+        if (!el.paused) el.pause();
+        if (el.src) {
+          el.removeAttribute("src");
+          el.load();
+        }
+      } catch {
+        /* ignore */
+      }
+    });
+  } catch {
+    /* ignore */
+  }
 }
 
 /** Cooldown-guarded Activity wake used by JS retry / AA paths. */
@@ -113,6 +188,10 @@ export async function registerAndroidAutoHandlers(
         (ev: NativePlaybackEvent) => {
           nativeOwnsPlayback = ev.nativeOwner === true;
           lastNativeEvent = ev;
+          if (ev.nativeOwner) {
+            // Belt-and-suspenders: never leave HTML5 decoding beside Exo.
+            silenceWebViewAudio();
+          }
           attachNativeHandler?.(ev);
         }
       );
@@ -132,7 +211,10 @@ export async function registerAndroidAutoHandlers(
       {
         action: "play",
         fn: () => {
-          if (nativeOwnsPlayback) return;
+          if (nativeOwnsPlayback) {
+            void resumeNativePlayback();
+            return;
+          }
           void withWebViewReady(() => handlers.play());
         },
       },
@@ -141,10 +223,21 @@ export async function registerAndroidAutoHandlers(
         fn: () => {
           ignorePausedSyncUntil = 0;
           lastPlayingSynced = false;
+          if (nativeOwnsPlayback) {
+            void pauseNativePlayback();
+          }
           handlers.pause();
         },
       },
-      { action: "stop", fn: () => handlers.dismissPlayer() },
+      {
+        action: "stop",
+        fn: () => {
+          if (nativeOwnsPlayback) {
+            void handOffNativeToWebView();
+          }
+          handlers.dismissPlayer();
+        },
+      },
       {
         action: "seekbackward",
         fn: () => {
@@ -189,7 +282,26 @@ export async function registerAndroidAutoHandlers(
           // Native ExoPlayer already started — attach UI only, do not loadTrack/blob.
           if (d?.nativeStarted) {
             markOptimisticPlaying();
-            if (lastNativeEvent) attachNativeHandler?.(lastNativeEvent);
+            silenceWebViewAudio();
+            nativeOwnsPlayback = true;
+            if (lastNativeEvent) {
+              attachNativeHandler?.(lastNativeEvent);
+            } else {
+              // Race: playmedia can beat the first nativePlayback tick.
+              void LibraryAuto.getNativePlaybackState()
+                .then((st) => {
+                  if (!st?.nativeOwner) return;
+                  const ev: NativePlaybackEvent = {
+                    nativeOwner: true,
+                    mediaId: st.mediaId || id,
+                    playing: st.playing,
+                    position: st.position,
+                  };
+                  lastNativeEvent = ev;
+                  attachNativeHandler?.(ev);
+                })
+                .catch(() => {});
+            }
             return;
           }
           if (nativeOwnsPlayback) {
@@ -197,6 +309,7 @@ export async function registerAndroidAutoHandlers(
             // Same title: just mirror UI. Different title: release Exo and start new.
             if (id && currentId && id === currentId) {
               markOptimisticPlaying();
+              silenceWebViewAudio();
               if (lastNativeEvent) attachNativeHandler?.(lastNativeEvent);
               return;
             }
@@ -310,12 +423,18 @@ export async function syncAndroidAutoPlayback(
     lastPlayingSynced = reportPlaying;
 
     const safePos = isFinite(pos) ? Math.max(0, pos) : 0;
+    const safeGlobal = isFinite(globalTime) ? Math.max(0, globalTime) : 0;
+    const trackLocal = Math.max(
+      0,
+      safeGlobal - (np.tracks[trackIndex]?.startOffset ?? 0)
+    );
     if ("source" in np && (np.source === "abs" || np.source === "rd")) {
+      // Snapshot must store BOOK-GLOBAL time — scope.position is chapter-local.
       saveAaResumeSnapshot(
         np as import("../types/player").NowPlaying,
-        safePos,
+        safeGlobal,
         trackIndex,
-        Math.max(0, globalTime - (np.tracks[trackIndex]?.startOffset ?? 0))
+        trackLocal
       );
     }
 
@@ -341,6 +460,8 @@ export async function syncAndroidAutoPlayback(
         album: np.author || "",
         duration: isFinite(d) && d > 0 ? d : 0,
         position: safePos,
+        // Book-global for cold AA resume — distinct from chapter-scoped scrubber pos.
+        bookGlobalPosition: safeGlobal,
         playbackRate: Math.max(playbackRate, 0.25),
         artwork,
       });
@@ -358,6 +479,7 @@ export async function syncAndroidAutoPlayback(
         album: np.author || "",
         duration: isFinite(d) && d > 0 ? d : 0,
         position: safePos,
+        bookGlobalPosition: safeGlobal,
         playbackRate: Math.max(playbackRate, 0.25),
       });
       return;
@@ -368,6 +490,7 @@ export async function syncAndroidAutoPlayback(
       playing: reportPlaying,
       mediaId,
       position: safePos,
+      bookGlobalPosition: safeGlobal,
       playbackRate: Math.max(playbackRate, 0.25),
       positionOnly: true,
     });

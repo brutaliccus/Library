@@ -38,6 +38,7 @@ interface InProgressABS {
   currentTime?: number;
   duration?: number;
   progress?: number;
+  updatedAt?: string | number;
 }
 
 interface RDHistoryItem {
@@ -194,22 +195,53 @@ async function loadContinueListening(): Promise<BrowseChild[]> {
       iconUri: coverUri(item.coverUrl),
     });
     // Warm native ExoPlayer cache while unlocked — locked AA play needs URLs.
-    void import("./aaPlayableCache").then(({ cacheRdPlayable }) => {
-      const total = item.tracks.reduce((s, t) => s + (t.duration || 0), 0);
-      return cacheRdPlayable(
-        item.id,
-        item.title,
-        item.author,
-        item.coverUrl,
-        item.tracks,
-        total,
-        item.trackPositionSeconds || 0,
-        item.currentTrackIndex || 0
-      );
-    });
+    // RD API tracks ship startOffset:0; must recalc + resolve before caching
+    // or AA seeks track-local time into the wrong file / whole-book timeline.
+    void warmRdPlayableCache(item);
   }
 
   return children.slice(0, 24);
+}
+
+function parseUpdatedAtMs(raw?: string | number | null): number | null {
+  if (raw == null || raw === "") return null;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    // ABS lastUpdate is often epoch ms; treat small values as seconds.
+    return raw < 1e12 ? raw * 1000 : raw;
+  }
+  const ms = Date.parse(String(raw));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+async function warmRdPlayableCache(item: RDHistoryItem): Promise<void> {
+  try {
+    const { recalcTrackOffsets, resolveTrackResume } = await import(
+      "../utils/resumeProgress"
+    );
+    const { cacheRdPlayable } = await import("./aaPlayableCache");
+    const tracks = item.tracks.map((t) => ({ ...t }));
+    const total = recalcTrackOffsets(tracks);
+    const durationsKnown = tracks.every((t) => (t.duration || 0) > 0);
+    const resume = resolveTrackResume({
+      tracks,
+      globalSeconds: item.progressSeconds || 0,
+      trackIndex: item.currentTrackIndex,
+      trackLocal: item.trackPositionSeconds,
+      preferTrackHints: !durationsKnown,
+    });
+    await cacheRdPlayable(
+      item.id,
+      item.title,
+      item.author,
+      item.coverUrl,
+      tracks,
+      total > 0 ? total : tracks.reduce((s, t) => s + (t.duration || 0), 0),
+      resume.trackLocal,
+      resume.trackIndex
+    );
+  } catch {
+    /* offline / API fail — browse still works from cache */
+  }
 }
 
 async function warmAbsPlayableCache(item: InProgressABS): Promise<void> {
@@ -219,15 +251,18 @@ async function warmAbsPlayableCache(item: InProgressABS): Promise<void> {
       getOfflineProgress,
       progressKeyForAbs,
     } = await import("../utils/offlinePlayback");
-    const { resolveTrackResume } = await import("../utils/resumeProgress");
+    const { pickResumeSeconds, resolveTrackResume } = await import(
+      "../utils/resumeProgress"
+    );
     const { cacheAbsPlayable } = await import("./aaPlayableCache");
     const local = getOfflineProgress(progressKeyForAbs(item.itemId));
     const serverSec = Number(item.currentTime) || 0;
-    // Prefer device-local resume (what the guest/listener actually heard).
-    let globalSec = serverSec;
-    if (local && (local.time > 5 || local.trackIndex > 0)) {
-      globalSec = local.time;
-    }
+    const globalSec = pickResumeSeconds({
+      serverSeconds: serverSec,
+      serverUpdatedAtMs: parseUpdatedAtMs(item.updatedAt),
+      localSeconds: local?.time,
+      localUpdatedAtMs: local?.updatedAt,
+    });
 
     const m = getAbsOfflineManifest(item.itemId);
     if (m?.tracks?.length) {
@@ -461,22 +496,7 @@ export async function handlePlayMediaId(
     }
     if (!item?.tracks?.length) return;
     // Warm native playable cache for next locked-phone AA play.
-    try {
-      const { cacheRdPlayable } = await import("./aaPlayableCache");
-      const total = item.tracks.reduce((s, t) => s + (t.duration || 0), 0);
-      void cacheRdPlayable(
-        item.id,
-        item.title,
-        item.author,
-        item.coverUrl,
-        item.tracks,
-        total,
-        item.trackPositionSeconds || 0,
-        item.currentTrackIndex || 0
-      );
-    } catch {
-      /* ignore */
-    }
+    void warmRdPlayableCache(item);
     handlers.playRD(item.tracks, item.title, item.author, item.coverUrl, item.id, {
       startAt: item.progressSeconds,
       trackIndex: item.currentTrackIndex,

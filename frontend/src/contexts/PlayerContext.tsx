@@ -37,13 +37,22 @@ import {
 } from "../utils/offlinePlayback";
 import { snapPlaybackSpeed } from "../utils/playbackSpeed";
 import { resolveBookPlaybackRate } from "../utils/playbackRatePrefs";
-import { pickResumeSeconds, resolveTrackResume } from "../utils/resumeProgress";
+import {
+  pickResumeSeconds,
+  recalcTrackOffsets,
+  resolveTrackResume,
+} from "../utils/resumeProgress";
 import { usePlayerProgressSync } from "../hooks/usePlayerProgressSync";
 import { usePlayerMediaSession } from "../hooks/usePlayerMediaSession";
 import {
   handOffNativeToWebView,
   isNativePlaybackOwner,
+  pauseNativePlayback,
+  reconcileNativeOwnership,
+  resumeNativePlayback,
+  seekNativePlayback,
   setNativePlaybackAttachHandler,
+  silenceWebViewAudio,
 } from "../media/libraryAuto";
 import { LibraryAuto, type NativePlaybackEvent } from "../media/libraryAutoPlugin";
 import { cacheAbsPlayable, cacheRdPlayable } from "../media/aaPlayableCache";
@@ -166,19 +175,6 @@ export function usePlayer(): PlayerContextType {
 const MAX_PLAYBACK_RETRIES = 6;
 /** Reload the track if buffering makes zero progress for this long. */
 const STALL_WATCHDOG_MS = 25_000;
-
-/**
- * Recalculate startOffset for every track and totalDuration from individual durations.
- * Mutates the tracks array in place for performance.
- */
-function recalcOffsets(tracks: Track[]): number {
-  let offset = 0;
-  for (const t of tracks) {
-    t.startOffset = offset;
-    offset += t.duration;
-  }
-  return offset;
-}
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -330,7 +326,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const updatedTracks = np.tracks.map((t, i) =>
         i === trackIndex ? { ...t, duration: dur } : { ...t }
       );
-      const totalDuration = recalcOffsets(updatedTracks);
+      const totalDuration = recalcTrackOffsets(updatedTracks);
 
       return {
         ...s,
@@ -345,6 +341,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const audio = getAudio();
       const track = np.tracks[trackIndex];
       if (!track) return;
+
+      // WebView is about to decode — release Exo so we never run two owners.
+      if (isNativePlaybackOwner()) {
+        void handOffNativeToWebView();
+      }
 
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
@@ -755,14 +756,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     async (itemId: string, opts?: { startAt?: number; shareToken?: string }) => {
       // Opening the app while AA native ExoPlayer is already on this book —
       // attach UI only; never start a second decoder / blob load (OOM path).
-      if (isNativePlaybackOwner()) {
+      if (isNativePlaybackOwner() || (await reconcileNativeOwnership())) {
         const mid = `play/abs/${itemId}`;
         try {
           const st = await LibraryAuto.getNativePlaybackState();
-          if (st.nativeOwner && (!st.mediaId || st.mediaId === mid)) {
+          if (st.nativeOwner && st.mediaId && st.mediaId === mid) {
+            // Same book already on Exo — resume native; never start HTML5.
+            void resumeNativePlayback();
+            setPlayIntent(true);
+            setState((s) => ({ ...s, isPlaying: true, wantPlaying: true }));
             return;
           }
-          // Different book requested — hand off then continue with WebView.
+          // Different book (or unknown id) — hand off then continue with WebView.
           await handOffNativeToWebView();
         } catch {
           /* continue */
@@ -1058,11 +1063,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       libraryItemId?: number,
       playbackRate?: number | null
     ) => {
+      // Switching titles (or taking over from AA) — release Exo before HTML5.
+      if (isNativePlaybackOwner()) {
+        void handOffNativeToWebView();
+      }
       probeAbortRef.current?.abort();
       retryCountRef.current = 0;
       setPlayIntent(true);
       const tracksCopy = absolutizeTracks(tracks.map((t) => ({ ...t })));
-      const totalDuration = recalcOffsets(tracksCopy);
+      const totalDuration = recalcTrackOffsets(tracksCopy);
       const np = withAbsoluteMediaUrls({
         source: "rd",
         streamHistoryId,
@@ -1183,23 +1192,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const togglePlay = useCallback(() => {
-    const audio = getAudio();
-    if (audio.paused) {
-      setPlayIntent(true);
-      audio.play().catch(() => {});
-    } else {
-      setPlayIntent(false);
-      audio.pause();
-    }
-  }, [getAudio, setPlayIntent]);
-
   // Explicit play/pause for external controllers (Android Auto, lock screen).
   // Toggle semantics there are dangerous: if native and web state disagree,
   // "pause" would start playback.
   const play = useCallback(() => {
-    // Native ExoPlayer already playing from AA — do not start HTML5 / blob.
+    // Native ExoPlayer already playing from AA — resume Exo, never HTML5/blob.
     if (isNativePlaybackOwner()) {
+      void resumeNativePlayback();
       setPlayIntent(true);
       setState((s) => (s.isPlaying ? s : { ...s, isPlaying: true, wantPlaying: true }));
       return;
@@ -1214,6 +1213,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (!np) {
       void (async () => {
         try {
+          // Stale flag after process death — check native before starting HTML5.
+          if (await reconcileNativeOwnership()) {
+            void resumeNativePlayback();
+            setPlayIntent(true);
+            setState((s) => ({ ...s, isPlaying: true, wantPlaying: true }));
+            return;
+          }
           const { loadAaResumeSnapshot } = await import("../media/aaResumeSnapshot");
           const { bringToForegroundSafe } = await import("../media/libraryAuto");
           const snap = loadAaResumeSnapshot();
@@ -1298,17 +1304,55 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       resumeAfterTransientPauseRef.current = null;
     }
     setPlayIntent(false);
-    // Native owns PCM — MediaSession pause already hit ExoPlayer; keep HTML5 quiet.
-    if (!isNativePlaybackOwner()) {
+    // Native owns PCM — phone UI must pause Exo (not just flip React state).
+    if (isNativePlaybackOwner()) {
+      void pauseNativePlayback();
+      silenceWebViewAudio();
+    } else {
       getAudio().pause();
     }
     setState((s) => ({ ...s, isPlaying: false, wantPlaying: false }));
   }, [getAudio, setPlayIntent]);
 
+  const togglePlay = useCallback(() => {
+    // Single owner: never start HTML5 beside Exo.
+    if (isNativePlaybackOwner()) {
+      if (stateRef.current.isPlaying || stateRef.current.wantPlaying) {
+        pause();
+      } else {
+        play();
+      }
+      return;
+    }
+    const audio = getAudio();
+    if (audio.paused) {
+      play();
+    } else {
+      pause();
+    }
+  }, [getAudio, play, pause]);
+
   const seek = useCallback(
     (time: number) => {
       const np = stateRef.current.nowPlaying;
       if (!np) return;
+      // Keep a single owner: seek Exo while AA owns, else HTML5 / loadTrack.
+      if (isNativePlaybackOwner()) {
+        void seekNativePlayback(time);
+        const trackIdx = Math.min(
+          Math.max(0, stateRef.current.currentTrackIndex),
+          Math.max(0, np.tracks.length - 1)
+        );
+        const localTime = Math.max(0, time - (np.tracks[trackIdx]?.startOffset ?? 0));
+        lastPosRef.current = {
+          key: npKey(np),
+          time,
+          trackIndex: trackIdx,
+          trackLocal: localTime,
+        };
+        setState((s) => ({ ...s, currentTime: time }));
+        return;
+      }
       let trackIdx = 0;
       let localTime = time;
       for (let i = 0; i < np.tracks.length; i++) {
@@ -1492,6 +1536,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     (index: number) => {
       const np = stateRef.current.nowPlaying;
       if (!np || !np.tracks[index]) return;
+      // loadTrack hands off Exo before starting HTML5.
       loadTrack(np, index, 0);
     },
     [loadTrack]
@@ -1585,6 +1630,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             startOffset: t.startOffset ?? 0,
             duration: t.duration ?? 0,
           }));
+          // Cached RD playables may still have all-zero offsets from older builds.
+          if (
+            tracks.length > 1 &&
+            tracks.every((t) => (t.startOffset || 0) === 0) &&
+            tracks.some((t) => (t.duration || 0) > 0)
+          ) {
+            recalcTrackOffsets(tracks);
+          }
           const totalDuration =
             raw.totalDuration && raw.totalDuration > 0
               ? raw.totalDuration
@@ -1616,16 +1669,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             Math.max(0, tracks.length - 1)
           );
           const position = Math.max(0, ev.position ?? 0);
-          const audio = getAudio();
-          if (!audio.paused) audio.pause();
-          if (audio.src) {
-            try {
-              audio.removeAttribute("src");
-              audio.load();
-            } catch {
-              /* ignore */
-            }
-          }
+          silenceWebViewAudio();
           setPlayIntent(ev.playing === true);
           attachedMediaId = mediaId;
           setState((s) => ({

@@ -430,6 +430,42 @@ public class LibraryAutoPlugin extends Plugin
         call.resolve();
     }
 
+    /** Phone UI / JS pause while Exo owns PCM. */
+    @PluginMethod
+    public void pauseNativePlayback(PluginCall call) {
+        JSObject data = new JSObject();
+        data.put("ok", LibraryAutoBridge.getInstance().tryNativePause());
+        call.resolve(data);
+    }
+
+    /** Phone UI / JS resume while Exo owns PCM. */
+    @PluginMethod
+    public void resumeNativePlayback(PluginCall call) {
+        JSObject data = new JSObject();
+        boolean ok = LibraryAutoBridge.getInstance().tryNativeResume();
+        data.put("ok", ok);
+        call.resolve(data);
+    }
+
+    /** Seek Exo to book-global seconds while it owns PCM. */
+    @PluginMethod
+    public void seekNativePlayback(PluginCall call) {
+        Double positionSec = call.getDouble("position");
+        JSObject data = new JSObject();
+        if (positionSec == null) {
+            data.put("ok", false);
+            call.resolve(data);
+            return;
+        }
+        long positionMs = Math.round(Math.max(0, positionSec) * 1000);
+        boolean ok = LibraryAutoBridge.getInstance().tryNativeSeekTo(positionMs);
+        if (ok) {
+            LibraryAutoBridge.getInstance().setBookGlobalPositionMs(positionMs);
+        }
+        data.put("ok", ok);
+        call.resolve(data);
+    }
+
     @PluginMethod
     public void cacheBrowseChildren(PluginCall call) {
         String parentId = call.getString("parentId");
@@ -624,6 +660,12 @@ public class LibraryAutoPlugin extends Plugin
             LibraryAutoBridge.getInstance().clear();
             call.resolve();
             return;
+        }
+
+        Double bookGlobalSec = call.getDouble("bookGlobalPosition");
+        if (bookGlobalSec != null && bookGlobalSec > 0) {
+            LibraryAutoBridge.getInstance()
+                .setBookGlobalPositionMs(Math.round(bookGlobalSec * 1000));
         }
 
         if (positionOnly) {

@@ -53,7 +53,10 @@ interface LibraryAutoPlugin {
     artist?: string;
     album?: string;
     duration?: number;
+    /** Chapter/track-scoped position for the AA scrubber display. */
     position?: number;
+    /** Book-global seconds for cold resume — never use chapter-scoped position. */
+    bookGlobalPosition?: number;
     playbackRate?: number;
     artwork?: { src: string; sizes?: string; type?: string }[];
     /** When true, only update transport state (position/playing) — no metadata or artwork. */
@@ -134,6 +137,12 @@ interface LibraryAutoPlugin {
   }>;
   /** Release ExoPlayer before WebView HTML5 audio takes over. */
   handOffNativePlayback(): Promise<void>;
+  /** Phone UI pause while Exo owns PCM. */
+  pauseNativePlayback(): Promise<{ ok: boolean }>;
+  /** Phone UI resume while Exo owns PCM. */
+  resumeNativePlayback(): Promise<{ ok: boolean }>;
+  /** Seek Exo to book-global seconds while it owns PCM. */
+  seekNativePlayback(options: { position: number }): Promise<{ ok: boolean }>;
   bringToForeground(): Promise<void>;
   addListener(
     eventName: "browseRequest",

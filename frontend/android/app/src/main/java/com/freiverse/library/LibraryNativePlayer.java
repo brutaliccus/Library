@@ -206,11 +206,17 @@ public final class LibraryNativePlayer {
     }
 
     private long trackStartOffsetMs(int idx) {
-        // Stored on MediaItem tag when prepared.
+        // Prefer the playlist item at idx (tag = startOffsetMs). Fall back to current.
         if (player == null) {
             return 0;
         }
-        MediaItem item = player.getCurrentMediaItem();
+        MediaItem item = null;
+        if (idx >= 0 && idx < player.getMediaItemCount()) {
+            item = player.getMediaItemAt(idx);
+        }
+        if (item == null) {
+            item = player.getCurrentMediaItem();
+        }
         if (item == null || item.localConfiguration == null) {
             return 0;
         }
@@ -350,9 +356,25 @@ public final class LibraryNativePlayer {
             if (player == null || !owning) {
                 return;
             }
-            // Seek within current window for simplicity; chapter skip still goes via JS/native bridge.
-            long local = Math.max(0, positionMs - trackStartOffsetMs(player.getCurrentMediaItemIndex()));
-            player.seekTo(local);
+            // Map book-global ms onto the correct playlist window.
+            int count = player.getMediaItemCount();
+            int targetIdx = player.getCurrentMediaItemIndex();
+            long local = Math.max(0, positionMs);
+            for (int i = 0; i < count; i++) {
+                long start = trackStartOffsetMs(i);
+                long nextStart =
+                    i + 1 < count ? trackStartOffsetMs(i + 1) : Long.MAX_VALUE;
+                if (positionMs >= start && positionMs < nextStart) {
+                    targetIdx = i;
+                    local = Math.max(0, positionMs - start);
+                    break;
+                }
+                if (i == count - 1) {
+                    targetIdx = i;
+                    local = Math.max(0, positionMs - start);
+                }
+            }
+            player.seekTo(targetIdx, local);
             emitState(player.isPlaying());
         });
     }
@@ -604,6 +626,42 @@ public final class LibraryNativePlayer {
         if (tracks.isEmpty()) {
             return null;
         }
+        // Repair legacy caches that stored every startOffset as 0.
+        boolean allZeroOffsets = true;
+        boolean anyDuration = false;
+        for (TrackSpec t : tracks) {
+            if (t.startOffsetMs > 0) {
+                allZeroOffsets = false;
+            }
+            if (t.durationMs > 0) {
+                anyDuration = true;
+            }
+        }
+        if (allZeroOffsets && anyDuration && tracks.size() > 1) {
+            List<TrackSpec> fixed = new ArrayList<>();
+            long offset = 0;
+            for (TrackSpec t : tracks) {
+                fixed.add(
+                    new TrackSpec(
+                        t.contentUrl,
+                        t.title,
+                        offset,
+                        t.durationMs,
+                        t.mimeType
+                    )
+                );
+                offset += t.durationMs;
+            }
+            tracks = fixed;
+        }
+        long totalMs = Math.round(o.optDouble("totalDuration", 0) * 1000.0);
+        if (totalMs <= 0) {
+            long sum = 0;
+            for (TrackSpec t : tracks) {
+                sum += t.durationMs;
+            }
+            totalMs = sum;
+        }
         return new Playable(
             mediaId,
             o.optString("title", ""),
@@ -612,7 +670,7 @@ public final class LibraryNativePlayer {
             o.optString("authToken", ""),
             Math.round(o.optDouble("position", 0) * 1000.0),
             o.optInt("trackIndex", 0),
-            Math.round(o.optDouble("totalDuration", 0) * 1000.0),
+            totalMs,
             tracks
         );
     }

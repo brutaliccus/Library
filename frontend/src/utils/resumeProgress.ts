@@ -27,6 +27,19 @@ export type TrackOffset = {
   duration: number;
 };
 
+/**
+ * Recalculate startOffset for every track from individual durations.
+ * Mutates the tracks array in place. Returns total duration.
+ */
+export function recalcTrackOffsets<T extends TrackOffset>(tracks: T[]): number {
+  let offset = 0;
+  for (const t of tracks) {
+    t.startOffset = offset;
+    offset += t.duration || 0;
+  }
+  return offset;
+}
+
 /** Map a book-global timestamp onto the current track list. */
 export function mapGlobalToTrack(
   tracks: TrackOffset[],
@@ -37,12 +50,22 @@ export function mapGlobalToTrack(
   for (let i = 0; i < tracks.length; i++) {
     const start = tracks[i].startOffset || 0;
     const dur = tracks[i].duration || 0;
-    const end = dur > 0 ? start + dur : Number.POSITIVE_INFINITY;
+    // Skip unprobed tracks (dur==0) when later tracks have known bounds —
+    // otherwise the first zero-duration file swallows every global seek.
+    if (dur <= 0) continue;
+    const end = start + dur;
     if (t >= start && t < end) {
       return { trackIndex: i, trackLocal: Math.max(0, t - start) };
     }
   }
-  const last = tracks.length - 1;
+  // Fallback: last track with a known duration, else last track.
+  let last = tracks.length - 1;
+  for (let i = tracks.length - 1; i >= 0; i--) {
+    if ((tracks[i].duration || 0) > 0) {
+      last = i;
+      break;
+    }
+  }
   const start = tracks[last].startOffset || 0;
   const dur = tracks[last].duration || 0;
   const local = Math.max(0, t - start);
@@ -96,12 +119,22 @@ export function resolveTrackResume(opts: {
     const t = tracks[idx!];
     const start = t.startOffset || 0;
     const dur = t.duration || 0;
+    // Clamped local (saved local > current track duration) means the layout
+    // expanded (1→N nested m4b split). Never trust the truncated value —
+    // remap from book-global when we have it.
+    const localOverflow = dur > 0 && local! > dur + 1;
+    if (localOverflow && global > 0 && durationsKnown) {
+      const mapped = mapGlobalToTrack(tracks, global);
+      return { ...mapped, globalSeconds: global };
+    }
+    // Overflow without a usable global: keep the raw local on the hinted
+    // index (Exo/HTML5 will clamp) rather than silently jumping to track end.
     const clampedLocal = dur > 0 ? Math.min(Math.max(0, local!), dur) : Math.max(0, local!);
-    const reconstructed = start + clampedLocal;
+    const reconstructed = start + (localOverflow ? Math.max(0, local!) : clampedLocal);
 
     if (durationsKnown) {
       // Hints disagree with global timeline (typical after N→1 merge).
-      if (global > 0 && Math.abs(reconstructed - global) > 5) {
+      if (global > 0 && Math.abs(start + clampedLocal - global) > 5) {
         const mapped = mapGlobalToTrack(tracks, global);
         return { ...mapped, globalSeconds: global };
       }
@@ -112,7 +145,7 @@ export function resolveTrackResume(opts: {
       }
       return {
         trackIndex: idx!,
-        trackLocal: clampedLocal,
+        trackLocal: localOverflow ? Math.max(0, local!) : clampedLocal,
         globalSeconds: global > 0 ? global : reconstructed,
       };
     }
@@ -122,7 +155,7 @@ export function resolveTrackResume(opts: {
       return {
         trackIndex: idx!,
         trackLocal: Math.max(0, local!),
-        globalSeconds: global > 0 ? global : reconstructed,
+        globalSeconds: global > 0 ? global : start + Math.max(0, local!),
       };
     }
   }
@@ -144,6 +177,12 @@ export function resolveTrackResume(opts: {
     };
   }
 
-  const mapped = mapGlobalToTrack(tracks, global);
-  return { ...mapped, globalSeconds: global };
+  // Only map from global when durations are known — otherwise the first
+  // zero-duration track would swallow the seek (legacy mapGlobalToTrack).
+  if (global > 0 && durationsKnown) {
+    const mapped = mapGlobalToTrack(tracks, global);
+    return { ...mapped, globalSeconds: global };
+  }
+
+  return { trackIndex: 0, trackLocal: global, globalSeconds: global };
 }

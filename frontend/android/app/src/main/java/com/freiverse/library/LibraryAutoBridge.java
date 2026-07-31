@@ -102,7 +102,13 @@ public final class LibraryAutoBridge {
     /** True while AA selected a title and native/WebView audio is still starting. */
     private boolean buffering = false;
     private long durationMs = 0;
+    /** Display / MediaSession scrubber position (may be chapter-scoped from WebView). */
     private long positionMs = 0;
+    /**
+     * Book-global position for cold AA resume. Never overwrite this with
+     * chapter-scoped MediaSession position from WebView sync.
+     */
+    private long bookGlobalPositionMs = 0;
     private float playbackSpeed = 1.0f;
     private long lastNotificationUpdateMs = 0;
     private long lastPersistSessionMs = 0;
@@ -205,6 +211,8 @@ public final class LibraryAutoBridge {
                     lastNativePlaying == null || lastNativePlaying != playing;
                 lastNativePlaying = playing;
 
+                // Exo emits true book-global position (track local + startOffset).
+                bookGlobalPositionMs = Math.max(0, positionMs);
                 if (metaChanged) {
                     lastNativeMetaKey = metaKey;
                     Log.i(
@@ -242,6 +250,7 @@ public final class LibraryAutoBridge {
                 nativeMediaId = "";
                 lastNativeMetaKey = "";
                 lastNativePlaying = null;
+                buffering = false;
             }
 
             @Override
@@ -251,6 +260,8 @@ public final class LibraryAutoBridge {
                 nativeOwnsPlayback = false;
                 lastNativeMetaKey = "";
                 lastNativePlaying = null;
+                buffering = false;
+                refreshSession(true);
             }
         };
 
@@ -432,12 +443,24 @@ public final class LibraryAutoBridge {
         if (ctx == null) {
             return false;
         }
-        // Prefer last known global position for this book (idle / process death).
+        // Prefer last known BOOK-GLOBAL position (never chapter-scoped scrubber pos).
+        // Session positionMs from WebView is chapter/track-scoped for AA display and
+        // must not remap a multi-file resume into the wrong file.
         String persistedId = getPersistedMediaId();
-        if (mediaId.equals(persistedId) && positionMs > 5_000) {
-            playable = playableWithGlobalPosition(playable, positionMs);
+        long trustedGlobal = bookGlobalPositionMs;
+        if (trustedGlobal <= 5_000) {
+            // Fall back to playable cache's own track-local + offset (warm path).
+            trustedGlobal = playable.positionMs + trackOffset(playable);
+        }
+        if (
+            mediaId.equals(persistedId)
+                && trustedGlobal > 5_000
+                && playableHasUsableOffsets(playable)
+        ) {
+            playable = playableWithGlobalPosition(playable, trustedGlobal);
         }
         long globalPos = playable.positionMs + trackOffset(playable);
+        bookGlobalPositionMs = globalPos;
         // Optimistic session metadata before first Exo tick.
         update(
             playable.title,
@@ -455,6 +478,23 @@ public final class LibraryAutoBridge {
         persistMediaId(mediaId);
         LibraryNativePlayer.getInstance().play(ctx, playable);
         return true;
+    }
+
+    /** True when track startOffsets form a usable book timeline (not all-zero). */
+    private static boolean playableHasUsableOffsets(LibraryNativePlayer.Playable playable) {
+        if (playable == null || playable.tracks.isEmpty()) {
+            return false;
+        }
+        if (playable.tracks.size() == 1) {
+            return true;
+        }
+        for (int i = 1; i < playable.tracks.size(); i++) {
+            if (playable.tracks.get(i).startOffsetMs > 0) {
+                return true;
+            }
+        }
+        // Multi-file with all-zero offsets: trust trackIndex+local from cache only.
+        return false;
     }
 
     /** Seek a cached playable to a book-global position (ms). */
@@ -590,13 +630,26 @@ public final class LibraryAutoBridge {
     /** WebView is becoming the audio owner — stop ExoPlayer without wiping AA session. */
     public void handOffNativeToWebView() {
         nativeOwnsPlayback = false;
+        buffering = false;
         LibraryNativePlayer.getInstance().handOffToWebView();
     }
 
     public void stopNativePlayback() {
         nativeOwnsPlayback = false;
         nativeMediaId = "";
+        buffering = false;
         LibraryNativePlayer.getInstance().stopAndReleaseOwnership();
+    }
+
+    /** Record book-global position from WebView sync (distinct from scrubber pos). */
+    public void setBookGlobalPositionMs(long globalMs) {
+        if (globalMs > 0) {
+            bookGlobalPositionMs = globalMs;
+        }
+    }
+
+    public long getBookGlobalPositionMs() {
+        return bookGlobalPositionMs;
     }
 
     /** So JS can persist browse folders before MediaBrowserService has attached. */
@@ -1277,6 +1330,7 @@ public final class LibraryAutoBridge {
             .putString("album", album)
             .putLong("durationMs", durationMs)
             .putLong("positionMs", positionMs)
+            .putLong("bookGlobalPositionMs", bookGlobalPositionMs)
             .putFloat("playbackSpeed", playbackSpeed);
         String mid = !nativeMediaId.isEmpty() ? nativeMediaId : getPersistedMediaId();
         if (mid != null && !mid.isEmpty()) {
@@ -1331,6 +1385,12 @@ public final class LibraryAutoBridge {
         this.album = prefs.getString("album", "");
         this.durationMs = prefs.getLong("durationMs", 0);
         this.positionMs = prefs.getLong("positionMs", 0);
+        this.bookGlobalPositionMs = prefs.getLong("bookGlobalPositionMs", 0);
+        // Legacy builds only stored scrubber position — do not treat it as global
+        // when it may be chapter-scoped. Prefer 0 so playable cache wins.
+        if (this.bookGlobalPositionMs <= 0) {
+            this.bookGlobalPositionMs = 0;
+        }
         this.playbackSpeed = prefs.getFloat("playbackSpeed", 1.0f);
         String mid = prefs.getString("mediaId", "");
         if (mid != null && !mid.isEmpty()) {

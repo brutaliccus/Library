@@ -500,14 +500,19 @@ async def _ereader_payload(user: User, db: AsyncSession) -> dict:
     from app.services import opds as opds_svc
 
     token = await opds_svc.ensure_user_opds_token(db, user)
+    short = await opds_svc.ensure_user_opds_short_code(db, user)
     base = await opds_svc.public_app_base()
-    root = f"{base}/api/opds/{token}" if base else ""
+    # Prefer short /o/{code} URL for ereader typing; keep long path as alternate.
+    root = f"{base}/o/{short}" if base and short else ""
+    legacy_root = f"{base}/api/opds/{token}" if base and token else ""
     items = await opds_svc.list_shelf_items(db, user.id)
     return {
         "opdsUrl": root,
+        "opdsUrlLegacy": legacy_root,
+        "shortCode": short,
         "shelfUrl": f"{root}/shelf" if root else "",
         "libraryUrl": f"{root}/library" if root else "",
-        "tokenConfigured": bool(token),
+        "tokenConfigured": bool(token and short),
         "appUrlConfigured": bool(base),
         "shelfCount": len(items),
         "shelf": [

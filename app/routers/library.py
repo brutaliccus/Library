@@ -2039,14 +2039,26 @@ class EbookProgressBody(BaseModel):
     book_title: str = ""
     series_name: str | None = None
     cover_url: str = ""
+    cfi: str | None = None  # EPUB CFI for exact resume
     hidden: bool = False
     last_read_at: float | None = None  # epoch ms from client
+
+
+def _normalize_cfi(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    # Cap pathological payloads; CFIs are typically well under this.
+    return text[:8192]
 
 
 def _serialize_ebook_progress(row) -> dict:
     last = row.last_read_at
     if last is not None and getattr(last, "tzinfo", None) is None:
         last = last.replace(tzinfo=timezone.utc)
+    cfi = getattr(row, "cfi", None)
     return {
         "chapterId": row.chapter_id,
         "page": int(row.page or 0),
@@ -2056,6 +2068,7 @@ def _serialize_ebook_progress(row) -> dict:
         "bookTitle": row.book_title or "",
         "seriesName": row.series_name,
         "coverUrl": row.cover_url or "",
+        "cfi": cfi or None,
         "hidden": bool(row.hidden),
         "lastReadAt": int(last.timestamp() * 1000) if last else 0,
     }
@@ -2138,6 +2151,9 @@ async def upsert_reading_progress(
             existing.series_name = (body.series_name or None) and body.series_name[:512]
         if body.cover_url:
             existing.cover_url = body.cover_url[:1024]
+        # Preserve prior CFI when client omits it (e.g. PDF progress writes).
+        if body.cfi is not None:
+            existing.cfi = _normalize_cfi(body.cfi)
         existing.hidden = bool(body.hidden)
         existing.last_read_at = last_read
         await db.commit()
@@ -2154,6 +2170,7 @@ async def upsert_reading_progress(
         book_title=(body.book_title or "")[:512],
         series_name=(body.series_name or None) and (body.series_name or "")[:512],
         cover_url=(body.cover_url or "")[:1024],
+        cfi=_normalize_cfi(body.cfi),
         hidden=bool(body.hidden),
         last_read_at=last_read,
     )
@@ -2183,6 +2200,8 @@ async def upsert_reading_progress(
             existing.series_name = (body.series_name or None) and body.series_name[:512]
         if body.cover_url:
             existing.cover_url = body.cover_url[:1024]
+        if body.cfi is not None:
+            existing.cfi = _normalize_cfi(body.cfi)
         existing.hidden = bool(body.hidden)
         existing.last_read_at = last_read
         await db.commit()

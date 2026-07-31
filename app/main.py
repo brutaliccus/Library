@@ -163,6 +163,7 @@ app.include_router(push.router)
 app.include_router(mobile.router)
 app.include_router(share.router)
 app.include_router(opds.router)
+app.include_router(opds.short_router)
 
 
 @app.get("/api/health")

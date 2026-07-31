@@ -20,7 +20,7 @@ import {
   saveEbookOfflineManifest,
 } from "../utils/offlinePlayback";
 import { isLikelyOffline, isNetworkError } from "../utils/networkStatus";
-import { getProgress, saveProgress } from "../utils/readingProgress";
+import { fetchChapterProgressFromServer, getProgress, saveProgress } from "../utils/readingProgress";
 import {
   ChevronLeft,
   ChevronRight,
@@ -341,7 +341,10 @@ export default function Ereader() {
         if (cancelled) return;
         setBookInfo(data);
         setError(null);
-        const prog = getProgress(cid);
+        // Prefer server CFI (cross-device / reinstall); fall back to local.
+        const prog = shareToken
+          ? getProgress(cid)
+          : (await fetchChapterProgressFromServer(cid)) || getProgress(cid);
         if (data.seriesFormat === KAVITA_PDF_FORMAT) {
           setPdfPage(prog?.page ?? 0);
         } else {
@@ -467,11 +470,41 @@ export default function Ereader() {
     const onVis = () => {
       if (document.visibilityState === "hidden") flush();
     };
+    const onUnload = () => flush();
     document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("pagehide", flush);
+    window.addEventListener("pagehide", onUnload);
+    window.addEventListener("beforeunload", onUnload);
+
+    let cancelled = false;
+    let removeAppListener: (() => void) | undefined;
+    if (Capacitor.isNativePlatform()) {
+      void (async () => {
+        try {
+          const { App } = await import("@capacitor/app");
+          if (cancelled) return;
+          const sub = await App.addListener("appStateChange", ({ isActive }) => {
+            if (!isActive) flush();
+          });
+          if (cancelled) {
+            void sub.remove();
+            return;
+          }
+          removeAppListener = () => {
+            void sub.remove();
+          };
+        } catch {
+          /* ignore */
+        }
+      })();
+    }
+
     return () => {
+      cancelled = true;
       document.removeEventListener("visibilitychange", onVis);
-      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("pagehide", onUnload);
+      window.removeEventListener("beforeunload", onUnload);
+      removeAppListener?.();
+      flush();
     };
   }, [isPdf, persistPdfProgress, persistEpubProgress]);
 

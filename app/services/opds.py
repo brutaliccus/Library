@@ -39,37 +39,77 @@ ACQ_TYPE = 'application/atom+xml;profile=opds-catalog;kind=acquisition'
 
 
 def new_opds_token() -> str:
+    """Long opaque token for /api/opds/{token} (backward compatible)."""
     return secrets.token_urlsafe(24)
 
 
-async def ensure_user_opds_token(db: AsyncSession, user: User) -> str:
-    """Create a stable OPDS token if the user does not have one yet."""
-    token = (user.opds_token or "").strip()
-    if token:
-        return token
-    for _ in range(5):
-        candidate = new_opds_token()
+def new_opds_short_code() -> str:
+    """Short code for /o/{code} (~11 chars, ~66 bits)."""
+    return secrets.token_urlsafe(8)
+
+
+async def _allocate_unique(
+    db: AsyncSession,
+    *,
+    column,
+    factory,
+) -> str:
+    for _ in range(8):
+        candidate = factory()
         existing = (
-            await db.execute(select(User.id).where(User.opds_token == candidate))
+            await db.execute(select(User.id).where(column == candidate))
         ).scalar_one_or_none()
         if existing is None:
-            user.opds_token = candidate
-            await db.commit()
-            await db.refresh(user)
             return candidate
-    raise RuntimeError("Could not allocate OPDS token")
+    raise RuntimeError("Could not allocate unique OPDS credential")
+
+
+async def ensure_user_opds_token(db: AsyncSession, user: User) -> str:
+    """Create a stable OPDS token (+ short code) if the user does not have one yet."""
+    changed = False
+    token = (user.opds_token or "").strip()
+    if not token:
+        user.opds_token = await _allocate_unique(
+            db, column=User.opds_token, factory=new_opds_token
+        )
+        changed = True
+    short = (getattr(user, "opds_short_code", None) or "").strip()
+    if not short:
+        user.opds_short_code = await _allocate_unique(
+            db, column=User.opds_short_code, factory=new_opds_short_code
+        )
+        changed = True
+    if changed:
+        await db.commit()
+        await db.refresh(user)
+    return (user.opds_token or "").strip()
+
+
+async def ensure_user_opds_short_code(db: AsyncSession, user: User) -> str:
+    """Return the user's short OPDS code, creating credentials if needed."""
+    await ensure_user_opds_token(db, user)
+    return (user.opds_short_code or "").strip()
 
 
 async def rotate_user_opds_token(db: AsyncSession, user: User) -> str:
     user.opds_token = None
+    user.opds_short_code = None
     await db.flush()
     return await ensure_user_opds_token(db, user)
 
 
 async def user_by_opds_token(db: AsyncSession, token: str) -> User | None:
+    """Resolve a user by long token or short code (either may appear in the URL)."""
     tok = (token or "").strip()
-    if not tok or len(tok) < 16:
+    if not tok or len(tok) < 8:
         return None
+    by_short = (
+        await db.execute(
+            select(User).where(User.opds_short_code == tok, User.is_active.is_(True))
+        )
+    ).scalar_one_or_none()
+    if by_short is not None:
+        return by_short
     return (
         await db.execute(select(User).where(User.opds_token == tok, User.is_active.is_(True)))
     ).scalar_one_or_none()

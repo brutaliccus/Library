@@ -75,6 +75,8 @@ class User(Base):
     can_share_books: Mapped[bool] = mapped_column(Boolean, default=False)
     # Long-lived OPDS catalog token (Library Site proxied feed for ereaders).
     opds_token: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True, index=True)
+    # Short public code for /o/{code} OPDS URLs (easier to type on ereaders).
+    opds_short_code: Mapped[str | None] = mapped_column(String(16), unique=True, nullable=True, index=True)
 
     download_requests: Mapped[list["DownloadRequest"]] = relationship(back_populates="user")
 
@@ -361,6 +363,8 @@ class EbookReadingProgress(Base):
     book_title: Mapped[str] = mapped_column(String(512), default="")
     series_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     cover_url: Mapped[str] = mapped_column(String(1024), default="")
+    # EPUB CFI from foliate-js (exact resume position); null for PDF / older rows.
+    cfi: Mapped[str | None] = mapped_column(Text, nullable=True)
     hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     last_read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

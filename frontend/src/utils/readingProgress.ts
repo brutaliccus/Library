@@ -19,7 +19,7 @@ export interface ReadingProgress {
   lastReadAt: number;
   /** Hidden from the Continue Reading shelf (progress preserved) */
   hidden?: boolean;
-  /** EPUB CFI from foliate-js (local + best-effort; not on older server rows). */
+  /** EPUB CFI from foliate-js — required to resume exact position. */
   cfi?: string;
 }
 
@@ -99,6 +99,52 @@ function toLocalShape(item: {
   };
 }
 
+function mergeProgress(local: ReadingProgress | undefined, server: ReadingProgress): ReadingProgress {
+  // Newer stamp wins, but never drop a CFI the other side still has.
+  const serverNewer = !local || (server.lastReadAt || 0) >= (local.lastReadAt || 0);
+  if (serverNewer) {
+    return {
+      ...server,
+      hidden: false,
+      cfi: server.cfi || local?.cfi,
+    };
+  }
+  return {
+    ...local!,
+    cfi: local!.cfi || server.cfi,
+  };
+}
+
+type ProgressPayload = {
+  chapter_id: number;
+  page: number;
+  viewport_page: number;
+  total_viewport_pages: number | null;
+  total_kavita_pages: number | null;
+  book_title: string;
+  series_name: string | null;
+  cover_url: string;
+  cfi?: string | null;
+  hidden: boolean;
+  last_read_at: number;
+};
+
+function toServerPayload(p: ReadingProgress): ProgressPayload {
+  return {
+    chapter_id: p.chapterId,
+    page: p.page,
+    viewport_page: p.viewportPage,
+    total_viewport_pages: p.totalViewportPages ?? null,
+    total_kavita_pages: p.totalKavitaPages ?? null,
+    book_title: p.bookTitle,
+    series_name: p.seriesName ?? null,
+    cover_url: p.coverUrl,
+    cfi: p.cfi ?? null,
+    hidden: false,
+    last_read_at: p.lastReadAt,
+  };
+}
+
 /** Pull server Continue Reading into localStorage (newer wins per chapter). */
 export async function hydrateReadingProgressFromServer(): Promise<void> {
   try {
@@ -114,6 +160,7 @@ export async function hydrateReadingProgressFromServer(): Promise<void> {
         coverUrl: string;
         lastReadAt: number;
         hidden?: boolean;
+        cfi?: string | null;
       }>;
     }>("/library/reading-progress", { params: { limit: 100 } });
     const items = data?.items || [];
@@ -127,9 +174,9 @@ export async function hydrateReadingProgressFromServer(): Promise<void> {
     for (const raw of items) {
       const server = toLocalShape(raw);
       const key = String(server.chapterId);
-      const local = all[key];
-      if (!local || (server.lastReadAt || 0) >= (local.lastReadAt || 0)) {
-        all[key] = { ...server, hidden: false };
+      const merged = mergeProgress(all[key], server);
+      if (JSON.stringify(all[key]) !== JSON.stringify(merged)) {
+        all[key] = merged;
         changed = true;
       }
     }
@@ -143,23 +190,49 @@ export async function hydrateReadingProgressFromServer(): Promise<void> {
   }
 }
 
+/**
+ * Fetch one chapter's progress from the server and merge into localStorage.
+ * Used when opening the ereader so CFI is restored even after reinstall.
+ */
+export async function fetchChapterProgressFromServer(
+  chapterId: number
+): Promise<ReadingProgress | null> {
+  try {
+    const { data } = await api.get<{
+      items: Array<{
+        chapterId: number;
+        page: number;
+        viewportPage: number;
+        totalViewportPages?: number | null;
+        totalKavitaPages?: number | null;
+        bookTitle: string;
+        seriesName?: string | null;
+        coverUrl: string;
+        lastReadAt: number;
+        hidden?: boolean;
+        cfi?: string | null;
+      }>;
+    }>("/library/reading-progress", { params: { limit: 100 } });
+    const raw = (data?.items || []).find((i) => i.chapterId === chapterId);
+    const local = getProgress(chapterId);
+    if (!raw) return local;
+    const merged = mergeProgress(local ?? undefined, toLocalShape(raw));
+    const all = loadAll();
+    all[String(chapterId)] = merged;
+    saveAll(all);
+    emitUpdated();
+    return merged;
+  } catch {
+    return getProgress(chapterId);
+  }
+}
+
 async function pushLocalReadingProgressToServer(): Promise<void> {
   const all = loadAll();
   const entries = Object.values(all).filter((p) => !p.hidden);
   for (const p of entries.slice(0, 40)) {
     try {
-      await api.put(`/library/reading-progress/${p.chapterId}`, {
-        chapter_id: p.chapterId,
-        page: p.page,
-        viewport_page: p.viewportPage,
-        total_viewport_pages: p.totalViewportPages ?? null,
-        total_kavita_pages: p.totalKavitaPages ?? null,
-        book_title: p.bookTitle,
-        series_name: p.seriesName ?? null,
-        cover_url: p.coverUrl,
-        hidden: false,
-        last_read_at: p.lastReadAt,
-      });
+      await api.put(`/library/reading-progress/${p.chapterId}`, toServerPayload(p));
     } catch {
       /* ignore per-row */
     }
@@ -180,19 +253,7 @@ export function saveProgress(progress: Omit<ReadingProgress, "lastReadAt">) {
   saveAll(all);
   emitUpdated();
   void api
-    .put(`/library/reading-progress/${progress.chapterId}`, {
-      chapter_id: progress.chapterId,
-      page: progress.page,
-      viewport_page: progress.viewportPage,
-      total_viewport_pages: progress.totalViewportPages ?? null,
-      total_kavita_pages: progress.totalKavitaPages ?? null,
-      book_title: progress.bookTitle,
-      series_name: progress.seriesName ?? null,
-      cover_url: progress.coverUrl,
-      hidden: false,
-      last_read_at: row.lastReadAt,
-      // Stored in series_name? No — server may ignore unknown fields; CFI is local-first.
-    })
+    .put(`/library/reading-progress/${progress.chapterId}`, toServerPayload(row))
     .catch(() => {
       /* offline — local kept */
     });

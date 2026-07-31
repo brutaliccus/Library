@@ -178,6 +178,8 @@ function InviteShareSection() {
 
 interface EreaderInfo {
   opdsUrl: string;
+  opdsUrlLegacy?: string;
+  shortCode?: string;
   shelfUrl: string;
   libraryUrl: string;
   appUrlConfigured: boolean;
@@ -268,7 +270,7 @@ function EreaderConnectSection() {
             <div className="space-y-2">
               <p className="text-[11px] text-gray-500 uppercase tracking-wide">OPDS catalog URL</p>
               <div className="flex items-start gap-2">
-                <code className="flex-1 min-w-0 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-[11px] text-amber-300/90 font-mono break-all select-all">
+                <code className="flex-1 min-w-0 px-3 py-2.5 bg-gray-800 border border-amber-700/40 rounded-lg text-sm text-amber-300 font-mono break-all select-all tracking-wide">
                   {data.opdsUrl}
                 </code>
                 <button
@@ -297,6 +299,29 @@ function EreaderConnectSection() {
                   <RefreshCw size={15} className={rotate.isPending ? "animate-spin" : ""} />
                 </button>
               </div>
+              <p className="text-[11px] text-gray-500 leading-relaxed">
+                Short path for typing on KOReader / Moon+. Code is in the URL ? no login needed.
+              </p>
+              {data.opdsUrlLegacy && data.opdsUrlLegacy !== data.opdsUrl && (
+                <details className="text-[11px] text-gray-500">
+                  <summary className="cursor-pointer text-gray-400 hover:text-gray-300">
+                    Alternate long URL
+                  </summary>
+                  <div className="mt-1.5 flex items-start gap-2">
+                    <code className="flex-1 min-w-0 px-2 py-1.5 bg-gray-800/80 border border-gray-700 rounded text-[10px] text-gray-400 font-mono break-all select-all">
+                      {data.opdsUrlLegacy}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => void copyUrl(data.opdsUrlLegacy!, "Long OPDS URL")}
+                      className="p-1.5 bg-gray-800 text-gray-400 rounded hover:bg-gray-700 shrink-0"
+                      title="Copy long OPDS URL"
+                    >
+                      <Copy size={13} />
+                    </button>
+                  </div>
+                </details>
+              )}
               <ul className="text-xs text-gray-500 space-y-1.5 list-disc pl-4">
                 <li>{data.instructions.koreader}</li>
                 <li>{data.instructions.moonreader}</li>

@@ -156,11 +156,14 @@ if ($branch -ne "main" -and -not $Force) {
 }
 
 $status = (Invoke-Git @("status", "--porcelain") "status failed").Trim()
-if ($status -and -not $DryRun) {
+if ($status -and -not $DryRun -and -not $Force) {
     Write-Host '  Working tree is dirty - skipping APK release so we do not mix uncommitted work into a tag.' -ForegroundColor Yellow
     Write-Host '  Commit/push your changes (or stash), then re-run with -ForceApk, or run:' -ForegroundColor DarkGray
     Write-Host '    .\scripts\release_android_apk.ps1 -Force' -ForegroundColor DarkGray
     exit 0
+}
+if ($status -and $Force) {
+    Write-Host '  Working tree is dirty - proceeding anyway because -Force was set.' -ForegroundColor Yellow
 }
 
 $lastTag = Get-LastAndroidTag

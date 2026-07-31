@@ -96,7 +96,8 @@ export default function DownloadPanel({
 
   const armLiveTimeout = useCallback((ac: AbortController, hasResults: boolean) => {
     if (liveTimeoutRef.current) window.clearTimeout(liveTimeoutRef.current);
-    const ms = hasResults ? 90_000 : 180_000;
+    // Fail fast once partial results exist — slow ABB/Flare must not hold the UI.
+    const ms = hasResults ? 45_000 : 75_000;
     liveTimeoutRef.current = window.setTimeout(() => ac.abort(), ms);
   }, []);
 
@@ -320,23 +321,38 @@ export default function DownloadPanel({
             continue;
           }
           const type = msg.type as string;
+          const applySourceProgress = (m: Record<string, unknown>, ceiling: number) => {
+            const sourcesDone = Number(m.sourcesDone || 0);
+            const sourcesTotal = Number(m.sourcesTotal || 0);
+            if (sourcesTotal > 0) {
+              // First source ~40%, both sources ~75%, leave headroom for finish.
+              const pct = 15 + (sourcesDone / sourcesTotal) * 60;
+              setSearchProgress((p) => Math.max(p, Math.min(ceiling, pct)));
+              return;
+            }
+            const page = Number(m.page || 0);
+            const pages = Number(m.pages || 0);
+            if (pages > 0 && page > 0) {
+              setSearchProgress((p) =>
+                Math.max(p, Math.min(ceiling, 15 + (page / pages) * 60))
+              );
+            }
+          };
           if (type === "status") {
             const phase = String(msg.phase || "Searching…");
             setSearchPhase(phase);
-            const page = Number(msg.page || 0);
-            const pages = Number(msg.pages || 0);
-            if (pages > 0 && page > 0) {
-              setSearchProgress(Math.min(88, 8 + (page / pages) * 70));
+            if (/finish|library|debrid|ranking/i.test(phase)) {
+              setSearchProgress((p) => Math.max(p, 88));
+            } else {
+              applySourceProgress(msg, 80);
             }
           } else if (type === "batch") {
             const phase = String(msg.phase || "Loading results…");
             setSearchPhase(phase);
-            const page = Number(msg.page || 0);
-            const pages = Number(msg.pages || 0);
-            if (pages > 0 && page > 0) {
-              setSearchProgress(Math.min(90, 10 + (page / pages) * 75));
-            } else if (msg.source === "knaben") {
-              setSearchProgress((p) => Math.max(p, 85));
+            if (msg.source === "finish" || /ranking/i.test(phase)) {
+              setSearchProgress((p) => Math.max(p, 90));
+            } else {
+              applySourceProgress(msg, 82);
             }
             const results = (msg.results as SearchResult[]) || [];
             liveResultCountRef.current = results.length;

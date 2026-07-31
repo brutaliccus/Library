@@ -719,18 +719,32 @@ async def search_live_stream(
             return json.dumps(obj, default=str) + "\n"
 
         try:
-            yield _line({"type": "status", "phase": "Searching Knaben & Jackett…", "page": 0, "pages": 0})
+            sources_total = 2
+            sources_done = 0
+            yield _line({
+                "type": "status",
+                "phase": "Searching Knaben & AudioBook Bay…",
+                "page": 0,
+                "pages": 0,
+                "sourcesDone": 0,
+                "sourcesTotal": sources_total,
+            })
 
-            # Cap Knaben query fan-out — 2–3 title variants is enough for live UI.
+            # Cap Knaben fan-out — 2 variants keep live UI snappy.
             knaben_task = asyncio.create_task(
-                prowlarr.search_knaben_multi(knaben_queries[:3], timeout=20)
+                prowlarr.search_knaben_multi(
+                    knaben_queries[:2], timeout=15, limit=150,
+                )
             )
-            # Jackett-first ABB (~1–3s). Avoid Mullvad Flare-first (often 60–90s).
+            # Jackett-first ABB with a hard overall budget. Skip Flare on live
+            # refresh — FlareSolverr was freezing progress at ~85% for 30–60s.
             abb_task = asyncio.create_task(
                 prowlarr.search_audiobookbay_multi(
                     [primary_abb],
-                    jackett_timeout=25,
-                    allow_flare_fallback=True,
+                    jackett_timeout=15,
+                    prowlarr_timeout=10,
+                    allow_flare_fallback=False,
+                    overall_timeout=22.0,
                 )
             )
 
@@ -739,26 +753,52 @@ async def search_live_stream(
                 done, _ = await asyncio.wait(pending.keys(), return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
                     source = pending.pop(task)
+                    sources_done += 1
                     try:
                         batch = task.result()
                     except Exception as e:
                         logger.warning("%s live search failed: %s", source, e)
                         batch = []
+                    label = "Knaben" if source == "knaben" else "AudioBook Bay"
+                    waiting = "AudioBook Bay" if source == "knaben" and pending else (
+                        "Knaben" if source != "knaben" and pending else None
+                    )
                     if not batch:
+                        phase = (
+                            f"{label} done (no results) — waiting for {waiting}…"
+                            if waiting
+                            else f"{label} done (no results)"
+                        )
+                        yield _line({
+                            "type": "status",
+                            "phase": phase,
+                            "source": "knaben" if source == "knaben" else "abb",
+                            "page": 0,
+                            "pages": 0,
+                            "sourcesDone": sources_done,
+                            "sourcesTotal": sources_total,
+                        })
                         continue
                     new = _merge_in(batch)
                     snap = _ranked_snapshot()
+                    phase = (
+                        f"{label} results — waiting for {waiting}…"
+                        if waiting
+                        else f"{label} results…"
+                    )
                     yield _line({
                         "type": "batch",
                         "source": "knaben" if source == "knaben" else "abb",
-                        "page": 1 if source != "knaben" else 0,
-                        "pages": 1 if source != "knaben" else 0,
+                        "page": sources_done,
+                        "pages": sources_total,
                         "results": snap["results"],
                         "totalSoFar": snap["totalFetched"],
                         "hiddenCount": snap.get("hiddenCount", 0),
                         "matchCounts": snap.get("matchCounts", {}),
                         "newCount": len(new),
-                        "phase": "Knaben results…" if source == "knaben" else "AudioBook Bay (Jackett)…",
+                        "sourcesDone": sources_done,
+                        "sourcesTotal": sources_total,
+                        "phase": phase,
                     })
                     if new:
                         asyncio.create_task(indexer_cache.upsert_torrents(new))
@@ -810,12 +850,38 @@ async def search_live_stream(
                         "pages": 0,
                     })
 
-            yield _line({"type": "status", "phase": "Finishing…", "page": 0, "pages": 0})
-
+            # Stream ranked results immediately so the UI leaves ~85% without
+            # waiting on hash resolve / debrid probes.
             snap = _ranked_snapshot()
+            early_results = order_results_for_display(
+                list(snap.get("results") or []), ctx,
+            )
+            yield _line({
+                "type": "batch",
+                "source": "finish",
+                "page": sources_total,
+                "pages": sources_total,
+                "results": early_results,
+                "totalSoFar": snap.get("totalFetched", len(pooled)),
+                "hiddenCount": snap.get("hiddenCount", 0),
+                "matchCounts": snap.get("matchCounts", {}),
+                "newCount": 0,
+                "sourcesDone": sources_total,
+                "sourcesTotal": sources_total,
+                "phase": "Ranking results…",
+            })
+
+            yield _line({
+                "type": "status",
+                "phase": "Checking library & debrid cache…",
+                "page": 0,
+                "pages": 0,
+                "sourcesDone": sources_total,
+                "sourcesTotal": sources_total,
+            })
+
             # Only resolve missing ABB hashes briefly — Jackett/Knaben magnets
-            # usually already include infoHash. The old 45s Flare resolve made
-            # "search complete" hang long after results were already on screen.
+            # usually already include infoHash. Keep this short so finish stays snappy.
             missing_hash = [
                 r for r in (snap.get("results") or [])
                 if not (r.get("infoHash") or "").strip()
@@ -826,9 +892,9 @@ async def search_live_stream(
                     enriched = await asyncio.wait_for(
                         audiobookbay.resolve_hashes_for_results(
                             missing_hash,
-                            limit=min(8, settings.abb_resolve_hash_limit),
+                            limit=min(4, settings.abb_resolve_hash_limit),
                         ),
-                        timeout=12.0,
+                        timeout=6.0,
                     )
                     by_url = {
                         (r.get("downloadUrl") or r.get("guid") or ""): r for r in enriched
@@ -848,7 +914,7 @@ async def search_live_stream(
             # Cap debrid probe so finish doesn't stall after results already streamed.
             try:
                 results = await asyncio.wait_for(
-                    _annotate_rd_cached(results, live=True), timeout=8.0,
+                    _annotate_rd_cached(results, live=True), timeout=5.0,
                 )
             except asyncio.TimeoutError:
                 logger.warning("Live debrid annotate timed out — returning without instant flags")

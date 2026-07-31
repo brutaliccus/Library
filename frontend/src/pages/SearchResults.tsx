@@ -1,15 +1,27 @@
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { useState, useEffect, FormEvent } from "react";
+import { useState, useEffect, useMemo, FormEvent } from "react";
 import api from "../api/client";
 import BookGrid from "../components/BookGrid";
 import CacheReleaseCard, { type CacheReleaseCardData } from "../components/CacheReleaseCard";
 import GenreSidebar from "../components/GenreSidebar";
 import type { Genre } from "../components/GenreSidebar";
-import { Search, ChevronLeft, ChevronRight, Library, BookOpen, Headphones, HardDrive, Loader2, SlidersHorizontal } from "lucide-react";
+import {
+  Search,
+  ChevronLeft,
+  ChevronRight,
+  Library,
+  BookOpen,
+  Headphones,
+  HardDrive,
+  Loader2,
+  SlidersHorizontal,
+  Globe,
+} from "lucide-react";
 import type { BookSummary } from "../types/book";
 import CoverImage from "../components/CoverImage";
 import { usePlayer } from "../contexts/PlayerContext";
+import { useToast } from "../contexts/ToastContext";
 
 interface LibrarySearchHit {
   title: string;
@@ -17,8 +29,54 @@ interface LibrarySearchHit {
   coverUrl?: string;
   source: "abs" | "kavita" | "rd";
   itemId?: string;
+  libraryItemId?: number;
+  seriesId?: number;
   chapterId?: number;
   googleVolumeId?: string;
+}
+
+interface AbsShelfItem {
+  itemId: string;
+  title: string;
+  author: string;
+  coverUrl: string;
+  genres?: string[];
+  series?: Array<{ name: string }>;
+  seriesName?: string;
+  narrator?: string;
+}
+
+interface KavitaShelfItem {
+  seriesId: number;
+  title: string;
+  author: string;
+  coverUrl: string;
+  chapterId: number | null;
+  genres?: string[];
+  seriesName?: string;
+  series?: Array<{ name: string }>;
+}
+
+interface RdShelfItem {
+  id: number;
+  googleVolumeId: string;
+  title: string;
+  author: string;
+  coverUrl: string;
+  genre?: string;
+  seriesName?: string;
+}
+
+interface AaSearchHit {
+  title: string;
+  author?: string;
+  size?: number;
+  mediaType?: string;
+  source?: string;
+  aaMd5?: string;
+  fileExtension?: string;
+  formatInfo?: string;
+  matchTier?: string;
 }
 
 function buildSearchQuery(q: string, categories: string[]): string {
@@ -62,6 +120,22 @@ function buildHeading(q: string, categories: string[], genres: Genre[]): string 
   return categories.map((s) => findGenreName(s, genres)).join(", ");
 }
 
+function formatSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "";
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  return `${Math.round(bytes / (1024 * 1024))} MB`;
+}
+
+function SectionLoader({ label }: { label: string }) {
+  return (
+    <p className="text-sm text-gray-500 flex items-center gap-2 py-1">
+      <Loader2 size={14} className="animate-spin shrink-0 text-brand-400" />
+      {label}
+    </p>
+  );
+}
+
 interface Props {
   genreMobileOpen: boolean;
   onGenreMobileClose: () => void;
@@ -78,6 +152,7 @@ export default function SearchResults({
   onActiveCountChange,
 }: Props) {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const { nowPlaying, expanded } = usePlayer();
   const liftForMini = Boolean(nowPlaying && !expanded);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -88,6 +163,7 @@ export default function SearchResults({
   const availableOnlyFilter = searchParams.get("available") === "1";
   const page = parseInt(searchParams.get("page") || "1", 10);
   const pageSize = 20;
+  const [requestingAa, setRequestingAa] = useState<string | null>(null);
 
   const activeCategories = categoryParam ? categoryParam.split(",").filter(Boolean) : [];
 
@@ -112,18 +188,149 @@ export default function SearchResults({
   const genres = genresData?.genres || [];
   const searchQuery = buildSearchQuery(q, activeCategories);
 
-  const showLibrarySection = q.trim().length >= 2 && activeCategories.length === 0;
+  const showTextSections = q.trim().length >= 2 && activeCategories.length === 0;
 
-  const { data: libraryHits, isLoading: libraryLoading } = useQuery({
+  // Subscribe to My Library shelf caches (enabled:false — never fetch from Store search).
+  type AbsCollectionCache = {
+    genres: Record<string, AbsShelfItem[]>;
+    ungrouped: AbsShelfItem[];
+  };
+  const { data: absCollection } = useQuery<AbsCollectionCache>({
+    queryKey: ["abs-collection"],
+    queryFn: () => Promise.reject(new Error("abs-collection is owned by MyLibrary")),
+    enabled: false,
+  });
+  const { data: kavitaCollection } = useQuery<{ items: KavitaShelfItem[] }>({
+    queryKey: ["kavita-collection"],
+    queryFn: () => Promise.reject(new Error("kavita-collection is owned by MyLibrary")),
+    enabled: false,
+  });
+  const { data: rdLibrary } = useQuery<{ items: RdShelfItem[] }>({
+    queryKey: ["streaming-library"],
+    queryFn: () => Promise.reject(new Error("streaming-library is owned by MyLibrary")),
+    enabled: false,
+  });
+
+  const localLibraryHits = useMemo(() => {
+    if (!showTextSections) return [] as LibrarySearchHit[];
+    const tokens = q
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (!tokens.length) return [] as LibrarySearchHit[];
+
+    const match = (...parts: Array<string | undefined | null | string[]>) => {
+      const blob = parts
+        .flatMap((p) => (Array.isArray(p) ? p : [p || ""]))
+        .join(" ")
+        .toLowerCase();
+      return tokens.every((t) => blob.includes(t));
+    };
+
+    const out: LibrarySearchHit[] = [];
+
+    if (absCollection) {
+      const items = [
+        ...Object.values(absCollection.genres || {}).flat(),
+        ...(absCollection.ungrouped || []),
+      ];
+      const seen = new Set<string>();
+      for (const item of items) {
+        if (!item.itemId || seen.has(item.itemId)) continue;
+        if (
+          !match(
+            item.title,
+            item.author,
+            item.narrator,
+            item.seriesName,
+            item.genres,
+            ...(item.series || []).map((s) => s.name)
+          )
+        ) {
+          continue;
+        }
+        seen.add(item.itemId);
+        out.push({
+          title: item.title,
+          author: item.author,
+          coverUrl: item.coverUrl,
+          source: "abs",
+          itemId: item.itemId,
+        });
+      }
+    }
+
+    if (kavitaCollection?.items) {
+      const seen = new Set<number>();
+      for (const item of kavitaCollection.items) {
+        if (item.seriesId == null || seen.has(item.seriesId)) continue;
+        if (
+          !match(
+            item.title,
+            item.author,
+            item.seriesName,
+            item.genres,
+            ...(item.series || []).map((s) => s.name)
+          )
+        ) {
+          continue;
+        }
+        seen.add(item.seriesId);
+        out.push({
+          title: item.title,
+          author: item.author,
+          coverUrl: item.coverUrl,
+          source: "kavita",
+          seriesId: item.seriesId,
+          chapterId: item.chapterId ?? undefined,
+        });
+      }
+    }
+
+    if (rdLibrary?.items) {
+      for (const item of rdLibrary.items) {
+        if (!match(item.title, item.author, item.genre, item.seriesName)) continue;
+        out.push({
+          title: item.title || "",
+          author: item.author || "",
+          coverUrl: item.coverUrl || "",
+          source: "rd",
+          libraryItemId: item.id,
+          googleVolumeId: item.googleVolumeId,
+        });
+      }
+    }
+
+    return out;
+  }, [showTextSections, q, absCollection, kavitaCollection, rdLibrary]);
+
+  // Server enrichment — runs in parallel; local hits already shown instantly.
+  const { data: libraryHits, isLoading: libraryServerLoading } = useQuery({
     queryKey: ["library-search-store", q],
     queryFn: async () => {
       const params = new URLSearchParams({ q: q.trim(), media: "all" });
       const { data } = await api.get(`/library/search?${params}`);
       return data as { results: LibrarySearchHit[] };
     },
-    enabled: showLibrarySection,
+    enabled: showTextSections,
     staleTime: 60 * 1000,
   });
+
+  const mergedLibraryHits = useMemo(() => {
+    const byKey = new Map<string, LibrarySearchHit>();
+    const keyOf = (r: LibrarySearchHit) =>
+      `${r.source}:${r.itemId || r.libraryItemId || r.seriesId || r.chapterId || r.title}`;
+    for (const r of localLibraryHits) byKey.set(keyOf(r), r);
+    for (const r of libraryHits?.results || []) {
+      const k = keyOf(r);
+      if (!byKey.has(k)) byKey.set(k, r);
+    }
+    return Array.from(byKey.values());
+  }, [localLibraryHits, libraryHits]);
+
+  const libraryLoading = localLibraryHits.length === 0 && libraryServerLoading;
 
   const isCategoryBrowse = activeCategories.length > 0 && !q.trim();
   const isAvailableBrowse =
@@ -168,8 +375,6 @@ export default function SearchResults({
     enabled: searchQuery.length >= 1,
   });
 
-  const showCacheReleases = q.trim().length >= 2 && activeCategories.length === 0;
-
   const { data: cacheReleases, isLoading: cacheReleasesLoading } = useQuery({
     queryKey: ["cache-releases", q],
     queryFn: async () => {
@@ -181,21 +386,16 @@ export default function SearchResults({
       const { data } = await api.get(`/search/cache-releases?${params}`);
       return data as { releases: CacheReleaseCardData[]; count: number };
     },
-    enabled: showCacheReleases,
+    enabled: showTextSections,
     staleTime: 60 * 1000,
   });
 
-  const bookCount = Array.isArray(data?.books) ? data.books.length : 0;
-
-  const catalogEmpty =
-    showCacheReleases &&
-    !isLoading &&
-    Boolean(data) &&
-    bookCount === 0;
-
-  // Only hit live ABB after catalog truly returns empty — never while OL is
-  // still loading (that was stacking Jackett/Flare work on top of catalog work).
-  const { data: abbReleases, isLoading: abbReleasesLoading, isFetching: abbFetching } = useQuery({
+  // Concurrent with cache/AA — do not wait for catalog to finish.
+  const {
+    data: abbReleases,
+    isLoading: abbReleasesLoading,
+    isFetching: abbFetching,
+  } = useQuery({
     queryKey: ["abb-releases", q],
     queryFn: async () => {
       const params = new URLSearchParams({ q: q.trim(), limit: "24" });
@@ -207,16 +407,35 @@ export default function SearchResults({
         timedOut?: boolean;
       };
     },
-    enabled: catalogEmpty,
+    enabled: showTextSections,
     staleTime: 60 * 1000,
   });
 
-  const abbEnabled = catalogEmpty;
+  const { data: aaResults, isLoading: aaLoading, isFetching: aaFetching } = useQuery({
+    queryKey: ["aa-store-search", q],
+    queryFn: async () => {
+      const params = new URLSearchParams({ q: q.trim() });
+      const { data } = await api.get(`/search/annas-archive?${params}`);
+      return data as { results: AaSearchHit[]; count: number };
+    },
+    enabled: showTextSections,
+    staleTime: 60 * 1000,
+  });
+
+  const bookCount = Array.isArray(data?.books) ? data.books.length : 0;
+  const cacheCount = cacheReleases?.releases?.length || 0;
+  const cachedMatchesLoading = isLoading || cacheReleasesLoading;
+  const abbBusy = abbReleasesLoading || abbFetching;
+  const aaBusy = aaLoading || aaFetching;
+
   const searchProgress: string[] = [];
-  if (isLoading) searchProgress.push("Searching catalog…");
-  if (cacheReleasesLoading) searchProgress.push("Checking indexer cache…");
-  if (abbEnabled && (abbReleasesLoading || abbFetching)) {
-    searchProgress.push("Searching AudioBookBay…");
+  if (showTextSections) {
+    if (libraryLoading) searchProgress.push("Searching library…");
+    if (cachedMatchesLoading) searchProgress.push("Checking cached matches…");
+    if (abbBusy) searchProgress.push("Searching AudioBookBay…");
+    if (aaBusy) searchProgress.push("Searching Anna's Archive…");
+  } else if (isLoading) {
+    searchProgress.push("Searching catalog…");
   }
 
   const toggleAvailableFilter = () => {
@@ -264,8 +483,49 @@ export default function SearchResults({
     window.scrollTo(0, 0);
   };
 
+  const openLibraryHit = (r: LibrarySearchHit) => {
+    if (r.source === "kavita" && r.chapterId) {
+      navigate(`/read/${r.chapterId}`);
+    } else if (r.source === "kavita" && r.seriesId) {
+      navigate(`/library/ebook/${r.seriesId}`);
+    } else if (r.source === "rd" && r.googleVolumeId) {
+      navigate(`/book/${encodeURIComponent(r.googleVolumeId)}`);
+    } else if (r.source === "abs" && r.itemId) {
+      navigate(`/library/abs/${encodeURIComponent(r.itemId)}`);
+    } else {
+      navigate("/my-library");
+    }
+  };
+
+  const requestAaHit = async (r: AaSearchHit) => {
+    if (!r.aaMd5) return;
+    setRequestingAa(r.aaMd5);
+    try {
+      await api.post("/requests", {
+        title: r.title,
+        author: r.author || undefined,
+        indexer: "Anna's Archive",
+        size_bytes: r.size || 0,
+        media_type: r.mediaType || "ebook",
+        source: "annas_archive",
+        aa_md5: r.aaMd5,
+        aa_file_extension: r.fileExtension || undefined,
+      });
+      const dest = r.mediaType === "audiobook" ? "Audiobookshelf" : "Kavita";
+      toast(`Requested "${r.title}". It will be added to ${dest}.`, "success");
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Failed to create request";
+      toast(detail, "error");
+    } finally {
+      setRequestingAa(null);
+    }
+  };
+
   const totalPages = data ? Math.ceil(data.totalItems / pageSize) : 0;
   const heading = buildHeading(q, activeCategories, genres);
+  const aaHits = (aaResults?.results || []).slice(0, 12);
 
   return (
     <div
@@ -412,31 +672,22 @@ export default function SearchResults({
             </div>
           )}
 
-          {showLibrarySection && (
+          {/* 1. Library — instant local + server enrich */}
+          {showTextSections && (
             <section className="mb-8">
               <div className="flex items-center gap-2 mb-3">
                 <Library size={18} className="text-brand-400" />
-                <h2 className="text-lg font-semibold text-gray-100">In your library</h2>
+                <h2 className="text-lg font-semibold text-gray-100">Library</h2>
               </div>
               {libraryLoading ? (
-                <p className="text-sm text-gray-500">Searching your library...</p>
-              ) : libraryHits?.results?.length ? (
+                <SectionLoader label="Searching your library…" />
+              ) : mergedLibraryHits.length ? (
                 <div className="space-y-1 rounded-xl border border-gray-800 bg-gray-900/40 p-1">
-                  {libraryHits.results.slice(0, 8).map((r, i) => (
+                  {mergedLibraryHits.slice(0, 8).map((r, i) => (
                     <button
-                      key={`${r.source}-${r.itemId || r.chapterId || i}`}
+                      key={`${r.source}-${r.itemId || r.libraryItemId || r.seriesId || r.chapterId || i}`}
                       type="button"
-                      onClick={() => {
-                        if (r.source === "kavita" && r.chapterId) {
-                          navigate(`/read/${r.chapterId}`);
-                        } else if (r.source === "rd" && r.googleVolumeId) {
-                          navigate(`/book/${encodeURIComponent(r.googleVolumeId)}`);
-                        } else if (r.source === "abs" && r.itemId) {
-                          navigate(`/library/abs/${encodeURIComponent(r.itemId)}`);
-                        } else {
-                          navigate("/my-library");
-                        }
-                      }}
+                      onClick={() => openLibraryHit(r)}
                       className="w-full flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-800/80 transition-colors text-left"
                     >
                       <CoverImage
@@ -464,57 +715,127 @@ export default function SearchResults({
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-gray-500">No matches in Audiobookshelf, Kavita, or your collection.</p>
+                <p className="text-sm text-gray-500">
+                  No matches in Audiobookshelf, Kavita, or your collection.
+                </p>
               )}
             </section>
           )}
 
-          <BookGrid
-            books={data?.books || []}
-            isLoading={isLoading}
-            skeletonCount={pageSize}
-          />
-
-          {showCacheReleases && (
-            <section className="mt-10 mb-4">
+          {/* 2. Cached Matches — catalog + unmatched indexer cache */}
+          {showTextSections ? (
+            <section className="mb-8">
               <div className="flex items-center gap-2 mb-3">
                 <HardDrive size={18} className="text-amber-400" />
-                <h2 className="text-lg font-semibold text-gray-100">Cached releases</h2>
+                <h2 className="text-lg font-semibold text-gray-100">Cached Matches</h2>
               </div>
               <p className="text-sm text-gray-500 mb-4">
-                Indexer torrents matching your search — including titles without an Open Library
-                catalog match. Open a card to download or stream.
+                Catalog and indexer-cache matches for your search. Green download = ready to
+                fetch; unmatched torrents appear below the catalog grid.
               </p>
-              {cacheReleasesLoading ? (
-                <p className="text-sm text-gray-500">Searching indexer cache...</p>
-              ) : cacheReleases?.releases?.length ? (
-                <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
-                  {cacheReleases.releases.map((r) => (
-                    <CacheReleaseCard key={r.id} release={r} />
-                  ))}
-                </div>
+              {cachedMatchesLoading && bookCount === 0 && cacheCount === 0 ? (
+                <SectionLoader label="Searching cached matches…" />
               ) : (
-                <p className="text-sm text-gray-500">No unmatched cached releases for this search.</p>
+                <>
+                  {bookCount > 0 && (
+                    <BookGrid books={data?.books || []} isLoading={false} />
+                  )}
+                  {cacheCount > 0 && (
+                    <div className={`${bookCount > 0 ? "mt-6" : ""}`}>
+                      {bookCount > 0 && (
+                        <p className="text-xs text-gray-500 mb-3 uppercase tracking-wide">
+                          Unmatched cached releases
+                        </p>
+                      )}
+                      <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
+                        {cacheReleases!.releases.map((r) => (
+                          <CacheReleaseCard key={r.id} release={r} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {!cachedMatchesLoading && bookCount === 0 && cacheCount === 0 && (
+                    <p className="text-sm text-gray-500">No cached catalog or indexer matches.</p>
+                  )}
+                  {isLoading && bookCount > 0 && (
+                    <SectionLoader label="Updating catalog…" />
+                  )}
+                  {cacheReleasesLoading && cacheCount === 0 && bookCount > 0 && (
+                    <div className="mt-3">
+                      <SectionLoader label="Checking indexer cache…" />
+                    </div>
+                  )}
+                </>
+              )}
+              {totalPages > 1 && bookCount > 0 && (
+                <div className="flex items-center justify-center gap-4 mt-8">
+                  <button
+                    onClick={() => goToPage(page - 1)}
+                    disabled={page <= 1}
+                    className="flex items-center gap-1 px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronLeft size={16} />
+                    Previous
+                  </button>
+                  <span className="text-sm text-gray-400">
+                    Page {page} of {totalPages}
+                  </span>
+                  <button
+                    onClick={() => goToPage(page + 1)}
+                    disabled={page >= totalPages}
+                    className="flex items-center gap-1 px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Next
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
               )}
             </section>
+          ) : (
+            <>
+              {isLoading ? (
+                <SectionLoader label="Searching catalog…" />
+              ) : (
+                <BookGrid books={data?.books || []} isLoading={false} />
+              )}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-center gap-4 mt-8">
+                  <button
+                    onClick={() => goToPage(page - 1)}
+                    disabled={page <= 1}
+                    className="flex items-center gap-1 px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronLeft size={16} />
+                    Previous
+                  </button>
+                  <span className="text-sm text-gray-400">
+                    Page {page} of {totalPages}
+                  </span>
+                  <button
+                    onClick={() => goToPage(page + 1)}
+                    disabled={page >= totalPages}
+                    className="flex items-center gap-1 px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Next
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+              )}
+            </>
           )}
 
-          {(catalogEmpty || (abbEnabled && (abbReleases?.releases?.length || abbReleasesLoading || abbFetching))) && (
+          {/* 3. AudioBook Bay — concurrent */}
+          {showTextSections && (
             <section className="mt-10 mb-4">
               <div className="flex items-center gap-2 mb-3">
                 <Headphones size={18} className="text-sky-400" />
-                <h2 className="text-lg font-semibold text-gray-100">AudioBookBay results</h2>
+                <h2 className="text-lg font-semibold text-gray-100">AudioBook Bay</h2>
               </div>
               <p className="text-sm text-gray-500 mb-4">
-                {catalogEmpty
-                  ? "No Open Library matches — searching AudioBookBay for niche titles."
-                  : "Also checking AudioBookBay while the catalog search finishes…"}
+                Live AudioBookBay results for audiobook releases.
               </p>
-              {abbReleasesLoading || abbFetching ? (
-                <p className="text-sm text-gray-500 flex items-center gap-2">
-                  <Loader2 size={14} className="animate-spin" />
-                  Searching AudioBookBay (usually under ~20s)…
-                </p>
+              {abbBusy && !(abbReleases?.releases?.length) ? (
+                <SectionLoader label="Searching AudioBookBay…" />
               ) : abbReleases?.releases?.length ? (
                 <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
                   {abbReleases.releases.map((r) => (
@@ -523,36 +844,64 @@ export default function SearchResults({
                 </div>
               ) : abbReleases?.timedOut ? (
                 <p className="text-sm text-amber-500/90">
-                  AudioBookBay timed out — try again, or open Find Downloads from a close catalog match.
+                  AudioBookBay timed out — try again, or open Find Downloads from a close catalog
+                  match.
                 </p>
-              ) : catalogEmpty ? (
+              ) : (
                 <p className="text-sm text-gray-500">No AudioBookBay hits for this search.</p>
-              ) : null}
+              )}
             </section>
           )}
 
-          {totalPages > 1 && (
-            <div className="flex items-center justify-center gap-4 mt-8">
-              <button
-                onClick={() => goToPage(page - 1)}
-                disabled={page <= 1}
-                className="flex items-center gap-1 px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >
-                <ChevronLeft size={16} />
-                Previous
-              </button>
-              <span className="text-sm text-gray-400">
-                Page {page} of {totalPages}
-              </span>
-              <button
-                onClick={() => goToPage(page + 1)}
-                disabled={page >= totalPages}
-                className="flex items-center gap-1 px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >
-                Next
-                <ChevronRight size={16} />
-              </button>
-            </div>
+          {/* 4. Anna's Archive — concurrent */}
+          {showTextSections && (
+            <section className="mt-10 mb-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Globe size={18} className="text-violet-400" />
+                <h2 className="text-lg font-semibold text-gray-100">Anna&apos;s Archive</h2>
+              </div>
+              <p className="text-sm text-gray-500 mb-4">
+                Direct ebook and file matches from Anna&apos;s Archive.
+              </p>
+              {aaBusy && aaHits.length === 0 ? (
+                <SectionLoader label="Searching Anna's Archive…" />
+              ) : aaHits.length ? (
+                <div className="space-y-1 rounded-xl border border-gray-800 bg-gray-900/40 p-1">
+                  {aaHits.map((r, i) => (
+                    <div
+                      key={`${r.aaMd5 || r.title}-${i}`}
+                      className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-800/80 transition-colors"
+                    >
+                      <div className="w-9 h-12 rounded bg-gray-800 shrink-0 flex items-center justify-center">
+                        <BookOpen size={14} className="text-violet-400" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-gray-100 truncate">{r.title}</p>
+                        <p className="text-xs text-gray-500 truncate">
+                          {[r.author, r.fileExtension?.toUpperCase(), formatSize(r.size)]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={!r.aaMd5 || requestingAa === r.aaMd5}
+                        onClick={() => void requestAaHit(r)}
+                        className="shrink-0 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-brand-600/90 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors"
+                      >
+                        {requestingAa === r.aaMd5 ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : (
+                          "Request"
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">No Anna&apos;s Archive hits for this search.</p>
+              )}
+            </section>
           )}
         </div>
       </div>

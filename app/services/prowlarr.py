@@ -652,35 +652,56 @@ async def search_audiobookbay_multi(
     jackett_timeout: int | None = None,
     prowlarr_timeout: int | None = None,
     allow_flare_fallback: bool = True,
+    overall_timeout: float | None = None,
 ) -> list[dict[str, Any]]:
     """Search ABB for live download UI.
 
     Jackett Torznab first (~1–3s). Direct Mullvad Flare multi-page scrape is a
     fallback only — it commonly takes 30–90s and made live search feel hung.
+    ``overall_timeout`` caps the whole Jackett → Flare → Prowlarr chain so one
+    slow path cannot freeze Find Downloads after Knaben already returned.
     """
     if not queries:
         return []
     query = queries[0]
     limit = max(25, int(settings.prowlarr_abb_search_limit))
     # Live UI must fail fast; do not inherit the 180s Jackett/Flare deploy budget.
-    jt = max(10, int(jackett_timeout if jackett_timeout is not None else 25))
+    jt = max(8, int(jackett_timeout if jackett_timeout is not None else 18))
+    deadline = (
+        time.monotonic() + float(overall_timeout)
+        if overall_timeout is not None and overall_timeout > 0
+        else None
+    )
 
-    jackett_rows = await search_jackett_audiobookbay(query, limit=limit, timeout=jt)
+    def _remaining() -> float | None:
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
+
+    jackett_budget = jt if deadline is None else max(5, min(jt, int(_remaining() or 0)))
+    if jackett_budget < 5:
+        logger.warning("ABB overall budget exhausted before Jackett for %r", query[:60])
+        return []
+
+    jackett_rows = await search_jackett_audiobookbay(query, limit=limit, timeout=jackett_budget)
     if jackett_rows:
         logger.info("ABB Jackett direct: %s results for %r", len(jackett_rows), query[:60])
         # Torznab magnets already carry infoHash — skip Flare detail crawls here.
         return await enrich_audiobookbay_for_cache(jackett_rows, limit=0)
 
+    remaining = _remaining()
     proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
-    if allow_flare_fallback and proxy:
+    # Cap Flare hard — this was the ~85% hang (35s+ after Knaben finished).
+    if allow_flare_fallback and proxy and (remaining is None or remaining >= 6):
         from app.services import audiobookbay
 
+        flare_timeout = 12.0 if remaining is None else min(12.0, remaining - 1.0)
         try:
             deep = await asyncio.wait_for(
                 audiobookbay.search_deep(
-                    query, max_pages=2, resolve_hashes=False, for_live=True,
+                    query, max_pages=1, resolve_hashes=False, for_live=True,
                 ),
-                timeout=35.0,
+                timeout=max(5.0, flare_timeout),
             )
             if deep:
                 logger.info(
@@ -688,21 +709,33 @@ async def search_audiobookbay_multi(
                     len(deep[:limit]),
                     query[:60],
                 )
-                return await enrich_audiobookbay_for_cache(deep[:limit], timeout=8.0)
+                return await enrich_audiobookbay_for_cache(deep[:limit], timeout=6.0)
         except asyncio.TimeoutError:
-            logger.warning("ABB Mullvad Flare fallback timed out after 35s for %r", query[:60])
+            logger.warning(
+                "ABB Mullvad Flare fallback timed out after %.0fs for %r",
+                max(5.0, flare_timeout),
+                query[:60],
+            )
         except Exception as e:
             logger.warning("ABB Mullvad Flare fallback failed for %r: %s", query[:60], e)
+
+    remaining = _remaining()
+    if remaining is not None and remaining < 4:
+        logger.warning("ABB overall budget exhausted before Prowlarr for %r", query[:60])
+        return []
 
     iid = await get_audiobookbay_indexer_id()
     if not iid:
         return []
     try:
+        pt = prowlarr_timeout if prowlarr_timeout is not None else 12
+        if remaining is not None:
+            pt = max(4, min(int(pt), int(remaining)))
         return await search(
             query,
             indexer_ids=[iid],
             limit=limit,
-            timeout=prowlarr_timeout if prowlarr_timeout is not None else 30,
+            timeout=pt,
         )
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 400:

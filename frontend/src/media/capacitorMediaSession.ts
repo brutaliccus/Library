@@ -26,6 +26,8 @@ type MediaSessionPlugin = typeof import("@capgo/capacitor-media-session").MediaS
 let nativeMs: MediaSessionPlugin | null = null;
 let nativeHandlersRegistered = false;
 let notificationPermissionRequested = false;
+/** Book-global start of the active MediaSession scrubber scope. */
+let lastNativeScopeStartSec = 0;
 
 async function ensurePlaybackNotificationPermission(): Promise<void> {
   if (Capacitor.getPlatform() !== "android" || notificationPermissionRequested) return;
@@ -110,7 +112,8 @@ export async function registerNativeMediaHandlers(
       action: "seekto",
       fn: (d) => {
         const t = d?.seekTime;
-        if (t != null && isFinite(t)) handlers.seek(t);
+        // Scrubber is chapter/track-local; seek() expects book-global.
+        if (t != null && isFinite(t)) handlers.seek(lastNativeScopeStartSec + t);
       },
     },
   ];
@@ -159,6 +162,7 @@ export async function syncNativeMediaSession(
   }
 
   const scope = playbackScope(np, globalTime, trackIndex);
+  lastNativeScopeStartSec = scope.scopeStart;
   const trackLabel =
     np.tracks.length > 1 && np.tracks[trackIndex]?.title
       ? np.tracks[trackIndex].title

@@ -39,6 +39,11 @@ public final class LibraryNativePlayer {
     private static final int TARGET_BUFFER_BYTES = 2 * 1024 * 1024;
 
     public interface Listener {
+        /**
+         * @param displayDurationMs chapter/track duration for AA scrubber
+         * @param displayPositionMs chapter/track-local position for AA scrubber
+         * @param bookGlobalPositionMs full-book position for resume / JS attach
+         */
         void onNativePlaying(
             String mediaId,
             String title,
@@ -46,8 +51,9 @@ public final class LibraryNativePlayer {
             String album,
             String coverUrl,
             boolean playing,
-            long durationMs,
-            long positionMs,
+            long displayDurationMs,
+            long displayPositionMs,
+            long bookGlobalPositionMs,
             float speed,
             int trackIndex
         );
@@ -79,6 +85,34 @@ public final class LibraryNativePlayer {
         }
     }
 
+    /** Chapter markers in book-global milliseconds (ABS / embedded). */
+    public static final class ChapterSpec {
+        public final String title;
+        public final long startMs;
+        public final long endMs;
+
+        public ChapterSpec(String title, long startMs, long endMs) {
+            this.title = title != null ? title : "";
+            this.startMs = Math.max(0, startMs);
+            this.endMs = Math.max(this.startMs, endMs);
+        }
+    }
+
+    /** AA / lock-screen scrubber scope (chapter preferred, else track). */
+    public static final class DisplayScope {
+        public final String label;
+        public final long startMs;
+        public final long durationMs;
+        public final long positionMs;
+
+        public DisplayScope(String label, long startMs, long durationMs, long positionMs) {
+            this.label = label != null ? label : "";
+            this.startMs = Math.max(0, startMs);
+            this.durationMs = Math.max(0, durationMs);
+            this.positionMs = Math.max(0, positionMs);
+        }
+    }
+
     public static final class Playable {
         public final String mediaId;
         public final String title;
@@ -89,6 +123,7 @@ public final class LibraryNativePlayer {
         public final int trackIndex;
         public final long totalDurationMs;
         public final List<TrackSpec> tracks;
+        public final List<ChapterSpec> chapters;
 
         public Playable(
             String mediaId,
@@ -101,6 +136,32 @@ public final class LibraryNativePlayer {
             long totalDurationMs,
             List<TrackSpec> tracks
         ) {
+            this(
+                mediaId,
+                title,
+                author,
+                coverUrl,
+                authToken,
+                positionMs,
+                trackIndex,
+                totalDurationMs,
+                tracks,
+                null
+            );
+        }
+
+        public Playable(
+            String mediaId,
+            String title,
+            String author,
+            String coverUrl,
+            String authToken,
+            long positionMs,
+            int trackIndex,
+            long totalDurationMs,
+            List<TrackSpec> tracks,
+            List<ChapterSpec> chapters
+        ) {
             this.mediaId = mediaId;
             this.title = title != null ? title : "";
             this.author = author != null ? author : "";
@@ -110,6 +171,7 @@ public final class LibraryNativePlayer {
             this.trackIndex = Math.max(0, trackIndex);
             this.totalDurationMs = Math.max(0, totalDurationMs);
             this.tracks = tracks != null ? tracks : new ArrayList<>();
+            this.chapters = chapters != null ? chapters : new ArrayList<>();
         }
     }
 
@@ -129,6 +191,10 @@ public final class LibraryNativePlayer {
     private String coverUrl = "";
     private String lastAuthToken = "";
     private long totalDurationMs = 0;
+    private List<TrackSpec> tracks = new ArrayList<>();
+    private List<ChapterSpec> chapters = new ArrayList<>();
+    /** Book-global start of the active AA display scope (chapter or track). */
+    private volatile long displayScopeStartMs = 0;
     private volatile boolean owning = false;
     private final Runnable tickRunnable = this::tickPosition;
 
@@ -243,6 +309,8 @@ public final class LibraryNativePlayer {
         album = playable.author;
         coverUrl = playable.coverUrl;
         totalDurationMs = playable.totalDurationMs;
+        tracks = new ArrayList<>(playable.tracks);
+        chapters = new ArrayList<>(playable.chapters);
         owning = true;
 
         List<MediaItem> items = new ArrayList<>();
@@ -558,20 +626,21 @@ public final class LibraryNativePlayer {
         if (!owning) {
             return;
         }
-        long pos = 0;
+        long globalPos = 0;
         int trackIndex = 0;
         if (player != null) {
             trackIndex = Math.max(0, player.getCurrentMediaItemIndex());
-            pos = Math.max(0, player.getCurrentPosition()) + trackStartOffsetMs(trackIndex);
+            globalPos =
+                Math.max(0, player.getCurrentPosition()) + trackStartOffsetMs(trackIndex);
         }
         float speed = player != null ? player.getPlaybackParameters().speed : 1f;
-        long dur = totalDurationMs;
-        if (dur <= 0 && player != null && player.getDuration() > 0) {
-            dur = player.getDuration() + trackStartOffsetMs(trackIndex);
-        }
-        // Refresh the off-main mirror before notifying listeners.
+        DisplayScope scope = resolveDisplayScope(globalPos, trackIndex, totalDurationMs, tracks, chapters);
+        displayScopeStartMs = scope.startMs;
+        String scopeArtist =
+            !scope.label.isEmpty() ? scope.label : (artist != null ? artist : "");
+        // Refresh the off-main mirror before notifying listeners (book-global).
         mirrorPlaying = playing;
-        mirrorPositionMs = pos;
+        mirrorPositionMs = globalPos;
         mirrorPositionAtElapsed = android.os.SystemClock.elapsedRealtime();
         mirrorSpeed = speed > 0 ? speed : 1f;
         mirrorTrackIndex = trackIndex;
@@ -579,16 +648,90 @@ public final class LibraryNativePlayer {
             l.onNativePlaying(
                 mediaId,
                 title,
-                artist,
+                scopeArtist,
                 album,
                 coverUrl,
                 playing,
-                dur,
-                pos,
+                scope.durationMs,
+                scope.positionMs,
+                globalPos,
                 speed > 0 ? speed : 1f,
                 trackIndex
             );
         }
+    }
+
+    /** Convert AA scrubber (chapter/track-local) ms → book-global ms. */
+    public long displayToGlobalMs(long displayPositionMs) {
+        return Math.max(0, displayScopeStartMs + Math.max(0, displayPositionMs));
+    }
+
+    /**
+     * Hot-swap chapter markers while native is already playing (ABS chapters
+     * often arrive after the first audio tick). Triggers a metadata refresh.
+     */
+    public void updateChapters(List<ChapterSpec> nextChapters) {
+        mainHandler.post(() -> {
+            chapters =
+                nextChapters != null
+                    ? new ArrayList<>(nextChapters)
+                    : new ArrayList<>();
+            if (owning) {
+                emitState(player != null && player.isPlaying());
+            }
+        });
+    }
+
+    public static DisplayScope resolveDisplayScope(
+        long globalMs,
+        int trackIndex,
+        long totalDurationMs,
+        List<TrackSpec> tracks,
+        List<ChapterSpec> chapters
+    ) {
+        long g = Math.max(0, globalMs);
+        if (chapters != null && !chapters.isEmpty()) {
+            int idx = 0;
+            for (int i = 0; i < chapters.size(); i++) {
+                if (chapters.get(i).startMs <= g) {
+                    idx = i;
+                } else {
+                    break;
+                }
+            }
+            ChapterSpec ch = chapters.get(idx);
+            long start = ch.startMs;
+            long end = ch.endMs;
+            if (end <= start) {
+                end =
+                    idx + 1 < chapters.size()
+                        ? chapters.get(idx + 1).startMs
+                        : Math.max(start, totalDurationMs);
+            }
+            long dur = Math.max(0, end - start);
+            long local = Math.max(0, Math.min(g - start, dur > 0 ? dur : g - start));
+            return new DisplayScope(ch.title, start, dur, local);
+        }
+        if (tracks != null && !tracks.isEmpty()) {
+            int idx = Math.min(Math.max(0, trackIndex), tracks.size() - 1);
+            TrackSpec tr = tracks.get(idx);
+            long start = tr.startOffsetMs;
+            long dur = tr.durationMs;
+            // Single unknown-duration file: fall back to whole book.
+            if (dur <= 0 && tracks.size() == 1 && totalDurationMs > 0) {
+                dur = totalDurationMs;
+                start = 0;
+            }
+            if (dur > 0) {
+                long local = Math.max(0, Math.min(g - start, dur));
+                String label =
+                    tr.title != null && !tr.title.isEmpty()
+                        ? tr.title
+                        : ("Track " + (idx + 1));
+                return new DisplayScope(label, start, dur, local);
+            }
+        }
+        return new DisplayScope("", 0, Math.max(0, totalDurationMs), g);
     }
 
     @Nullable
@@ -662,6 +805,36 @@ public final class LibraryNativePlayer {
             }
             totalMs = sum;
         }
+        List<ChapterSpec> chapters = new ArrayList<>();
+        JSONArray chArr = o.optJSONArray("chapters");
+        if (chArr != null) {
+            for (int i = 0; i < chArr.length(); i++) {
+                JSONObject c = chArr.optJSONObject(i);
+                if (c == null) {
+                    continue;
+                }
+                long startMs = Math.round(c.optDouble("start", 0) * 1000.0);
+                long endMs;
+                if (c.has("end") && !c.isNull("end")) {
+                    endMs = Math.round(c.optDouble("end", 0) * 1000.0);
+                } else if (i + 1 < chArr.length()) {
+                    JSONObject next = chArr.optJSONObject(i + 1);
+                    endMs =
+                        next != null
+                            ? Math.round(next.optDouble("start", 0) * 1000.0)
+                            : totalMs;
+                } else {
+                    endMs = totalMs;
+                }
+                chapters.add(
+                    new ChapterSpec(
+                        c.optString("title", "Chapter " + (i + 1)),
+                        startMs,
+                        endMs
+                    )
+                );
+            }
+        }
         return new Playable(
             mediaId,
             o.optString("title", ""),
@@ -671,7 +844,8 @@ public final class LibraryNativePlayer {
             Math.round(o.optDouble("position", 0) * 1000.0),
             o.optInt("trackIndex", 0),
             totalMs,
-            tracks
+            tracks,
+            chapters
         );
     }
 }

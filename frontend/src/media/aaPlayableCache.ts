@@ -6,7 +6,7 @@ import { Capacitor } from "@capacitor/core";
 import { LibraryAuto } from "./libraryAutoPlugin";
 import { toAbsoluteUrl } from "../api/instanceUrl";
 import { androidDiskFileUri } from "../utils/audioDiskCache";
-import type { Track } from "../types/player";
+import type { AbsChapter, Track } from "../types/player";
 
 const AA_PLAY_ABS_PREFIX = "play/abs/";
 const AA_PLAY_RD_HIST_PREFIX = "play/rdhist/";
@@ -21,6 +21,8 @@ export interface CachePlayableOpts {
   position?: number;
   trackIndex?: number;
   totalDuration?: number;
+  /** ABS chapter markers (seconds) — drives AA scrubber duration/label. */
+  chapters?: AbsChapter[];
 }
 
 function absMediaId(itemId: string): string {
@@ -63,6 +65,13 @@ export async function cachePlayableForAndroidAuto(
         mimeType: t.mimeType || "",
       }))
     );
+    const chapters = (opts.chapters || [])
+      .filter((c) => c && isFinite(c.start))
+      .map((c) => ({
+        title: c.title || "",
+        start: c.start,
+        end: c.end != null && isFinite(c.end) ? c.end : null,
+      }));
     await LibraryAuto.cachePlayableMedia({
       mediaId: opts.mediaId,
       title: opts.title,
@@ -73,6 +82,7 @@ export async function cachePlayableForAndroidAuto(
       trackIndex: Math.max(0, opts.trackIndex ?? 0),
       totalDuration: Math.max(0, opts.totalDuration ?? 0),
       tracks,
+      chapters: chapters.length ? chapters : undefined,
     });
   } catch {
     /* plugin unavailable */
@@ -87,7 +97,8 @@ export async function cacheAbsPlayable(
   tracks: Track[],
   totalDuration: number,
   position = 0,
-  trackIndex = 0
+  trackIndex = 0,
+  chapters?: AbsChapter[]
 ): Promise<void> {
   await cachePlayableForAndroidAuto({
     mediaId: absMediaId(itemId),
@@ -98,6 +109,7 @@ export async function cacheAbsPlayable(
     totalDuration,
     position,
     trackIndex,
+    chapters,
   });
 }
 
@@ -109,7 +121,8 @@ export async function cacheRdPlayable(
   tracks: Track[],
   totalDuration: number,
   position = 0,
-  trackIndex = 0
+  trackIndex = 0,
+  chapters?: AbsChapter[]
 ): Promise<void> {
   await cachePlayableForAndroidAuto({
     mediaId: rdMediaId(historyId),
@@ -120,5 +133,6 @@ export async function cacheRdPlayable(
     totalDuration,
     position,
     trackIndex,
+    chapters,
   });
 }

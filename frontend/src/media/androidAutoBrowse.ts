@@ -280,7 +280,8 @@ async function warmAbsPlayableCache(item: InProgressABS): Promise<void> {
         m.tracks,
         m.totalDuration,
         resume.trackLocal,
-        resume.trackIndex
+        resume.trackIndex,
+        m.absChapters
       );
       return;
     }

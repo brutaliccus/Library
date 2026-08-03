@@ -97,7 +97,8 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             @Override
             public void onSeekTo(long pos) {
                 LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
-                if (bridge.tryNativeSeekTo(pos)) {
+                // Scrubber position is chapter/track-scoped (matches METADATA duration).
+                if (bridge.tryNativeSeekToDisplay(pos)) {
                     return;
                 }
                 Bundle extras = new Bundle();

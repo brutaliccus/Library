@@ -827,7 +827,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           np.tracks,
           manifest.totalDuration,
           localStart,
-          trackIdx
+          trackIdx,
+          manifest.absChapters
         );
         return true;
       };
@@ -1007,7 +1008,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           np.tracks,
           data.duration || 0,
           localStart,
-          trackIdx
+          trackIdx,
+          np.absChapters
         );
 
         // Download tracks locally while they stream (ABS + debrid)
@@ -1042,6 +1044,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               if (s.nowPlaying?.source !== "abs" || s.nowPlaying.itemId !== itemId) return s;
               return { ...s, nowPlaying: { ...s.nowPlaying, absChapters } };
             });
+            // Refresh AA playable cache so MediaSession uses chapter duration.
+            void cacheAbsPlayable(
+              itemId,
+              data.title,
+              data.author || "",
+              data.coverUrl || "",
+              np.tracks,
+              data.duration || 0,
+              localStart,
+              trackIdx,
+              absChapters
+            );
           })
           .catch(() => {});
       } catch (err) {
@@ -1652,6 +1666,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             streamHistoryId = parseInt(mediaId.slice("play/rdhist/".length), 10);
             source = "rd";
           }
+          const absChapters: AbsChapter[] | undefined = Array.isArray(raw.chapters)
+            ? raw.chapters.map((c, i) => ({
+                id: i,
+                title: c.title || `Chapter ${i + 1}`,
+                start: Number(c.start) || 0,
+                end: c.end != null ? Number(c.end) : null,
+              }))
+            : undefined;
           const np: NowPlaying = withAbsoluteMediaUrls({
             source,
             itemId,
@@ -1663,6 +1685,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             coverUrl: raw.coverUrl || ev.coverUrl || "",
             tracks,
             totalDuration,
+            absChapters:
+              absChapters && absChapters.length > 0 ? absChapters : undefined,
           });
           const trackIndex = Math.min(
             Math.max(0, ev.trackIndex ?? raw.trackIndex ?? 0),

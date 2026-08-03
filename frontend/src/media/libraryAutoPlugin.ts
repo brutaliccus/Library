@@ -43,6 +43,13 @@ export interface PlayableTrackPayload {
   mimeType?: string;
 }
 
+export interface PlayableChapterPayload {
+  title?: string;
+  /** Seconds from book start */
+  start: number;
+  end?: number | null;
+}
+
 interface LibraryAutoPlugin {
   syncPlayback(options: {
     active: boolean;
@@ -93,6 +100,7 @@ interface LibraryAutoPlugin {
     trackIndex?: number;
     totalDuration?: number;
     tracks: PlayableTrackPayload[];
+    chapters?: PlayableChapterPayload[];
   }): Promise<void>;
   /** Append base64 chunk to on-disk offline audio (Android large books). */
   appendAudioDiskCache(options: {
@@ -134,6 +142,7 @@ interface LibraryAutoPlugin {
     trackIndex?: number;
     totalDuration?: number;
     tracks?: PlayableTrackPayload[];
+    chapters?: PlayableChapterPayload[];
   }>;
   /** Release ExoPlayer before WebView HTML5 audio takes over. */
   handOffNativePlayback(): Promise<void>;

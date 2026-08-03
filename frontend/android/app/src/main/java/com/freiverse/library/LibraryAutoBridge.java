@@ -179,8 +179,9 @@ public final class LibraryAutoBridge {
                 String album,
                 String coverUrl,
                 boolean playing,
-                long durationMs,
-                long positionMs,
+                long displayDurationMs,
+                long displayPositionMs,
+                long bookGlobalMs,
                 float speed,
                 int trackIndex
             ) {
@@ -205,14 +206,14 @@ public final class LibraryAutoBridge {
                         + "|"
                         + trackIndex
                         + "|"
-                        + durationMs;
+                        + displayDurationMs;
                 boolean metaChanged = !metaKey.equals(lastNativeMetaKey);
                 boolean playChanged =
                     lastNativePlaying == null || lastNativePlaying != playing;
                 lastNativePlaying = playing;
 
-                // Exo emits true book-global position (track local + startOffset).
-                bookGlobalPositionMs = Math.max(0, positionMs);
+                // Resume / cold-start use book-global; AA scrubber uses display scope.
+                bookGlobalPositionMs = Math.max(0, bookGlobalMs);
                 if (metaChanged) {
                     lastNativeMetaKey = metaKey;
                     Log.i(
@@ -221,6 +222,8 @@ public final class LibraryAutoBridge {
                             + mediaId
                             + " track="
                             + trackIndex
+                            + " displayDurMs="
+                            + displayDurationMs
                     );
                     update(
                         title,
@@ -229,8 +232,8 @@ public final class LibraryAutoBridge {
                         null,
                         true,
                         playing,
-                        durationMs,
-                        positionMs,
+                        displayDurationMs,
+                        displayPositionMs,
                         speed
                     );
                     LibraryMediaBrowserService svc = serviceRef.get();
@@ -238,9 +241,9 @@ public final class LibraryAutoBridge {
                         svc.promoteToForeground();
                     }
                 } else if (playChanged) {
-                    updatePosition(playing, positionMs, speed);
+                    updatePosition(playing, displayPositionMs, speed);
                 } else {
-                    updatePosition(playing, positionMs, speed);
+                    updatePosition(playing, displayPositionMs, speed);
                 }
             }
 
@@ -297,6 +300,17 @@ public final class LibraryAutoBridge {
                 // Drop oldest-ish by rewriting only recent keys we touch; simple trim:
                 // leave as-is unless severely over — SharedPreferences is small JSON.
                 Log.i(TAG, "Playable cache size=" + prefs.getAll().size());
+            }
+            // If Exo is already on this title, apply chapter markers immediately.
+            if (
+                mediaId.equals(nativeMediaId)
+                    || mediaId.equals(getPersistedMediaId())
+            ) {
+                LibraryNativePlayer.Playable parsed =
+                    LibraryNativePlayer.parsePlayable(playableJson);
+                if (parsed != null && !parsed.chapters.isEmpty()) {
+                    LibraryNativePlayer.getInstance().updateChapters(parsed.chapters);
+                }
             }
         } catch (Exception e) {
             Log.w(TAG, "putPlayableCache failed", e);
@@ -364,9 +378,26 @@ public final class LibraryAutoBridge {
         LibraryNativePlayer.Playable playable = getPlayableCache(mediaId);
         if (playable != null) {
             nextTitle = playable.title != null ? playable.title : nextTitle;
-            nextArtist = playable.author != null ? playable.author : nextArtist;
-            nextDuration = Math.max(0, playable.totalDurationMs);
-            nextPosition = Math.max(0, playable.positionMs + trackOffset(playable));
+            long globalPos = Math.max(0, playable.positionMs + trackOffset(playable));
+            int tIdx =
+                Math.min(
+                    Math.max(0, playable.trackIndex),
+                    Math.max(0, playable.tracks.size() - 1)
+                );
+            LibraryNativePlayer.DisplayScope scope =
+                LibraryNativePlayer.resolveDisplayScope(
+                    globalPos,
+                    tIdx,
+                    playable.totalDurationMs,
+                    playable.tracks,
+                    playable.chapters
+                );
+            nextArtist =
+                !scope.label.isEmpty()
+                    ? scope.label
+                    : (playable.author != null ? playable.author : nextArtist);
+            nextDuration = Math.max(0, scope.durationMs);
+            nextPosition = Math.max(0, scope.positionMs);
         } else {
             AutoBrowseNode node = findCachedPlayableNode(mediaId);
             if (node != null) {
@@ -461,16 +492,29 @@ public final class LibraryAutoBridge {
         }
         long globalPos = playable.positionMs + trackOffset(playable);
         bookGlobalPositionMs = globalPos;
-        // Optimistic session metadata before first Exo tick.
+        int tIdx =
+            Math.min(
+                Math.max(0, playable.trackIndex),
+                Math.max(0, playable.tracks.size() - 1)
+            );
+        LibraryNativePlayer.DisplayScope scope =
+            LibraryNativePlayer.resolveDisplayScope(
+                globalPos,
+                tIdx,
+                playable.totalDurationMs,
+                playable.tracks,
+                playable.chapters
+            );
+        // Optimistic session metadata before first Exo tick — chapter/track scoped.
         update(
             playable.title,
-            playable.author,
+            !scope.label.isEmpty() ? scope.label : playable.author,
             playable.author,
             null,
             true,
             true,
-            playable.totalDurationMs,
-            globalPos,
+            scope.durationMs,
+            scope.positionMs,
             1.0f
         );
         nativeOwnsPlayback = true;
@@ -531,7 +575,8 @@ public final class LibraryAutoBridge {
             local,
             idx,
             playable.totalDurationMs,
-            playable.tracks
+            playable.tracks,
+            playable.chapters
         );
     }
 
@@ -603,11 +648,28 @@ public final class LibraryAutoBridge {
         return true;
     }
 
-    public boolean tryNativeSeekTo(long positionMs) {
+    /**
+     * Seek from the AA / lock-screen scrubber (chapter/track-local display ms).
+     * Converts to book-global before ExoPlayer seek.
+     */
+    public boolean tryNativeSeekToDisplay(long displayPositionMs) {
         if (!isNativeOwningPlayback()) {
             return false;
         }
-        LibraryNativePlayer.getInstance().seekTo(positionMs);
+        long global =
+            LibraryNativePlayer.getInstance().displayToGlobalMs(displayPositionMs);
+        bookGlobalPositionMs = global;
+        LibraryNativePlayer.getInstance().seekTo(global);
+        return true;
+    }
+
+    /** Seek to a book-global position (phone UI / JS). */
+    public boolean tryNativeSeekTo(long bookGlobalPositionMs) {
+        if (!isNativeOwningPlayback()) {
+            return false;
+        }
+        this.bookGlobalPositionMs = Math.max(0, bookGlobalPositionMs);
+        LibraryNativePlayer.getInstance().seekTo(bookGlobalPositionMs);
         return true;
     }
 

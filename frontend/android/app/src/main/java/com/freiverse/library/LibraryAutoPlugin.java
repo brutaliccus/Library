@@ -102,8 +102,9 @@ public class LibraryAutoPlugin extends Plugin
                 String album,
                 String coverUrl,
                 boolean playing,
-                long durationMs,
-                long positionMs,
+                long displayDurationMs,
+                long displayPositionMs,
+                long bookGlobalPositionMs,
                 float speed,
                 int trackIndex
             ) {
@@ -119,8 +120,8 @@ public class LibraryAutoPlugin extends Plugin
                     artist,
                     album,
                     playing,
-                    durationMs,
-                    positionMs,
+                    displayDurationMs,
+                    displayPositionMs,
                     speed
                 );
 
@@ -129,7 +130,9 @@ public class LibraryAutoPlugin extends Plugin
                         + "|"
                         + playing
                         + "|"
-                        + trackIndex;
+                        + trackIndex
+                        + "|"
+                        + (artist != null ? artist : "");
                 long now = SystemClock.elapsedRealtime();
                 boolean significant = !key.equals(lastNativeJsKey);
                 boolean due = now - lastNativeJsEmitElapsed >= NATIVE_JS_POS_INTERVAL_MS;
@@ -140,6 +143,7 @@ public class LibraryAutoPlugin extends Plugin
                 lastNativeJsEmitElapsed = now;
 
                 // Bridge already updates MediaSession; notify JS for attach/UI.
+                // position stays BOOK-GLOBAL so React currentTime / resume stay correct.
                 JSObject data = new JSObject();
                 data.put("mediaId", mediaId != null ? mediaId : "");
                 data.put("title", title != null ? title : "");
@@ -147,8 +151,8 @@ public class LibraryAutoPlugin extends Plugin
                 data.put("album", album != null ? album : "");
                 data.put("coverUrl", coverUrl != null ? coverUrl : "");
                 data.put("playing", playing);
-                data.put("duration", durationMs / 1000.0);
-                data.put("position", positionMs / 1000.0);
+                data.put("duration", displayDurationMs / 1000.0);
+                data.put("position", bookGlobalPositionMs / 1000.0);
                 data.put("playbackRate", speed);
                 data.put("trackIndex", trackIndex);
                 data.put("nativeOwner", true);

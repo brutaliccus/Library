@@ -67,6 +67,10 @@ export function usePlayerMediaSession(
   const playActionsRef = useRef(playActions);
   playActionsRef.current = playActions;
 
+  // Keep a ref so interval-based position syncs don't re-subscribe every tick.
+  const stateSnapRef = useRef(state);
+  stateSnapRef.current = state;
+
   // Native (Capacitor) handlers: Android Auto browse/play + plugin media session.
   useEffect(() => {
     void registerNativeMediaHandlers(
@@ -124,7 +128,15 @@ export function usePlayerMediaSession(
 
     nav.setActionHandler("seekto", (ev) => {
       const t = ev.seekTime;
-      if (t != null && isFinite(t)) actionsRef.current.seek(t);
+      if (t == null || !isFinite(t)) return;
+      // Position state is chapter/track-scoped; convert to book-global.
+      const s = stateSnapRef.current;
+      if (s.nowPlaying) {
+        const scope = playbackScope(s.nowPlaying, s.currentTime, s.currentTrackIndex);
+        actionsRef.current.seek(scope.scopeStart + t);
+      } else {
+        actionsRef.current.seek(t);
+      }
     });
 
     return () => {
@@ -142,10 +154,6 @@ export function usePlayerMediaSession(
       }
     };
   }, []);
-
-  // Keep a ref so interval-based position syncs don't re-subscribe every tick.
-  const stateSnapRef = useRef(state);
-  stateSnapRef.current = state;
 
   // Web metadata (title / artist / artwork) — do NOT depend on currentTime;
   // timeupdate would rebuild MediaMetadata (and artwork) several times/sec.

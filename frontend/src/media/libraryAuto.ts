@@ -31,6 +31,8 @@ let lastMetaKey = "";
 let lastChapterKey = "";
 let lastPosSyncAt = 0;
 let lastPlayingSynced: boolean | null = null;
+/** Book-global start of the AA scrubber scope (for seekto conversion). */
+let lastScopeStartSec = 0;
 /** After AA/lock play, ignore stale playing=false syncs until audio catches up. */
 let ignorePausedSyncUntil = 0;
 const POS_SYNC_INTERVAL_MS = 1_000;
@@ -271,7 +273,8 @@ export async function registerAndroidAutoHandlers(
         fn: (d) => {
           if (nativeOwnsPlayback) return;
           const t = d?.seekTime;
-          if (t != null && isFinite(t)) handlers.seek(t);
+          // AA scrubber is chapter/track-local; seek() expects book-global.
+          if (t != null && isFinite(t)) handlers.seek(lastScopeStartSec + t);
         },
       },
       {
@@ -390,6 +393,7 @@ export async function syncAndroidAutoPlayback(
     }
 
     const scope = playbackScope(np, globalTime, trackIndex);
+    lastScopeStartSec = scope.scopeStart;
     const trackLabel =
       np.tracks.length > 1 && np.tracks[trackIndex]?.title
         ? np.tracks[trackIndex].title

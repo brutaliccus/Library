@@ -1,9 +1,15 @@
-/** Discrete audiobook playback speeds (0.5 left -> 1.0 middle -> 3.0 right). */
-export const PLAYBACK_SPEED_STEPS = [
-  0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.05, 1.1, 1.15, 1.25, 1.5, 2.0, 2.5, 3.0,
-] as const;
+/** Discrete audiobook playback speeds (0.5 left -> 1.0 middle -> 3.0 right), step 0.05. */
+function buildPlaybackSpeedSteps(): number[] {
+  const steps: number[] = [];
+  for (let r = 50; r <= 300; r += 5) {
+    steps.push(r / 100);
+  }
+  return steps;
+}
 
-export type PlaybackSpeed = (typeof PLAYBACK_SPEED_STEPS)[number];
+export const PLAYBACK_SPEED_STEPS: readonly number[] = buildPlaybackSpeedSteps();
+
+export type PlaybackSpeed = number;
 
 const ONE_IDX = PLAYBACK_SPEED_STEPS.indexOf(1.0);
 
@@ -32,7 +38,7 @@ export function snapPlaybackSpeed(rate: number): number {
 
 export function playbackSpeedIndex(rate: number): number {
   const snapped = snapPlaybackSpeed(rate);
-  const idx = PLAYBACK_SPEED_STEPS.indexOf(snapped as PlaybackSpeed);
+  const idx = PLAYBACK_SPEED_STEPS.indexOf(snapped);
   return idx >= 0 ? idx : ONE_IDX;
 }
 

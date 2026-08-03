@@ -420,31 +420,34 @@ public final class LibraryNativePlayer {
     }
 
     public void seekTo(long positionMs) {
-        mainHandler.post(() -> {
-            if (player == null || !owning) {
-                return;
+        mainHandler.post(() -> seekToInternal(positionMs));
+    }
+
+    /** Must run on main thread. */
+    private void seekToInternal(long positionMs) {
+        if (player == null || !owning) {
+            return;
+        }
+        // Map book-global ms onto the correct playlist window.
+        int count = player.getMediaItemCount();
+        int targetIdx = player.getCurrentMediaItemIndex();
+        long local = Math.max(0, positionMs);
+        for (int i = 0; i < count; i++) {
+            long start = trackStartOffsetMs(i);
+            long nextStart =
+                i + 1 < count ? trackStartOffsetMs(i + 1) : Long.MAX_VALUE;
+            if (positionMs >= start && positionMs < nextStart) {
+                targetIdx = i;
+                local = Math.max(0, positionMs - start);
+                break;
             }
-            // Map book-global ms onto the correct playlist window.
-            int count = player.getMediaItemCount();
-            int targetIdx = player.getCurrentMediaItemIndex();
-            long local = Math.max(0, positionMs);
-            for (int i = 0; i < count; i++) {
-                long start = trackStartOffsetMs(i);
-                long nextStart =
-                    i + 1 < count ? trackStartOffsetMs(i + 1) : Long.MAX_VALUE;
-                if (positionMs >= start && positionMs < nextStart) {
-                    targetIdx = i;
-                    local = Math.max(0, positionMs - start);
-                    break;
-                }
-                if (i == count - 1) {
-                    targetIdx = i;
-                    local = Math.max(0, positionMs - start);
-                }
+            if (i == count - 1) {
+                targetIdx = i;
+                local = Math.max(0, positionMs - start);
             }
-            player.seekTo(targetIdx, local);
-            emitState(player.isPlaying());
-        });
+        }
+        player.seekTo(targetIdx, local);
+        emitState(player.isPlaying());
     }
 
     public void seekRelative(long deltaMs) {
@@ -474,6 +477,85 @@ public final class LibraryNativePlayer {
     public void skipToPreviousTrack() {
         mainHandler.post(() -> {
             if (player == null || !owning) {
+                return;
+            }
+            if (player.getCurrentPosition() > 3_000) {
+                player.seekTo(0);
+            } else if (player.hasPreviousMediaItem()) {
+                player.seekToPreviousMediaItem();
+            } else {
+                player.seekTo(0);
+            }
+            player.play();
+            emitState(true);
+        });
+    }
+
+    /**
+     * AA skip-next: chapter markers when present (single-file ABS), else next
+     * media item. Auto-resume used track-only skip which no-oped on one file.
+     */
+    public void skipToNextChapterOrTrack() {
+        mainHandler.post(() -> {
+            if (player == null || !owning) {
+                return;
+            }
+            long global =
+                Math.max(0, player.getCurrentPosition())
+                    + trackStartOffsetMs(Math.max(0, player.getCurrentMediaItemIndex()));
+            if (chapters != null && !chapters.isEmpty()) {
+                int idx = 0;
+                for (int i = 0; i < chapters.size(); i++) {
+                    if (chapters.get(i).startMs <= global) {
+                        idx = i;
+                    } else {
+                        break;
+                    }
+                }
+                if (idx < chapters.size() - 1) {
+                    seekToInternal(chapters.get(idx + 1).startMs);
+                    player.play();
+                    emitState(true);
+                    return;
+                }
+            }
+            if (player.hasNextMediaItem()) {
+                player.seekToNextMediaItem();
+                player.play();
+                emitState(true);
+            }
+        });
+    }
+
+    /** AA skip-previous: prior chapter (or chapter start) when markers exist. */
+    public void skipToPreviousChapterOrTrack() {
+        mainHandler.post(() -> {
+            if (player == null || !owning) {
+                return;
+            }
+            long global =
+                Math.max(0, player.getCurrentPosition())
+                    + trackStartOffsetMs(Math.max(0, player.getCurrentMediaItemIndex()));
+            if (chapters != null && !chapters.isEmpty()) {
+                int idx = 0;
+                for (int i = 0; i < chapters.size(); i++) {
+                    if (chapters.get(i).startMs <= global) {
+                        idx = i;
+                    } else {
+                        break;
+                    }
+                }
+                long chapterStart = chapters.get(idx).startMs;
+                // Same UX as JS: restart chapter unless near its start.
+                if (global - chapterStart > 3_000) {
+                    seekToInternal(chapterStart);
+                } else if (idx > 0) {
+                    seekToInternal(chapters.get(idx - 1).startMs);
+                } else {
+                    seekToInternal(0);
+                }
+                player.play();
+                emitState(true);
                 return;
             }
             if (player.getCurrentPosition() > 3_000) {

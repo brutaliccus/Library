@@ -109,6 +109,8 @@ public final class LibraryAutoBridge {
      * chapter-scoped MediaSession position from WebView sync.
      */
     private long bookGlobalPositionMs = 0;
+    /** Wall-clock ms when {@link #bookGlobalPositionMs} was last trusted. */
+    private long bookGlobalUpdatedAtMs = 0;
     private float playbackSpeed = 1.0f;
     private long lastNotificationUpdateMs = 0;
     private long lastPersistSessionMs = 0;
@@ -288,14 +290,60 @@ public final class LibraryAutoBridge {
         }
         try {
             playableJson.put("mediaId", mediaId);
-            ctx
-                .getSharedPreferences(PLAYABLE_PREFS, Context.MODE_PRIVATE)
-                .edit()
-                .putString(mediaId, playableJson.toString())
-                .apply();
-            // Cap entries — keep Continue Listening warm without unbounded growth.
+            if (!playableJson.has("positionUpdatedAt")) {
+                playableJson.put("positionUpdatedAt", System.currentTimeMillis());
+            }
             SharedPreferences prefs =
                 ctx.getSharedPreferences(PLAYABLE_PREFS, Context.MODE_PRIVATE);
+            // Never let an older warm-cache / chapter-reload stamp overwrite a
+            // newer phone listening position (car-entry progress revert).
+            String existingRaw = prefs.getString(mediaId, null);
+            if (existingRaw != null && !existingRaw.isEmpty()) {
+                try {
+                    JSONObject existing = new JSONObject(existingRaw);
+                    long incomingTs = playableJson.optLong("positionUpdatedAt", 0);
+                    long existingTs = existing.optLong("positionUpdatedAt", 0);
+                    LibraryNativePlayer.Playable incoming =
+                        LibraryNativePlayer.parsePlayable(playableJson);
+                    LibraryNativePlayer.Playable prior =
+                        LibraryNativePlayer.parsePlayable(existing);
+                    if (incoming != null && prior != null) {
+                        long incomingGlobal =
+                            Math.max(0, incoming.positionMs + trackOffset(incoming));
+                        long priorGlobal =
+                            Math.max(0, prior.positionMs + trackOffset(prior));
+                        boolean incomingOlder =
+                            existingTs > 0
+                                && incomingTs > 0
+                                && incomingTs + 2_000 < existingTs;
+                        boolean sameEraMissingTs =
+                            (existingTs <= 0 || incomingTs <= 0)
+                                && priorGlobal > incomingGlobal + 5_000;
+                        if (incomingOlder || sameEraMissingTs) {
+                            // Keep fresher position / track index; adopt new tracks/chapters.
+                            playableJson.put("position", prior.positionMs / 1000.0);
+                            playableJson.put("trackIndex", prior.trackIndex);
+                            playableJson.put(
+                                "positionUpdatedAt",
+                                Math.max(existingTs, incomingTs)
+                            );
+                            Log.i(
+                                TAG,
+                                "putPlayableCache kept fresher position for "
+                                    + mediaId
+                                    + " priorGlobalMs="
+                                    + priorGlobal
+                                    + " incomingGlobalMs="
+                                    + incomingGlobal
+                            );
+                        }
+                    }
+                } catch (Exception mergeEx) {
+                    Log.w(TAG, "putPlayableCache merge skipped", mergeEx);
+                }
+            }
+            prefs.edit().putString(mediaId, playableJson.toString()).apply();
+            // Cap entries — keep Continue Listening warm without unbounded growth.
             if (prefs.getAll().size() > 40) {
                 // Drop oldest-ish by rewriting only recent keys we touch; simple trim:
                 // leave as-is unless severely over — SharedPreferences is small JSON.
@@ -314,6 +362,61 @@ public final class LibraryAutoBridge {
             }
         } catch (Exception e) {
             Log.w(TAG, "putPlayableCache failed", e);
+        }
+    }
+
+    /**
+     * Lightweight resume-position stamp during phone HTML5 playback so AA cold
+     * start does not revive a stale car-session offset.
+     */
+    public void stampPlayableCachePosition(String mediaId, long bookGlobalMs, int trackIndex) {
+        if (mediaId == null || mediaId.isEmpty() || bookGlobalMs < 0) {
+            return;
+        }
+        Context ctx = appContextRef.get();
+        if (ctx == null) {
+            return;
+        }
+        try {
+            SharedPreferences prefs =
+                ctx.getSharedPreferences(PLAYABLE_PREFS, Context.MODE_PRIVATE);
+            String raw = prefs.getString(mediaId, null);
+            if (raw == null || raw.isEmpty()) {
+                return;
+            }
+            JSONObject o = new JSONObject(raw);
+            long existingTs = o.optLong("positionUpdatedAt", 0);
+            long now = System.currentTimeMillis();
+            // Ignore stale stamps (e.g. late Exo tick after phone advanced further).
+            if (existingTs > now + 2_000) {
+                return;
+            }
+            LibraryNativePlayer.Playable base = LibraryNativePlayer.parsePlayable(o);
+            if (base == null) {
+                return;
+            }
+            long priorGlobal = Math.max(0, base.positionMs + trackOffset(base));
+            if (
+                existingTs > 0
+                    && bookGlobalMs + 5_000 < priorGlobal
+                    && now < existingTs + 60_000
+            ) {
+                // Incoming is meaningfully behind a recent stamp — keep newer.
+                return;
+            }
+            LibraryNativePlayer.Playable updated =
+                playableWithGlobalPosition(base, bookGlobalMs);
+            o.put("position", updated.positionMs / 1000.0);
+            o.put(
+                "trackIndex",
+                trackIndex >= 0 ? trackIndex : updated.trackIndex
+            );
+            o.put("positionUpdatedAt", now);
+            prefs.edit().putString(mediaId, o.toString()).apply();
+            setBookGlobalPositionMs(bookGlobalMs);
+            persistMediaId(mediaId);
+        } catch (Exception e) {
+            Log.w(TAG, "stampPlayableCachePosition(mediaId) failed", e);
         }
     }
 
@@ -474,24 +577,51 @@ public final class LibraryAutoBridge {
         if (ctx == null) {
             return false;
         }
-        // Prefer last known BOOK-GLOBAL position (never chapter-scoped scrubber pos).
-        // Session positionMs from WebView is chapter/track-scoped for AA display and
-        // must not remap a multi-file resume into the wrong file.
+        // Resolve freshest BOOK-GLOBAL resume: playable cache (phone walk progress /
+        // warm Continue) vs persisted car-session bookGlobal. Prefer newer
+        // positionUpdatedAt; when timestamps are close/missing take farther.
+        // Never let a stale car snapshot rewind past fresher phone progress.
         String persistedId = getPersistedMediaId();
-        long trustedGlobal = bookGlobalPositionMs;
-        if (trustedGlobal <= 5_000) {
-            // Fall back to playable cache's own track-local + offset (warm path).
-            trustedGlobal = playable.positionMs + trackOffset(playable);
+        long cacheGlobal = Math.max(0, playable.positionMs + trackOffset(playable));
+        long sessionGlobal = Math.max(0, bookGlobalPositionMs);
+        long cacheTs = readPlayablePositionUpdatedAt(mediaId);
+        long sessionTs = bookGlobalUpdatedAtMs;
+        long trustedGlobal = pickFreshestGlobalMs(
+            cacheGlobal,
+            cacheTs,
+            sessionGlobal,
+            sessionTs
+        );
+        if (trustedGlobal <= 0) {
+            trustedGlobal = Math.max(cacheGlobal, sessionGlobal);
         }
         if (
             mediaId.equals(persistedId)
-                && trustedGlobal > 5_000
-                && playableHasUsableOffsets(playable)
+                || cacheGlobal > 0
+                || sessionGlobal > 0
         ) {
-            playable = playableWithGlobalPosition(playable, trustedGlobal);
+            if (playableHasUsableOffsets(playable) || playable.tracks.size() <= 1) {
+                playable = playableWithGlobalPosition(playable, trustedGlobal);
+            }
         }
         long globalPos = playable.positionMs + trackOffset(playable);
         bookGlobalPositionMs = globalPos;
+        bookGlobalUpdatedAtMs = System.currentTimeMillis();
+        Log.i(
+            TAG,
+            "Native play resume mediaId="
+                + mediaId
+                + " cacheGlobalMs="
+                + cacheGlobal
+                + " sessionGlobalMs="
+                + sessionGlobal
+                + " chosenMs="
+                + globalPos
+                + " cacheTs="
+                + cacheTs
+                + " sessionTs="
+                + sessionTs
+        );
         int tIdx =
             Math.min(
                 Math.max(0, playable.trackIndex),
@@ -594,6 +724,14 @@ public final class LibraryAutoBridge {
             return false;
         }
         LibraryNativePlayer.getInstance().resume();
+        // Ensure AA transport shows PLAYING + pause/skip actions immediately
+        // (auto-resume used to leave a paused/restored session chrome).
+        this.active = true;
+        this.buffering = false;
+        this.playing = true;
+        ignorePausedSyncUntilElapsed =
+            SystemClock.elapsedRealtime() + PAUSED_SYNC_GRACE_MS;
+        refreshSession(true);
         return true;
     }
 
@@ -612,32 +750,57 @@ public final class LibraryAutoBridge {
         if (mid == null || mid.isEmpty()) {
             return;
         }
+        long global = Math.max(0, LibraryNativePlayer.getInstance().getPositionMs());
+        stampPlayableCachePosition(mid, global, -1);
+    }
+
+    private long readPlayablePositionUpdatedAt(String mediaId) {
         Context ctx = appContextRef.get();
-        if (ctx == null) {
-            return;
+        if (ctx == null || mediaId == null || mediaId.isEmpty()) {
+            return 0;
         }
         try {
-            SharedPreferences prefs =
-                ctx.getSharedPreferences(PLAYABLE_PREFS, Context.MODE_PRIVATE);
-            String raw = prefs.getString(mid, null);
+            String raw =
+                ctx
+                    .getSharedPreferences(PLAYABLE_PREFS, Context.MODE_PRIVATE)
+                    .getString(mediaId, null);
             if (raw == null || raw.isEmpty()) {
-                return;
+                return 0;
             }
-            JSONObject o = new JSONObject(raw);
-            long global = Math.max(0, LibraryNativePlayer.getInstance().getPositionMs());
-            // Store track-local seconds + index for parsePlayable.
-            LibraryNativePlayer.Playable base = LibraryNativePlayer.parsePlayable(o);
-            if (base == null) {
-                return;
-            }
-            LibraryNativePlayer.Playable updated = playableWithGlobalPosition(base, global);
-            o.put("position", updated.positionMs / 1000.0);
-            o.put("trackIndex", updated.trackIndex);
-            prefs.edit().putString(mid, o.toString()).apply();
-            persistMediaId(mid);
+            return new JSONObject(raw).optLong("positionUpdatedAt", 0);
         } catch (Exception e) {
-            Log.w(TAG, "stampPlayableCachePosition failed", e);
+            return 0;
         }
+    }
+
+    /**
+     * Newer timestamp wins; when within 5s (or either missing), take farther
+     * progress so a car reconnect cannot rewind a phone walk session.
+     */
+    private static long pickFreshestGlobalMs(
+        long aMs,
+        long aTs,
+        long bMs,
+        long bTs
+    ) {
+        if (aMs <= 0 && bMs <= 0) {
+            return 0;
+        }
+        if (aMs <= 0) {
+            return bMs;
+        }
+        if (bMs <= 0) {
+            return aMs;
+        }
+        if (aTs > 0 && bTs > 0) {
+            if (aTs > bTs + 5_000) {
+                return aMs;
+            }
+            if (bTs > aTs + 5_000) {
+                return bMs;
+            }
+        }
+        return Math.max(aMs, bMs);
     }
 
     public boolean tryNativeSeekRelative(long deltaMs) {
@@ -677,7 +840,8 @@ public final class LibraryAutoBridge {
         if (!isNativeOwningPlayback()) {
             return false;
         }
-        LibraryNativePlayer.getInstance().skipToNextTrack();
+        // Prefer chapter markers (ABS) — track skip is a no-op on single-file books.
+        LibraryNativePlayer.getInstance().skipToNextChapterOrTrack();
         return true;
     }
 
@@ -685,7 +849,7 @@ public final class LibraryAutoBridge {
         if (!isNativeOwningPlayback()) {
             return false;
         }
-        LibraryNativePlayer.getInstance().skipToPreviousTrack();
+        LibraryNativePlayer.getInstance().skipToPreviousChapterOrTrack();
         return true;
     }
 
@@ -706,7 +870,17 @@ public final class LibraryAutoBridge {
     /** Record book-global position from WebView sync (distinct from scrubber pos). */
     public void setBookGlobalPositionMs(long globalMs) {
         if (globalMs > 0) {
+            // Do not let an older Exo/AA tick rewind a newer phone stamp.
+            long now = System.currentTimeMillis();
+            if (
+                bookGlobalUpdatedAtMs > 0
+                    && globalMs + 5_000 < bookGlobalPositionMs
+                    && now < bookGlobalUpdatedAtMs + 15_000
+            ) {
+                return;
+            }
             bookGlobalPositionMs = globalMs;
+            bookGlobalUpdatedAtMs = now;
         }
     }
 
@@ -1393,6 +1567,7 @@ public final class LibraryAutoBridge {
             .putLong("durationMs", durationMs)
             .putLong("positionMs", positionMs)
             .putLong("bookGlobalPositionMs", bookGlobalPositionMs)
+            .putLong("bookGlobalUpdatedAtMs", bookGlobalUpdatedAtMs)
             .putFloat("playbackSpeed", playbackSpeed);
         String mid = !nativeMediaId.isEmpty() ? nativeMediaId : getPersistedMediaId();
         if (mid != null && !mid.isEmpty()) {
@@ -1448,10 +1623,12 @@ public final class LibraryAutoBridge {
         this.durationMs = prefs.getLong("durationMs", 0);
         this.positionMs = prefs.getLong("positionMs", 0);
         this.bookGlobalPositionMs = prefs.getLong("bookGlobalPositionMs", 0);
+        this.bookGlobalUpdatedAtMs = prefs.getLong("bookGlobalUpdatedAtMs", 0);
         // Legacy builds only stored scrubber position — do not treat it as global
         // when it may be chapter-scoped. Prefer 0 so playable cache wins.
         if (this.bookGlobalPositionMs <= 0) {
             this.bookGlobalPositionMs = 0;
+            this.bookGlobalUpdatedAtMs = 0;
         }
         this.playbackSpeed = prefs.getFloat("playbackSpeed", 1.0f);
         String mid = prefs.getString("mediaId", "");

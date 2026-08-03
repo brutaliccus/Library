@@ -762,6 +762,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           const st = await LibraryAuto.getNativePlaybackState();
           if (st.nativeOwner && st.mediaId && st.mediaId === mid) {
             // Same book already on Exo — resume native; never start HTML5.
+            // If phone progress is ahead of the (possibly stale) AA seek, jump forward.
+            if (opts?.startAt != null && (st.position ?? 0) + 5 < opts.startAt) {
+              void seekNativePlayback(opts.startAt);
+            } else {
+              const local = getOfflineProgress(progressKeyForAbs(itemId));
+              if (local && (st.position ?? 0) + 5 < (local.time || 0)) {
+                void seekNativePlayback(local.time);
+              }
+            }
             void resumeNativePlayback();
             setPlayIntent(true);
             setState((s) => ({ ...s, isPlaying: true, wantPlaying: true }));
@@ -1045,6 +1054,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               return { ...s, nowPlaying: { ...s.nowPlaying, absChapters } };
             });
             // Refresh AA playable cache so MediaSession uses chapter duration.
+            // Use *current* position — stamping play-start localStart here was
+            // overwriting walk progress and rewound AA auto-resume seeks.
+            const live = lastPosRef.current;
+            const liveLocal =
+              live?.key === npKey(np) ? live.trackLocal : localStart;
+            const liveIdx =
+              live?.key === npKey(np) ? live.trackIndex : trackIdx;
             void cacheAbsPlayable(
               itemId,
               data.title,
@@ -1052,8 +1068,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               data.coverUrl || "",
               np.tracks,
               data.duration || 0,
-              localStart,
-              trackIdx,
+              liveLocal,
+              liveIdx,
               absChapters
             );
           })
@@ -1236,6 +1252,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           }
           const { loadAaResumeSnapshot } = await import("../media/aaResumeSnapshot");
           const { bringToForegroundSafe } = await import("../media/libraryAuto");
+          const {
+            getOfflineProgress,
+            saveOfflineProgress,
+            progressKeyForAbs,
+            progressKeyForRd,
+          } = await import("../utils/offlinePlayback");
+          const { pickResumeSeconds } = await import("../utils/resumeProgress");
           const snap = loadAaResumeSnapshot();
           if (!snap) return;
           try {
@@ -1244,13 +1267,48 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             /* ignore */
           }
           if (snap.source === "abs" && snap.itemId) {
+            // Merge AA snapshot into local offline so playABS's server+local
+            // pickResumeSeconds sees the freshest phone/car progress.
+            const key = progressKeyForAbs(snap.itemId);
+            const local = getOfflineProgress(key);
+            const merged = pickResumeSeconds({
+              serverSeconds: snap.position || 0,
+              serverUpdatedAtMs: snap.updatedAt || 0,
+              localSeconds: local?.time,
+              localUpdatedAtMs: local?.updatedAt,
+            });
+            if (!local || merged > (local.time || 0) + 2) {
+              saveOfflineProgress(key, {
+                time: merged,
+                trackIndex: local?.trackIndex ?? snap.trackIndex,
+                trackLocal: local?.trackLocal ?? snap.trackLocal,
+                playbackRate: local?.playbackRate,
+              });
+            }
             await playABS(snap.itemId);
           } else if (snap.source === "rd" && snap.streamHistoryId) {
             const { data } = await api.get("/stream/rd/history/in-progress");
             const item = (data?.items ?? []).find(
-              (i: { id: number }) => i.id === snap.streamHistoryId
+              (i: {
+                id: number;
+                progressSeconds?: number;
+                updatedAt?: string;
+                currentTrackIndex?: number;
+                trackPositionSeconds?: number;
+              }) => i.id === snap.streamHistoryId
             );
             if (item?.tracks?.length) {
+              const local = getOfflineProgress(
+                progressKeyForRd({ streamHistoryId: item.id }) || ""
+              );
+              const startAt = pickResumeSeconds({
+                serverSeconds: item.progressSeconds || snap.position || 0,
+                serverUpdatedAtMs: item.updatedAt
+                  ? Date.parse(item.updatedAt)
+                  : snap.updatedAt || 0,
+                localSeconds: local?.time ?? snap.position,
+                localUpdatedAtMs: local?.updatedAt ?? snap.updatedAt,
+              });
               playRD(
                 item.tracks,
                 item.title || snap.title,
@@ -1258,9 +1316,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                 item.coverUrl || snap.coverUrl,
                 item.id,
                 {
-                  startAt: snap.position,
-                  trackIndex: snap.trackIndex,
-                  trackPositionSeconds: snap.trackLocal,
+                  startAt,
+                  trackIndex: local?.trackIndex ?? item.currentTrackIndex ?? snap.trackIndex,
+                  trackPositionSeconds:
+                    local?.trackLocal ??
+                    item.trackPositionSeconds ??
+                    snap.trackLocal,
                 }
               );
             }
@@ -1692,7 +1753,88 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             Math.max(0, ev.trackIndex ?? raw.trackIndex ?? 0),
             Math.max(0, tracks.length - 1)
           );
-          const position = Math.max(0, ev.position ?? 0);
+          let position = Math.max(0, ev.position ?? 0);
+          // Authoritative resume: offline + AA snapshot newest/farther wins over
+          // a stale Exo start from the last car session.
+          try {
+            const {
+              getOfflineProgress,
+              progressKeyForAbs,
+              progressKeyForRd,
+            } = await import("../utils/offlinePlayback");
+            const { loadAaResumeSnapshot } = await import("../media/aaResumeSnapshot");
+            const { pickResumeSeconds } = await import("../utils/resumeProgress");
+            const local =
+              source === "abs" && itemId
+                ? getOfflineProgress(progressKeyForAbs(itemId))
+                : source === "rd" && streamHistoryId != null
+                  ? getOfflineProgress(
+                      progressKeyForRd({ streamHistoryId }) || ""
+                    )
+                  : null;
+            const snap = loadAaResumeSnapshot();
+            const snapMatches =
+              snap &&
+              ((source === "abs" && snap.source === "abs" && snap.itemId === itemId) ||
+                (source === "rd" &&
+                  snap.source === "rd" &&
+                  snap.streamHistoryId === streamHistoryId));
+            const freshest = pickResumeSeconds({
+              serverSeconds: position,
+              serverUpdatedAtMs: 0,
+              localSeconds: Math.max(
+                local?.time ?? 0,
+                snapMatches ? snap!.position || 0 : 0
+              ),
+              localUpdatedAtMs: Math.max(
+                local?.updatedAt ?? 0,
+                snapMatches ? snap!.updatedAt || 0 : 0
+              ),
+            });
+            if (freshest > position + 5) {
+              position = freshest;
+              void seekNativePlayback(freshest);
+              const mapped = (() => {
+                for (let i = 0; i < tracks.length; i++) {
+                  const start = tracks[i].startOffset ?? 0;
+                  const end = start + (tracks[i].duration || 0);
+                  if (freshest >= start && (tracks[i].duration <= 0 || freshest < end)) {
+                    return { idx: i, local: Math.max(0, freshest - start) };
+                  }
+                }
+                return {
+                  idx: trackIndex,
+                  local: Math.max(
+                    0,
+                    freshest - (tracks[trackIndex]?.startOffset ?? 0)
+                  ),
+                };
+              })();
+              lastPosRef.current = {
+                key: npKey(np),
+                time: position,
+                trackIndex: mapped.idx,
+                trackLocal: mapped.local,
+              };
+              silenceWebViewAudio();
+              setPlayIntent(ev.playing === true);
+              attachedMediaId = mediaId;
+              setState((s) => ({
+                ...s,
+                nowPlaying: np,
+                currentTime: position,
+                duration: totalDuration,
+                currentTrackIndex: mapped.idx,
+                isPlaying: ev.playing === true,
+                wantPlaying: ev.playing === true,
+                buffering: false,
+                expanded: false,
+              }));
+              return;
+            }
+          } catch {
+            /* keep Exo position */
+          }
           silenceWebViewAudio();
           setPlayIntent(ev.playing === true);
           attachedMediaId = mediaId;

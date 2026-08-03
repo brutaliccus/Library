@@ -269,6 +269,34 @@ public class LibraryAutoPlugin extends Plugin
         }
     }
 
+    /**
+     * Update only the resume position in an existing playable cache entry.
+     * Called periodically from phone HTML5 playback so AA auto-resume seeks
+     * to the freshest progress instead of a stale car-session offset.
+     */
+    @PluginMethod
+    public void stampPlayablePosition(PluginCall call) {
+        String mediaId = call.getString("mediaId");
+        if (mediaId == null || mediaId.isEmpty()) {
+            call.reject("mediaId required");
+            return;
+        }
+        Context ctx = getContext();
+        if (ctx != null) {
+            LibraryAutoBridge.getInstance().ensureAppContext(ctx);
+        }
+        Double positionSec = call.getDouble("position", 0.0);
+        Integer trackIndex = call.getInt("trackIndex", -1);
+        long globalMs = Math.round(Math.max(0, positionSec != null ? positionSec : 0) * 1000.0);
+        LibraryAutoBridge.getInstance()
+            .stampPlayableCachePosition(
+                mediaId,
+                globalMs,
+                trackIndex != null ? trackIndex : -1
+            );
+        call.resolve();
+    }
+
     /** Append a base64 audio chunk to the on-disk offline cache (large books). */
     @PluginMethod
     public void appendAudioDiskCache(PluginCall call) {

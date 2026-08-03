@@ -440,6 +440,15 @@ export async function syncAndroidAutoPlayback(
         trackIndex,
         trackLocal
       );
+      // Keep native playable cache resume offset in sync with phone HTML5
+      // progress so AA auto-resume cannot revive a stale car-session seek.
+      if (mediaId && (metaChanged || becomingPlaying || posDue)) {
+        void import("./aaPlayableCache")
+          .then(({ stampAaPlayablePosition }) =>
+            stampAaPlayablePosition(mediaId, safeGlobal, trackIndex)
+          )
+          .catch(() => {});
+      }
     }
 
     // Full metadata on first sync, book change, or auto-resume→playing so AA

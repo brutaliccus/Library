@@ -81,8 +81,28 @@ export async function cachePlayableForAndroidAuto(
       position: Math.max(0, opts.position ?? 0),
       trackIndex: Math.max(0, opts.trackIndex ?? 0),
       totalDuration: Math.max(0, opts.totalDuration ?? 0),
+      positionUpdatedAt: Date.now(),
       tracks,
       chapters: chapters.length ? chapters : undefined,
+    });
+  } catch {
+    /* plugin unavailable */
+  }
+}
+
+/** Update resume offset only — keeps track URLs; safe to call every ~30s. */
+export async function stampAaPlayablePosition(
+  mediaId: string,
+  bookGlobalSeconds: number,
+  trackIndex?: number
+): Promise<void> {
+  if (Capacitor.getPlatform() !== "android") return;
+  if (!mediaId) return;
+  try {
+    await LibraryAuto.stampPlayablePosition({
+      mediaId,
+      position: Math.max(0, bookGlobalSeconds),
+      trackIndex: trackIndex != null ? Math.max(0, trackIndex) : undefined,
     });
   } catch {
     /* plugin unavailable */

@@ -101,6 +101,15 @@ interface LibraryAutoPlugin {
     totalDuration?: number;
     tracks: PlayableTrackPayload[];
     chapters?: PlayableChapterPayload[];
+    /** Epoch ms — used to reject stale overwrites on the native side. */
+    positionUpdatedAt?: number;
+  }): Promise<void>;
+  /** Lightweight resume-position stamp during phone playback (no track re-resolve). */
+  stampPlayablePosition(options: {
+    mediaId: string;
+    /** Book-global seconds */
+    position: number;
+    trackIndex?: number;
   }): Promise<void>;
   /** Append base64 chunk to on-disk offline audio (Android large books). */
   appendAudioDiskCache(options: {

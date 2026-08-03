@@ -46,10 +46,27 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             public void onPlay() {
                 LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
                 bridge.requestAudioFocusForPlay();
+                // Same chrome path as onPlayFromMediaId: BUFFERING → PLAYING with
+                // mediaId + transport actions. Auto-resume used to skip this and
+                // left AA without pause / chapter-skip controls while audio ran.
+                String mid = bridge.getPersistedMediaId();
+                if (mid != null && !mid.isEmpty()) {
+                    bridge.beginPlayFromMediaId(mid);
+                }
                 bridge.setPlayingOptimistic(true);
                 // Cold idle / process death: restart Exo from playable cache — do
                 // not depend on Capacitor WebView being alive.
                 if (bridge.tryNativeResumeOrRestart()) {
+                    String startedId = bridge.getNativeMediaId();
+                    if (startedId == null || startedId.isEmpty()) {
+                        startedId = mid;
+                    }
+                    if (startedId != null && !startedId.isEmpty()) {
+                        Bundle payload = new Bundle();
+                        payload.putString("mediaId", startedId);
+                        payload.putBoolean("nativeStarted", true);
+                        bridge.dispatch("playmedia", payload);
+                    }
                     return;
                 }
                 bridge.dispatch("play", null);

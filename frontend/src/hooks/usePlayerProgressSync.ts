@@ -12,6 +12,7 @@ import { toAbsoluteUrl } from "../api/instanceUrl";
 import { useToast } from "../contexts/ToastContext";
 import { npKey, type NowPlaying, type PlaybackPosition } from "../types/player";
 import {
+  getOfflineProgress,
   isLikelyOffline,
   progressKeyForAbs,
   progressKeyForRd,
@@ -20,33 +21,66 @@ import {
 
 const SYNC_INTERVAL = 30_000;
 
+function progressKeyFor(np: NowPlaying): string | null {
+  if (np.source === "abs" && np.itemId) return progressKeyForAbs(np.itemId);
+  if (np.source === "rd") {
+    return progressKeyForRd({
+      libraryItemId: np.libraryItemId,
+      streamHistoryId: np.streamHistoryId,
+    });
+  }
+  return null;
+}
+
 function persistLocalProgress(
   np: NowPlaying,
   time: number,
   trackIndex: number,
   trackLocalTime?: number,
   playbackRate?: number | null
-): void {
+): boolean {
   const trackLocal = trackLocalTime ?? Math.max(0, time - (np.tracks[trackIndex]?.startOffset ?? 0));
+  const key = progressKeyFor(np);
+  if (!key) return false;
+
+  // Never let an older AA/Exo tick clobber fresher phone progress.
+  const existing = getOfflineProgress(key);
+  if (
+    existing &&
+    existing.updatedAt > 0 &&
+    time + 5 < (existing.time || 0) &&
+    Date.now() - existing.updatedAt < 15 * 60_000
+  ) {
+    return false;
+  }
+
   const payload = { time, trackIndex, trackLocal, playbackRate };
   if (np.source === "abs" && np.itemId) {
     saveOfflineProgress(progressKeyForAbs(np.itemId), payload);
-    return;
-  }
-  if (np.source === "rd") {
-    const key = progressKeyForRd({
-      libraryItemId: np.libraryItemId,
-      streamHistoryId: np.streamHistoryId,
-    });
-    if (key) {
-      saveOfflineProgress(key, payload);
-    }
+  } else if (np.source === "rd") {
+    saveOfflineProgress(key, payload);
     // Also mirror under the alternate key so lib↔history lookups both resume.
     if (np.libraryItemId != null && np.streamHistoryId != null) {
       saveOfflineProgress(progressKeyForRd({ streamHistoryId: np.streamHistoryId })!, payload);
       saveOfflineProgress(progressKeyForRd({ libraryItemId: np.libraryItemId })!, payload);
     }
   }
+
+  // Keep AA playable-cache seek offset aligned with authoritative local progress.
+  const mediaId =
+    np.source === "abs" && np.itemId
+      ? `play/abs/${np.itemId}`
+      : np.source === "rd" && np.streamHistoryId != null
+        ? `play/rdhist/${np.streamHistoryId}`
+        : "";
+  if (mediaId) {
+    void import("../media/aaPlayableCache")
+      .then(({ stampAaPlayablePosition }) =>
+        stampAaPlayablePosition(mediaId, time, trackIndex)
+      )
+      .catch(() => {});
+  }
+  return true;
 }
 
 interface ProgressSyncSources {
@@ -74,7 +108,15 @@ export function usePlayerProgressSync({
       trackLocalTime?: number
     ): Promise<boolean> => {
       // Always keep a local resume point so offline replay works without ABS/API.
-      persistLocalProgress(np, time, trackIndex, trackLocalTime, getPlaybackRate?.());
+      // Skip server write too when this tick would rewind fresher local progress.
+      const wroteLocal = persistLocalProgress(
+        np,
+        time,
+        trackIndex,
+        trackLocalTime,
+        getPlaybackRate?.()
+      );
+      if (!wroteLocal) return true;
 
       // Offline / no live session: local save is enough.
       if (isLikelyOffline()) return true;
@@ -159,9 +201,16 @@ export function usePlayerProgressSync({
       const np = getNowPlaying();
       const pos = getPosition();
       if (!np || pos?.key !== npKey(np)) return;
-      // Always persist locally first (works offline).
-      persistLocalProgress(np, pos.time, pos.trackIndex, pos.trackLocal, getPlaybackRate?.());
-      if (isLikelyOffline()) return;
+      // Always persist locally first (works offline). Skip network if this
+      // tick would rewind fresher phone progress (stale AA/Exo attach).
+      const wrote = persistLocalProgress(
+        np,
+        pos.time,
+        pos.trackIndex,
+        pos.trackLocal,
+        getPlaybackRate?.()
+      );
+      if (!wrote || isLikelyOffline()) return;
       const token = localStorage.getItem("access_token") || "";
       if (np.source === "abs" && np.sessionId) {
         // "sync" keeps the session alive (app merely backgrounded and may keep

@@ -2,13 +2,8 @@ import { useState, FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, SlidersHorizontal } from "lucide-react";
 import { usePlayer } from "../contexts/PlayerContext";
-import {
-  FLOATING_SEARCH_ACTION,
-  FLOATING_SEARCH_FILTER,
-  FLOATING_SEARCH_INNER,
-  FLOATING_SEARCH_INPUT,
-  FLOATING_SEARCH_WRAP,
-} from "./floatingSearchStyles";
+import MobileExpandableSearch from "./MobileExpandableSearch";
+import { FLOATING_SEARCH_FILTER } from "./floatingSearchStyles";
 
 interface Props {
   onGenreToggle?: () => void;
@@ -31,45 +26,34 @@ export default function HeroSearch({ onGenreToggle, genreActiveCount = 0 }: Prop
 
   const hasFilter = Boolean(onGenreToggle);
 
+  const filterSlot = hasFilter ? (
+    <button
+      type="button"
+      onClick={onGenreToggle}
+      className={FLOATING_SEARCH_FILTER}
+      title="Filter genres"
+      aria-label="Filter genres"
+    >
+      <SlidersHorizontal size={18} />
+      {genreActiveCount > 0 && (
+        <span className="min-w-[1.1rem] px-1 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
+          {genreActiveCount}
+        </span>
+      )}
+    </button>
+  ) : null;
+
   return (
     <div className="text-center pt-1 pb-3 lg:pt-4 lg:pb-12">
-      {/* Mobile: bottom floating pill — no outer tray */}
-      <div className={FLOATING_SEARCH_WRAP(liftForMini)}>
-        <form onSubmit={handleSubmit} className={FLOATING_SEARCH_INNER}>
-          <input
-            type="text"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="Search by title, author, or ISBN..."
-            className={FLOATING_SEARCH_INPUT({ hasFilter })}
-            aria-label="Search catalog"
-          />
-          {hasFilter && (
-            <button
-              type="button"
-              onClick={onGenreToggle}
-              className={FLOATING_SEARCH_FILTER}
-              title="Filter genres"
-              aria-label="Filter genres"
-            >
-              <SlidersHorizontal size={18} />
-              {genreActiveCount > 0 && (
-                <span className="min-w-[1.1rem] px-1 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
-                  {genreActiveCount}
-                </span>
-              )}
-            </button>
-          )}
-          <button
-            type="submit"
-            className={FLOATING_SEARCH_ACTION}
-            aria-label="Search"
-            title="Search"
-          >
-            <Search size={18} strokeWidth={2.25} />
-          </button>
-        </form>
-      </div>
+      <MobileExpandableSearch
+        liftForMini={liftForMini}
+        value={value}
+        onChange={setValue}
+        onSubmit={handleSubmit}
+        placeholder="Search by title, author, or ISBN..."
+        ariaLabel="Search catalog"
+        filterSlot={filterSlot}
+      />
 
       <h1 className="text-4xl font-bold text-gray-100 mb-2">
         Find your next read

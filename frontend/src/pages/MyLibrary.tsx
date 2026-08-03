@@ -75,12 +75,8 @@ import {
   type LibraryScrollMemory,
   type LibrarySortMode,
 } from "../utils/libraryScrollMemory";
-import {
-  FLOATING_SEARCH_ACTION,
-  FLOATING_SEARCH_INNER,
-  FLOATING_SEARCH_INPUT,
-  FLOATING_SEARCH_WRAP,
-} from "../components/floatingSearchStyles";
+import MobileExpandableSearch from "../components/MobileExpandableSearch";
+import { FLOATING_SEARCH_FILTER } from "../components/floatingSearchStyles";
 
 interface LibraryItem {
   id: number;
@@ -1379,6 +1375,23 @@ export default function MyLibrary() {
     <button
       type="button"
       onClick={() => setFilterDrawerOpen(true)}
+      className={FLOATING_SEARCH_FILTER}
+      title="Filters"
+      aria-label="Open library filters"
+    >
+      <SlidersHorizontal size={18} />
+      {activeFilterCount > 0 && (
+        <span className="min-w-[1.1rem] px-1 py-0.5 bg-brand-600 text-white text-[10px] font-bold rounded-full leading-none">
+          {activeFilterCount}
+        </span>
+      )}
+    </button>
+  ) : null;
+
+  const desktopFilterTrigger = filterableTab && !isSearching ? (
+    <button
+      type="button"
+      onClick={() => setFilterDrawerOpen(true)}
       className="inline-flex items-center justify-center gap-0.5 p-2 rounded-full text-gray-400 hover:text-gray-100 hover:bg-gray-800/80 transition-colors"
       title="Filters"
       aria-label="Open library filters"
@@ -1654,40 +1667,16 @@ export default function MyLibrary() {
         </div>
       )}
 
-      {/* Mobile: bottom floating pill. Desktop: sticky search + tabs under nav. */}
-      <div className={FLOATING_SEARCH_WRAP(liftForMini)}>
-        <div className={FLOATING_SEARCH_INNER}>
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={offline ? "Search unavailable offline" : "Search your library..."}
-            disabled={offline}
-            className={FLOATING_SEARCH_INPUT({
-              hasFilter: Boolean(filterableTab && !isSearching),
-              disabled: offline,
-            })}
-            aria-label="Search your library"
-          />
-          {filterTrigger && (
-            <span className="absolute right-[3.35rem] top-1/2 -translate-y-1/2">{filterTrigger}</span>
-          )}
-          {searchQuery ? (
-            <button
-              type="button"
-              onClick={() => setSearchQuery("")}
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-2.5 rounded-full text-gray-400 hover:text-gray-100 hover:bg-gray-800/80 transition-colors"
-              aria-label="Clear library search"
-            >
-              <X size={18} />
-            </button>
-          ) : (
-            <span className={`${FLOATING_SEARCH_ACTION} pointer-events-none`} aria-hidden>
-              <Search size={18} strokeWidth={2.25} />
-            </span>
-          )}
-        </div>
-      </div>
+      {/* Mobile: expandable FAB search. Desktop: sticky search + tabs under nav. */}
+      <MobileExpandableSearch
+        liftForMini={liftForMini}
+        value={searchQuery}
+        onChange={setSearchQuery}
+        placeholder={offline ? "Search unavailable offline" : "Search your library..."}
+        ariaLabel="Search your library"
+        disabled={offline}
+        filterSlot={filterTrigger}
+      />
 
       <div
         className="hidden lg:block z-40 -mx-4 lg:-mx-6 bg-gray-950/95 backdrop-blur-sm border-b border-gray-800/80 pt-1 pb-3 mb-4 space-y-3 sticky top-[calc(3.5rem+env(safe-area-inset-top,0px))] pl-[max(1.5rem,env(safe-area-inset-left,0px))] pr-[max(1.5rem,env(safe-area-inset-right,0px))]"
@@ -1709,13 +1698,13 @@ export default function MyLibrary() {
             }`}
             aria-label="Search your library"
           />
-          {filterTrigger && (
+          {desktopFilterTrigger && (
             <span
               className={`absolute top-1/2 -translate-y-1/2 ${
                 searchQuery ? "right-10" : "right-2"
               }`}
             >
-              {filterTrigger}
+              {desktopFilterTrigger}
             </span>
           )}
           {searchQuery && (

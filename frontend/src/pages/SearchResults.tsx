@@ -22,6 +22,8 @@ import type { BookSummary } from "../types/book";
 import CoverImage from "../components/CoverImage";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
+import MobileExpandableSearch from "../components/MobileExpandableSearch";
+import { FLOATING_SEARCH_FILTER } from "../components/floatingSearchStyles";
 
 interface LibrarySearchHit {
   title: string;
@@ -535,30 +537,19 @@ export default function SearchResults({
           : "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]"
       } lg:pb-8`}
     >
-      {/* Mobile: bottom floating pill */}
-      <div
-        className={`lg:hidden z-40 fixed left-0 right-0 px-4 pointer-events-none ${
-          liftForMini
-            ? "bottom-[calc(5rem+0.75rem+env(safe-area-inset-bottom,0px))]"
-            : "bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))]"
-        }`}
-      >
-        <form onSubmit={handleSubmit} className="pointer-events-auto relative max-w-2xl mx-auto">
-          <input
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            placeholder="Search by title, author, or ISBN..."
-            className={`w-full pl-5 py-3 bg-gray-900/90 backdrop-blur-md border border-gray-700/70 rounded-full text-base text-gray-100 shadow-lg shadow-black/40 focus:outline-none focus:ring-2 focus:ring-brand-500/80 focus:border-brand-500/50 placeholder:text-gray-500 ${
-              onGenreToggle ? "pr-[6.5rem]" : "pr-14"
-            }`}
-            aria-label="Search catalog"
-          />
-          {onGenreToggle && (
+      <MobileExpandableSearch
+        liftForMini={liftForMini}
+        value={inputValue}
+        onChange={setInputValue}
+        onSubmit={handleSubmit}
+        placeholder="Search by title, author, or ISBN..."
+        ariaLabel="Search catalog"
+        filterSlot={
+          onGenreToggle ? (
             <button
               type="button"
               onClick={onGenreToggle}
-              className="absolute right-[3.35rem] top-1/2 -translate-y-1/2 inline-flex items-center justify-center gap-0.5 p-2 rounded-full text-gray-400 hover:text-gray-100 hover:bg-gray-800/80 transition-colors"
+              className={FLOATING_SEARCH_FILTER}
               title="Filter genres"
               aria-label="Filter genres"
             >
@@ -569,17 +560,9 @@ export default function SearchResults({
                 </span>
               )}
             </button>
-          )}
-          <button
-            type="submit"
-            className="absolute right-1.5 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-brand-600 text-white hover:bg-brand-500 transition-colors shadow-md shadow-brand-900/30"
-            aria-label="Search"
-            title="Search"
-          >
-            <Search size={18} strokeWidth={2.25} />
-          </button>
-        </form>
-      </div>
+          ) : null
+        }
+      />
 
       {/* Desktop search */}
       <div className="hidden lg:block mb-6 px-4">

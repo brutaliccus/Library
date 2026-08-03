@@ -141,17 +141,6 @@ export default function Navbar() {
         )}
 
         <div className="flex items-center gap-1">
-          {onlineOnly && (
-            <Link
-              to="/search"
-              className="sm:hidden flex items-center justify-center p-2 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
-              title="Search"
-              aria-label="Search books"
-            >
-              <Search size={16} />
-            </Link>
-          )}
-
           {primaryLinks.map(renderLink)}
 
           {nowPlaying && (

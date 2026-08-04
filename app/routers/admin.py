@@ -194,6 +194,17 @@ class QuickReviewApplyBody(BaseModel):
     replace_cover: bool = True
 
 
+class EbookReviewSearchBody(BaseModel):
+    query: str = ""
+    title: str = ""
+    author: str = ""
+    limit: int = 12
+
+
+class EbookReviewApplyBody(BaseModel):
+    selected_result: dict
+
+
 class ContinueForgeBody(BaseModel):
     """Optional resume point for Continue / Quick Review Continue pipeline."""
     resume_from: str | None = None  # auto|m4b|chapters|folder|finalize|metadata
@@ -1081,6 +1092,89 @@ async def post_quick_review_apply(
         _admin.username,
         request_id,
         result.get("edit_mode"),
+    )
+    return result
+
+
+@router.get("/requests/{request_id}/ebook-review")
+@router.get("/download-requests/{request_id}/ebook-review")
+async def get_ebook_review(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Load ebook Quick Review clues (Files → Hardcover metadata wizard)."""
+    from app.services.ebook_quick_review import (
+        EbookQuickReviewError,
+        load_ebook_quick_review,
+    )
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        return await load_ebook_quick_review(req)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except EbookQuickReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/requests/{request_id}/ebook-review/search")
+@router.post("/download-requests/{request_id}/ebook-review/search")
+async def post_ebook_review_search(
+    request_id: int,
+    body: EbookReviewSearchBody,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Search Hardcover metadata candidates for a quarantined ebook."""
+    from app.services.ebook_quick_review import (
+        EbookQuickReviewError,
+        search_ebook_quick_review,
+    )
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        return await search_ebook_quick_review(
+            req,
+            query=body.query,
+            title=body.title,
+            author=body.author,
+            limit=body.limit,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except EbookQuickReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/requests/{request_id}/ebook-review/apply")
+@router.post("/download-requests/{request_id}/ebook-review/apply")
+async def post_ebook_review_apply(
+    request_id: int,
+    body: EbookReviewApplyBody,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Apply selected Hardcover metadata to an ebook staging request."""
+    from app.services.ebook_quick_review import (
+        EbookQuickReviewError,
+        apply_ebook_quick_review,
+    )
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        result = await apply_ebook_quick_review(
+            req,
+            selected_result=body.selected_result,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except EbookQuickReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    logger.info(
+        "Admin %s applied ebook Hardcover metadata for request %s",
+        _admin.username,
+        request_id,
     )
     return result
 

@@ -38,11 +38,13 @@ After a successful organize, Library Site calls Kavita’s scan API so the new
 
 Quarantined ebooks keep files under `unorganized`. Admin → Requests offers:
 
+- **Match metadata** — Hardcover search → cover cards → apply (writes
+  `ebook_applied.json` + OPF tags; Continue uses the selected match)
 - **Staging files** — browse / delete entries
 - **Continue pipeline** — skip the confidence gate, organize + scan
 - **Reject / delete** — wipe the request’s `unorganized/req_{id}_*` tree
 
-There is no LibraForge Manual Review link for ebooks.
+There is no LibraForge Manual Review link for ebooks (use Match metadata instead).
 
 ## Env knobs
 

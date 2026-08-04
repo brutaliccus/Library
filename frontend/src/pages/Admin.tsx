@@ -42,6 +42,7 @@ import ScraperTab from "../components/admin/ScraperTab";
 import ConfigTab from "../components/admin/ConfigTab";
 import StagingFilesViewer from "../components/admin/StagingFilesViewer";
 import QuickReviewWizard from "../components/admin/QuickReviewWizard";
+import EbookMetadataMatcher from "../components/admin/EbookMetadataMatcher";
 import LibrarySweepTab from "../components/admin/LibrarySweepTab";
 import AudibleAuthPanel from "../components/admin/AudibleAuthPanel";
 import { usePushNotifications } from "../hooks/usePushNotifications";
@@ -803,6 +804,10 @@ function AllRequestsTab() {
     title: string;
     manual_review_url?: string | null;
   } | null>(null);
+  const [ebookReview, setEbookReview] = useState<{
+    id: number;
+    title: string;
+  } | null>(null);
   const { data: requests, isLoading } = useQuery({
     queryKey: ["admin-downloads"],
     queryFn: async () => {
@@ -981,6 +986,21 @@ function AllRequestsTab() {
                         Quick review
                       </button>
                     )}
+                    {quarantined && req.media_type === "ebook" && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEbookReview({
+                            id: req.id,
+                            title: req.title || "Request",
+                          })
+                        }
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
+                      >
+                        <Sparkles size={12} />
+                        Match metadata
+                      </button>
+                    )}
                     {showStagingBrowser && (
                       <button
                         type="button"
@@ -1068,6 +1088,14 @@ function AllRequestsTab() {
           open={!!quickReview}
           onClose={() => setQuickReview(null)}
           manualReviewUrl={quickReview.manual_review_url}
+        />
+      )}
+      {ebookReview && (
+        <EbookMetadataMatcher
+          requestId={ebookReview.id}
+          title={ebookReview.title}
+          open={!!ebookReview}
+          onClose={() => setEbookReview(null)}
         />
       )}
     </div>

@@ -812,28 +812,35 @@ async def run_ebook_after_download(
 
     if resume_from in ("metadata", "folder"):
         if meta is None:
-            # Continue-after-review: re-identify but skip score gate (admin approved).
-            meta = await identify_ebook_metadata(
-                staging=staging,
-                title_hint=title,
-                author_hint=author or "",
-                google_volume_id=google_volume_id,
-            )
-            if meta.score < 0.5:
-                # Prefer request hints when identification is still weak after review.
-                meta = EbookMeta(
-                    title=(title or meta.title or "Unknown").strip(),
-                    author=(author or meta.author or "Unknown").strip(),
-                    series=meta.series,
-                    series_index=meta.series_index,
-                    edition=meta.edition,
-                    isbn13=meta.isbn13,
-                    isbn10=meta.isbn10,
-                    score=max(meta.score, 0.7),
-                    source=meta.source or "manual",
-                    cover_url=meta.cover_url,
-                    reason="Admin continue with request hints",
+            # Prefer admin-selected Hardcover match from Quick Review when present.
+            from app.services.ebook_quick_review import load_applied_ebook_meta
+
+            applied = load_applied_ebook_meta(staging)
+            if applied is not None:
+                meta = applied
+            else:
+                # Continue-after-review: re-identify but skip score gate (admin approved).
+                meta = await identify_ebook_metadata(
+                    staging=staging,
+                    title_hint=title,
+                    author_hint=author or "",
+                    google_volume_id=google_volume_id,
                 )
+                if meta.score < 0.5:
+                    # Prefer request hints when identification is still weak after review.
+                    meta = EbookMeta(
+                        title=(title or meta.title or "Unknown").strip(),
+                        author=(author or meta.author or "Unknown").strip(),
+                        series=meta.series,
+                        series_index=meta.series_index,
+                        edition=meta.edition,
+                        isbn13=meta.isbn13,
+                        isbn10=meta.isbn10,
+                        score=max(meta.score, 0.7),
+                        source=meta.source or "manual",
+                        cover_url=meta.cover_url,
+                        reason="Admin continue with request hints",
+                    )
             primary = pick_primary_ebook(staging)
             if primary:
                 await embed_ebook_metadata(primary, meta)

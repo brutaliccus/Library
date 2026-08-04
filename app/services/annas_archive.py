@@ -700,31 +700,33 @@ async def _fetch_aa_page_html(page_url: str) -> tuple[str, str | None]:
     if not settings.flaresolverr_url or not _host_allows_flaresolverr(page_url):
         return html, final_url
 
-    # Challenge bypass (DDoS-Guard / CF). Signed CDN URL is usually in the HTML
-    # immediately after the check — waitInSeconds=0 avoids an extra idle delay.
-    result = await _fetch_via_flaresolverr(
-        page_url, wait_seconds=0, return_final_url=True, retries=1
-    )
-    flare_ok = False
-    if isinstance(result, tuple):
-        html2, final2 = result
-        flare_ok = bool(html2)
-    else:
-        html2, final2 = result or "", None
-        flare_ok = bool(html2)
-    if html2:
-        html = html2
-    if final2:
-        final_url = final2
+    # Challenge bypass (DDoS-Guard / CF). Prefer a quick solve; signed CDN URL is
+    # usually already in the HTML. If Flare is busy/times out, one longer retry is
+    # still needed for zlib-only books that have no libgen partner.
+    for challenge_wait, retries in ((0, 1), (15, 1)):
+        result = await _fetch_via_flaresolverr(
+            page_url,
+            wait_seconds=challenge_wait,
+            return_final_url=True,
+            retries=retries,
+        )
+        if isinstance(result, tuple):
+            html2, final2 = result
+        else:
+            html2, final2 = result or "", None
+        if html2:
+            html = html2
+        if final2:
+            final_url = final2
+        if _extract_direct_url_from_aa_html(html) or (
+            final_url and _is_likely_file_url(final_url)
+        ):
+            return html, final_url
+        if html2:
+            break  # got a page; fall through to countdown wait if needed
 
-    if _extract_direct_url_from_aa_html(html) or (
-        final_url and _is_likely_file_url(final_url)
-    ):
-        return html, final_url
-
-    # Only do a long countdown wait when Flare actually returned a timer page
-    # (not when it timed out — pipeline should try the next slow mirror instead).
-    if is_timer and flare_ok:
+    # Countdown pages / DDoS-Guard that need a longer Flare session.
+    if is_timer:
         timer = _parse_timer_seconds_from_html(html) or 65
         timer = max(30, min(timer + 5, 90))
         logger.info("AA: slow_download countdown wait %ss via FlareSolverr", timer)

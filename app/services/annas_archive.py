@@ -123,6 +123,8 @@ _CLOUDFLARE_INDICATORS = (
     "checking your browser",
     "cloudflare",
     "please wait while we verify",
+    "ddg-l10n",
+    "ddos-guard",
 )
 
 
@@ -196,12 +198,13 @@ async def _fetch_via_flaresolverr(
     if not base_url:
         return (None, None) if return_final_url else None
     api_url = f"{base_url}/v1" if "/v1" not in base_url else base_url
-    # Timer pages need ~65s wait + page load; allow 7 min for DDoS-Guard delays
-    req_timeout = 420 if wait_seconds >= 60 else 180
+    # Bound client/server timeouts to the requested wait — avoid multi-minute hangs
+    # when FlareSolverr is wedged (common under concurrent ABB + AA load).
+    req_timeout = 90 if wait_seconds <= 20 else (180 if wait_seconds < 60 else 300)
     payload: dict[str, Any] = {
         "cmd": "request.get",
         "url": url,
-        "maxTimeout": max(420000, (wait_seconds + 120) * 1000),
+        "maxTimeout": max(int(req_timeout * 1000), (wait_seconds + 45) * 1000),
     }
     if wait_seconds > 0:
         payload["waitInSeconds"] = wait_seconds
@@ -426,7 +429,7 @@ def _extract_download_urls(html: str, base: str) -> list[str]:
                 fast.append(full)
 
     for a in soup.select('a[href^="/slow_download/"]'):
-        href = a.get("href", "").strip()
+        href = a.get("href", "").strip().split("?")[0]
         if not href:
             continue
         full = f"{base}{href}"
@@ -463,7 +466,7 @@ def _extract_download_urls(html: str, base: str) -> list[str]:
             return 5
         if "cloudflare-ipfs" in lower or "ipfs.io" in lower or "dweb.link" in lower:
             return 8
-        if "z-lib" in lower or "zlib" in lower:
+        if "z-lib" in lower or "zlib" in lower or "z-library" in lower:
             return 9
         return 6
 
@@ -473,11 +476,13 @@ def _extract_download_urls(html: str, base: str) -> list[str]:
         if not _is_skip_partner_url(u)
     ]
     partners.sort(key=_partner_rank)
-    # External partners first (no Flare), then AA fast (account), then one slow fallback.
-    # slow_download via FlareSolverr is flaky — keep it last and only once.
-    urls = partners + fast[:3]
-    if slow:
-        urls.append(slow[0])
+    good_partners = [u for u in partners if _partner_rank(u) <= 6]
+    weak_partners = [u for u in partners if _partner_rank(u) > 6]
+
+    # Prefer reliable partners, then membership fast (1 attempt — quota exhaustion
+    # redirects all fast_* to the same not_member page), then several slow mirrors
+    # (zlib-only books often have no libgen), then weak externals last.
+    urls = good_partners + fast[:1] + slow[:3] + weak_partners[:1]
     return urls
 
 
@@ -491,6 +496,9 @@ def _is_skip_partner_url(url: str) -> bool:
         return True
     # Bare IP libgen CDNs are unreachable from many residential/VPN networks.
     if is_unreachable_libgen_cdn(url):
+        return True
+    # z-library.sk currently returns HTTP 513 (bot/challenge) from our egress.
+    if "z-library." in lower or "z-lib." in lower:
         return True
     return False
 
@@ -555,9 +563,47 @@ _FILE_EXT_IN_URL = re.compile(
     r"\.(epub|pdf|mobi|azw3?|fb2|djvu|cbr|cbz|txt|zip|rar|mp3|m4b|m4a)(?:\?|~|/|$)", re.IGNORECASE
 )
 
+# AA slow-partner signed CDN links often omit a file extension in the path.
+_AA_SLOW_CDN_RE = re.compile(
+    r"https?://[a-z0-9.-]+\.(?:xyz|net|com|cv|pm|top|site)/d3/",
+    re.IGNORECASE,
+)
+
+
+def _is_aa_account_or_member_page(url: str) -> bool:
+    """True for AA account/membership HTML pages that must never be treated as files."""
+    lower = (url or "").lower()
+    if not lower:
+        return False
+    return any(
+        x in lower
+        for x in (
+            "/account/",
+            "/fast_download_not_member",
+            "/donate",
+            "/login",
+        )
+    )
+
+
+def _is_aa_slow_cdn_url(url: str) -> bool:
+    """True for Anna's Archive slow-partner CDN URLs (often extensionless)."""
+    lower = (url or "").lower()
+    if not lower.startswith("http"):
+        return False
+    if _AA_SLOW_CDN_RE.match(lower):
+        return True
+    if "zlib3_files" in lower or "annas_archive_data__aacid" in lower:
+        return True
+    return False
+
 
 def _is_likely_file_url(url: str) -> bool:
     """True if URL looks like a direct file (has extension or known file host)."""
+    if not url:
+        return False
+    if _is_aa_account_or_member_page(url):
+        return False
     if "library.lol" in url and "/fiction/" in url and "/get" not in url.lower():
         return False
     if _FILE_EXT_IN_URL.search(url):
@@ -568,7 +614,121 @@ def _is_likely_file_url(url: str) -> bool:
         return True
     if "booksdl." in url.lower():
         return True
+    if _is_aa_slow_cdn_url(url):
+        return True
     return False
+
+
+def _extract_direct_url_from_aa_html(html: str) -> str | None:
+    """Pull a direct file CDN URL from an AA slow/partner countdown page."""
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    for sel in (
+        "span.bg-gray-200.break-all",
+        "span.break-all",
+        "span[class*='break-all']",
+        "span.dark\\:bg-slate-700.break-all",
+        "span.dark\\:bg-gray-700.break-all",
+        "div.break-all",
+        "div[class*='break-all']",
+        "code.break-all",
+        "pre.break-all",
+    ):
+        for el in soup.select(sel):
+            url_text = el.get_text(strip=True)
+            if url_text.startswith("http") and _is_likely_file_url(url_text):
+                return url_text
+
+    dl_btn = soup.select_one("#download-button")
+    if dl_btn:
+        href = (dl_btn.get("href") or "").strip()
+        if href.startswith("http") and _is_likely_file_url(href):
+            return href
+
+    # Extensionless AA CDN hosts (.xyz /d3/...) plus classic libgen CDN file URLs.
+    cdn_pattern = re.compile(
+        r'https?://[a-zA-Z0-9.-]+\.(?:xyz|net|com|io|org|cv|pm|top|site)/[^\s"\'<>]+',
+        re.IGNORECASE,
+    )
+    for m in cdn_pattern.finditer(html):
+        url = m.group(0).rstrip("'\">,)")
+        if _is_likely_file_url(url) and not _is_annas_archive_url(url):
+            return url
+    return None
+
+
+async def _fetch_aa_page_html(page_url: str) -> tuple[str, str | None]:
+    """Fetch an AA page via direct HTTP, falling back to FlareSolverr on challenges.
+
+    For /slow_download/, the signed CDN URL is usually already in the HTML after the
+    bot-check — so prefer a short challenge wait over a blind 65s countdown wait.
+    """
+    html = ""
+    final_url: str | None = None
+    is_timer = _is_timer_page_url(page_url)
+
+    try:
+        async with _build_session(
+            for_annas_archive=_is_annas_archive_url(page_url)
+        ) as client:
+            resp = await client.get(page_url)
+            # Keep body even on 403 challenge pages so we can detect DDoS-Guard.
+            html = resp.text
+            final_url = str(resp.url)
+            if resp.history and _is_likely_file_url(final_url):
+                return html, final_url
+            if resp.status_code < 400 and not _is_cloudflare_challenge(html):
+                return html, final_url
+    except Exception as e:
+        logger.warning(f"AA resolve download failed: {e}")
+        _clear_mirror_on_dns_error(e)
+        html = ""
+
+    if final_url and _is_aa_account_or_member_page(final_url):
+        logger.info("AA: membership/fast quota page (%s) — not a file", final_url[:80])
+        return html, final_url
+
+    if not settings.flaresolverr_url or not _host_allows_flaresolverr(page_url):
+        return html, final_url
+
+    # Challenge bypass first (DDoS-Guard / CF). URL is often already on the page.
+    challenge_wait = 15
+    result = await _fetch_via_flaresolverr(
+        page_url, wait_seconds=challenge_wait, return_final_url=True, retries=1
+    )
+    if isinstance(result, tuple):
+        html2, final2 = result
+    else:
+        html2, final2 = result or html, None
+    if html2:
+        html = html2
+    if final2:
+        final_url = final2
+
+    if _extract_direct_url_from_aa_html(html) or (
+        final_url and _is_likely_file_url(final_url)
+    ):
+        return html, final_url
+
+    # Countdown pages without a URL yet: wait out the partner timer once.
+    if is_timer:
+        timer = _parse_timer_seconds_from_html(html) or 65
+        timer = max(30, min(timer + 5, 90))
+        logger.info("AA: slow_download countdown wait %ss via FlareSolverr", timer)
+        result = await _fetch_via_flaresolverr(
+            page_url, wait_seconds=timer, return_final_url=True, retries=1
+        )
+        if isinstance(result, tuple):
+            html3, final3 = result
+        else:
+            html3, final3 = result or html, None
+        if html3:
+            html = html3
+        if final3:
+            final_url = final3
+
+    return html, final_url
 
 
 def _absolutize_url(page_url: str, href: str) -> str:
@@ -831,7 +991,8 @@ async def resolve_download(page_url: str, media_type: str = "ebook") -> str | No
     """Follow an AA partner/slow_download page to get the actual file download URL.
 
     Prefer libgen.li ads.php → get.php (direct HTTP, no Flare). AA /slow_download/
-    still needs FlareSolverr with a long wait. Other partners: HTTP first, Flare
+    tries direct HTTP first (CDN URL is often already in the HTML); FlareSolverr is
+    used only for bot challenges / countdown pages. Other partners: HTTP first, Flare
     only when Cloudflare is detected (and the host is Flare-safe).
     """
     archive_url = await _resolve_archive_org(page_url, media_type)
@@ -851,79 +1012,60 @@ async def resolve_download(page_url: str, media_type: str = "ebook") -> str | No
     html = ""
     final_url: str | None = None
 
+    # AA-hosted fast/slow pages: shared fetch with challenge-aware Flare fallback.
+    if _is_annas_archive_url(page_url) or _is_timer_page_url(page_url):
+        html, final_url = await _fetch_aa_page_html(page_url)
+        if final_url and _is_aa_account_or_member_page(final_url):
+            return None
+        if final_url and _is_likely_file_url(final_url):
+            logger.info(f"AA: redirect to file: {final_url[:100]}...")
+            return _finalize_resolved_url(final_url)
+        direct = _extract_direct_url_from_aa_html(html or "")
+        if direct:
+            logger.info(f"AA: found direct URL on AA page: {direct[:80]}...")
+            return _finalize_resolved_url(direct)
+        return None
+
     is_library = _is_library_page_url(page_url)
-    is_timer = _is_timer_page_url(page_url)
     wait_sec = 10 if is_library else 65
 
-    if is_timer and settings.flaresolverr_url and _host_allows_flaresolverr(page_url):
+    try:
+        async with _build_session(
+            for_annas_archive=_is_annas_archive_url(page_url)
+        ) as client:
+            resp = await client.get(page_url)
+            resp.raise_for_status()
+            html = resp.text
+            if resp.history and _is_likely_file_url(str(resp.url)):
+                return _finalize_resolved_url(str(resp.url))
+    except Exception as e:
+        logger.warning(f"AA resolve download failed: {e}")
+        _clear_mirror_on_dns_error(e)
+        return None
+
+    if (
+        _is_cloudflare_challenge(html)
+        and settings.flaresolverr_url
+        and _host_allows_flaresolverr(page_url)
+    ):
         result = await _fetch_via_flaresolverr(
             page_url, wait_seconds=wait_sec, return_final_url=True
         )
         if isinstance(result, tuple):
             html, final_url = result
         else:
-            html = result or ""
-    else:
-        try:
-            async with _build_session(
-                for_annas_archive=_is_annas_archive_url(page_url)
-            ) as client:
-                resp = await client.get(page_url)
-                resp.raise_for_status()
-                html = resp.text
-                # AA fast_download with membership often 302s straight to a file CDN
-                if resp.history and _is_likely_file_url(str(resp.url)):
-                    return _finalize_resolved_url(str(resp.url))
-        except Exception as e:
-            logger.warning(f"AA resolve download failed: {e}")
-            _clear_mirror_on_dns_error(e)
-            return None
-
-        if (
-            _is_cloudflare_challenge(html)
-            and settings.flaresolverr_url
-            and _host_allows_flaresolverr(page_url)
-        ):
-            result = await _fetch_via_flaresolverr(
-                page_url, wait_seconds=wait_sec, return_final_url=True
-            )
-            if isinstance(result, tuple):
-                html, final_url = result
-            else:
-                html = result or html
+            html = result or html
 
     if final_url and _is_likely_file_url(final_url):
         logger.info(f"AA: FlareSolverr redirect to file: {final_url[:100]}...")
         return _finalize_resolved_url(final_url)
 
+    direct = _extract_direct_url_from_aa_html(html or "")
+    if direct:
+        logger.info(f"AA: found direct URL in page HTML: {direct[:80]}...")
+        return _finalize_resolved_url(direct)
+
     soup = BeautifulSoup(html or "", "html.parser")
-
-    # Anna's Archive partner page: direct URL in span (original selectors first for compatibility)
-    # Then dark-mode variants and broader fallbacks for alternate page layouts
-    for sel in (
-        "span.bg-gray-200.break-all",
-        "span.break-all",
-        "span[class*='break-all']",
-        "span.dark\\:bg-slate-700.break-all",
-        "span.dark\\:bg-gray-700.break-all",
-        "div.break-all",
-        "div[class*='break-all']",
-        "code.break-all",
-        "pre.break-all",
-    ):
-        for el in soup.select(sel):
-            url_text = el.get_text(strip=True)
-            if url_text.startswith("http") and _is_likely_file_url(url_text):
-                logger.info(f"AA: found direct URL in {sel[:30]}: {url_text[:80]}...")
-                return _finalize_resolved_url(url_text)
-
-    # Download button (id=download-button) - href added when timer completes
-    dl_btn = soup.select_one("#download-button")
-    if dl_btn:
-        href = dl_btn.get("href", "")
-        if href.startswith("http") and _is_likely_file_url(href):
-            logger.info(f"AA: found file URL in #download-button: {href[:80]}...")
-            return _finalize_resolved_url(href)
 
     download_link = soup.select_one('a[href*="download"]')
     if download_link:
@@ -935,8 +1077,10 @@ async def resolve_download(page_url: str, media_type: str = "ebook") -> str | No
                 resolved = await _resolve_library_page(href)
                 if resolved:
                     return _finalize_resolved_url(resolved)
-        if href.startswith("/"):
-            return f"{base}{href}"
+        if href.startswith("/") and not _is_aa_account_or_member_page(href):
+            full = f"{base}{href}"
+            if _is_likely_file_url(full):
+                return _finalize_resolved_url(full)
 
     for a in soup.select("a[href]"):
         href = a.get("href", "")
@@ -949,19 +1093,6 @@ async def resolve_download(page_url: str, media_type: str = "ebook") -> str | No
             if resolved:
                 return _finalize_resolved_url(resolved)
 
-    # Fallback: scan raw HTML for CDN-style file URLs (b4mcx2ml.net, libgen CDNs, etc.)
-    # Matches .mobi~, .epub, .pdf, .m4b, .mp3 and similar LibGen CDN format
-    cdn_pattern = re.compile(
-        r'https?://[a-zA-Z0-9.-]+\.(?:net|com|io|org)/[^\s"\'<>]*(?:\.mobi~?|\.epub|\.pdf|\.m4b|\.mp3|\.azw3?)[^\s"\'<>]*',
-        re.IGNORECASE,
-    )
-    for m in cdn_pattern.finditer(html or ""):
-        url = m.group(0).rstrip("'\">,)")
-        if _is_likely_file_url(url):
-            logger.info(f"AA: found file URL in page: {url[:80]}...")
-            return _finalize_resolved_url(url)
-
-    # Last resort: data attributes (some pages use data-download-url, data-href)
     for el in soup.select("[data-download-url], [data-href], [data-url]"):
         u = el.get("data-download-url") or el.get("data-href") or el.get("data-url")
         if u and isinstance(u, str) and u.startswith("http") and _is_likely_file_url(u):

@@ -1416,10 +1416,13 @@ async def process_aa_download(request_id: int) -> None:
             last_page_url = ""
             last_error: Exception | None = None
             downloaded = False
+            skip_fast = False
 
             for page_url in download_urls:
                 if await _is_cancelled(request_id):
                     return
+                if skip_fast and "/fast_download/" in page_url:
+                    continue
                 last_page_url = page_url
                 source_label = "Anna's Archive"
                 if "archive.org" in page_url:
@@ -1428,6 +1431,8 @@ async def process_aa_download(request_id: int) -> None:
                     source_label = "Library Genesis"
                 elif "slow_download" in page_url:
                     source_label = "Anna's Archive (slow)"
+                elif "fast_download" in page_url:
+                    source_label = "Anna's Archive (fast)"
                 elif "z-lib" in page_url.lower() or "zlib" in page_url.lower():
                     source_label = "Z-Library"
                 logger.info(f"AA download: trying page URL {page_url[:80]}...")
@@ -1436,6 +1441,19 @@ async def process_aa_download(request_id: int) -> None:
                 )
                 direct_url = await annas_archive.resolve_download(page_url, media_type)
                 if not direct_url:
+                    if "/fast_download/" in page_url:
+                        # Daily membership quota / not-member → don't burn more fast_* URLs.
+                        skip_fast = True
+                        last_error = RuntimeError(
+                            "Anna's Archive fast download unavailable "
+                            "(membership quota exhausted or not a member)"
+                        )
+                        await _update_status(
+                            db,
+                            request_id,
+                            "transferring",
+                            "Fast download unavailable, trying slow/partner mirrors…",
+                        )
                     continue
                 # Common failure: interstitial HTML advertised as a "file" URL.
                 if not await annas_archive.verify_direct_file_url(direct_url):

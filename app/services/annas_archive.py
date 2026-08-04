@@ -676,31 +676,42 @@ async def _fetch_aa_page_html(page_url: str) -> tuple[str, str | None]:
             # Keep body even on 403 challenge pages so we can detect DDoS-Guard.
             html = resp.text
             final_url = str(resp.url)
+            if final_url and _is_aa_account_or_member_page(final_url):
+                logger.info(
+                    "AA: membership/fast quota page (%s) — not a file", final_url[:80]
+                )
+                return html, final_url
             if resp.history and _is_likely_file_url(final_url):
                 return html, final_url
-            if resp.status_code < 400 and not _is_cloudflare_challenge(html):
-                return html, final_url
+            # Parse CDN URL before treating DDoS-Guard/CF HTML as a hard failure.
+            if resp.status_code < 400:
+                if _extract_direct_url_from_aa_html(html):
+                    return html, final_url
+                if not _is_cloudflare_challenge(html):
+                    return html, final_url
     except Exception as e:
         logger.warning(f"AA resolve download failed: {e}")
         _clear_mirror_on_dns_error(e)
         html = ""
 
     if final_url and _is_aa_account_or_member_page(final_url):
-        logger.info("AA: membership/fast quota page (%s) — not a file", final_url[:80])
         return html, final_url
 
     if not settings.flaresolverr_url or not _host_allows_flaresolverr(page_url):
         return html, final_url
 
-    # Challenge bypass first (DDoS-Guard / CF). URL is often already on the page.
-    challenge_wait = 15
+    # Challenge bypass (DDoS-Guard / CF). Signed CDN URL is usually in the HTML
+    # immediately after the check — waitInSeconds=0 avoids an extra idle delay.
     result = await _fetch_via_flaresolverr(
-        page_url, wait_seconds=challenge_wait, return_final_url=True, retries=1
+        page_url, wait_seconds=0, return_final_url=True, retries=1
     )
+    flare_ok = False
     if isinstance(result, tuple):
         html2, final2 = result
+        flare_ok = bool(html2)
     else:
-        html2, final2 = result or html, None
+        html2, final2 = result or "", None
+        flare_ok = bool(html2)
     if html2:
         html = html2
     if final2:
@@ -711,8 +722,9 @@ async def _fetch_aa_page_html(page_url: str) -> tuple[str, str | None]:
     ):
         return html, final_url
 
-    # Countdown pages without a URL yet: wait out the partner timer once.
-    if is_timer:
+    # Only do a long countdown wait when Flare actually returned a timer page
+    # (not when it timed out — pipeline should try the next slow mirror instead).
+    if is_timer and flare_ok:
         timer = _parse_timer_seconds_from_html(html) or 65
         timer = max(30, min(timer + 5, 90))
         logger.info("AA: slow_download countdown wait %ss via FlareSolverr", timer)

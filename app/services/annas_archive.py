@@ -30,6 +30,10 @@ _MIRROR_DOMAINS = [
 _BASE_URL: str | None = None
 _SEARCH_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _CACHE_TTL = 300
+# Cookies from a successful FlareSolverr solve — reuse for /slow_download so we
+# don't re-fight DDoS-Guard on every partner mirror (Flare is single-threaded).
+_AA_FLARE_COOKIES: dict[str, str] = {}
+_AA_FLARE_UA: str | None = None
 
 _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
@@ -189,6 +193,25 @@ def _parse_timer_seconds_from_html(html: str) -> int | None:
     return max(candidates)
 
 
+def _cache_aa_flare_solution(solution: dict[str, Any]) -> None:
+    """Keep FlareSolverr cookies/UA so later AA GETs can skip another bot solve."""
+    global _AA_FLARE_UA
+    cookies = solution.get("cookies") or []
+    if isinstance(cookies, list):
+        for c in cookies:
+            if not isinstance(c, dict):
+                continue
+            name = c.get("name")
+            value = c.get("value")
+            if name and value is not None:
+                _AA_FLARE_COOKIES[str(name)] = str(value)
+    ua = solution.get("userAgent")
+    if isinstance(ua, str) and ua.strip():
+        _AA_FLARE_UA = ua.strip()
+    if _AA_FLARE_COOKIES:
+        logger.info("AA: cached %d FlareSolverr cookie(s) for reuse", len(_AA_FLARE_COOKIES))
+
+
 async def _fetch_via_flaresolverr(
     url: str, wait_seconds: int = 0, return_final_url: bool = False, retries: int = 2
 ) -> str | tuple[str | None, str | None]:
@@ -223,7 +246,9 @@ async def _fetch_via_flaresolverr(
                         "(docker-compose dns: 1.1.1.1 / 8.8.8.8) and restart it"
                     )
                 return (None, None) if return_final_url else None
-            solution = data.get("solution", {})
+            solution = data.get("solution", {}) or {}
+            if _is_annas_archive_url(url) or _is_annas_archive_url(str(solution.get("url") or "")):
+                _cache_aa_flare_solution(solution)
             html = solution.get("response") or None
             final_url = solution.get("url") or None
             if return_final_url:
@@ -247,14 +272,20 @@ def _build_session(*, for_annas_archive: bool = False) -> httpx.AsyncClient:
     Only attach the AA membership cookie on annas-archive hosts — sending it to
     libgen.li/other partners can trigger 500s and break otherwise-working GETs.
     """
-    cookies = {}
-    if for_annas_archive and settings.aa_account_id:
-        cookies["aa_account_id2"] = settings.aa_account_id
+    cookies: dict[str, str] = {}
+    headers = {
+        "User-Agent": _USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    if for_annas_archive:
+        if _AA_FLARE_COOKIES:
+            cookies.update(_AA_FLARE_COOKIES)
+        if _AA_FLARE_UA:
+            headers["User-Agent"] = _AA_FLARE_UA
+        if settings.aa_account_id:
+            cookies["aa_account_id2"] = settings.aa_account_id
     return httpx.AsyncClient(
-        headers={
-            "User-Agent": _USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
+        headers=headers,
         cookies=cookies,
         follow_redirects=True,
         timeout=60,

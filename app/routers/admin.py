@@ -1439,6 +1439,49 @@ async def system_health(_admin: User = Depends(require_admin)):
     return await collect_system_health()
 
 
+@router.get("/docker/services")
+async def docker_services(_admin: User = Depends(require_admin)):
+    """List Docker-managed stack services and live container state (admin only)."""
+    from app.services import docker_control
+
+    return await docker_control.list_services()
+
+
+@router.post("/docker/services/{service_id}/{action}")
+async def docker_service_action(
+    service_id: str,
+    action: str,
+    _admin: User = Depends(require_admin),
+):
+    """Start / stop / restart a managed Docker service (admin only).
+
+    The Library app container (`app`) only allows restart, scheduled after the
+    response so the HTTP request can complete before the process exits.
+    """
+    from app.services import docker_control
+
+    action_norm = (action or "").strip().lower()
+    if action_norm not in ("start", "stop", "restart"):
+        raise HTTPException(status_code=400, detail="action must be start, stop, or restart")
+
+    if docker_control.get_service(service_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown service: {service_id}")
+
+    try:
+        return await docker_control.control_service(service_id, action_norm)  # type: ignore[arg-type]
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except PermissionError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Docker %s on %s failed", action_norm, service_id)
+        raise HTTPException(status_code=502, detail=str(e)[:240]) from e
+
+
 @router.get("/libraforge")
 async def libraforge_status(_admin: User = Depends(require_admin)):
     """Admin deep-link status for sibling LibraForge (no proxy)."""

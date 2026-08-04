@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, useMemo, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api from "../api/client";
 import {
@@ -32,6 +32,8 @@ import {
   Share2,
   Clock3,
   Server,
+  Square,
+  RotateCcw,
   type LucideIcon,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
@@ -1253,9 +1255,40 @@ function formatFileSize(bytes: unknown): string {
   return `${(value / 1024 ** unit).toFixed(unit ? 1 : 0)} ${units[unit]}`;
 }
 
+type DockerAction = "start" | "stop" | "restart";
+
+type DockerServiceInfo = {
+  id: string;
+  label: string;
+  container: string;
+  composeService: string;
+  healthKey: string | null;
+  isSelf: boolean;
+  actions: DockerAction[];
+  available: boolean;
+  error?: string;
+  state: {
+    exists: boolean;
+    running: boolean;
+    status: string;
+    startedAt?: string | null;
+  };
+};
+
+type DockerServicesResponse = {
+  available: boolean;
+  socket?: string;
+  error?: string | null;
+  services: DockerServiceInfo[];
+  byHealthKey: Record<string, string>;
+  appServiceId: string;
+};
+
 function HealthTab() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [stopConfirm, setStopConfirm] = useState<DockerServiceInfo | null>(null);
+
   const { data: health, isLoading, refetch } = useQuery({
     queryKey: ["admin-health"],
     queryFn: async () => {
@@ -1263,6 +1296,74 @@ function HealthTab() {
       return data;
     },
   });
+
+  const {
+    data: dockerInfo,
+    refetch: refetchDocker,
+  } = useQuery({
+    queryKey: ["admin-docker-services"],
+    queryFn: async () => {
+      const { data } = await api.get("/admin/docker/services");
+      return data as DockerServicesResponse;
+    },
+    retry: 1,
+  });
+
+  const dockerById = useMemo(() => {
+    const map = new Map<string, DockerServiceInfo>();
+    for (const s of dockerInfo?.services || []) map.set(s.id, s);
+    return map;
+  }, [dockerInfo]);
+
+  const dockerForHealth = (healthKey: string): DockerServiceInfo | undefined => {
+    const id = dockerInfo?.byHealthKey?.[healthKey];
+    return id ? dockerById.get(id) : undefined;
+  };
+
+  const refreshHealth = async () => {
+    await Promise.all([refetch(), refetchDocker()]);
+  };
+
+  const dockerAction = useMutation({
+    mutationFn: async ({ serviceId, action }: { serviceId: string; action: DockerAction }) => {
+      const { data } = await api.post(
+        `/admin/docker/services/${serviceId}/${action}`,
+        null,
+        { timeout: 90_000 },
+      );
+      return data as {
+        ok: boolean;
+        message?: string;
+        deferred?: boolean;
+        serviceId: string;
+        action: string;
+      };
+    },
+    onSuccess: async (data) => {
+      toast(data.message || "Container action completed", data.deferred ? "info" : "success");
+      setStopConfirm(null);
+      // Give containers a moment, then refresh probes + docker state.
+      const delays = data.deferred ? [2500, 6000, 12000] : [800, 2500, 5000];
+      for (const delay of delays) {
+        await new Promise((r) => setTimeout(r, delay));
+        await refreshHealth();
+        if (data.serviceId === "app") {
+          await queryClient.invalidateQueries({ queryKey: ["uptime-check"] });
+        }
+      }
+    },
+    onError: (err: any) => {
+      toast(err.response?.data?.detail || "Container action failed", "error");
+    },
+  });
+
+  const runDockerAction = (svc: DockerServiceInfo, action: DockerAction) => {
+    if (action === "stop") {
+      setStopConfirm(svc);
+      return;
+    }
+    dockerAction.mutate({ serviceId: svc.id, action });
+  };
 
   const libraryRefresh = useMutation({
     mutationFn: async () => {
@@ -1313,6 +1414,9 @@ function HealthTab() {
 
   const h = health as Record<string, any>;
   const svc = (key: string) => h[key] || {};
+  const busyId = dockerAction.isPending
+    ? (dockerAction.variables?.serviceId ?? null)
+    : null;
 
   return (
     <div className="space-y-4 min-w-0">
@@ -1325,10 +1429,18 @@ function HealthTab() {
           Service health, disk, and library scans. API keys and OpenRouter live under Integrations;
           Open Library catalog build/schedule under Catalog.
         </p>
+        {dockerInfo && !dockerInfo.available && (
+          <p className="text-xs text-amber-400/90 mt-2 max-w-xl">
+            Container controls unavailable
+            {dockerInfo.error ? `: ${dockerInfo.error}` : ""}. Mount docker.sock and set{" "}
+            <code className="text-amber-300">DOCKER_GID</code> on the Pi, then recreate the app
+            container.
+          </p>
+        )}
       </div>
       <div className="flex flex-wrap gap-2">
         <button
-          onClick={() => refetch()}
+          onClick={() => void refreshHealth()}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-gray-300 text-sm rounded-lg hover:bg-gray-700 border border-gray-700"
         >
           <RefreshCw size={14} /> Refresh
@@ -1346,7 +1458,11 @@ function HealthTab() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <UptimeCard />
+        <UptimeCard
+          docker={dockerById.get("app")}
+          onAction={runDockerAction}
+          busy={busyId === "app"}
+        />
         <HealthCard
           title="Real-Debrid"
           configured={svc("real_debrid").configured !== false}
@@ -1379,6 +1495,9 @@ function HealthTab() {
           items={[
             { label: "URL", value: svc("audiobookshelf").url || "N/A" },
           ]}
+          docker={dockerForHealth("audiobookshelf")}
+          onDockerAction={runDockerAction}
+          dockerBusy={busyId === "audiobookshelf"}
         />
         <HealthCard
           title="Kavita"
@@ -1387,6 +1506,9 @@ function HealthTab() {
           items={[
             { label: "URL", value: svc("kavita").url || "N/A" },
           ]}
+          docker={dockerForHealth("kavita")}
+          onDockerAction={runDockerAction}
+          dockerBusy={busyId === "kavita"}
         />
         <HealthCard
           title="Prowlarr"
@@ -1400,6 +1522,9 @@ function HealthTab() {
               ? [{ label: "Error", value: String(svc("prowlarr").error) }]
               : []),
           ]}
+          docker={dockerForHealth("prowlarr")}
+          onDockerAction={runDockerAction}
+          dockerBusy={busyId === "prowlarr"}
         />
         <HealthCard
           title="Jackett"
@@ -1412,6 +1537,9 @@ function HealthTab() {
               ? [{ label: "Error", value: String(svc("jackett").error) }]
               : []),
           ]}
+          docker={dockerForHealth("jackett")}
+          onDockerAction={runDockerAction}
+          dockerBusy={busyId === "jackett"}
         />
         <HealthCard
           title="FlareSolverr"
@@ -1424,6 +1552,9 @@ function HealthTab() {
               ? [{ label: "Error", value: String(svc("flaresolverr").error) }]
               : []),
           ]}
+          docker={dockerForHealth("flaresolverr")}
+          onDockerAction={runDockerAction}
+          dockerBusy={busyId === "flaresolverr"}
         />
         <HealthCard
           title="Mullvad (ABB proxy)"
@@ -1446,6 +1577,9 @@ function HealthTab() {
               ? [{ label: "Error", value: String(svc("mullvad_proxy").error) }]
               : []),
           ]}
+          docker={dockerForHealth("mullvad_proxy")}
+          onDockerAction={runDockerAction}
+          dockerBusy={busyId === "gluetun"}
         />
         <HealthCard
           title="Knaben"
@@ -1502,13 +1636,16 @@ function HealthTab() {
               ? [{ label: "Error", value: String(svc("libraforge").error) }]
               : []),
           ]}
+          docker={dockerForHealth("libraforge")}
+          onDockerAction={runDockerAction}
+          dockerBusy={busyId === "libraforge"}
           action={
             svc("libraforge").url ? (
               <a
                 href={String(svc("libraforge").url)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 mt-3 text-sm rounded-lg bg-teal-900/40 text-teal-200 border border-teal-800/50 hover:bg-teal-900/60"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-teal-900/40 text-teal-200 border border-teal-800/50 hover:bg-teal-900/60"
               >
                 <ExternalLink size={14} /> Open LibraForge
               </a>
@@ -1527,11 +1664,141 @@ function HealthTab() {
           ]}
         />
       </div>
+
+      <Modal
+        title="Stop container?"
+        show={stopConfirm !== null}
+        onClose={() => !dockerAction.isPending && setStopConfirm(null)}
+      >
+        <p className="text-sm text-gray-400 mb-4">
+          Stop{" "}
+          <span className="text-gray-200">{stopConfirm?.label}</span> (
+          <code className="text-xs text-gray-300">{stopConfirm?.container}</code>)? Dependent
+          features may fail until you start it again.
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            disabled={dockerAction.isPending}
+            onClick={() => setStopConfirm(null)}
+            className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={dockerAction.isPending || !stopConfirm}
+            onClick={() =>
+              stopConfirm &&
+              dockerAction.mutate({ serviceId: stopConfirm.id, action: "stop" })
+            }
+            className="px-3 py-1.5 text-sm rounded-lg bg-red-900/50 text-red-200 border border-red-800/60 hover:bg-red-900/70 disabled:opacity-50"
+          >
+            {dockerAction.isPending ? "Stopping…" : "Stop"}
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }
 
-function UptimeCard() {
+function ContainerControls({
+  docker,
+  onAction,
+  busy,
+}: {
+  docker?: DockerServiceInfo;
+  onAction: (svc: DockerServiceInfo, action: DockerAction) => void;
+  busy?: boolean;
+}) {
+  if (!docker) return null;
+  const running = !!docker.state?.running;
+  const exists = !!docker.state?.exists;
+  const can = (action: DockerAction) => docker.actions.includes(action);
+  const socketOk = docker.available !== false;
+  const disabled = busy || !socketOk;
+
+  const btn =
+    "inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg border disabled:opacity-40 disabled:cursor-not-allowed";
+
+  return (
+    <div className="mt-3 pt-3 border-t border-gray-700/80 space-y-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {can("start") && (
+          <button
+            type="button"
+            title={
+              !socketOk
+                ? docker.error || "Docker socket unavailable"
+                : running
+                  ? "Already running"
+                  : !exists
+                    ? "Start container (must already exist from compose)"
+                    : "Start container"
+            }
+            disabled={disabled || running}
+            onClick={() => onAction(docker, "start")}
+            className={`${btn} bg-emerald-950/50 text-emerald-300 border-emerald-800/50 hover:bg-emerald-900/50`}
+          >
+            <Play size={12} /> Start
+          </button>
+        )}
+        {can("stop") && (
+          <button
+            type="button"
+            title={!socketOk ? docker.error || "Docker socket unavailable" : "Stop container"}
+            disabled={disabled || !running}
+            onClick={() => onAction(docker, "stop")}
+            className={`${btn} bg-red-950/40 text-red-300 border-red-800/50 hover:bg-red-900/50`}
+          >
+            <Square size={12} /> Stop
+          </button>
+        )}
+        {can("restart") && (
+          <button
+            type="button"
+            title={
+              docker.isSelf
+                ? "Restart Library app (brief outage; scheduled after confirm)"
+                : !socketOk
+                  ? docker.error || "Docker socket unavailable"
+                  : "Restart container"
+            }
+            disabled={disabled || (!running && !docker.isSelf)}
+            onClick={() => onAction(docker, "restart")}
+            className={`${btn} bg-gray-900 text-gray-300 border-gray-700 hover:bg-gray-700`}
+          >
+            <RotateCcw size={12} className={busy ? "animate-spin" : ""} />{" "}
+            {busy ? "Working…" : "Restart"}
+          </button>
+        )}
+        {docker.state?.status && docker.state.status !== "unknown" && (
+          <span className="ml-auto text-[11px] text-gray-500 capitalize">
+            {docker.state.status.replace(/_/g, " ")}
+          </span>
+        )}
+      </div>
+      {docker.isSelf && (
+        <p className="text-[11px] text-gray-500">
+          Stop/Start disabled for the Library app (would kill this session). Restart is deferred ~2s.
+        </p>
+      )}
+      {!socketOk && docker.error && (
+        <p className="text-[11px] text-amber-500/90 break-words">{docker.error}</p>
+      )}
+    </div>
+  );
+}
+
+function UptimeCard({
+  docker,
+  onAction,
+  busy,
+}: {
+  docker?: DockerServiceInfo;
+  onAction: (svc: DockerServiceInfo, action: DockerAction) => void;
+  busy?: boolean;
+}) {
   const { data, isFetching, isError, refetch } = useQuery({
     queryKey: ["uptime-check"],
     queryFn: async () => {
@@ -1556,6 +1823,7 @@ function UptimeCard() {
         className="inline-flex items-center gap-1.5 px-3 py-1.5 mt-3 text-sm rounded-lg bg-gray-900 text-gray-300 border border-gray-700 hover:bg-gray-700 disabled:opacity-50">
         <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} /> Refresh
       </button>
+      <ContainerControls docker={docker} onAction={onAction} busy={busy} />
     </div>
   );
 }
@@ -2172,12 +2440,18 @@ function HealthCard({
   configured = true,
   items,
   action,
+  docker,
+  onDockerAction,
+  dockerBusy,
 }: {
   title: string;
   connected: boolean;
   configured?: boolean;
   items: { label: string; value: string }[];
   action?: ReactNode;
+  docker?: DockerServiceInfo;
+  onDockerAction?: (svc: DockerServiceInfo, action: DockerAction) => void;
+  dockerBusy?: boolean;
 }) {
   const dot =
     !configured ? "bg-amber-500" : connected ? "bg-green-500" : "bg-red-500";
@@ -2198,7 +2472,12 @@ function HealthCard({
           </div>
         ))}
       </div>
-      {action}
+      {action && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">{action}</div>
+      )}
+      {docker && onDockerAction && (
+        <ContainerControls docker={docker} onAction={onDockerAction} busy={dockerBusy} />
+      )}
     </div>
   );
 }

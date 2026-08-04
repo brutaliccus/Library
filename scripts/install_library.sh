@@ -155,6 +155,9 @@ set_env SECRET_KEY "$SECRET_KEY"
 # Match LibraForge default UID so M4B/Folder Forge can write shared media.
 set_env PUID "1000"
 set_env PGID "1000"
+# Admin Health Start/Stop/Restart needs docker.sock + docker group membership.
+_docker_gid="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
+set_env DOCKER_GID "${_docker_gid:-998}"
 
 c_cyan "==> Host media mounts (must exist)"
 prompt AUDIO_HOST "Host audiobooks path" "./media/audiobooks"

@@ -330,6 +330,13 @@ Set-EnvKey $envPath "APP_URL" $APP_URL
 Set-EnvKey $envPath "SECRET_KEY" $SECRET_KEY
 Set-EnvKey $envPath "PUID" "1000"
 Set-EnvKey $envPath "PGID" "1000"
+# Admin Health Start/Stop/Restart — host docker group GID (WSL/Linux often 998/999).
+$dockerGid = "998"
+try {
+  $gidLine = & getent group docker 2>$null
+  if ($gidLine -match ":(\d+):") { $dockerGid = $Matches[1] }
+} catch { }
+Set-EnvKey $envPath "DOCKER_GID" $dockerGid
 
 Write-Step "==> Host media mounts (must exist)"
 $AUDIO_HOST = Read-Default "Host audiobooks path" $AudioHost

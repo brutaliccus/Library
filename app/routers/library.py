@@ -35,8 +35,6 @@ logger = logging.getLogger(__name__)
 
 # Coalesce concurrent full collection rebuilds (refresh=true storms on Pi).
 _collection_inflight: dict[str, asyncio.Future] = {}
-# Single background ABS scan+cleanup task for wait=false kicks.
-_bg_abs_scan_task: asyncio.Task | None = None
 
 # Build a lookup: lowercased sub-genre name/keyword -> top-level genre name
 # Same taxonomy as store `/books/genres` (GENRE_TAXONOMY).
@@ -923,6 +921,138 @@ async def abs_item_detail(
     }
 
 
+def _kavita_volume_title(series_name: str, vol: dict, chapter: dict) -> str:
+    """Best display title for one Kavita volume (prefer file stem over placeholder chapter titles)."""
+    files = chapter.get("files") or []
+    best_stem = ""
+    best_rank = -1
+    for f in files:
+        path = str(f.get("filePath") or f.get("fileName") or "")
+        stem = Path(path).stem if path else ""
+        if not stem:
+            continue
+        # Prefer canonical file over re-download duplicates: "Title (2).epub"
+        rank = 0 if re.search(r"\s\(\d+\)$", stem) else 10
+        if rank > best_rank:
+            best_rank = rank
+            best_stem = stem
+    if best_stem:
+        return best_stem
+    for key in ("titleName", "title", "range"):
+        raw = (chapter.get(key) or vol.get(key) or "").strip()
+        if raw and raw not in ("-100000", "0", "Special"):
+            return raw
+    vol_num = vol.get("number")
+    if vol_num is not None and float(vol_num or 0) > 0:
+        return f"{series_name} {vol_num}".strip()
+    return series_name
+
+
+def _kavita_collection_items_from_series(
+    s: dict,
+    volumes: list,
+    meta: dict,
+    *,
+    hidden_titles: set[str],
+) -> list[dict]:
+    """Expand one Kavita series into one shelf item per volume so series books accumulate."""
+    name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
+    if not name or _is_hidden(name, hidden_titles):
+        return []
+
+    writers = meta.get("writers") or s.get("authors") or []
+    author = ""
+    if writers:
+        author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
+    genres = _normalize_item_genres(meta.get("genres") or [])
+
+    added_at = s.get("created") or s.get("lastChapterAdded") or meta.get("releaseYear") or 0
+    try:
+        if isinstance(added_at, str) and added_at:
+            from datetime import datetime
+
+            added_ms = int(datetime.fromisoformat(added_at.replace("Z", "+00:00")).timestamp() * 1000)
+        else:
+            added_ms = int(added_at or 0)
+            if added_ms < 10_000_000_000:
+                added_ms = added_ms * 1000 if added_ms else 0
+    except Exception:
+        added_ms = 0
+
+    sid = s.get("id")
+    vol_entries: list[tuple[float, dict, dict]] = []
+    for vol in volumes or []:
+        chapters = vol.get("chapters") or []
+        if not chapters:
+            continue
+        ch = chapters[0]
+        if ch.get("id") is None:
+            continue
+        vol_num = kavita_ebook_match._volume_index(vol)
+        sort_key = vol_num if vol_num is not None else 999.0
+        vol_entries.append((sort_key, vol, ch))
+
+    if not vol_entries:
+        # Series row with no volumes yet — keep a placeholder card.
+        return [{
+            "seriesId": sid,
+            "volumeId": None,
+            "volumeNumber": None,
+            "title": name,
+            "author": author,
+            "coverUrl": f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else "",
+            "chapterId": None,
+            "genres": genres,
+            "seriesName": "",
+            "sequence": "",
+            "series": [],
+            "addedAt": added_ms,
+            "volumeCount": 0,
+            "source": "kavita",
+        }]
+
+    vol_entries.sort(key=lambda x: x[0])
+    multi = len(vol_entries) > 1
+    items: list[dict] = []
+    for sort_key, vol, ch in vol_entries:
+        chapter_id = int(ch["id"])
+        volume_id = vol.get("id")
+        vol_num = kavita_ebook_match._volume_index(vol)
+        title = _kavita_volume_title(name, vol, ch) if multi else name
+        seq = ""
+        if vol_num is not None and vol_num > 0:
+            seq = str(int(vol_num)) if float(vol_num).is_integer() else str(vol_num)
+        sname = name if multi else ""
+        if not sname:
+            inferred = library_series_from_title(title)
+            if inferred and not is_junk_series_hint(inferred[0]):
+                sname, seq = inferred[0], str(inferred[1] or seq)
+
+        cover_url = f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else ""
+        if cover_url and volume_id:
+            cover_url += f"&volumeId={volume_id}"
+        if cover_url and chapter_id:
+            cover_url += f"&chapterId={chapter_id}"
+
+        items.append({
+            "seriesId": sid,
+            "volumeId": volume_id,
+            "volumeNumber": vol_num,
+            "title": title,
+            "author": author,
+            "coverUrl": cover_url,
+            "chapterId": chapter_id,
+            "genres": genres,
+            "seriesName": sname,
+            "sequence": seq,
+            "series": [{"name": sname, "sequence": seq}] if sname else [],
+            "addedAt": added_ms,
+            "volumeCount": len(vol_entries),
+            "source": "kavita",
+        })
+    return items
+
+
 @router.get("/kavita/collection")
 async def kavita_collection(
     user: User = Depends(get_current_user),
@@ -932,7 +1062,10 @@ async def kavita_collection(
         description="Bypass short-TTL collection + Kavita series caches (use after scans).",
     ),
 ):
-    """Return all Kavita ebook series (EPUB/PDF) for the library view."""
+    """Return Kavita ebook volumes (EPUB/PDF) for the library view.
+
+    Multi-volume series expand to one shelf item per volume so Book 1/2/3 all appear.
+    """
     cache_key = f"kavita_coll:{user.id}"
     if not refresh:
         cached = library_collection_cache.get(cache_key)
@@ -962,66 +1095,11 @@ async def kavita_collection(
         results = await asyncio.gather(*[volumes_and_meta(s) for s in series])
         items: list[dict] = []
         for s, volumes, meta in results:
-            name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
-            if not name or _is_hidden(name, hidden_titles):
-                continue
-            book_num = kavita_ebook_match._book_number_from_text(name)
-            chapter_id = kavita_ebook_match._pick_chapter_id(volumes, book_num)
-            volume_id: int | None = None
-            for vol in volumes:
-                chapters = vol.get("chapters", [])
-                if chapters and chapters[0].get("id") == chapter_id:
-                    volume_id = vol.get("id")
-                    break
-                if chapter_id is None and chapters:
-                    chapter_id = chapters[0].get("id")
-                    volume_id = vol.get("id")
-                    break
-            sid = s.get("id")
-            cover_url = f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else ""
-            if cover_url and volume_id:
-                cover_url += f"&volumeId={volume_id}"
-            if cover_url and chapter_id:
-                cover_url += f"&chapterId={chapter_id}"
-
-            writers = meta.get("writers") or s.get("authors") or []
-            author = ""
-            if writers:
-                author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
-            genres = _normalize_item_genres(meta.get("genres") or [])
-            # Local series from title cues (LibraForge-cleaned titles) — no Hardcover.
-            inferred = library_series_from_title(name)
-            sname = ""
-            seq = ""
-            if inferred and not is_junk_series_hint(inferred[0]):
-                sname, seq = inferred[0], str(inferred[1] or "")
-
-            added_at = s.get("created") or s.get("lastChapterAdded") or meta.get("releaseYear") or 0
-            try:
-                # Kavita may return ISO strings or epoch ms
-                if isinstance(added_at, str) and added_at:
-                    from datetime import datetime
-                    added_ms = int(datetime.fromisoformat(added_at.replace("Z", "+00:00")).timestamp() * 1000)
-                else:
-                    added_ms = int(added_at or 0)
-                    if added_ms < 10_000_000_000:  # seconds → ms
-                        added_ms = added_ms * 1000 if added_ms else 0
-            except Exception:
-                added_ms = 0
-
-            items.append({
-                "seriesId": s.get("id"),
-                "title": name,
-                "author": author,
-                "coverUrl": cover_url,
-                "chapterId": chapter_id,
-                "genres": genres,
-                "seriesName": sname,
-                "sequence": seq,
-                "series": [{"name": sname, "sequence": seq}] if sname else [],
-                "addedAt": added_ms,
-                "source": "kavita",
-            })
+            items.extend(
+                _kavita_collection_items_from_series(
+                    s, volumes, meta, hidden_titles=hidden_titles
+                )
+            )
         # Skip HC enrich on forced refresh (same Pi load reason as ABS collection).
         if not refresh:
             items = await _enrich_items_via_hardcover(items)
@@ -1053,15 +1131,35 @@ async def kavita_item_detail(
     book_num = kavita_ebook_match._book_number_from_text(name)
     chapter_id = kavita_ebook_match._pick_chapter_id(volumes, book_num)
     volume_id: int | None = None
-    for vol in volumes:
-        chapters = vol.get("chapters", [])
-        if chapters and chapters[0].get("id") == chapter_id:
-            volume_id = vol.get("id")
-            break
-        if chapter_id is None and chapters:
-            chapter_id = chapters[0].get("id")
-            volume_id = vol.get("id")
-            break
+    volume_list: list[dict] = []
+    for vol in volumes or []:
+        chapters = vol.get("chapters") or []
+        if not chapters:
+            continue
+        ch = chapters[0]
+        ch_id = ch.get("id")
+        if ch_id is None:
+            continue
+        v_id = vol.get("id")
+        v_num = kavita_ebook_match._volume_index(vol)
+        v_title = _kavita_volume_title(name, vol, ch)
+        volume_list.append({
+            "volumeId": v_id,
+            "volumeNumber": v_num,
+            "chapterId": int(ch_id),
+            "title": v_title,
+        })
+        if chapter_id is not None and int(ch_id) == int(chapter_id):
+            volume_id = v_id
+        elif chapter_id is None:
+            chapter_id = int(ch_id)
+            volume_id = v_id
+    volume_list.sort(
+        key=lambda v: (
+            v["volumeNumber"] is None,
+            v["volumeNumber"] if v["volumeNumber"] is not None else 999.0,
+        )
+    )
     cover_url = f"/api/library/reader/cover/ebook?seriesId={series_id}"
     if volume_id:
         cover_url += f"&volumeId={volume_id}"
@@ -1077,6 +1175,8 @@ async def kavita_item_detail(
     sname, seq = "", ""
     if inferred and not is_junk_series_hint(inferred[0]):
         sname, seq = inferred[0], str(inferred[1] or "")
+    if not sname and len(volume_list) > 1:
+        sname = name
     series_out = [{"name": sname, "sequence": seq}] if sname else []
 
     abs_item_id = ""
@@ -1098,6 +1198,7 @@ async def kavita_item_detail(
         "chapterId": chapter_id,
         "coverUrl": cover_url,
         "series": series_out,
+        "volumes": volume_list,
         "absItemId": abs_item_id or None,
     }
 
@@ -1281,16 +1382,6 @@ def _get_tracks(item: StreamingLibraryItem) -> list:
         return []
 
 
-async def _abs_scan_wait_and_cleanup() -> None:
-    """Background: wait for ABS scan, remove orphans, invalidate caches."""
-    try:
-        await audiobookshelf.scan_library_and_wait()
-        await audiobookshelf.remove_items_with_issues()
-        audiobookshelf.invalidate_cache()
-    except Exception:
-        logger.exception("Background ABS scan/cleanup failed")
-
-
 @router.post("/abs/scan")
 async def trigger_abs_scan(
     wait: bool = Query(
@@ -1300,53 +1391,23 @@ async def trigger_abs_scan(
     user: User = Depends(get_current_user),
 ):
     """Trigger an ABS library scan; optionally wait for completion and clean orphans."""
-    global _bg_abs_scan_task
     try:
-        if not wait:
-            # Coalesce: do not stack scan_library_and_wait + invalidate storms.
-            # Invalidate only after the background scan finishes (in cleanup helper).
-            if _bg_abs_scan_task is not None and not _bg_abs_scan_task.done():
-                return {
-                    "ok": True,
-                    "message": "Library scan already running in background",
-                    "scan_ran": True,
-                    "scan_complete": False,
-                    "timed_out": False,
-                    "deferred": True,
-                    "already_running": True,
-                    "waited_seconds": 0,
-                    "items_total": None,
-                }
-            _bg_abs_scan_task = asyncio.create_task(_abs_scan_wait_and_cleanup())
-            return {
-                "ok": True,
-                "message": "Library scan started; cleanup continues in background",
-                "scan_ran": True,
-                "scan_complete": False,
-                "timed_out": False,
-                "deferred": True,
-                "already_running": False,
-                "waited_seconds": 0,
-                "items_total": None,
-            }
-
-        scan_status = await audiobookshelf.scan_library_and_wait()
-        await audiobookshelf.remove_items_with_issues()
-        audiobookshelf.invalidate_cache()
+        result = await audiobookshelf.kick_library_scan(wait=wait)
+        if result.get("error") and not result.get("ok"):
+            raise HTTPException(status_code=502, detail=result.get("message") or result["error"])
         return {
-            "ok": True,
-            "message": (
-                "Library scanned and cleaned up"
-                if scan_status.get("scan_complete")
-                else "Library scan started but did not finish before timeout; refresh again shortly"
-            ),
-            "scan_ran": bool(scan_status.get("scan_ran")),
-            "scan_complete": bool(scan_status.get("scan_complete")),
-            "timed_out": bool(scan_status.get("timed_out")),
-            "waited_seconds": scan_status.get("waited_seconds"),
-            "items_total": scan_status.get("items_total"),
-            "deferred": False,
+            "ok": bool(result.get("ok")),
+            "message": result.get("message") or "Library scan",
+            "scan_ran": bool(result.get("scan_ran")),
+            "scan_complete": bool(result.get("scan_complete")),
+            "timed_out": bool(result.get("timed_out")),
+            "waited_seconds": result.get("waited_seconds"),
+            "items_total": result.get("items_total"),
+            "deferred": bool(result.get("deferred")),
+            "already_running": bool(result.get("already_running")),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

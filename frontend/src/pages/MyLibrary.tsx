@@ -142,6 +142,9 @@ interface SearchResult {
 
 interface KavitaItem {
   seriesId: number;
+  volumeId?: number | null;
+  volumeNumber?: number | null;
+  volumeCount?: number;
   title: string;
   author: string;
   coverUrl: string;
@@ -579,9 +582,11 @@ export default function MyLibrary() {
     }
 
     if (wantEbook && kavitaCollection?.items) {
-      const seen = new Set<number>();
+      const seen = new Set<string>();
       for (const item of kavitaCollection.items as KavitaItem[]) {
-        if (item.seriesId == null || seen.has(item.seriesId)) continue;
+        if (item.seriesId == null) continue;
+        const key = `${item.seriesId}:${item.chapterId ?? item.volumeId ?? "s"}`;
+        if (seen.has(key)) continue;
         if (
           !match(
             item.title,
@@ -593,7 +598,7 @@ export default function MyLibrary() {
         ) {
           continue;
         }
-        seen.add(item.seriesId);
+        seen.add(key);
         out.push({
           title: item.title,
           author: item.author,
@@ -629,7 +634,7 @@ export default function MyLibrary() {
   const mergedSearchResults = useMemo(() => {
     const byKey = new Map<string, SearchResult>();
     const keyOf = (r: SearchResult) =>
-      `${r.source}:${r.itemId || r.libraryItemId || r.seriesId || r.title}`;
+      `${r.source}:${r.itemId || r.libraryItemId || `${r.seriesId ?? ""}:${r.chapterId ?? ""}` || r.title}`;
     for (const r of localSearchResults) byKey.set(keyOf(r), r);
     for (const r of searchResults?.results || []) {
       const k = keyOf(r);
@@ -940,7 +945,11 @@ export default function MyLibrary() {
     async (title: string, author?: string, target?: { ebookChapterId?: number; ebookSeriesId?: number; absItemId?: string }) => {
       persistLibraryUi();
       if (target?.ebookSeriesId != null) {
-        navigate(`/library/ebook/${target.ebookSeriesId}`);
+        const q =
+          target.ebookChapterId != null
+            ? `?chapter=${encodeURIComponent(String(target.ebookChapterId))}`
+            : "";
+        navigate(`/library/ebook/${target.ebookSeriesId}${q}`);
         return;
       }
       if (target?.ebookChapterId != null) {
@@ -1938,7 +1947,7 @@ export default function MyLibrary() {
                     <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
                       {filteredEbookItems.map((item) => (
                         <EbookCard
-                          key={item.seriesId}
+                          key={`${item.seriesId}-${item.chapterId ?? item.volumeId ?? "x"}`}
                           item={item}
                           onNavigateToBook={handleNavigateToBook}
                           hasAudio={formatMatches?.[item.title]?.hasAudio}
@@ -2426,7 +2435,7 @@ function EbookGenreRow({
           const cached = item.chapterId != null && !!cachedIds?.has(item.chapterId);
           return (
             <EbookCard
-              key={item.seriesId}
+              key={`${item.seriesId}-${item.chapterId ?? item.volumeId ?? "x"}`}
               item={item}
               onNavigateToBook={onNavigateToBook}
               hasAudio={formatMatches?.[item.title]?.hasAudio}
@@ -2518,7 +2527,10 @@ function EbookCard({
   }, [item.coverUrl, item.seriesId]);
 
   const handleClick = () => {
-    onNavigateToBook(item.title, item.author, { ebookSeriesId: item.seriesId });
+    onNavigateToBook(item.title, item.author, {
+      ebookSeriesId: item.seriesId,
+      ebookChapterId: item.chapterId ?? undefined,
+    });
   };
 
   const fallback = (

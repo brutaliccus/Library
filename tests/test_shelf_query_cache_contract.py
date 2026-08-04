@@ -75,6 +75,8 @@ def test_soft_refresh_defaults_to_no_cache_bust():
 def test_admin_fix_metadata_soft_refreshes_collection_cache():
     src = ADMIN.read_text(encoding="utf-8")
     assert "softRefreshLibraryCollectionQueries" in src
+    assert "Library Refresh" in src
+    assert "/admin/library/refresh" in src
     assert "bustMs: 5_000" in src or "bustMs: 5000" in src.replace("_", "")
     assert "bustMs: 0" in src
 
@@ -83,12 +85,20 @@ def test_abs_scan_supports_deferred_wait_false():
     src = LIBRARY_ROUTER.read_text(encoding="utf-8")
     assert "wait: bool" in src or "wait: bool =" in src.replace(" ", "")
     assert "deferred" in src
-    assert "_abs_scan_wait_and_cleanup" in src
+    assert "kick_library_scan" in src
     assert "already_running" in src
     assert "_singleflight" in src
     # Forced refresh must not run Hardcover enrich (Pi CPU).
     assert "if refresh:" in src
     assert "items = cleaned" in src
+
+
+def test_admin_library_refresh_endpoint_exists():
+    admin = Path(__file__).resolve().parents[1] / "app" / "routers" / "admin.py"
+    src = admin.read_text(encoding="utf-8")
+    assert '/library/refresh' in src or '"/library/refresh"' in src
+    assert "kick_library_scan" in src
+    assert "kavita.scan_library" in src
 
 
 def test_abs_collection_signature_logic_orphan_detection():

@@ -17,6 +17,12 @@ _CACHE_TTL = 300  # 5 minutes
 # Coalesce concurrent scan_library_and_wait callers onto one in-flight ABS scan.
 _scan_lock = asyncio.Lock()
 _scan_result_fut: asyncio.Future | None = None
+# Prevent stacked POST /scan while ABS is still working (re-POST cancels & restarts → Pi OOM).
+_scan_posted_at: float | None = None
+_scan_posted_before_last: Any = None
+_SCAN_POST_COOLDOWN_SEC = 300.0
+# Single background scan+orphan-cleanup task for deferred kicks.
+_bg_scan_cleanup_task: asyncio.Task | None = None
 
 # ABS iterates metadataPrecedence low→high; last entry wins. Keep absMetadata highest
 # so LibraForge / manual ABS edits are not replaced by folder names on scan.
@@ -47,22 +53,56 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {settings.abs_api_key}"}
 
 
-async def scan_library(library_id: str | None = None) -> None:
+async def scan_library(library_id: str | None = None, *, force: bool = False) -> bool:
     """Trigger an ABS library scan (fire-and-forget on the ABS side).
 
     ABS responds HTTP 200 immediately and continues scanning in the background.
     Prefer :func:`scan_library_and_wait` when callers need a complete index.
+
+    Returns True when a new ``POST …/scan`` was sent. Returns False when skipped
+    because a prior kick is still in flight (same ``lastScan`` within cooldown) —
+    stacking scans on a Pi cancels/restarts LibraryScanner and can OOM the host.
     """
+    global _scan_posted_at, _scan_posted_before_last
     lid = library_id or settings.abs_library_id
     if not lid:
-        return
+        return False
+
+    lib: dict[str, Any] | None = None
+    try:
+        lib = await get_library(lid)
+    except Exception as e:
+        logger.warning("ABS unreachable before scan: %s", e)
+        raise
+
+    current_last = (lib or {}).get("lastScan")
+    now = time.monotonic()
+    if (
+        not force
+        and _scan_posted_at is not None
+        and (now - _scan_posted_at) < _SCAN_POST_COOLDOWN_SEC
+        and current_last == _scan_posted_before_last
+    ):
+        logger.info(
+            "Skipping ABS scan POST for %s — prior scan still in flight "
+            "(lastScan=%s, %.0fs cooldown)",
+            lid,
+            current_last,
+            _SCAN_POST_COOLDOWN_SEC,
+        )
+        return False
+
+    _scan_posted_before_last = current_last
+    _scan_posted_at = now
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{settings.abs_url}/api/libraries/{lid}/scan",
             headers=_headers(),
+            # Never force=1 — full rescan of every file melts low-RAM hosts.
             timeout=60,
         )
         resp.raise_for_status()
+    return True
 
 
 async def get_library(library_id: str | None = None) -> dict[str, Any] | None:
@@ -156,7 +196,12 @@ async def scan_library_and_wait(
         before_last = (before_lib or {}).get("lastScan")
         started = time.monotonic()
 
-        await scan_library(lid)
+        posted = await scan_library(lid)
+        if not posted:
+            logger.info(
+                "ABS scan wait joining in-flight scan for %s (no new POST)",
+                lid,
+            )
 
         # Fallback: if lastScan never moves (already-scanning race, older ABS), treat
         # a stable item total across several polls as "done enough".
@@ -254,6 +299,107 @@ async def scan_library_and_wait(
         if not fut.done():
             fut.set_exception(e)
         raise
+
+
+async def _bg_scan_and_cleanup() -> None:
+    """Background: wait for ABS scan, remove orphans, invalidate caches."""
+    try:
+        await scan_library_and_wait()
+        await remove_items_with_issues()
+        invalidate_cache()
+    except Exception:
+        logger.exception("Background ABS scan/cleanup failed")
+
+
+async def kick_library_scan(*, wait: bool = True) -> dict[str, Any]:
+    """Safe ABS scan + orphan cleanup entry point for admin / My Library refresh.
+
+    ``wait=False`` coalesces onto one background task (no stacked scans, no
+    blocking the HTTP worker for minutes). Health-checks ABS before kicking.
+    """
+    global _bg_scan_cleanup_task
+    empty = {
+        "ok": False,
+        "scan_ran": False,
+        "scan_complete": False,
+        "timed_out": False,
+        "deferred": False,
+        "already_running": False,
+        "waited_seconds": 0.0,
+        "items_total": None,
+        "error": None,
+        "message": "Audiobookshelf library is not configured",
+    }
+    if not settings.abs_library_id or not settings.abs_api_key:
+        return empty
+
+    try:
+        healthy = await health_check()
+    except Exception as e:
+        return {**empty, "error": str(e), "message": "ABS health check failed"}
+    if not healthy:
+        return {
+            **empty,
+            "error": "ABS healthcheck failed",
+            "message": "Audiobookshelf is not reachable — scan skipped",
+        }
+
+    if not wait:
+        if _bg_scan_cleanup_task is not None and not _bg_scan_cleanup_task.done():
+            return {
+                "ok": True,
+                "scan_ran": True,
+                "scan_complete": False,
+                "timed_out": False,
+                "deferred": True,
+                "already_running": True,
+                "waited_seconds": 0.0,
+                "items_total": None,
+                "error": None,
+                "message": "Library scan already running in background",
+            }
+        _bg_scan_cleanup_task = asyncio.create_task(_bg_scan_and_cleanup())
+        return {
+            "ok": True,
+            "scan_ran": True,
+            "scan_complete": False,
+            "timed_out": False,
+            "deferred": True,
+            "already_running": False,
+            "waited_seconds": 0.0,
+            "items_total": None,
+            "error": None,
+            "message": "Library scan started; cleanup continues in background",
+        }
+
+    try:
+        scan_status = await scan_library_and_wait()
+        await remove_items_with_issues()
+        invalidate_cache()
+        complete = bool(scan_status.get("scan_complete"))
+        return {
+            "ok": True,
+            "scan_ran": bool(scan_status.get("scan_ran")),
+            "scan_complete": complete,
+            "timed_out": bool(scan_status.get("timed_out")),
+            "deferred": False,
+            "already_running": False,
+            "waited_seconds": scan_status.get("waited_seconds") or 0.0,
+            "items_total": scan_status.get("items_total"),
+            "error": None,
+            "message": (
+                "Library scanned and cleaned up"
+                if complete
+                else "Library scan started but did not finish before timeout; refresh again shortly"
+            ),
+        }
+    except Exception as e:
+        logger.warning("kick_library_scan wait path failed: %s", e)
+        return {
+            **empty,
+            "error": str(e),
+            "message": f"ABS scan failed: {e}",
+        }
 
 
 async def match_all_items(library_id: str | None = None) -> bool:
@@ -1456,36 +1602,30 @@ async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, An
     items_total: int | None = None
     orphan_cleanup_ok = False
     try:
-        scan_status = await scan_library_and_wait(lid)
-        scan_ran = bool(scan_status.get("scan_ran"))
-        scan_complete = bool(scan_status.get("scan_complete"))
-        timed_out = bool(scan_status.get("timed_out"))
-        waited_seconds = float(scan_status.get("waited_seconds") or 0)
-        items_total = scan_status.get("items_total")
-        orphan_cleanup_ok = await remove_items_with_issues(lid)
+        # Prefer deferred kick — blocking wait + full item pagination after a
+        # scan has OOM'd / rebooted the Pi when admin hammered "Scan ABS".
+        kick = await kick_library_scan(wait=False)
+        scan_ran = bool(kick.get("scan_ran"))
+        scan_complete = bool(kick.get("scan_complete"))
+        timed_out = bool(kick.get("timed_out"))
+        waited_seconds = float(kick.get("waited_seconds") or 0)
+        items_total = kick.get("items_total")
+        # Orphan cleanup runs inside the background task after scan finishes.
+        orphan_cleanup_ok = bool(kick.get("deferred") or kick.get("scan_complete"))
+        if kick.get("error"):
+            logger.warning("fix_metadata_mismatches: %s", kick.get("error"))
     except Exception as e:
         logger.warning("fix_metadata_mismatches: library scan / orphan cleanup failed: %s", e)
 
+    # Cheap total — never paginate the whole library right after kicking a scan.
     items_examined = 0
     try:
-        items = await _fetch_library_items_all_pages(lid)
-        items_examined = len(items)
-        if items_total is None:
-            items_total = items_examined
+        total = await get_library_item_total(lid)
+        if total is not None:
+            items_total = total
+            items_examined = total
     except Exception as e:
-        logger.warning("Failed to paginate-fetch ABS items after scan: %s", e, exc_info=True)
-        out = {
-            **empty,
-            "scan_ran": scan_ran,
-            "scan_complete": scan_complete,
-            "timed_out": timed_out,
-            "waited_seconds": waited_seconds,
-            "items_total": items_total,
-            "orphan_cleanup_ok": orphan_cleanup_ok,
-            "hardening": hardening,
-        }
-        out["fetch_error"] = str(e)
-        return out
+        logger.warning("Failed to fetch ABS item total after scan kick: %s", e)
 
     if scan_ran or orphan_cleanup_ok:
         invalidate_cache()
@@ -1502,6 +1642,7 @@ async def fix_metadata_mismatches(library_id: str | None = None) -> dict[str, An
         "items_examined": items_examined,
         "fetch_error": None,
         "hardening": hardening,
+        "deferred": True,
     }
 
 

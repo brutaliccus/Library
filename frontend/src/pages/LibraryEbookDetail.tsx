@@ -1,6 +1,6 @@
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import api from "../api/client";
 import { resolveShareOrigin } from "../api/inviteLink";
 import { useToast } from "../contexts/ToastContext";
@@ -14,6 +14,13 @@ import Modal from "../components/Modal";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
 
+interface EbookVolume {
+  volumeId: number | null;
+  volumeNumber: number | null;
+  chapterId: number;
+  title: string;
+}
+
 interface EbookItemDetail {
   seriesId: number;
   title: string;
@@ -23,12 +30,14 @@ interface EbookItemDetail {
   series: Array<{ name: string; sequence: string }>;
   chapterId: number | null;
   coverUrl: string;
+  volumes?: EbookVolume[];
   absItemId?: string | null;
 }
 
 export default function LibraryEbookDetail() {
   const { seriesId: rawId } = useParams<{ seriesId: string }>();
   const seriesId = rawId ? Number(rawId) : NaN;
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -51,17 +60,31 @@ export default function LibraryEbookDetail() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const volumes = item?.volumes || [];
+  const preferredChapter = Number(searchParams.get("chapter") || "");
+  const activeChapterId = useMemo(() => {
+    if (Number.isFinite(preferredChapter) && preferredChapter > 0) {
+      if (volumes.some((v) => v.chapterId === preferredChapter)) {
+        return preferredChapter;
+      }
+    }
+    return item?.chapterId ?? volumes[0]?.chapterId ?? null;
+  }, [item?.chapterId, preferredChapter, volumes]);
+
+  const activeVolume = volumes.find((v) => v.chapterId === activeChapterId) || null;
+  const displayTitle = activeVolume?.title || item?.title || "";
+
   const handleViewInStore = async () => {
     if (!item) return;
     setStoreLoading(true);
     try {
       const q = item.author
-        ? `intitle:${JSON.stringify(item.title)} inauthor:${item.author}`
-        : item.title;
+        ? `intitle:${JSON.stringify(displayTitle)} inauthor:${item.author}`
+        : displayTitle;
       const { data } = await api.get(`/books/search?q=${encodeURIComponent(q)}&pageSize=5`);
       const books = (data as { books?: { id: string; title: string }[] })?.books;
       if (books?.length) {
-        const titleLower = item.title.toLowerCase();
+        const titleLower = displayTitle.toLowerCase();
         const match =
           books.find((b) => {
             const bt = b.title.toLowerCase();
@@ -109,13 +132,13 @@ export default function LibraryEbookDetail() {
   const canShare = user?.role === "admin" || !!user?.canShareBooks;
 
   const handleSendToEreader = async () => {
-    if (!item || item.chapterId == null || !Number.isFinite(seriesId)) return;
+    if (!item || activeChapterId == null || !Number.isFinite(seriesId)) return;
     setEreaderBusy(true);
     try {
       const { data } = await api.post("/auth/ereader/shelf", {
         series_id: seriesId,
-        chapter_id: item.chapterId,
-        title: item.title,
+        chapter_id: activeChapterId,
+        title: displayTitle,
         author: item.author,
         cover_url: item.coverUrl,
       });
@@ -142,14 +165,14 @@ export default function LibraryEbookDetail() {
   };
 
   const handleShare = async () => {
-    if (!item || item.chapterId == null || !Number.isFinite(seriesId)) return;
+    if (!item || activeChapterId == null || !Number.isFinite(seriesId)) return;
     setShareBusy(true);
     try {
       const { data } = await api.post("/share", {
         media_type: "ebook",
         series_id: seriesId,
-        chapter_id: item.chapterId,
-        title: item.title,
+        chapter_id: activeChapterId,
+        title: displayTitle,
       });
       const share = data as { path?: string; token?: string; url?: string };
       const path = share.path || (share.token ? `/share/${share.token}` : "");
@@ -162,7 +185,7 @@ export default function LibraryEbookDetail() {
           : `${window.location.origin}${path}`;
       if (navigator.share) {
         try {
-          await navigator.share({ title: item.title || "Shared ebook", text: `Read ${item.title}`, url });
+          await navigator.share({ title: displayTitle || "Shared ebook", text: `Read ${displayTitle}`, url });
           toast("Share sheet opened", "success");
           return;
         } catch (err) {
@@ -213,7 +236,7 @@ export default function LibraryEbookDetail() {
     .join(" · ");
 
   const cover = item.coverUrl ? (
-    <CoverImage src={item.coverUrl} alt={item.title} className="w-full rounded-xl shadow-2xl shadow-black/40" />
+    <CoverImage src={item.coverUrl} alt={displayTitle} className="w-full rounded-xl shadow-2xl shadow-black/40" />
   ) : (
     <div className="w-full aspect-[2/3] bg-gray-800 rounded-xl flex items-center justify-center text-gray-700">
       <BookOpen size={48} />
@@ -222,17 +245,17 @@ export default function LibraryEbookDetail() {
 
   const actions = (
     <>
-      {item.chapterId != null && (
+      {activeChapterId != null && (
         <button
           type="button"
-          onClick={() => navigate(`/read/${item.chapterId}`)}
+          onClick={() => navigate(`/read/${activeChapterId}`)}
           className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-amber-600 text-white hover:bg-amber-500 transition-colors"
         >
           <BookOpen size={16} />
           Read
         </button>
       )}
-      {item.chapterId != null && (
+      {activeChapterId != null && (
         <button
           type="button"
           onClick={() => void handleSendToEreader()}
@@ -248,7 +271,7 @@ export default function LibraryEbookDetail() {
           Send to ereader
         </button>
       )}
-      {canShare && item.chapterId != null && (
+      {canShare && activeChapterId != null && (
         <button
           type="button"
           onClick={() => void handleShare()}
@@ -270,12 +293,12 @@ export default function LibraryEbookDetail() {
           Listen
         </button>
       )}
-      {item.chapterId != null && (
+      {activeChapterId != null && (
         <SaveOfflineButton
           target={{
             kind: "ebook",
-            chapterId: item.chapterId,
-            title: item.title,
+            chapterId: activeChapterId,
+            title: displayTitle,
             author: item.author,
             coverUrl: item.coverUrl,
           }}
@@ -325,13 +348,16 @@ export default function LibraryEbookDetail() {
       <div className="flex flex-col md:flex-row gap-8">
         <div className="hidden md:block w-64 shrink-0">{cover}</div>
         <div className="flex-1 min-w-0">
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{item.title}</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{displayTitle}</h1>
           {item.author && (
             <p className="text-gray-300 mt-2 sm:mt-3">
               by <span className="text-gray-100 font-medium">{item.author}</span>
             </p>
           )}
           {seriesLine && <p className="text-sm text-brand-400 mt-1">{seriesLine}</p>}
+          {!seriesLine && volumes.length > 1 && (
+            <p className="text-sm text-brand-400 mt-1">{item.title}</p>
+          )}
 
           {(item.genres || []).length > 0 && (
             <div className="flex flex-wrap gap-1.5 mt-3">
@@ -344,6 +370,43 @@ export default function LibraryEbookDetail() {
           )}
 
           <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">{actions}</div>
+
+          {volumes.length > 1 && (
+            <div className="mt-6">
+              <h2 className="text-lg font-semibold text-gray-100 mb-3">
+                Volumes in series ({volumes.length})
+              </h2>
+              <ul className="space-y-1.5">
+                {volumes.map((vol) => {
+                  const active = vol.chapterId === activeChapterId;
+                  return (
+                    <li key={vol.chapterId}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          navigate(`/library/ebook/${seriesId}?chapter=${vol.chapterId}`, {
+                            replace: true,
+                          })
+                        }
+                        className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
+                          active
+                            ? "bg-brand-900/40 border-brand-700 text-brand-200"
+                            : "bg-gray-900/40 border-gray-800 text-gray-300 hover:bg-gray-800/60"
+                        }`}
+                      >
+                        <span className="text-gray-500 mr-2">
+                          {vol.volumeNumber != null && vol.volumeNumber > 0
+                            ? `#${Number.isInteger(vol.volumeNumber) ? vol.volumeNumber : vol.volumeNumber}`
+                            : "•"}
+                        </span>
+                        {vol.title}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
 
           {item.description && (
             <div className="mt-6">
@@ -377,7 +440,7 @@ export default function LibraryEbookDetail() {
             disabled={deleting}
             className="px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-500 disabled:opacity-50"
           >
-            {deleting ? "Deleting..." : "Delete"}
+            {deleting ? "Deleting…" : "Delete"}
           </button>
         </div>
       </Modal>

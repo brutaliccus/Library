@@ -226,6 +226,28 @@ def final_ebook_path(meta: EbookMeta, *, suffix: str = ".epub") -> Path:
     return Path(settings.ebook_dir) / rel / filename
 
 
+def ensure_series_index(meta: EbookMeta) -> EbookMeta:
+    """Fill missing series / series_index from title cues so Kavita keeps distinct volumes."""
+    from app.utils.book_series import detect_series_from_title, extract_book_numbers_from_text
+
+    title = (meta.title or "").strip()
+    detected = detect_series_from_title(title)
+    if not meta.series and detected:
+        meta.series = detected[0]
+    if meta.series and not meta.series_index:
+        if detected and detected[1]:
+            meta.series_index = detected[1]
+        else:
+            nums = sorted(n for n in extract_book_numbers_from_text(title) if 0 < n < 200)
+            if nums:
+                n = nums[0]
+                meta.series_index = str(int(n)) if float(n).is_integer() else str(n)
+            else:
+                # First book often has no number in the title.
+                meta.series_index = "1"
+    return meta
+
+
 def _meta_from_catalog_book(book: dict, *, score: float, source: str) -> EbookMeta:
     authors = book.get("authors") or []
     if isinstance(authors, list):
@@ -501,8 +523,31 @@ async def embed_ebook_metadata(ebook_path: Path, meta: EbookMeta) -> bool:
     return True
 
 
+def _cleanup_numbered_ebook_duplicates(dest_dir: Path, canonical: Path) -> None:
+    """Remove ``Title (N).ext`` siblings when the canonical ``Title.ext`` exists."""
+    stem = canonical.stem
+    dup_re = re.compile(re.escape(stem) + r" \(\d+\)$")
+    for sibling in dest_dir.iterdir():
+        if not sibling.is_file() or sibling == canonical:
+            continue
+        if sibling.suffix.lower() != canonical.suffix.lower():
+            continue
+        if not dup_re.fullmatch(sibling.stem):
+            continue
+        try:
+            sibling.unlink()
+            logger.info("Removed duplicate ebook %s", sibling)
+        except OSError as e:
+            logger.warning("Could not remove duplicate ebook %s: %s", sibling, e)
+
+
 def organize_ebook_files(staging: Path, meta: EbookMeta) -> Path:
-    """Move primary ebook into final library layout; return destination file path."""
+    """Move primary ebook into final library layout; return destination file path.
+
+    Same-sized existing destinations are reused (no ``Title (2).epub`` churn).
+    Sibling duplicate ``(N)`` copies of the same stem are removed after a successful move.
+    """
+    meta = ensure_series_index(meta)
     primary = pick_primary_ebook(staging)
     if not primary:
         raise FileNotFoundError(f"No ebook files in staging: {staging}")
@@ -510,9 +555,25 @@ def organize_ebook_files(staging: Path, meta: EbookMeta) -> Path:
     dest_file = final_ebook_path(meta, suffix=primary.suffix.lower())
     dest_dir = dest_file.parent
     dest_dir.mkdir(parents=True, exist_ok=True)
+    canonical = dest_file
 
-    # Avoid clobbering an existing library file with a different request.
+    # Identical re-download — keep the library file, drop the staging copy.
     if dest_file.exists():
+        try:
+            if dest_file.stat().st_size == primary.stat().st_size and dest_file.stat().st_size > 0:
+                logger.info(
+                    "Ebook already organized at %s (same size) — skipping move",
+                    dest_file,
+                )
+                try:
+                    primary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                _cleanup_numbered_ebook_duplicates(dest_dir, canonical)
+                return dest_file
+        except OSError:
+            pass
+        # Different content at the same path — use a numbered sibling.
         stem = dest_file.stem
         n = 2
         while True:
@@ -523,6 +584,8 @@ def organize_ebook_files(staging: Path, meta: EbookMeta) -> Path:
             n += 1
 
     shutil.move(str(primary), str(dest_file))
+    if dest_file == canonical:
+        _cleanup_numbered_ebook_duplicates(dest_dir, canonical)
     logger.info("Organized ebook → %s", dest_file)
     return dest_file
 
@@ -738,6 +801,7 @@ async def run_ebook_after_download(
                 await _set_quarantine(request_id, fail_reason, staging)
                 return
 
+        meta = ensure_series_index(meta)
         # Embed OPF tags on primary ebook while still in staging
         primary = pick_primary_ebook(staging)
         if primary:

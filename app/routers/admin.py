@@ -1271,11 +1271,70 @@ async def reorganize_audiobook_download(
     return {"ok": True, "book_dirs": [str(p.resolve()) for p in book_dirs]}
 
 
-# --- ABS Metadata ---
+# --- Library refresh (ABS + Kavita) ---
+
+@router.post("/library/refresh")
+async def library_refresh(_admin: User = Depends(require_admin)):
+    """Safely rescan ABS + Kavita without stacking full ABS scans on the Pi.
+
+    ABS is kicked deferred (coalesced background wait + orphan cleanup). Kavita
+    is scanned after the ABS kick returns so we do not parallel-hammer the host.
+    """
+    abs_result = await audiobookshelf.kick_library_scan(wait=False)
+    kavita_ok = False
+    kavita_error: str | None = None
+    try:
+        await kavita.scan_library()
+        kavita.invalidate_cache()
+        kavita_ok = True
+    except Exception as e:
+        kavita_error = str(e)
+        logger.warning("Kavita scan during library refresh failed: %s", e)
+
+    abs_ok = bool(abs_result.get("ok"))
+    bits: list[str] = []
+    if abs_ok and abs_result.get("already_running"):
+        bits.append("ABS scan already running (coalesced)")
+    elif abs_ok and abs_result.get("deferred"):
+        bits.append("ABS scan started in background")
+    elif abs_ok:
+        bits.append("ABS scan ok")
+    else:
+        bits.append(abs_result.get("message") or "ABS scan skipped")
+    if kavita_ok:
+        bits.append("Kavita scanned")
+    else:
+        bits.append(f"Kavita failed: {kavita_error or 'unknown'}")
+
+    return {
+        "ok": abs_ok or kavita_ok,
+        "message": "; ".join(bits),
+        "abs": {
+            "ok": abs_ok,
+            "scan_ran": bool(abs_result.get("scan_ran")),
+            "scan_complete": bool(abs_result.get("scan_complete")),
+            "timed_out": bool(abs_result.get("timed_out")),
+            "deferred": bool(abs_result.get("deferred")),
+            "already_running": bool(abs_result.get("already_running")),
+            "items_total": abs_result.get("items_total"),
+            "error": abs_result.get("error"),
+            "message": abs_result.get("message"),
+        },
+        "kavita": {
+            "ok": kavita_ok,
+            "error": kavita_error,
+            "message": "Kavita scanned" if kavita_ok else (kavita_error or "Kavita scan failed"),
+        },
+    }
+
 
 @router.post("/abs/fix-metadata")
 async def fix_abs_metadata(_admin: User = Depends(require_admin)):
-    """Scan ABS and purge missing/orphan items. Does not rewrite titles or Quick Match."""
+    """Scan ABS and purge missing/orphan items. Does not rewrite titles or Quick Match.
+
+    Prefer ``POST /admin/library/refresh`` (ABS+Kavita, deferred). This endpoint
+    now also uses a deferred ABS kick to avoid Pi OOM from blocking full scans.
+    """
     result = await audiobookshelf.fix_metadata_mismatches()
     if result.get("fetch_error"):
         raise HTTPException(status_code=502, detail=result["fetch_error"])

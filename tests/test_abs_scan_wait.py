@@ -117,31 +117,8 @@ def test_scan_library_and_wait_times_out_with_clear_status():
     asyncio.run(_run())
 
 
-def test_fix_metadata_waits_for_scan_before_fetching_items():
+def test_fix_metadata_uses_deferred_kick_not_full_paginate():
     async def _run():
-        order: list[str] = []
-
-        async def wait_scan(_lid=None, **_kwargs):
-            order.append("wait")
-            return {
-                "scan_ran": True,
-                "scan_complete": True,
-                "timed_out": False,
-                "items_total": 2,
-                "waited_seconds": 1.0,
-                "last_scan": 99,
-            }
-
-        async def fetch_items(_lid):
-            order.append("fetch")
-            return [
-                {
-                    "id": "i1",
-                    "relPath": "Author/Book One",
-                    "media": {"metadata": {"title": "Book One: Rich Title"}},
-                }
-            ]
-
         with (
             patch.object(abs_svc, "settings") as settings,
             patch.object(
@@ -149,9 +126,26 @@ def test_fix_metadata_waits_for_scan_before_fetching_items():
                 "ensure_metadata_hardening",
                 new=AsyncMock(return_value={"library_ok": True, "server_ok": True}),
             ) as harden,
-            patch.object(abs_svc, "scan_library_and_wait", side_effect=wait_scan),
-            patch.object(abs_svc, "remove_items_with_issues", new=AsyncMock(return_value=True)),
-            patch.object(abs_svc, "_fetch_library_items_all_pages", side_effect=fetch_items),
+            patch.object(
+                abs_svc,
+                "kick_library_scan",
+                new=AsyncMock(
+                    return_value={
+                        "ok": True,
+                        "scan_ran": True,
+                        "scan_complete": False,
+                        "timed_out": False,
+                        "deferred": True,
+                        "waited_seconds": 0,
+                        "items_total": None,
+                        "error": None,
+                    }
+                ),
+            ) as kick,
+            patch.object(abs_svc, "get_library_item_total", new=AsyncMock(return_value=42)),
+            patch.object(
+                abs_svc, "_fetch_library_items_all_pages", new=AsyncMock()
+            ) as fetch_all,
             patch.object(abs_svc, "update_item_metadata", new=AsyncMock(return_value=True)) as upd,
             patch.object(abs_svc, "invalidate_cache"),
         ):
@@ -159,15 +153,53 @@ def test_fix_metadata_waits_for_scan_before_fetching_items():
             settings.abs_api_key = "key"
             out = await abs_svc.fix_metadata_mismatches()
 
-        assert order == ["wait", "fetch"]
+        kick.assert_awaited_once_with(wait=False)
+        fetch_all.assert_not_awaited()
         assert out["scan_ran"] is True
-        assert out["scan_complete"] is True
-        assert out["timed_out"] is False
+        assert out["deferred"] is True
+        assert out["items_total"] == 42
+        assert out["items_examined"] == 42
         # Must not rewrite LibraForge / Audible titles to bare folder names.
         assert out["count"] == 0
         assert out["fixed"] == []
         upd.assert_not_awaited()
         harden.assert_awaited_once()
         assert out["hardening"]["library_ok"] is True
+
+    asyncio.run(_run())
+
+
+def test_scan_library_skips_repost_while_inflight():
+    async def _run():
+        abs_svc._scan_posted_at = None
+        abs_svc._scan_posted_before_last = None
+        lid = "lib_test"
+        post_mock = AsyncMock()
+        post_mock.return_value = type("R", (), {"raise_for_status": lambda self: None})()
+
+        with (
+            patch.object(
+                abs_svc,
+                "get_library",
+                new=AsyncMock(return_value={"id": lid, "lastScan": 1000}),
+            ),
+            patch.object(abs_svc, "settings") as settings,
+            patch("httpx.AsyncClient") as client_cls,
+        ):
+            settings.abs_library_id = lid
+            settings.abs_url = "http://abs"
+            settings.abs_api_key = "k"
+            client = AsyncMock()
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=None)
+            client.post = post_mock
+            client_cls.return_value = client
+
+            first = await abs_svc.scan_library(lid)
+            second = await abs_svc.scan_library(lid)
+
+        assert first is True
+        assert second is False
+        assert post_mock.await_count == 1
 
     asyncio.run(_run())

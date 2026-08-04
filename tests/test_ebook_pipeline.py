@@ -92,6 +92,38 @@ def test_organize_moves_primary_and_wipe(_ebook_dirs):
     assert not staging.exists()
 
 
+def test_organize_skips_same_size_and_cleans_duplicates(_ebook_dirs):
+    from app.services.ebook_pipeline import ensure_series_index
+
+    ebook, _ = _ebook_dirs
+    meta = EbookMeta(
+        title="The Burning Witch 2",
+        author="Delemhach",
+        series="The Burning Witch",
+        series_index="2",
+        score=0.95,
+    )
+    dest_dir = ebook / "Delemhach" / "The Burning Witch" / "The Burning Witch 2"
+    dest_dir.mkdir(parents=True)
+    canonical = dest_dir / "The Burning Witch 2.epub"
+    canonical.write_bytes(b"same-bytes")
+    (dest_dir / "The Burning Witch 2 (2).epub").write_bytes(b"same-bytes")
+
+    staging = ebook_staging_dir(9, "Burning")
+    staging.mkdir(parents=True)
+    (staging / "The Burning Witch 2.epub").write_bytes(b"same-bytes")
+
+    out = organize_ebook_files(staging, meta)
+    assert out == canonical
+    assert not (dest_dir / "The Burning Witch 2 (2).epub").exists()
+    assert not (staging / "The Burning Witch 2.epub").exists()
+
+    filled = ensure_series_index(
+        EbookMeta(title="The Burning Witch 3", author="Delemhach", series="The Burning Witch")
+    )
+    assert filled.series_index == "3"
+
+
 def test_pick_primary_prefers_epub(_ebook_dirs):
     staging = ebook_staging_dir(1, "Book")
     staging.mkdir(parents=True)

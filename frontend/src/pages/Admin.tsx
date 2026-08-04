@@ -9,7 +9,6 @@ import {
   Trash2,
   RefreshCw,
   Bell,
-  Wrench,
   Radar,
   Settings2,
   EyeOff,
@@ -1265,64 +1264,47 @@ function HealthTab() {
     },
   });
 
-  const fixMetadata = useMutation({
+  const libraryRefresh = useMutation({
     mutationFn: async () => {
-      // Backend waits up to ~4 min for ABS scan completion; proxy allows 600s.
-      const { data } = await api.post("/admin/abs/fix-metadata", null, { timeout: 600_000 });
+      // Deferred ABS kick + Kavita scan — do not block for minutes (that melted the Pi).
+      const { data } = await api.post("/admin/library/refresh", null, { timeout: 90_000 });
       return data as {
-        fixed: { itemId: string; oldTitle: string; newTitle: string }[];
-        count: number;
-        scan_ran: boolean;
-        scan_complete?: boolean;
-        timed_out?: boolean;
-        waited_seconds?: number;
-        items_total?: number | null;
-        orphan_cleanup_ok: boolean;
-        items_examined: number;
-        fetch_error?: string | null;
+        ok: boolean;
+        message: string;
+        abs: {
+          ok: boolean;
+          scan_ran?: boolean;
+          scan_complete?: boolean;
+          deferred?: boolean;
+          already_running?: boolean;
+          items_total?: number | null;
+          error?: string | null;
+          message?: string;
+        };
+        kavita: {
+          ok: boolean;
+          error?: string | null;
+          message?: string;
+        };
       };
     },
     onSuccess: async (data) => {
-      const softPollAbs = async () => {
-        // Backend already waited for the scan; one short bust then sparse cache-first polls.
-        // Do not re-extend refresh=true on every tick (Pi load spike).
+      void (async () => {
         await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 5_000 });
-        for (const delay of [10_000, 25_000]) {
+        for (const delay of [10_000, 25_000, 45_000]) {
           await new Promise((r) => setTimeout(r, delay));
           await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 0 });
         }
-      };
-      void softPollAbs();
+      })();
 
-      const bits: string[] = [];
-      if (data.scan_complete) {
-        bits.push(
-          data.orphan_cleanup_ok
-            ? "ABS scan finished; removed entries whose files are missing."
-            : "ABS scan finished.",
-        );
-      } else if (data.timed_out) {
-        bits.push(
-          "ABS scan still running after the wait limit — My Library will keep catching up; refresh again shortly if the count looks low.",
-        );
-      } else if (data.scan_ran) {
-        bits.push("Library scan was triggered.");
-      } else {
-        bits.push("Library scan did not complete; check ABS connectivity and logs.");
-      }
-      if (typeof data.items_total === "number" && data.items_total > 0) {
-        bits.push(`ABS reports ${data.items_total} item(s).`);
-      }
-      if (typeof data.items_examined === "number" && data.items_examined > 0) {
-        bits.push(`Indexed ${data.items_examined} item(s).`);
-      }
-      bits.push(
-        "Titles are left as-is (LibraForge / embedded tags). Orphaned rows whose files are missing are removed after the scan.",
+      const absDeferred = Boolean(data.abs?.deferred || data.abs?.already_running);
+      toast(
+        data.message || "Library refresh kicked",
+        data.ok ? (absDeferred ? "info" : "success") : "error",
       );
-      toast(bits.join(" "), data.scan_complete ? "success" : "info");
     },
     onError: (err: any) => {
-      toast(err.response?.data?.detail || "Failed to fix metadata", "error");
+      toast(err.response?.data?.detail || "Library refresh failed", "error");
     },
   });
 
@@ -1353,13 +1335,13 @@ function HealthTab() {
         </button>
         <button
           type="button"
-          title="Runs a full Audiobookshelf library scan and waits for it to finish (up to a few minutes), then removes library rows whose files are missing. Does not Quick Match Audible or rewrite titles to folder names."
-          onClick={() => fixMetadata.mutate()}
-          disabled={fixMetadata.isPending}
+          title="Safely rescan Audiobookshelf (deferred, coalesced — will not stack overlapping full scans) and Kavita. Orphan ABS rows are cleaned after the background scan finishes. Does not Quick Match or rewrite titles."
+          onClick={() => libraryRefresh.mutate()}
+          disabled={libraryRefresh.isPending}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-900/40 text-brand-300 text-sm rounded-lg hover:bg-brand-900/60 border border-brand-800/50 disabled:opacity-50"
         >
-          <Wrench size={14} className={fixMetadata.isPending ? "animate-spin" : ""} />
-          {fixMetadata.isPending ? "Waiting for ABS scan…" : "Scan ABS & clean orphans"}
+          <RefreshCw size={14} className={libraryRefresh.isPending ? "animate-spin" : ""} />
+          {libraryRefresh.isPending ? "Refreshing libraries…" : "Library Refresh (ABS+Kavita)"}
         </button>
       </div>
 

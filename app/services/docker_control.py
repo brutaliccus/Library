@@ -79,7 +79,8 @@ MANAGED_SERVICES: dict[str, ManagedService] = {
     "audiobookshelf": ManagedService(
         id="audiobookshelf",
         label="Audiobookshelf",
-        container="audiobookshelf",
+        # Pi stack (/opt/stacks/audiobookshelf) uses container_name audiobookshelf-server
+        container="audiobookshelf-server",
         compose_service="audiobookshelf",
         health_key="audiobookshelf",
     ),

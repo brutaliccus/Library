@@ -24,6 +24,7 @@ import androidx.annotation.Nullable;
 import androidx.media.MediaBrowserServiceCompat;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -157,6 +158,8 @@ public final class LibraryAutoBridge {
     private Boolean lastNativePlaying = null;
     /** Skip redundant MediaMetadata pushes when title/art/duration unchanged. */
     private String lastSessionMetaSig = "";
+    /** Last mediaId published via {@link MediaSessionCompat#setQueue}. */
+    private String lastSessionQueueMediaId = "";
 
     private LibraryAutoBridge() {}
 
@@ -473,6 +476,8 @@ public final class LibraryAutoBridge {
         if (mediaId == null || mediaId.isEmpty() || NOW_PLAYING_ID.equals(mediaId)) {
             return;
         }
+        boolean wasActive = this.active;
+        String previousMediaId = this.nativeMediaId;
         persistMediaId(mediaId);
         String nextTitle = title;
         String nextArtist = artist;
@@ -524,8 +529,18 @@ public final class LibraryAutoBridge {
         this.positionMs = nextPosition;
         ignorePausedSyncUntilElapsed =
             SystemClock.elapsedRealtime() + PAUSED_SYNC_GRACE_MS;
+        // Force metadata + queue republish — AA Bluetooth auto-resume often
+        // reconnects after attach() already pushed the same metaSig, and a
+        // PlaybackState-only update leaves the player surface without buttons.
+        lastSessionMetaSig = "";
+        lastSessionQueueMediaId = "";
         refreshSession(true);
-        notifyRootChanged();
+        // Do NOT invalidate the browse tree on same-title auto-resume. AA was
+        // entering the player, then notifyChildrenChanged(root) yanked it back
+        // to browse with audio still playing and no transport chrome.
+        if (!wasActive || !mediaId.equals(previousMediaId)) {
+            notifyRootChanged();
+        }
         Log.i(TAG, "AA beginPlayFromMediaId mediaId=" + mediaId + " title=" + nextTitle);
     }
 
@@ -731,6 +746,8 @@ public final class LibraryAutoBridge {
         this.playing = true;
         ignorePausedSyncUntilElapsed =
             SystemClock.elapsedRealtime() + PAUSED_SYNC_GRACE_MS;
+        lastSessionMetaSig = "";
+        lastSessionQueueMediaId = "";
         refreshSession(true);
         return true;
     }
@@ -1028,6 +1045,10 @@ public final class LibraryAutoBridge {
             long now = SystemClock.elapsedRealtime();
             ignorePausedSyncUntilElapsed = now + PAUSED_SYNC_GRACE_MS;
             ignoreFocusLossUntilElapsed = now + grace;
+            // Bluetooth autoplay can flip PLAYING without beginPlay (no mediaId
+            // yet). Force metadata/queue so AA draws pause/skip buttons.
+            lastSessionMetaSig = "";
+            lastSessionQueueMediaId = "";
         } else {
             buffering = false;
             ignorePausedSyncUntilElapsed = 0;
@@ -1100,6 +1121,7 @@ public final class LibraryAutoBridge {
         lastNativeMetaKey = "";
         lastNativePlaying = null;
         lastSessionMetaSig = "";
+        lastSessionQueueMediaId = "";
         update("", "", "", null, false, false, 0, 0, 1.0f);
         Context ctx = appContextRef.get();
         if (ctx != null) {
@@ -1641,6 +1663,16 @@ public final class LibraryAutoBridge {
         );
     }
 
+    /** Stable positive queue id that matches {@link PlaybackStateCompat} active item. */
+    private static long queueIdForMediaId(String mediaId) {
+        if (mediaId == null || mediaId.isEmpty()) {
+            return MediaSessionCompat.QueueItem.UNKNOWN_ID;
+        }
+        long id = mediaId.hashCode() & 0xffffffffL;
+        // UNKNOWN_ID is -1; keep ids in the unsigned 32-bit range.
+        return id == MediaSessionCompat.QueueItem.UNKNOWN_ID ? 1L : id;
+    }
+
     private void refreshSession(boolean metadataMayHaveChanged) {
         // MediaSessionCompat updates must happen on the main thread; Capacitor
         // plugin methods (syncPlayback) arrive on a bridge worker thread.
@@ -1652,6 +1684,14 @@ public final class LibraryAutoBridge {
         MediaSessionCompat session = sessionRef.get();
         if (session == null) {
             return;
+        }
+
+        String activeMediaId =
+            !nativeMediaId.isEmpty()
+                ? nativeMediaId
+                : (getPersistedMediaId() != null ? getPersistedMediaId() : "");
+        if (activeMediaId == null) {
+            activeMediaId = "";
         }
 
         long actions =
@@ -1677,6 +1717,89 @@ public final class LibraryAutoBridge {
             state = PlaybackStateCompat.STATE_PAUSED;
         }
 
+        if (!active) {
+            lastSessionMetaSig = "";
+            lastSessionQueueMediaId = "";
+            session.setPlaybackState(
+                new PlaybackStateCompat.Builder()
+                    .setActions(actions)
+                    .setState(
+                        PlaybackStateCompat.STATE_NONE,
+                        0,
+                        0f,
+                        SystemClock.elapsedRealtime()
+                    )
+                    .build()
+            );
+            session.setQueue(null);
+            session.setMetadata(null);
+            LibraryMediaBrowserService service = serviceRef.get();
+            if (service != null) {
+                service.stopForegroundPlayback();
+            }
+            return;
+        }
+
+        // Activate + metadata + queue BEFORE PlaybackState. Bluetooth autoplay
+        // clients that only see a PLAYING state without a matching queue/mediaId
+        // show Now Playing audio with an empty transport strip.
+        session.setActive(true);
+
+        if (metadataMayHaveChanged) {
+            // Skip no-op metadata pushes — binder copies of album art are expensive
+            // and repeating them mid-play freezes some OEM system_servers.
+            String artSig =
+                (artwork != null && !artwork.isRecycled())
+                    ? (artwork.getWidth() + "x" + artwork.getHeight() + "@" + System.identityHashCode(artwork))
+                    : "noart";
+            String midForMeta = activeMediaId;
+            String metaSig =
+                title + "|" + artist + "|" + album + "|" + durationMs + "|" + midForMeta + "|" + artSig;
+            if (!metaSig.equals(lastSessionMetaSig)) {
+                lastSessionMetaSig = metaSig;
+                MediaMetadataCompat.Builder metaBuilder = new MediaMetadataCompat.Builder()
+                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
+                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, title)
+                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, artist)
+                    .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+                if (!midForMeta.isEmpty()) {
+                    metaBuilder.putString(
+                        MediaMetadataCompat.METADATA_KEY_MEDIA_ID,
+                        midForMeta
+                    );
+                }
+                // Never put a null bitmap — that clears cover art on many AA units.
+                // One bitmap key is enough; duplicating ALBUM_ART + DISPLAY_ICON
+                // copies the same pixels into the system binder payload twice.
+                if (artwork != null && !artwork.isRecycled()) {
+                    metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork);
+                }
+                session.setMetadata(metaBuilder.build());
+            }
+        }
+
+        if (!activeMediaId.isEmpty() && !activeMediaId.equals(lastSessionQueueMediaId)) {
+            MediaDescriptionCompat.Builder descBuilder =
+                new MediaDescriptionCompat.Builder()
+                    .setMediaId(activeMediaId)
+                    .setTitle(title.isEmpty() ? "Now Playing" : title)
+                    .setSubtitle(artist)
+                    .setDescription(album);
+            if (artwork != null && !artwork.isRecycled()) {
+                descBuilder.setIconBitmap(artwork);
+            }
+            MediaSessionCompat.QueueItem item =
+                new MediaSessionCompat.QueueItem(
+                    descBuilder.build(),
+                    queueIdForMediaId(activeMediaId)
+                );
+            session.setQueue(Collections.singletonList(item));
+            session.setQueueTitle("Now Playing");
+            lastSessionQueueMediaId = activeMediaId;
+        }
+
         // Custom ±15 actions: AA often reserves side slots for chapter skip when
         // SKIP_TO_PREVIOUS/NEXT are set; custom actions keep seek buttons visible.
         PlaybackStateCompat.Builder stateBuilder = new PlaybackStateCompat.Builder()
@@ -1698,71 +1821,18 @@ public final class LibraryAutoBridge {
                     R.drawable.ic_media_forward_15
                 ).build()
             );
-        String activeMediaId =
-            !nativeMediaId.isEmpty()
-                ? nativeMediaId
-                : (getPersistedMediaId() != null ? getPersistedMediaId() : "");
-        if (activeMediaId != null && !activeMediaId.isEmpty()) {
-            // Helps AA match browse selection → Now Playing / controls UI.
-            stateBuilder.setActiveQueueItemId(activeMediaId.hashCode() & 0xffffffffL);
+        if (!activeMediaId.isEmpty()) {
+            stateBuilder.setActiveQueueItemId(queueIdForMediaId(activeMediaId));
         }
         session.setPlaybackState(stateBuilder.build());
 
-        if (!active) {
-            lastSessionMetaSig = "";
-            session.setMetadata(null);
-            LibraryMediaBrowserService service = serviceRef.get();
-            if (service != null) {
-                service.stopForegroundPlayback();
-            }
-            return;
-        }
-
-        if (metadataMayHaveChanged) {
-            // Skip no-op metadata pushes — binder copies of album art are expensive
-            // and repeating them mid-play freezes some OEM system_servers.
-            String artSig =
-                (artwork != null && !artwork.isRecycled())
-                    ? (artwork.getWidth() + "x" + artwork.getHeight() + "@" + System.identityHashCode(artwork))
-                    : "noart";
-            String midForMeta = activeMediaId != null ? activeMediaId : "";
-            String metaSig =
-                title + "|" + artist + "|" + album + "|" + durationMs + "|" + midForMeta + "|" + artSig;
-            if (!metaSig.equals(lastSessionMetaSig)) {
-                lastSessionMetaSig = metaSig;
-                MediaMetadataCompat.Builder metaBuilder = new MediaMetadataCompat.Builder()
-                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-                    .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
-                    .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
-                if (!midForMeta.isEmpty()) {
-                    metaBuilder.putString(
-                        MediaMetadataCompat.METADATA_KEY_MEDIA_ID,
-                        midForMeta
-                    );
-                }
-                // Never put a null bitmap — that clears cover art on many AA units.
-                // One bitmap key is enough; duplicating ALBUM_ART + DISPLAY_ICON
-                // copies the same pixels into the system binder payload twice.
-                if (artwork != null && !artwork.isRecycled()) {
-                    metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork);
-                }
-                session.setMetadata(metaBuilder.build());
-            }
-        }
-        session.setActive(true);
-
         LibraryMediaBrowserService service = serviceRef.get();
         if (service != null) {
-            if (active) {
-                service.promoteToForeground();
-                long now = System.currentTimeMillis();
-                if (metadataMayHaveChanged || now - lastNotificationUpdateMs >= 5_000) {
-                    lastNotificationUpdateMs = now;
-                    service.updateForegroundNotification();
-                }
-            } else {
-                service.stopForegroundPlayback();
+            service.promoteToForeground();
+            long now = System.currentTimeMillis();
+            if (metadataMayHaveChanged || now - lastNotificationUpdateMs >= 5_000) {
+                lastNotificationUpdateMs = now;
+                service.updateForegroundNotification();
             }
         }
     }

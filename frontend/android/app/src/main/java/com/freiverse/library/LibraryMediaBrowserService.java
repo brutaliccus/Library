@@ -46,9 +46,9 @@ public class LibraryMediaBrowserService extends MediaBrowserServiceCompat {
             public void onPlay() {
                 LibraryAutoBridge bridge = LibraryAutoBridge.getInstance();
                 bridge.requestAudioFocusForPlay();
-                // Same chrome path as onPlayFromMediaId: BUFFERING → PLAYING with
-                // mediaId + transport actions. Auto-resume used to skip this and
-                // left AA without pause / chapter-skip controls while audio ran.
+                // Same chrome path as onPlayFromMediaId: BUFFERING → queue +
+                // metadata → PLAYING. Bluetooth auto-resume must not invalidate
+                // the browse root (that drops AA transport buttons while audio runs).
                 String mid = bridge.getPersistedMediaId();
                 if (mid != null && !mid.isEmpty()) {
                     bridge.beginPlayFromMediaId(mid);

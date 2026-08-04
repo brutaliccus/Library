@@ -1126,7 +1126,7 @@ async def post_ebook_review_search(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Search Hardcover metadata candidates for a quarantined ebook."""
+    """Search Hardcover + Open Library metadata candidates for a quarantined ebook."""
     from app.services.ebook_quick_review import (
         EbookQuickReviewError,
         search_ebook_quick_review,
@@ -1155,7 +1155,7 @@ async def post_ebook_review_apply(
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Apply selected Hardcover metadata to an ebook staging request."""
+    """Apply selected Hardcover/Open Library metadata to an ebook staging request."""
     from app.services.ebook_quick_review import (
         EbookQuickReviewError,
         apply_ebook_quick_review,
@@ -1172,7 +1172,7 @@ async def post_ebook_review_apply(
     except EbookQuickReviewError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     logger.info(
-        "Admin %s applied ebook Hardcover metadata for request %s",
+        "Admin %s applied ebook metadata for request %s",
         _admin.username,
         request_id,
     )

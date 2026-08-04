@@ -66,8 +66,18 @@ type SearchResult = {
   publisher?: string;
   language?: string;
   info_link?: string;
+  source?: string;
   [key: string]: unknown;
 };
+
+function sourceLabel(source?: string): string {
+  const s = (source || "").toLowerCase().replace(/[-\s]/g, "_");
+  if (s === "open_library" || s === "ol" || s === "ol_catalog" || s === "openlibrary") {
+    return "Open Library";
+  }
+  if (s === "hardcover" || s === "hc") return "Hardcover";
+  return source?.trim() || "Catalog";
+}
 
 const STEPS: { id: WizardStep; label: string; icon: typeof Files }[] = [
   { id: "files", label: "Files", icon: Files },
@@ -104,7 +114,12 @@ function authorLine(r: SearchResult): string {
 }
 
 function resultKey(r: SearchResult, idx: number): string {
-  return fieldStr(r.id) || fieldStr(r.hardcover_id) || fieldStr(r.title) || `r-${idx}`;
+  return (
+    fieldStr(r.id) ||
+    fieldStr(r.hardcover_id) ||
+    `${fieldStr(r.source)}:${fieldStr(r.title)}` ||
+    `r-${idx}`
+  );
 }
 
 function localField(
@@ -204,7 +219,9 @@ export default function EbookMetadataMatcher({
     onSuccess: (data) => {
       setResults(data.results || []);
       setSelectedKey(null);
-      if (!(data.results || []).length) toast("No Hardcover matches found", "info");
+      if (!(data.results || []).length) {
+        toast("No Hardcover / Open Library matches found", "info");
+      }
     },
     onError: (err: any) => toast(err.response?.data?.detail || "Search failed", "error"),
   });
@@ -294,8 +311,8 @@ export default function EbookMetadataMatcher({
         {step === "files" && (
           <div className="space-y-3">
             <p className="text-sm text-gray-400">
-              Review staging files, then match metadata via Hardcover before continuing
-              organize → Kavita.
+              Review staging files, then match metadata via Hardcover or Open Library before
+              continuing organize → Kavita.
             </p>
             <StagingFilesPanel requestId={requestId} compact />
             <div className="flex justify-end">
@@ -366,7 +383,7 @@ export default function EbookMetadataMatcher({
 
                 <div className="flex flex-wrap items-end gap-2">
                   <span className="inline-flex items-center px-2.5 py-2 text-xs rounded-lg border border-gray-700 bg-gray-900 text-gray-300">
-                    Provider: Hardcover
+                    Providers: Hardcover + Open Library
                   </span>
                   <button
                     type="button"
@@ -471,8 +488,14 @@ export default function EbookMetadataMatcher({
                                   </span>
                                 </div>
                                 <div className="mt-1.5 flex flex-wrap gap-1.5 text-[10px] text-gray-400">
-                                  <span className="px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700">
-                                    Hardcover
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded border ${
+                                      sourceLabel(r.source) === "Open Library"
+                                        ? "bg-sky-950/50 border-sky-800/50 text-sky-200/90"
+                                        : "bg-amber-950/40 border-amber-800/40 text-amber-200/90"
+                                    }`}
+                                  >
+                                    {sourceLabel(r.source)}
                                   </span>
                                   {(r.isbn13 || r.isbn10) && (
                                     <span className="px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 font-mono">
@@ -588,7 +611,7 @@ export default function EbookMetadataMatcher({
                                 className="mt-2 inline-flex items-center gap-1 text-[11px] text-amber-300/90 hover:text-amber-200"
                               >
                                 <ExternalLink size={11} />
-                                Open on Hardcover
+                                Open on {sourceLabel(r.source)}
                               </a>
                             )}
                           </button>
@@ -606,8 +629,8 @@ export default function EbookMetadataMatcher({
           <div className="space-y-3">
             <p className="text-sm text-gray-300">
               {metadataApplied
-                ? "Selected Hardcover metadata is saved. Continue to organize the ebook and scan Kavita."
-                : "You can continue without a new match (uses request hints / auto-identify). Prefer applying a Hardcover match first when quarantine was caused by ambiguous metadata."}
+                ? "Selected metadata is saved. Continue to organize the ebook and scan Kavita."
+                : "You can continue without a new match (uses request hints / auto-identify). Prefer applying a Hardcover or Open Library match first when quarantine was caused by ambiguous metadata."}
             </p>
             <div className="rounded-lg border border-gray-700 bg-gray-900/40 px-3 py-2 text-xs text-gray-400">
               Next: Organize → Finalize (Kavita scan)

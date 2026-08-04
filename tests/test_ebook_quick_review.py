@@ -1,4 +1,4 @@
-"""Tests for ebook Hardcover metadata matcher (load/search/apply helpers)."""
+"""Tests for ebook Hardcover + Open Library metadata matcher helpers."""
 
 from __future__ import annotations
 
@@ -78,6 +78,7 @@ def test_selected_result_to_ebook_meta_maps_hardcover_fields():
             "isbn13": "9780451472410",
             "cover_url": "https://example.com/a.jpg",
             "score": 0.88,
+            "source": "hardcover",
         }
     )
     assert meta.title == "Ash and Quill"
@@ -85,9 +86,28 @@ def test_selected_result_to_ebook_meta_maps_hardcover_fields():
     assert meta.series == "Great Library"
     assert meta.series_index == "3"
     assert meta.cover_url == "https://example.com/a.jpg"
+    assert meta.source == "hardcover"
+    assert "Hardcover" in meta.reason
 
 
-def test_search_ebook_quick_review_calls_hardcover(tmp_path, monkeypatch):
+def test_selected_result_to_ebook_meta_maps_open_library_fields():
+    meta = selected_result_to_ebook_meta(
+        {
+            "id": "OL:/works/OL45804W",
+            "title": "Timeline",
+            "authors": ["Michael Crichton"],
+            "isbn13": "9780345468260",
+            "cover_url": "https://covers.openlibrary.org/b/id/1-M.jpg",
+            "source": "open_library",
+            "score": 0.9,
+        }
+    )
+    assert meta.source == "open_library"
+    assert meta.isbn13 == "9780345468260"
+    assert "Open Library" in meta.reason
+
+
+def test_search_ebook_quick_review_merges_hardcover_and_ol(tmp_path, monkeypatch):
     import asyncio
 
     from app.services import ebook_quick_review as eqr
@@ -106,7 +126,7 @@ def test_search_ebook_quick_review_calls_hardcover(tmp_path, monkeypatch):
     req.title = "Timeline"
     req.author = "Michael Crichton"
 
-    hits = [
+    hc_hits = [
         {
             "id": "HC:1",
             "title": "Timeline",
@@ -126,12 +146,48 @@ def test_search_ebook_quick_review_calls_hardcover(tmp_path, monkeypatch):
             "previewLink": "",
         }
     ]
+    ol_books = [
+        {
+            "id": "OL:/works/OL45804W",
+            "volumeId": "OL:/works/OL45804W",
+            "title": "Timeline",
+            "authors": ["Michael Crichton"],
+            "coverUrl": "https://covers.openlibrary.org/b/id/99-M.jpg",
+            "isbn13": "9780345468260",
+            "isbn10": "",
+            "publishedDate": "1999",
+            "description": "",
+            "publisher": "Ballantine",
+            "language": "en",
+            "infoLink": "https://openlibrary.org/works/OL45804W",
+            "previewLink": "https://openlibrary.org/works/OL45804W",
+        },
+        {
+            "id": "OL:/works/OL999W",
+            "volumeId": "OL:/works/OL999W",
+            "title": "Timeline (unrelated)",
+            "authors": ["Someone Else"],
+            "coverUrl": "",
+            "isbn13": "",
+            "isbn10": "",
+            "publishedDate": "2001",
+            "description": "",
+            "publisher": "",
+            "language": "en",
+            "infoLink": "https://openlibrary.org/works/OL999W",
+            "previewLink": "",
+        },
+    ]
 
     async def _run():
         with (
             patch.object(eqr, "resolve_staging_dir", return_value=staging),
             patch("app.services.hardcover.get_api_key", new=AsyncMock(return_value="Bearer x")),
-            patch("app.services.hardcover.search_books", new=AsyncMock(return_value=hits)),
+            patch("app.services.hardcover.search_books", new=AsyncMock(return_value=hc_hits)),
+            patch(
+                "app.services.google_books.search_volumes",
+                new=AsyncMock(return_value={"books": ol_books, "totalItems": 2}),
+            ),
         ):
             return await eqr.search_ebook_quick_review(
                 req,
@@ -141,7 +197,62 @@ def test_search_ebook_quick_review_calls_hardcover(tmp_path, monkeypatch):
             )
 
     out = asyncio.run(_run())
-    assert out["provider"] == "hardcover"
+    assert out["provider"] == "hardcover+open_library"
+    assert "hardcover" in out["providers"]
+    assert "open_library" in out["providers"]
+    # ISBN-identical HC + OL rows collapse; unrelated OL remains.
+    assert len(out["results"]) == 2
+    top = out["results"][0]
+    assert top["title"] == "Timeline"
+    assert top["source"] == "hardcover"
+    assert top["cover_url"]  # kept / filled
+    assert any(r["source"] == "open_library" for r in out["results"])
+
+
+def test_search_ebook_quick_review_ol_only_without_hardcover_key(tmp_path, monkeypatch):
+    import asyncio
+
+    from app.services import ebook_quick_review as eqr
+
+    ebook = tmp_path / "ebooks"
+    staging = ebook / "unorganized" / "req_10_Book"
+    staging.mkdir(parents=True)
+    (staging / "Book.epub").write_bytes(b"epub")
+    monkeypatch.setattr("app.services.ebook_pipeline.settings.ebook_dir", str(ebook))
+    monkeypatch.setattr("app.services.forge_pipeline.settings.ebook_dir", str(ebook))
+
+    req = MagicMock()
+    req.id = 10
+    req.media_type = "ebook"
+    req.staging_path = str(staging.as_posix())
+    req.title = "Book"
+    req.author = "Author"
+
+    ol_books = [
+        {
+            "id": "OL:/works/OL1W",
+            "title": "Book",
+            "authors": ["Author"],
+            "coverUrl": "https://covers.openlibrary.org/b/id/1-M.jpg",
+            "isbn13": "",
+            "isbn10": "",
+            "publishedDate": "2020",
+            "infoLink": "https://openlibrary.org/works/OL1W",
+        }
+    ]
+
+    async def _run():
+        with (
+            patch.object(eqr, "resolve_staging_dir", return_value=staging),
+            patch("app.services.hardcover.get_api_key", new=AsyncMock(return_value="")),
+            patch(
+                "app.services.google_books.search_volumes",
+                new=AsyncMock(return_value={"books": ol_books, "totalItems": 1}),
+            ),
+        ):
+            return await eqr.search_ebook_quick_review(req, query="Book Author", title="Book")
+
+    out = asyncio.run(_run())
     assert len(out["results"]) == 1
-    assert out["results"][0]["title"] == "Timeline"
-    assert out["results"][0]["cover_url"] == "https://example.com/c.jpg"
+    assert out["results"][0]["source"] == "open_library"
+    assert "open_library" in out["providers"]

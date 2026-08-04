@@ -6,19 +6,22 @@
  * Soft-refresh (invalidate) is the default after scans/adds so phones never
  * blank the shelf for 30s. Hard purge remains for rare ASIN orphan wipes.
  *
- * Persist blobs are origin-scoped (v6) so multi-library devices never mix catalogs.
+ * Persist blobs are origin-scoped (v7) so multi-library devices never mix catalogs.
  * v6 busts stale Mayfair/Hardcover series snapshots after ABS seriesName preference.
+ * v7 busts Kavita shelves collapsed by seriesId-only merge (multi-volume series
+ * like Burning Witch were reduced to one card; count stuck near series count).
  */
 import type { QueryClient } from "@tanstack/react-query";
 import { currentOrigin } from "../api/libraryRegistry";
 
 /** Base prefix; use shelfPersistKey() for the active origin. */
-export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v6:";
+export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v7:";
 export const SHELF_PERSIST_LEGACY_KEYS = [
   "rq-shelf-cache-v2",
   "rq-shelf-cache-v3",
   "rq-shelf-cache-v4",
   "rq-shelf-cache-v5",
+  "rq-shelf-cache-v6",
 ] as const;
 
 /** Origin-scoped localStorage key for shelf query persistence. */
@@ -49,6 +52,8 @@ export type AbsCollectionData = {
 
 export type KavitaCollectionItem = {
   seriesId?: number;
+  volumeId?: number | null;
+  chapterId?: number | null;
   title?: string;
   addedAt?: number;
 };
@@ -57,6 +62,17 @@ export type KavitaCollectionData = {
   items?: KavitaCollectionItem[];
   totalItems?: number;
 };
+
+/** Stable identity for one shelf card (series may expand to multiple volumes). */
+export function kavitaCollectionItemKey(item: KavitaCollectionItem | null | undefined): string | null {
+  const sid = item?.seriesId;
+  if (sid == null || !Number.isFinite(sid)) return null;
+  const chapterId = item?.chapterId;
+  if (chapterId != null && Number.isFinite(chapterId)) return `${sid}:c:${chapterId}`;
+  const volumeId = item?.volumeId;
+  if (volumeId != null && Number.isFinite(volumeId)) return `${sid}:v:${volumeId}`;
+  return `${sid}:s`;
+}
 
 export type StreamingLibraryData = {
   items?: Array<{ id?: number; title?: string }>;
@@ -176,7 +192,11 @@ export function mergeAbsCollection<T extends AbsCollectionData>(
 }
 
 /**
- * Merge Kavita collection snapshots by seriesId.
+ * Merge Kavita collection snapshots by volume/chapter identity.
+ *
+ * Multi-volume series expand to one shelf item per volume (same seriesId).
+ * Merging on seriesId alone collapsed those cards (e.g. 3 Burning Witch
+ * volumes → 1, shelf count stuck near Kavita series count).
  * Same prune semantics as {@link mergeAbsCollection}.
  */
 export function mergeKavitaCollection<T extends KavitaCollectionData>(
@@ -187,16 +207,16 @@ export function mergeKavitaCollection<T extends KavitaCollectionData>(
   if (!fresh) return cached;
   if (!cached) return fresh;
   const prune = opts?.pruneMissing !== false;
-  const map = new Map<number, KavitaCollectionItem>();
+  const map = new Map<string, KavitaCollectionItem>();
   if (!prune) {
     for (const item of cached.items || []) {
-      const id = item?.seriesId;
-      if (id != null && Number.isFinite(id)) map.set(Number(id), item);
+      const id = kavitaCollectionItemKey(item);
+      if (id) map.set(id, item);
     }
   }
   for (const item of fresh.items || []) {
-    const id = item?.seriesId;
-    if (id != null && Number.isFinite(id)) map.set(Number(id), item);
+    const id = kavitaCollectionItemKey(item);
+    if (id) map.set(id, item);
   }
   const items = Array.from(map.values()).sort(
     (a, b) => (Number(b.addedAt) || 0) - (Number(a.addedAt) || 0),
@@ -341,6 +361,7 @@ export function clearLegacyShelfPersist(
   }
   // Origin-scoped generations use `prefix + origin` (e.g. rq-shelf-cache-v5:https://…).
   const originPrefixes = [
+    "rq-shelf-cache-v6:",
     "rq-shelf-cache-v5:",
     "rq-shelf-cache-v4:",
     "rq-shelf-cache-v3:",

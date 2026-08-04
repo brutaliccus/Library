@@ -15,15 +15,16 @@ ADMIN = ROOT / "frontend" / "src" / "pages" / "Admin.tsx"
 LIBRARY_ROUTER = ROOT / "app" / "routers" / "library.py"
 
 
-def test_persist_buster_is_v6_origin_scoped_and_clears_legacy():
+def test_persist_buster_is_v7_origin_scoped_and_clears_legacy():
     main = MAIN.read_text(encoding="utf-8")
     assert "shelfPersistKey" in main
     assert "clearLegacyShelfPersist" in main
     util = UTIL.read_text(encoding="utf-8")
-    assert 'SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v6:"' in util
-    assert "rq-shelf-cache-v5" in util  # legacy clear list
+    assert 'SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v7:"' in util
+    assert "rq-shelf-cache-v6" in util  # legacy clear list
+    assert "rq-shelf-cache-v5" in util
     assert "rq-shelf-cache-v4" in util
-    assert 'rq-shelf-cache-v5:' in util  # origin-scoped prefix sweep
+    assert 'rq-shelf-cache-v6:' in util  # origin-scoped prefix sweep
 
 
 def test_util_exports_orphan_merge_and_soft_refresh_helpers():
@@ -131,6 +132,56 @@ def test_merge_abs_prune_and_upsert_semantics():
     upserted = {**cached, **fresh}
     assert set(upserted) == {"a", "b", "c"}
     assert upserted["b"] == 20
+
+
+def test_merge_kavita_keeps_multi_volume_series_cards():
+    """mergeKavitaCollection must not collapse volumes that share seriesId.
+
+    Backend expands multi-volume series to one shelf item per volume. A
+    seriesId-only merge key reduced Burning Witch (3 vols) to one card and
+    pinned the ebook count near Kavita's series count (~104 instead of ~114).
+    """
+    util = UTIL.read_text(encoding="utf-8")
+    assert "kavitaCollectionItemKey" in util
+    assert "seriesId-only" in util or "same seriesId" in util
+    assert "${sid}:c:" in util or "`${sid}:c:" in util
+    assert "${sid}:v:" in util or "`${sid}:v:" in util
+
+    def key(item: dict) -> str:
+        sid = item["seriesId"]
+        if item.get("chapterId") is not None:
+            return f"{sid}:c:{item['chapterId']}"
+        if item.get("volumeId") is not None:
+            return f"{sid}:v:{item['volumeId']}"
+        return f"{sid}:s"
+
+    cached = {
+        "items": [
+            {"seriesId": 106, "volumeId": 1, "chapterId": 10, "title": "Vol 1", "addedAt": 3},
+            {"seriesId": 106, "volumeId": 2, "chapterId": 11, "title": "Vol 2", "addedAt": 2},
+            {"seriesId": 1, "volumeId": 9, "chapterId": 20, "title": "Solo", "addedAt": 1},
+        ],
+        "totalItems": 3,
+    }
+    fresh = {
+        "items": [
+            {"seriesId": 106, "volumeId": 1, "chapterId": 10, "title": "Vol 1b", "addedAt": 5},
+            {"seriesId": 106, "volumeId": 2, "chapterId": 11, "title": "Vol 2b", "addedAt": 4},
+            {"seriesId": 106, "volumeId": 3, "chapterId": 12, "title": "Vol 3", "addedAt": 6},
+            {"seriesId": 1, "volumeId": 9, "chapterId": 20, "title": "Solo", "addedAt": 1},
+        ],
+        "totalItems": 4,
+    }
+    # pruneMissing=true: only fresh keys (by volume/chapter identity)
+    merged: dict[str, dict] = {}
+    for item in fresh["items"]:
+        merged[key(item)] = item
+    assert len(merged) == 4
+    assert merged["106:c:10"]["title"] == "Vol 1b"
+    assert "106:c:12" in merged
+    # seriesId-only (the old bug) would collapse to 2
+    by_series = {i["seriesId"]: i for i in fresh["items"]}
+    assert len(by_series) == 2
 
 
 def test_abs_collection_total_items_is_unique_not_genre_slots():

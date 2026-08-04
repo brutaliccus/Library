@@ -771,6 +771,14 @@ async def abs_collection(
             if hit is not None:
                 return hit
 
+        # Stale-while-scanning: don't rebuild from ABS mid-scan (partial items).
+        from app.services import library_refresh as refresh_pipeline
+
+        if refresh_pipeline.is_running():
+            stale = library_collection_cache.get_stale(cache_key)
+            if stale is not None:
+                return stale
+
         hidden_titles = await _get_private_titles_for_others(user.id, db)
         raw_items = [
             it for it in await audiobookshelf.get_all_items(force_refresh=refresh)
@@ -1077,6 +1085,17 @@ async def kavita_collection(
             hit = library_collection_cache.get(cache_key)
             if hit is not None:
                 return hit
+
+        # Stale-while-scanning: while the refresh pipeline runs, Kavita is
+        # rebuilding series/volumes and a rebuild would snapshot partial data
+        # (books vanish, multi-volume series collapse). Serve the last
+        # assembled payload instead; the post-scan refresh rebuilds fresh.
+        from app.services import library_refresh as refresh_pipeline
+
+        if refresh_pipeline.is_running():
+            stale = library_collection_cache.get_stale(cache_key)
+            if stale is not None:
+                return stale
 
         hidden_titles = await _get_private_titles_for_others(user.id, db)
         series = await kavita.get_all_series(formats=kavita.EBOOK_FORMATS, force_refresh=refresh)

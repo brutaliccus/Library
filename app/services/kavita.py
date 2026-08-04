@@ -25,6 +25,22 @@ _last_good_series: dict[str, list[dict]] = {}
 _SHRINK_GUARD_RATIO = 0.7
 _SHRINK_GUARD_MIN_PREV = 10
 
+# Last known-good volume list per series id. While a refresh pipeline run is
+# active, Kavita rebuilds series/volumes and /api/Series/volumes can briefly
+# return fewer volumes (e.g. a 3-volume series collapsing to 1); accepting that
+# snapshot made books vanish from the shelf until the next rebuild.
+_last_good_vols: dict[int, list[dict]] = {}
+
+
+def _refresh_pipeline_active() -> bool:
+    """True while the serialized ABS+Kavita refresh pipeline is running."""
+    try:
+        from app.services import library_refresh
+
+        return library_refresh.is_running()
+    except Exception:
+        return False
+
 
 async def _conn() -> tuple[str, str, int]:
     """Effective Kavita URL/key/library (DB override → env)."""
@@ -283,7 +299,17 @@ async def get_all_series(
 
         # Shrink guard: a scan in progress can return a partial series list.
         # Never let a sharply smaller snapshot replace the last known-good one.
+        # While our own refresh pipeline is running, reject ANY shrink — the
+        # scan is rebuilding rows and even a small dip is mid-scan noise.
         prev = _last_good_series.get(cache_key)
+        if prev is not None and len(items) < len(prev) and _refresh_pipeline_active():
+            logger.warning(
+                "Kavita series snapshot shrank %d → %d during refresh pipeline — keeping previous",
+                len(prev),
+                len(items),
+            )
+            _cache_set(cache_key, prev)
+            return prev
         if (
             prev is not None
             and len(prev) >= _SHRINK_GUARD_MIN_PREV
@@ -328,11 +354,28 @@ async def get_series_volumes(series_id: int) -> list[dict]:
             resp.raise_for_status()
             data = resp.json()
             volumes = data if isinstance(data, list) else []
+
+        # Volume shrink guard: mid-scan reads can briefly drop volumes from a
+        # series (Kavita rebuilds them row by row). While the refresh pipeline
+        # is active, never let a shorter list replace the last known-good one.
+        prev = _last_good_vols.get(series_id)
+        if prev and len(volumes) < len(prev) and _refresh_pipeline_active():
+            logger.warning(
+                "Kavita volumes for series %s shrank %d → %d during refresh pipeline — keeping previous",
+                series_id,
+                len(prev),
+                len(volumes),
+            )
+            _cache_set(cache_key, prev)
+            return prev
+
+        _last_good_vols[series_id] = volumes
         _cache_set(cache_key, volumes)
         return volumes
     except Exception as e:
         logger.warning("Failed to fetch Kavita volumes for series %s: %s", series_id, e)
-        return []
+        prev = _last_good_vols.get(series_id)
+        return list(prev) if prev is not None else []
 
 
 async def get_series_metadata(series_id: int) -> dict:

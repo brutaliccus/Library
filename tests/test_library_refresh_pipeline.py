@@ -184,3 +184,69 @@ def test_kavita_series_shrink_guard_keeps_last_good_snapshot():
             assert len(second) == 100
 
     asyncio.run(_run())
+
+
+def test_kavita_volumes_shrink_guard_only_while_pipeline_runs():
+    async def _run():
+        kavita_svc._cache.clear()
+        kavita_svc._last_good_vols.clear()
+
+        full = [{"id": 1}, {"id": 2}, {"id": 3}]
+        partial = [{"id": 1}]
+        responses = [list(full), list(partial), list(partial)]
+
+        class FakeResp:
+            def __init__(self, data):
+                self._data = data
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._data
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return None
+
+            async def get(self, *a, **k):
+                return FakeResp(responses.pop(0))
+
+        with (
+            patch.object(kavita_svc, "_conn", new=AsyncMock(return_value=("http://kv", "key", 1))),
+            patch.object(kavita_svc.httpx, "AsyncClient", FakeClient),
+        ):
+            first = await kavita_svc.get_series_volumes(106)
+            assert len(first) == 3
+
+            # Mid-refresh a shrunken volume list is mid-scan noise: keep last good.
+            kavita_svc._cache.clear()
+            with patch.object(kavita_svc, "_refresh_pipeline_active", return_value=True):
+                second = await kavita_svc.get_series_volumes(106)
+            assert len(second) == 3
+
+            # With no refresh running, a shrink is a real deletion: accept it.
+            kavita_svc._cache.clear()
+            with patch.object(kavita_svc, "_refresh_pipeline_active", return_value=False):
+                third = await kavita_svc.get_series_volumes(106)
+            assert len(third) == 1
+
+    asyncio.run(_run())
+
+
+def test_collection_cache_invalidate_keeps_stale_payload():
+    from app.services import library_collection_cache as coll
+
+    coll._CACHE.clear()
+    payload = {"items": ["a", "b", "c"], "totalItems": 3}
+    coll.set("kavita_coll:1", payload)
+
+    coll.invalidate()
+
+    # Fresh reads miss (forces a rebuild when safe) ...
+    assert coll.get("kavita_coll:1") is None
+    # ... but the stale payload survives to serve while a scan is running.
+    assert coll.get_stale("kavita_coll:1") == payload

@@ -168,7 +168,19 @@ else {
     Invoke-Ssh "cd '$REMOTE_PATH' && docker compose build app" "docker build failed"
 }
 
-Write-Step "[8/9] Restarting app..."
+Write-Step "[8/9] Ensuring DOCKER_GID for Admin container controls..."
+try {
+    # App runs as PUID:PGID; group_add needs the host docker GID to use the socket.
+    $dockerGidCmd = @"
+cd '$REMOTE_PATH' && GID=`$(getent group docker | cut -d: -f3) && if [ -n "`$GID" ]; then if grep -q '^DOCKER_GID=' .env 2>/dev/null; then sed -i "s/^DOCKER_GID=.*/DOCKER_GID=`$GID/" .env; else printf '\nDOCKER_GID=%s\n' "`$GID" >> .env; fi; echo "DOCKER_GID=`$GID"; else echo 'docker group not found'; fi
+"@
+    Invoke-Ssh $dockerGidCmd "DOCKER_GID sync failed"
+}
+catch {
+    Write-Host "Warning (non-fatal): $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+Write-Step "[8b/9] Restarting app..."
 Invoke-Ssh "cd '$REMOTE_PATH' && docker compose up -d app" "docker compose up failed"
 
 Write-Step "[9/9] Updating NPM proxy timeouts..."

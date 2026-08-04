@@ -692,41 +692,37 @@ export default function MyLibrary() {
     if (scanning) return;
     setScanning(true);
     try {
-      // Fire-and-forget ABS wait: do not block UI on scan_library_and_wait (~30–240s).
-      // Backend still scans + cleans orphans in the background when wait=false.
-      const [absResult] = await Promise.allSettled([
-        api.post("/library/abs/scan", null, {
-          params: { wait: false },
-          timeout: 60_000,
-        }),
-        api.post("/library/kavita/scan", null, { timeout: 60_000 }),
-      ]);
-      const deferred =
-        absResult.status === "fulfilled" &&
-        Boolean((absResult.value.data as { deferred?: boolean } | undefined)?.deferred);
-
-      // Cache-first soft refresh — do NOT pass refresh=true (full rebuild + HC enrich)
-      // while ABS/Kavita are still scanning; that thundering-herd melted the Pi.
-      await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 0 });
+      // Single serialized pipeline (ABS scan → Kavita scan) on the backend.
+      // Firing ABS + Kavita scans in parallel from here froze the Pi (OOM).
+      const { data } = await api.post("/library/refresh", null, { timeout: 60_000 });
+      const info = data as { message?: string; cooldown?: boolean; already_running?: boolean };
 
       toast(
-        deferred
-          ? "Library updating — scan running in background; new books will appear shortly"
-          : "Library refreshed — ABS + Kavita scanned",
-        deferred ? "info" : "success",
+        info.cooldown
+          ? "Library was refreshed moments ago — try again in a minute"
+          : "Library updating — scans run one at a time in the background",
+        "info",
       );
 
-      // Sparse polls without cache bust; one short bust only on the final catch-up
-      // after ABS has had time to finish indexing.
+      // Poll pipeline status; refresh views only when each stage completes so
+      // we never snapshot ABS/Kavita mid-scan (that made the ebook count shrink).
       void (async () => {
-        const delays = [8_000, 20_000, 40_000];
-        for (let i = 0; i < delays.length; i++) {
-          await new Promise((r) => setTimeout(r, delays[i]));
+        let lastPhase = "";
+        for (let i = 0; i < 36; i++) {
+          await new Promise((r) => setTimeout(r, 10_000));
           try {
-            const last = i === delays.length - 1;
-            await softRefreshLibraryCollectionQueries(queryClient, {
-              bustMs: last ? 5_000 : 0,
-            });
+            const { data: st } = await api.get("/library/refresh/status", { timeout: 15_000 });
+            const phase = (st as { phase?: string })?.phase || "idle";
+            if (phase === "idle") {
+              // Pipeline finished — one short cache-busted catch-up.
+              await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 5_000 });
+              break;
+            }
+            if (phase !== lastPhase) {
+              // Stage transition (abs → kavita): ABS data is now complete.
+              await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 0 });
+            }
+            lastPhase = phase;
           } catch {
             // ignore background poll errors
           }

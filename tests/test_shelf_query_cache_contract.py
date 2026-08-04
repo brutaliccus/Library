@@ -50,16 +50,20 @@ def test_my_library_soft_refreshes_without_purge_on_refresh():
     assert "structuralSharing: false" in src
     assert "softRefreshLibraryCollectionQueries" in src
     assert "mergeAbsCollection" in src
-    assert "wait: false" in src or 'wait: false' in src or "wait: false" in src.replace(" ", "")
+    # Refresh must go through the single serialized backend pipeline — firing
+    # ABS + Kavita scans in parallel from the client froze the Pi (OOM).
+    refresh_fn = src[src.index("handleRefreshLibrary") : src.index("handleRefreshLibrary") + 2600]
+    assert '"/library/refresh"' in refresh_fn
+    assert "/library/abs/scan" not in refresh_fn
+    assert "/library/kavita/scan" not in refresh_fn
+    assert "/library/refresh/status" in refresh_fn
     # Refresh must not hard-purge before the first refetch.
-    refresh_fn = src[src.index("handleRefreshLibrary") : src.index("handleRefreshLibrary") + 2200]
     assert "purgeLibraryCollectionQueries" not in refresh_fn
     assert "softRefreshLibraryCollectionQueries" in refresh_fn
-    # Must not thundering-herd refresh=true on every poll (Pi load).
+    # Must not thundering-herd refresh=true on every poll (Pi load): busted
+    # catch-up only once the pipeline reports idle.
     assert "bustMs: 0" in refresh_fn
-    assert "bustMs: last ? 5_000 : 0" in refresh_fn or "bustMs: last ? 5000 : 0" in refresh_fn.replace(
-        "_", ""
-    )
+    assert "bustMs: 5_000" in refresh_fn or "bustMs: 5000" in refresh_fn.replace("_", "")
 
 
 def test_soft_refresh_defaults_to_no_cache_bust():
@@ -77,17 +81,23 @@ def test_admin_fix_metadata_soft_refreshes_collection_cache():
     assert "softRefreshLibraryCollectionQueries" in src
     assert "Library Refresh" in src
     assert "/admin/library/refresh" in src
+    # Busted catch-up happens only after the pipeline reports idle.
+    assert "/admin/library/refresh/status" in src
     assert "bustMs: 5_000" in src or "bustMs: 5000" in src.replace("_", "")
-    assert "bustMs: 0" in src
 
 
-def test_abs_scan_supports_deferred_wait_false():
+def test_legacy_scan_endpoints_join_serialized_pipeline():
+    """Old mobile builds call /abs/scan + /kavita/scan in parallel — both must
+    coalesce onto the single ABS → Kavita pipeline (parallel scans froze the Pi)."""
     src = LIBRARY_ROUTER.read_text(encoding="utf-8")
-    assert "wait: bool" in src or "wait: bool =" in src.replace(" ", "")
     assert "deferred" in src
-    assert "kick_library_scan" in src
     assert "already_running" in src
     assert "_singleflight" in src
+    assert 'from app.services import library_refresh' in src
+    assert "refresh_pipeline.kick()" in src
+    # Direct scans must be gone from the legacy endpoints.
+    assert "kick_library_scan" not in src
+    assert "await kavita.scan_library()" not in src
     # Forced refresh must not run Hardcover enrich (Pi CPU).
     assert "if refresh:" in src
     assert "items = cleaned" in src
@@ -97,8 +107,9 @@ def test_admin_library_refresh_endpoint_exists():
     admin = Path(__file__).resolve().parents[1] / "app" / "routers" / "admin.py"
     src = admin.read_text(encoding="utf-8")
     assert '/library/refresh' in src or '"/library/refresh"' in src
-    assert "kick_library_scan" in src
-    assert "kavita.scan_library" in src
+    assert '"/library/refresh/status"' in src
+    assert "library_refresh" in src
+    assert "refresh_pipeline.kick()" in src
 
 
 def test_abs_collection_signature_logic_orphan_detection():

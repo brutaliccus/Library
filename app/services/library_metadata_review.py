@@ -13,7 +13,12 @@ from typing import Any
 
 from app.config import get_settings
 from app.services import audiobookshelf, kavita, libraforge
-from app.services.ebook_pipeline import embed_ebook_metadata, pick_primary_ebook
+from app.services.ebook_pipeline import (
+    EbookMeta,
+    embed_ebook_metadata,
+    pick_primary_ebook,
+    read_ebook_metadata,
+)
 from app.services.ebook_quick_review import (
     EbookQuickReviewError,
     search_ebook_metadata_candidates,
@@ -575,7 +580,32 @@ async def apply_ebook_metadata_review(
     embedded_paths: list[str] = []
     for path in paths:
         try:
-            ok = await embed_ebook_metadata(path, ebook_meta)
+            if len(paths) == 1 or path == primary:
+                # Full selected metadata only for the reviewed (primary) file.
+                ok = await embed_ebook_metadata(path, ebook_meta)
+            else:
+                # Sibling volumes keep their own title/series index — stamping
+                # one book's metadata into every file of a Kavita series merged
+                # distinct volumes into one (e.g. all three Burning Witch books
+                # became "Volume 3" and the shelf showed a single card).
+                existing = await read_ebook_metadata(path)
+                own_title = (existing.get("title") or "").strip() or path.stem
+                own_index = (existing.get("series_index") or "").strip() or None
+                if own_index is None:
+                    from app.services.kavita_ebook_match import _book_number_from_text
+
+                    num = _book_number_from_text(path.stem)
+                    own_index = str(num) if num is not None else None
+                sibling_meta = EbookMeta(
+                    title=own_title,
+                    author=ebook_meta.author,
+                    series=ebook_meta.series or (existing.get("series") or "").strip() or None,
+                    series_index=own_index,
+                    score=ebook_meta.score,
+                    source=ebook_meta.source,
+                    reason="series-level apply (title/index preserved)",
+                )
+                ok = await embed_ebook_metadata(path, sibling_meta)
             if ok:
                 embedded_paths.append(path.name)
         except Exception as e:
@@ -587,10 +617,12 @@ async def apply_ebook_metadata_review(
         author=ebook_meta.author,
         summary=str(selected_result.get("summary") or "").strip() or None,
     )
+    # Targeted series scan — a full library scan here (plus the folder watcher
+    # reacting to rewritten files) stacked scans and overloaded the Pi.
     try:
-        await kavita.scan_library()
+        await kavita.scan_series(series_id)
     except Exception as e:
-        logger.warning("Kavita scan after ebook metadata apply failed: %s", e)
+        logger.warning("Kavita series scan after ebook metadata apply failed: %s", e)
     kavita.invalidate_cache()
 
     return {

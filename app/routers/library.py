@@ -1382,45 +1382,67 @@ def _get_tracks(item: StreamingLibraryItem) -> list:
         return []
 
 
+@router.post("/refresh")
+async def trigger_library_refresh(user: User = Depends(get_current_user)):
+    """Kick the serialized ABS → Kavita refresh pipeline (coalesced, non-blocking)."""
+    from app.services import library_refresh as refresh_pipeline
+
+    kick = refresh_pipeline.kick()
+    return {
+        "ok": bool(kick.get("ok")),
+        "message": kick.get("message") or "Library refresh",
+        "started": bool(kick.get("started")),
+        "already_running": bool(kick.get("already_running")),
+        "cooldown": bool(kick.get("cooldown")),
+        "deferred": bool(kick.get("started") or kick.get("already_running")),
+    }
+
+
+@router.get("/refresh/status")
+async def library_refresh_status(user: User = Depends(get_current_user)):
+    """Current phase of the refresh pipeline (idle | abs | kavita)."""
+    from app.services import library_refresh as refresh_pipeline
+
+    return refresh_pipeline.get_status()
+
+
 @router.post("/abs/scan")
 async def trigger_abs_scan(
     wait: bool = Query(
         True,
-        description="If false, kick ABS scan and return immediately (cleanup runs in background).",
+        description="Deprecated — scans now run via the serialized refresh pipeline.",
     ),
     user: User = Depends(get_current_user),
 ):
-    """Trigger an ABS library scan; optionally wait for completion and clean orphans."""
-    try:
-        result = await audiobookshelf.kick_library_scan(wait=wait)
-        if result.get("error") and not result.get("ok"):
-            raise HTTPException(status_code=502, detail=result.get("message") or result["error"])
-        return {
-            "ok": bool(result.get("ok")),
-            "message": result.get("message") or "Library scan",
-            "scan_ran": bool(result.get("scan_ran")),
-            "scan_complete": bool(result.get("scan_complete")),
-            "timed_out": bool(result.get("timed_out")),
-            "waited_seconds": result.get("waited_seconds"),
-            "items_total": result.get("items_total"),
-            "deferred": bool(result.get("deferred")),
-            "already_running": bool(result.get("already_running")),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Legacy entry point (older mobile builds). Joins the serialized pipeline.
+
+    Previously this ran an ABS scan while ``POST /library/kavita/scan`` ran a
+    Kavita scan in parallel — two full scans at once froze the Pi. Both legacy
+    endpoints now coalesce onto the single ABS → Kavita pipeline.
+    """
+    from app.services import library_refresh as refresh_pipeline
+
+    kick = refresh_pipeline.kick()
+    return {
+        "ok": bool(kick.get("ok")),
+        "message": kick.get("message") or "Library scan",
+        "scan_ran": bool(kick.get("started")),
+        "scan_complete": False,
+        "timed_out": False,
+        "waited_seconds": 0.0,
+        "items_total": None,
+        "deferred": bool(kick.get("started") or kick.get("already_running")),
+        "already_running": bool(kick.get("already_running")),
+    }
 
 
 @router.post("/kavita/scan")
 async def trigger_kavita_scan(user: User = Depends(get_current_user)):
-    """Trigger a Kavita library scan and clear the in-process series cache."""
-    try:
-        await kavita.scan_library()
-        kavita.invalidate_cache()
-        return {"ok": True, "message": "Kavita scanned"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Legacy entry point (older mobile builds). Joins the serialized pipeline."""
+    from app.services import library_refresh as refresh_pipeline
+
+    kick = refresh_pipeline.kick()
+    return {"ok": bool(kick.get("ok")), "message": kick.get("message") or "Library refresh"}
 
 
 # --------------- Reader proxy (Kavita Book API) ---------------

@@ -523,6 +523,59 @@ async def embed_ebook_metadata(ebook_path: Path, meta: EbookMeta) -> bool:
     return True
 
 
+async def read_ebook_metadata(ebook_path: Path) -> dict[str, str | None]:
+    """Read existing title/author/series/index from a file via calibre ``ebook-meta``.
+
+    Used to preserve each file's own identity when applying series-level
+    metadata (stamping one book's title/index into every file of a series
+    collapsed distinct volumes into one in Kavita).
+    """
+    out: dict[str, str | None] = {
+        "title": None,
+        "author": None,
+        "series": None,
+        "series_index": None,
+    }
+    ebook_meta = _get_ebook_meta_bin()
+    if not ebook_meta or ebook_path.suffix.lower() not in {".epub", ".mobi", ".azw3", ".azw"}:
+        return out
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ebook_meta,
+            str(ebook_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await proc.communicate()
+        if proc.returncode != 0:
+            return out
+    except Exception as e:
+        logger.debug("ebook-meta read failed for %s: %s", ebook_path.name, e)
+        return out
+
+    for line in stdout.decode(errors="replace").splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        value = value.strip()
+        if not value:
+            continue
+        if key == "title":
+            out["title"] = value
+        elif key.startswith("author"):
+            out["author"] = value.split("&")[0].split("[")[0].strip()
+        elif key == "series":
+            # calibre prints "Series              : Name #2.0"
+            name, _, idx = value.rpartition("#")
+            if idx and name:
+                out["series"] = name.strip()
+                out["series_index"] = idx.strip()
+            else:
+                out["series"] = value
+    return out
+
+
 def _cleanup_numbered_ebook_duplicates(dest_dir: Path, canonical: Path) -> None:
     """Remove ``Title (N).ext`` siblings when the canonical ``Title.ext`` exists."""
     stem = canonical.stem

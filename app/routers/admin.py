@@ -1369,57 +1369,47 @@ async def reorganize_audiobook_download(
 
 @router.post("/library/refresh")
 async def library_refresh(_admin: User = Depends(require_admin)):
-    """Safely rescan ABS + Kavita without stacking full ABS scans on the Pi.
+    """Kick the serialized ABS → Kavita refresh pipeline (never parallel scans).
 
-    ABS is kicked deferred (coalesced background wait + orphan cleanup). Kavita
-    is scanned after the ABS kick returns so we do not parallel-hammer the host.
+    Returns immediately; poll ``GET /admin/library/refresh/status`` for
+    completion. Parallel full scans on the Pi caused OOM freezes, so all
+    refresh entry points coalesce onto one background pipeline.
     """
-    abs_result = await audiobookshelf.kick_library_scan(wait=False)
-    kavita_ok = False
-    kavita_error: str | None = None
-    try:
-        await kavita.scan_library()
-        kavita.invalidate_cache()
-        kavita_ok = True
-    except Exception as e:
-        kavita_error = str(e)
-        logger.warning("Kavita scan during library refresh failed: %s", e)
+    from app.services import library_refresh as refresh_pipeline
 
-    abs_ok = bool(abs_result.get("ok"))
-    bits: list[str] = []
-    if abs_ok and abs_result.get("already_running"):
-        bits.append("ABS scan already running (coalesced)")
-    elif abs_ok and abs_result.get("deferred"):
-        bits.append("ABS scan started in background")
-    elif abs_ok:
-        bits.append("ABS scan ok")
-    else:
-        bits.append(abs_result.get("message") or "ABS scan skipped")
-    if kavita_ok:
-        bits.append("Kavita scanned")
-    else:
-        bits.append(f"Kavita failed: {kavita_error or 'unknown'}")
-
+    kick = refresh_pipeline.kick()
+    deferred = bool(kick.get("started"))
     return {
-        "ok": abs_ok or kavita_ok,
-        "message": "; ".join(bits),
+        "ok": bool(kick.get("ok")),
+        "message": kick.get("message") or "Library refresh",
         "abs": {
-            "ok": abs_ok,
-            "scan_ran": bool(abs_result.get("scan_ran")),
-            "scan_complete": bool(abs_result.get("scan_complete")),
-            "timed_out": bool(abs_result.get("timed_out")),
-            "deferred": bool(abs_result.get("deferred")),
-            "already_running": bool(abs_result.get("already_running")),
-            "items_total": abs_result.get("items_total"),
-            "error": abs_result.get("error"),
-            "message": abs_result.get("message"),
+            "ok": bool(kick.get("ok")),
+            "scan_ran": deferred,
+            "scan_complete": False,
+            "timed_out": False,
+            "deferred": deferred,
+            "already_running": bool(kick.get("already_running")),
+            "items_total": None,
+            "error": None,
+            "message": kick.get("message"),
         },
         "kavita": {
-            "ok": kavita_ok,
-            "error": kavita_error,
-            "message": "Kavita scanned" if kavita_ok else (kavita_error or "Kavita scan failed"),
+            "ok": bool(kick.get("ok")),
+            "error": None,
+            "message": "Kavita scan queued after ABS completes",
         },
+        "started": deferred,
+        "already_running": bool(kick.get("already_running")),
+        "cooldown": bool(kick.get("cooldown")),
     }
+
+
+@router.get("/library/refresh/status")
+async def library_refresh_status(_admin: User = Depends(require_admin)):
+    """Current phase of the refresh pipeline (idle | abs | kavita)."""
+    from app.services import library_refresh as refresh_pipeline
+
+    return refresh_pipeline.get_status()
 
 
 @router.post("/abs/fix-metadata")

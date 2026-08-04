@@ -1418,12 +1418,21 @@ function HealthTab() {
       };
     },
     onSuccess: async (data) => {
+      // Poll the serialized pipeline (ABS → Kavita); only bust caches once it
+      // finishes so we never snapshot mid-scan (partial ebook counts).
       void (async () => {
-        await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 5_000 });
-        for (const delay of [10_000, 25_000, 45_000]) {
-          await new Promise((r) => setTimeout(r, delay));
-          await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 0 });
+        for (let i = 0; i < 36; i++) {
+          await new Promise((r) => setTimeout(r, 10_000));
+          try {
+            const { data: st } = await api.get("/admin/library/refresh/status", {
+              timeout: 15_000,
+            });
+            if ((st as { phase?: string })?.phase === "idle") break;
+          } catch {
+            // keep polling
+          }
         }
+        await softRefreshLibraryCollectionQueries(queryClient, { bustMs: 5_000 });
       })();
 
       const absDeferred = Boolean(data.abs?.deferred || data.abs?.already_running);

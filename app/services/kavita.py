@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -16,6 +17,13 @@ EPUB_FORMAT = 3
 
 _cache: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 300  # 5 minutes
+
+# Last known-good series list per cache key. Used to reject partial snapshots
+# taken while a Kavita scan is rebuilding series/volumes (mid-scan reads made
+# the ebook count shrink, then bounce back after the next cache expiry).
+_last_good_series: dict[str, list[dict]] = {}
+_SHRINK_GUARD_RATIO = 0.7
+_SHRINK_GUARD_MIN_PREV = 10
 
 
 async def _conn() -> tuple[str, str, int]:
@@ -84,6 +92,107 @@ async def scan_library(library_id: int | None = None) -> None:
             timeout=60,
         )
         resp.raise_for_status()
+
+
+async def scan_series(series_id: int, library_id: int | None = None, *, force: bool = True) -> bool:
+    """Targeted scan of one series (cheap) — avoids full-library scans after metadata edits."""
+    url, key, default_lid = await _conn()
+    if not key:
+        return False
+    lid = library_id or default_lid or 1
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{url}/api/Series/scan",
+                headers={**_headers(key), "Content-Type": "application/json"},
+                json={"libraryId": lid, "seriesId": series_id, "forceUpdate": force},
+                timeout=60,
+            )
+            resp.raise_for_status()
+        return True
+    except Exception as e:
+        logger.warning("Kavita series scan for %s failed: %s", series_id, e)
+        return False
+
+
+async def get_library_last_scanned(library_id: int | None = None) -> str | None:
+    """Return the library's ``lastScanned`` timestamp (advances when a scan finishes)."""
+    url, key, default_lid = await _conn()
+    if not key:
+        return None
+    lid = library_id or default_lid
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{url}/api/Library/libraries",
+            headers=_headers(key),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    if not isinstance(data, list):
+        return None
+    for lib in data:
+        if not isinstance(lib, dict):
+            continue
+        if lid is None or lib.get("id") == lid:
+            return lib.get("lastScanned")
+    return None
+
+
+async def scan_library_and_wait(
+    library_id: int | None = None,
+    *,
+    timeout_seconds: float = 300,
+    poll_interval: float = 5.0,
+) -> dict[str, Any]:
+    """Trigger a Kavita scan and poll ``lastScanned`` until it advances or timeout.
+
+    The in-process cache is invalidated only AFTER the scan completes so
+    collection reads never snapshot Kavita mid-scan (partial series/volumes).
+    """
+    result: dict[str, Any] = {
+        "scan_ran": False,
+        "scan_complete": False,
+        "timed_out": False,
+        "waited_seconds": 0.0,
+        "last_scanned": None,
+    }
+    try:
+        before = await get_library_last_scanned(library_id)
+    except Exception as e:
+        logger.warning("Kavita unreachable before scan: %s", e)
+        raise
+
+    started = time.monotonic()
+    await scan_library(library_id)
+    result["scan_ran"] = True
+
+    after = before
+    while True:
+        elapsed = time.monotonic() - started
+        if elapsed >= timeout_seconds:
+            result.update(timed_out=True, waited_seconds=round(elapsed, 2), last_scanned=after)
+            logger.warning(
+                "Kavita scan wait timed out after %.0fs (lastScanned %s → %s)",
+                elapsed, before, after,
+            )
+            break
+        await asyncio.sleep(poll_interval)
+        try:
+            after = await get_library_last_scanned(library_id)
+        except Exception as e:
+            logger.debug("Kavita lastScanned poll failed: %s", e)
+            continue
+        if after is not None and after != before:
+            elapsed = time.monotonic() - started
+            result.update(scan_complete=True, waited_seconds=round(elapsed, 2), last_scanned=after)
+            logger.info(
+                "Kavita scan complete in %.1fs (lastScanned %s → %s)", elapsed, before, after
+            )
+            break
+
+    invalidate_cache()
+    return result
 
 
 async def search_library(query: str) -> list[dict]:
@@ -171,10 +280,31 @@ async def get_all_series(
             items = []
         if formats:
             items = [s for s in items if s.get("format") in formats]
+
+        # Shrink guard: a scan in progress can return a partial series list.
+        # Never let a sharply smaller snapshot replace the last known-good one.
+        prev = _last_good_series.get(cache_key)
+        if (
+            prev is not None
+            and len(prev) >= _SHRINK_GUARD_MIN_PREV
+            and len(items) < len(prev) * _SHRINK_GUARD_RATIO
+        ):
+            logger.warning(
+                "Kavita series snapshot shrank %d → %d (scan in progress?) — keeping previous",
+                len(prev),
+                len(items),
+            )
+            _cache_set(cache_key, prev)
+            return prev
+
+        _last_good_series[cache_key] = items
         _cache_set(cache_key, items)
         return items
     except Exception as e:
         logger.warning("Failed to fetch Kavita series: %s", e)
+        prev = _last_good_series.get(cache_key)
+        if prev is not None:
+            return prev
         return []
 
 

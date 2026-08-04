@@ -6,11 +6,12 @@ import { resolveShareOrigin } from "../api/inviteLink";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import {
-  ArrowLeft, BookOpen, Headphones, Loader2, Store, Trash2, Share2, TabletSmartphone,
+  ArrowLeft, BookOpen, Headphones, Loader2, Store, Trash2, Share2, TabletSmartphone, Tags,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
 import Modal from "../components/Modal";
+import EbookMetadataMatcher from "../components/admin/EbookMetadataMatcher";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
 
@@ -46,6 +47,7 @@ export default function LibraryEbookDetail() {
   const isAdmin = user?.role === "admin";
   const [storeLoading, setStoreLoading] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
+  const [showEditMetadata, setShowEditMetadata] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const [ereaderBusy, setEreaderBusy] = useState(false);
@@ -316,6 +318,16 @@ export default function LibraryEbookDetail() {
       {isAdmin && (
         <button
           type="button"
+          onClick={() => setShowEditMetadata(true)}
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors"
+        >
+          <Tags size={16} />
+          Edit metadata
+        </button>
+      )}
+      {isAdmin && (
+        <button
+          type="button"
           onClick={() => setShowDelete(true)}
           className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-red-900/40 text-red-300 border border-red-800/60 hover:bg-red-900/60 transition-colors"
         >
@@ -444,6 +456,19 @@ export default function LibraryEbookDetail() {
           </button>
         </div>
       </Modal>
+
+      {isAdmin && Number.isFinite(seriesId) && (
+        <EbookMetadataMatcher
+          seriesId={seriesId}
+          title={displayTitle || item.title}
+          open={showEditMetadata}
+          onClose={() => setShowEditMetadata(false)}
+          onApplied={() => {
+            void queryClient.invalidateQueries({ queryKey: ["kavita-item-detail", seriesId] });
+            void softRefreshLibraryCollectionQueries(queryClient);
+          }}
+        />
+      )}
     </div>
   );
 }

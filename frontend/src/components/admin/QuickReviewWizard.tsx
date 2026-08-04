@@ -250,23 +250,31 @@ function localField(
 }
 
 type Props = {
-  requestId: number;
+  /** Quarantine / request pipeline mode. */
+  requestId?: number;
+  /** In-library ABS item mode (detail-page editor). */
+  itemId?: string;
   title: string;
   open: boolean;
   onClose: () => void;
   manualReviewUrl?: string | null;
+  /** Called after a successful library apply (detail pages refresh). */
+  onApplied?: () => void;
 };
 
 export default function QuickReviewWizard({
   requestId,
+  itemId,
   title,
   open,
   onClose,
   manualReviewUrl,
+  onApplied,
 }: Props) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [step, setStep] = useState<WizardStep>("files");
+  const isLibrary = Boolean(itemId && itemId.trim());
+  const [step, setStep] = useState<WizardStep>(isLibrary ? "metadata" : "files");
   const [relativePath, setRelativePath] = useState("");
   const [clues, setClues] = useState<Clues>({
     query: "",
@@ -295,8 +303,11 @@ export default function QuickReviewWizard({
   }>({});
 
   const loadKey = useMemo(
-    () => ["admin-quick-review", requestId, relativePath] as const,
-    [requestId, relativePath],
+    () =>
+      isLibrary
+        ? (["admin-library-abs-review", itemId] as const)
+        : (["admin-quick-review", requestId, relativePath] as const),
+    [isLibrary, itemId, requestId, relativePath],
   );
   const pipelineKey = useMemo(
     () => ["admin-quick-review-pipeline", requestId] as const,
@@ -311,11 +322,20 @@ export default function QuickReviewWizard({
   } = useQuery({
     queryKey: loadKey,
     queryFn: async () => {
+      if (isLibrary) {
+        const { data } = await api.get(
+          `/admin/library/abs/${encodeURIComponent(itemId!)}/metadata-review`,
+        );
+        return data as QuickReviewLoad;
+      }
       const params = relativePath ? { relative_path: relativePath } : undefined;
       const { data } = await api.get(`/admin/requests/${requestId}/quick-review`, { params });
       return data as QuickReviewLoad;
     },
-    enabled: open && requestId > 0 && step !== "files",
+    enabled:
+      open &&
+      (isLibrary || (typeof requestId === "number" && requestId > 0)) &&
+      (isLibrary || step !== "files"),
     refetchOnWindowFocus: false,
   });
 
@@ -331,7 +351,12 @@ export default function QuickReviewWizard({
       );
       return data as PipelineState;
     },
-    enabled: open && requestId > 0 && (step === "m4b" || step === "chapters" || step === "pipeline"),
+    enabled:
+      !isLibrary &&
+      open &&
+      typeof requestId === "number" &&
+      requestId > 0 &&
+      (step === "m4b" || step === "chapters" || step === "pipeline"),
     refetchInterval: (q) => {
       const st = (q.state.data as PipelineState | undefined)?.status;
       return st === "m4b_convert" || st === "chapter_forge" ? 2500 : false;
@@ -341,7 +366,7 @@ export default function QuickReviewWizard({
 
   useEffect(() => {
     if (!open) {
-      setStep("files");
+      setStep(isLibrary ? "metadata" : "files");
       setRelativePath("");
       setResults([]);
       setSelectedAsin(null);
@@ -354,8 +379,10 @@ export default function QuickReviewWizard({
       setCurrentChapters([]);
       setChapterCompareDetail("");
       setChapterCompareMeta({});
+    } else if (isLibrary) {
+      setStep("metadata");
     }
-  }, [open]);
+  }, [open, isLibrary]);
 
   useEffect(() => {
     if (!review) return;
@@ -402,7 +429,10 @@ export default function QuickReviewWizard({
 
   const searchMutation = useMutation({
     mutationFn: async () => {
-      const { data } = await api.post(`/admin/requests/${requestId}/quick-review/search`, {
+      const path = isLibrary
+        ? `/admin/library/abs/${encodeURIComponent(itemId!)}/metadata-review/search`
+        : `/admin/requests/${requestId}/quick-review/search`;
+      const { data } = await api.post(path, {
         query: clues.query,
         title: clues.title,
         author: clues.author,
@@ -424,8 +454,11 @@ export default function QuickReviewWizard({
 
   const applyMutation = useMutation({
     mutationFn: async (selected: SearchResult) => {
+      const path = isLibrary
+        ? `/admin/library/abs/${encodeURIComponent(itemId!)}/metadata-review/apply`
+        : `/admin/requests/${requestId}/quick-review/apply`;
       const { data } = await api.post(
-        `/admin/requests/${requestId}/quick-review/apply`,
+        path,
         {
           relative_path: relativePath,
           selected_result: selected,
@@ -440,10 +473,13 @@ export default function QuickReviewWizard({
       setMetadataApplied(true);
       const asin = fieldStr(selected.asin || selected.chosen_metadata?.asin);
       if (asin) setChapterAsin(asin);
-      toast("Metadata applied to staging", "success");
+      toast(isLibrary ? "Metadata applied to audiobook" : "Metadata applied to staging", "success");
       void queryClient.invalidateQueries({ queryKey: loadKey });
-      void queryClient.invalidateQueries({ queryKey: pipelineKey });
+      if (!isLibrary) {
+        void queryClient.invalidateQueries({ queryKey: pipelineKey });
+      }
       void refetchReview();
+      if (isLibrary) onApplied?.();
     },
     onError: (err: any) => toast(err.response?.data?.detail || "Apply failed", "error"),
   });
@@ -600,8 +636,14 @@ export default function QuickReviewWizard({
   };
 
   return (
-    <Modal title={`Quick review — ${title}`} show={open} onClose={onClose} size="xl">
+    <Modal
+      title={isLibrary ? `Edit metadata — ${title}` : `Quick review — ${title}`}
+      show={open}
+      onClose={onClose}
+      size="xl"
+    >
       <div className="space-y-4">
+        {!isLibrary && (
         <nav
           aria-label="Quick review steps"
           className="flex flex-wrap items-center gap-1 sm:gap-2"
@@ -637,8 +679,9 @@ export default function QuickReviewWizard({
             );
           })}
         </nav>
+        )}
 
-        {forgeUrl && (
+        {!isLibrary && forgeUrl && (
           <div className="flex justify-end">
             <a
               href={forgeUrl}
@@ -652,9 +695,9 @@ export default function QuickReviewWizard({
           </div>
         )}
 
-        {step === "files" && (
+        {!isLibrary && step === "files" && (
           <div className="space-y-4">
-            <StagingFilesPanel requestId={requestId} compact />
+            <StagingFilesPanel requestId={requestId!} compact />
             <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
               <button
                 type="button"
@@ -1041,37 +1084,61 @@ export default function QuickReviewWizard({
             )}
 
             <div className="flex flex-col-reverse sm:flex-row sm:justify-between gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setStep("files")}
-                className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
-              >
-                Back
-              </button>
-              <div className="flex flex-col-reverse sm:flex-row gap-2">
-                <button
-                  type="button"
-                  onClick={() => setStep("m4b")}
-                  className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
-                >
-                  {metadataApplied ? "Next — M4B" : "Skip — metadata already good"}
-                </button>
-                {metadataApplied && (
+              {isLibrary ? (
+                <>
                   <button
                     type="button"
-                    onClick={() => setStep("m4b")}
-                    className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
+                    onClick={onClose}
+                    className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
                   >
-                    Continue to M4B
-                    <ChevronRight size={14} />
+                    Cancel
                   </button>
-                )}
-              </div>
+                  {metadataApplied && (
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
+                    >
+                      <Check size={14} />
+                      Done
+                    </button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setStep("files")}
+                    className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
+                  >
+                    Back
+                  </button>
+                  <div className="flex flex-col-reverse sm:flex-row gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setStep("m4b")}
+                      className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
+                    >
+                      {metadataApplied ? "Next — M4B" : "Skip — metadata already good"}
+                    </button>
+                    {metadataApplied && (
+                      <button
+                        type="button"
+                        onClick={() => setStep("m4b")}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
+                      >
+                        Continue to M4B
+                        <ChevronRight size={14} />
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}
 
-        {step === "m4b" && (
+        {!isLibrary && step === "m4b" && (
           <div className="space-y-4">
             <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4 space-y-3">
               <p className="text-sm text-gray-200">Convert this book to a single M4B?</p>
@@ -1145,7 +1212,7 @@ export default function QuickReviewWizard({
           </div>
         )}
 
-        {step === "chapters" && (
+        {!isLibrary && step === "chapters" && (
           <div className="space-y-4">
             <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4 space-y-3">
               <p className="text-sm text-gray-200">Chapter Forge — Audible chapters</p>
@@ -1314,7 +1381,7 @@ export default function QuickReviewWizard({
           </div>
         )}
 
-        {step === "pipeline" && (
+        {!isLibrary && step === "pipeline" && (
           <div className="space-y-4">
             <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4 space-y-2">
               <p className="text-sm text-gray-200">

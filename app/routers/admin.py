@@ -1460,6 +1460,148 @@ async def rematch_abs_item(
     return {"updated": result.get("updated", False), "skipped": False}
 
 
+@router.get("/library/abs/{item_id}/metadata-review")
+async def get_abs_library_metadata_review(
+    item_id: str,
+    _admin: User = Depends(require_admin),
+):
+    """Load metadata match clues for an in-library audiobook."""
+    from app.services.library_metadata_review import (
+        LibraryMetadataReviewError,
+        load_abs_metadata_review,
+    )
+
+    try:
+        return await load_abs_metadata_review(item_id)
+    except LibraryMetadataReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/library/abs/{item_id}/metadata-review/search")
+async def post_abs_library_metadata_search(
+    item_id: str,
+    body: QuickReviewSearchBody,
+    _admin: User = Depends(require_admin),
+):
+    """Search Audible / specialty catalogs for a library audiobook."""
+    from app.services.library_metadata_review import (
+        LibraryMetadataReviewError,
+        search_abs_metadata_review,
+    )
+
+    try:
+        return await search_abs_metadata_review(
+            item_id,
+            query=body.query,
+            title=body.title,
+            author=body.author,
+            series=body.series,
+            sequence=body.sequence,
+            narrator=body.narrator,
+            limit=body.limit,
+            provider=body.provider,
+        )
+    except LibraryMetadataReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/library/abs/{item_id}/metadata-review/apply")
+async def post_abs_library_metadata_apply(
+    item_id: str,
+    body: QuickReviewApplyBody,
+    _admin: User = Depends(require_admin),
+):
+    """Apply selected metadata to a library audiobook (files + ABS)."""
+    from app.services.library_metadata_review import (
+        LibraryMetadataReviewError,
+        apply_abs_metadata_review,
+    )
+
+    try:
+        result = await apply_abs_metadata_review(
+            item_id,
+            selected_result=body.selected_result,
+            edit_mode=body.edit_mode,
+            replace_cover=body.replace_cover,
+        )
+    except LibraryMetadataReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    logger.info(
+        "Admin %s applied library audiobook metadata for item %s",
+        _admin.username,
+        item_id,
+    )
+    return result
+
+
+@router.get("/library/ebook/{series_id}/metadata-review")
+async def get_ebook_library_metadata_review(
+    series_id: int,
+    _admin: User = Depends(require_admin),
+):
+    """Load metadata match clues for an in-library ebook."""
+    from app.services.library_metadata_review import (
+        LibraryMetadataReviewError,
+        load_ebook_metadata_review,
+    )
+
+    try:
+        return await load_ebook_metadata_review(series_id)
+    except LibraryMetadataReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/library/ebook/{series_id}/metadata-review/search")
+async def post_ebook_library_metadata_search(
+    series_id: int,
+    body: EbookReviewSearchBody,
+    _admin: User = Depends(require_admin),
+):
+    """Search Hardcover + Open Library for a library ebook."""
+    from app.services.library_metadata_review import (
+        LibraryMetadataReviewError,
+        search_ebook_metadata_review,
+    )
+
+    try:
+        return await search_ebook_metadata_review(
+            series_id,
+            query=body.query,
+            title=body.title,
+            author=body.author,
+            limit=body.limit,
+        )
+    except LibraryMetadataReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/library/ebook/{series_id}/metadata-review/apply")
+async def post_ebook_library_metadata_apply(
+    series_id: int,
+    body: EbookReviewApplyBody,
+    _admin: User = Depends(require_admin),
+):
+    """Apply selected metadata to a library ebook (OPF embed + Kavita)."""
+    from app.services.library_metadata_review import (
+        LibraryMetadataReviewError,
+        apply_ebook_metadata_review,
+    )
+
+    try:
+        result = await apply_ebook_metadata_review(
+            series_id,
+            selected_result=body.selected_result,
+        )
+    except LibraryMetadataReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    logger.info(
+        "Admin %s applied library ebook metadata for series %s",
+        _admin.username,
+        series_id,
+    )
+    return result
+
+
 @router.delete("/library/abs/{item_id}")
 async def delete_abs_library_media(
     item_id: str,

@@ -137,21 +137,29 @@ function localField(
 }
 
 type Props = {
-  requestId: number;
+  /** Quarantine / request pipeline mode. */
+  requestId?: number;
+  /** In-library Kavita series mode (detail-page editor). */
+  seriesId?: number;
   title: string;
   open: boolean;
   onClose: () => void;
+  /** Called after a successful library apply (detail pages refresh). */
+  onApplied?: () => void;
 };
 
 export default function EbookMetadataMatcher({
   requestId,
+  seriesId,
   title,
   open,
   onClose,
+  onApplied,
 }: Props) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [step, setStep] = useState<WizardStep>("files");
+  const isLibrary = seriesId != null && Number.isFinite(seriesId) && seriesId > 0;
+  const [step, setStep] = useState<WizardStep>(isLibrary ? "metadata" : "files");
   const [clues, setClues] = useState<Clues>({
     query: "",
     title: "",
@@ -164,8 +172,11 @@ export default function EbookMetadataMatcher({
   const [metadataApplied, setMetadataApplied] = useState(false);
 
   const loadKey = useMemo(
-    () => ["admin-ebook-review", requestId] as const,
-    [requestId],
+    () =>
+      isLibrary
+        ? (["admin-library-ebook-review", seriesId] as const)
+        : (["admin-ebook-review", requestId] as const),
+    [isLibrary, seriesId, requestId],
   );
 
   const {
@@ -176,22 +187,31 @@ export default function EbookMetadataMatcher({
   } = useQuery({
     queryKey: loadKey,
     queryFn: async () => {
+      if (isLibrary) {
+        const { data } = await api.get(`/admin/library/ebook/${seriesId}/metadata-review`);
+        return data as EbookReviewLoad;
+      }
       const { data } = await api.get(`/admin/requests/${requestId}/ebook-review`);
       return data as EbookReviewLoad;
     },
-    enabled: open && requestId > 0 && step !== "files",
+    enabled:
+      open &&
+      (isLibrary || (typeof requestId === "number" && requestId > 0)) &&
+      (isLibrary || step !== "files"),
     refetchOnWindowFocus: false,
   });
 
   useEffect(() => {
     if (!open) {
-      setStep("files");
+      setStep(isLibrary ? "metadata" : "files");
       setResults([]);
       setSelectedKey(null);
       setMetadataApplied(false);
       setClues({ query: "", title: "", author: "", series: "", sequence: "" });
+    } else if (isLibrary) {
+      setStep("metadata");
     }
-  }, [open]);
+  }, [open, isLibrary]);
 
   useEffect(() => {
     if (!review) return;
@@ -208,7 +228,10 @@ export default function EbookMetadataMatcher({
 
   const searchMutation = useMutation({
     mutationFn: async () => {
-      const { data } = await api.post(`/admin/requests/${requestId}/ebook-review/search`, {
+      const path = isLibrary
+        ? `/admin/library/ebook/${seriesId}/metadata-review/search`
+        : `/admin/requests/${requestId}/ebook-review/search`;
+      const { data } = await api.post(path, {
         query: clues.query,
         title: clues.title,
         author: clues.author,
@@ -228,8 +251,11 @@ export default function EbookMetadataMatcher({
 
   const applyMutation = useMutation({
     mutationFn: async (selected: SearchResult) => {
+      const path = isLibrary
+        ? `/admin/library/ebook/${seriesId}/metadata-review/apply`
+        : `/admin/requests/${requestId}/ebook-review/apply`;
       const { data } = await api.post(
-        `/admin/requests/${requestId}/ebook-review/apply`,
+        path,
         { selected_result: selected },
         { timeout: 120_000 },
       );
@@ -237,10 +263,13 @@ export default function EbookMetadataMatcher({
     },
     onSuccess: () => {
       setMetadataApplied(true);
-      toast("Metadata applied to staging", "success");
+      toast(isLibrary ? "Metadata applied to ebook" : "Metadata applied to staging", "success");
       void queryClient.invalidateQueries({ queryKey: loadKey });
-      void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      if (!isLibrary) {
+        void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      }
       void refetchReview();
+      if (isLibrary) onApplied?.();
     },
     onError: (err: any) => toast(err.response?.data?.detail || "Apply failed", "error"),
   });
@@ -273,8 +302,14 @@ export default function EbookMetadataMatcher({
   };
 
   return (
-    <Modal title={`Ebook metadata — ${title}`} show={open} onClose={onClose} size="xl">
+    <Modal
+      title={isLibrary ? `Edit metadata — ${title}` : `Ebook metadata — ${title}`}
+      show={open}
+      onClose={onClose}
+      size="xl"
+    >
       <div className="space-y-4">
+        {!isLibrary && (
         <nav
           aria-label="Ebook metadata steps"
           className="flex flex-wrap items-center gap-1 sm:gap-2"
@@ -307,14 +342,15 @@ export default function EbookMetadataMatcher({
             );
           })}
         </nav>
+        )}
 
-        {step === "files" && (
+        {!isLibrary && step === "files" && (
           <div className="space-y-3">
             <p className="text-sm text-gray-400">
               Review staging files, then match metadata via Hardcover or Open Library before
               continuing organize → Kavita.
             </p>
-            <StagingFilesPanel requestId={requestId} compact />
+            <StagingFilesPanel requestId={requestId!} compact />
             <div className="flex justify-end">
               <button
                 type="button"
@@ -351,8 +387,10 @@ export default function EbookMetadataMatcher({
                 {metadataApplied && (
                   <p className="text-xs text-teal-300/90 bg-teal-950/30 border border-teal-800/40 rounded-lg px-3 py-2">
                     Metadata applied
-                    {review.primary_ebook ? ` to ${review.primary_ebook}` : ""}. Continue
-                    the pipeline when ready.
+                    {review.primary_ebook ? ` to ${review.primary_ebook}` : ""}.
+                    {isLibrary
+                      ? " Library details will refresh shortly."
+                      : " Continue the pipeline when ready."}
                   </p>
                 )}
 
@@ -413,7 +451,7 @@ export default function EbookMetadataMatcher({
                       Apply metadata
                     </button>
                   )}
-                  {metadataApplied && (
+                  {!isLibrary && metadataApplied && (
                     <button
                       type="button"
                       onClick={() => setStep("pipeline")}
@@ -421,6 +459,16 @@ export default function EbookMetadataMatcher({
                     >
                       <Play size={14} />
                       Continue pipeline
+                    </button>
+                  )}
+                  {isLibrary && metadataApplied && (
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-gray-600 text-gray-200 hover:bg-gray-700/40"
+                    >
+                      <Check size={14} />
+                      Done
                     </button>
                   )}
                 </div>
@@ -625,7 +673,7 @@ export default function EbookMetadataMatcher({
           </div>
         )}
 
-        {step === "pipeline" && (
+        {!isLibrary && step === "pipeline" && (
           <div className="space-y-3">
             <p className="text-sm text-gray-300">
               {metadataApplied

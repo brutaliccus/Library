@@ -7,11 +7,12 @@ import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import {
-  ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store, Trash2, ListPlus, Share2,
+  ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store, Trash2, ListPlus, Share2, Tags,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
 import Modal from "../components/Modal";
+import QuickReviewWizard from "../components/admin/QuickReviewWizard";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
 import type { AbsChapter } from "../types/player";
@@ -65,6 +66,7 @@ export default function LibraryBookDetail() {
   const [playLoading, setPlayLoading] = useState(false);
   const [storeLoading, setStoreLoading] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
+  const [showEditMetadata, setShowEditMetadata] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
 
@@ -350,6 +352,16 @@ export default function LibraryBookDetail() {
       {isAdmin && (
         <button
           type="button"
+          onClick={() => setShowEditMetadata(true)}
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors"
+        >
+          <Tags size={16} />
+          Edit metadata
+        </button>
+      )}
+      {isAdmin && (
+        <button
+          type="button"
           onClick={() => setShowDelete(true)}
           className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-red-900/40 text-red-300 border border-red-800/60 hover:bg-red-900/60 transition-colors"
         >
@@ -476,6 +488,20 @@ export default function LibraryBookDetail() {
           </button>
         </div>
       </Modal>
+
+      {isAdmin && itemId && (
+        <QuickReviewWizard
+          itemId={itemId}
+          title={item.title}
+          open={showEditMetadata}
+          onClose={() => setShowEditMetadata(false)}
+          onApplied={() => {
+            void queryClient.invalidateQueries({ queryKey: ["abs-item-detail", itemId] });
+            void queryClient.invalidateQueries({ queryKey: ["abs-chapters", itemId] });
+            void softRefreshLibraryCollectionQueries(queryClient);
+          }}
+        />
+      )}
     </div>
   );
 }

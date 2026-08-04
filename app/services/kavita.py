@@ -361,6 +361,117 @@ async def get_book_resources(chapter_id: int, file_path: str) -> bytes | None:
     except Exception as e:
         logger.warning("Failed to fetch Kavita resource %s: %s", file_path, e)
         return None
+
+
+async def update_series_identity(
+    series_id: int,
+    *,
+    name: str,
+    author: str | None = None,
+    summary: str | None = None,
+) -> bool:
+    """Best-effort Kavita series name + metadata update after OPF embed.
+
+    Kavita re-reads file tags on scan; this also pins UI fields immediately.
+    """
+    url, key, _ = await _conn()
+    if not key:
+        return False
+    title = (name or "").strip()
+    if not title:
+        return False
+
+    ok_name = False
+    ok_meta = False
+    try:
+        async with httpx.AsyncClient() as client:
+            # Fetch current series so we can preserve fields Kavita requires.
+            series_payload: dict[str, Any] = {
+                "id": series_id,
+                "name": title,
+                "localizedName": title,
+                "sortName": title,
+                "sortNameLocked": True,
+                "localizedNameLocked": True,
+                "nameLocked": True,
+            }
+            try:
+                detail = await client.get(
+                    f"{url}/api/Series/{series_id}",
+                    headers=_headers(key),
+                    timeout=15,
+                )
+                if detail.status_code == 200:
+                    raw = detail.json()
+                    if isinstance(raw, dict):
+                        series_payload = {**raw, **series_payload}
+            except Exception:
+                logger.debug("Kavita series detail fetch failed for %s", series_id, exc_info=True)
+
+            resp = await client.post(
+                f"{url}/api/Series/update",
+                headers={**_headers(key), "Content-Type": "application/json"},
+                json=series_payload,
+                timeout=30,
+            )
+            ok_name = resp.status_code in (200, 204)
+            if not ok_name:
+                logger.warning(
+                    "Kavita Series/update for %s failed: HTTP %s %s",
+                    series_id,
+                    resp.status_code,
+                    (resp.text or "")[:200],
+                )
+
+            writers: list[dict[str, Any]] = []
+            if (author or "").strip():
+                writers = [{"id": 0, "name": author.strip()}]
+            meta_body: dict[str, Any] = {
+                "seriesMetadata": {
+                    "seriesId": series_id,
+                    "summary": (summary or "").strip(),
+                    "writers": writers,
+                    "summaryLocked": bool((summary or "").strip()),
+                    "writerLocked": bool(writers),
+                }
+            }
+            # Merge existing metadata when available so we do not wipe genres/tags.
+            try:
+                existing = await get_series_metadata(series_id)
+                if existing:
+                    merged = {**existing, **meta_body["seriesMetadata"]}
+                    merged["seriesId"] = series_id
+                    if writers:
+                        merged["writers"] = writers
+                    if (summary or "").strip():
+                        merged["summary"] = summary.strip()
+                    meta_body["seriesMetadata"] = merged
+            except Exception:
+                pass
+
+            meta_resp = await client.post(
+                f"{url}/api/Series/metadata",
+                headers={**_headers(key), "Content-Type": "application/json"},
+                json=meta_body,
+                timeout=30,
+            )
+            ok_meta = meta_resp.status_code in (200, 204)
+            if not ok_meta:
+                logger.warning(
+                    "Kavita Series/metadata for %s failed: HTTP %s %s",
+                    series_id,
+                    meta_resp.status_code,
+                    (meta_resp.text or "")[:200],
+                )
+    except Exception as e:
+        logger.warning("Kavita update_series_identity for %s failed: %s", series_id, e)
+        return False
+
+    if ok_name or ok_meta:
+        invalidate_cache()
+    return ok_name or ok_meta
+
+
 async def delete_series(series_id: int) -> bool:
     """Delete a series from Kavita."""
     url, key, _ = await _conn()

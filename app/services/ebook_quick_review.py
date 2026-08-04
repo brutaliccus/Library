@@ -450,21 +450,15 @@ async def load_ebook_quick_review(req: DownloadRequest) -> dict[str, Any]:
     }
 
 
-async def search_ebook_quick_review(
-    req: DownloadRequest,
+async def search_ebook_metadata_candidates(
     *,
     query: str = "",
     title: str = "",
     author: str = "",
     limit: int = 12,
 ) -> dict[str, Any]:
-    """Search Hardcover and Open Library for ebook metadata candidates."""
-    if (req.media_type or "") != "ebook":
-        raise EbookQuickReviewError("Ebook Quick Review search is ebook-only")
-
+    """Search Hardcover + Open Library (shared by quarantine + library editors)."""
     from app.services import google_books, hardcover
-
-    resolve_staging_dir(req.staging_path or "")
 
     q = (query or "").strip()
     t = (title or "").strip()
@@ -481,7 +475,6 @@ async def search_ebook_quick_review(
     hc_results: list[dict[str, Any]] = []
     ol_results: list[dict[str, Any]] = []
 
-    # Hardcover (optional — still search OL when key missing / HC fails)
     if await hardcover.get_api_key():
         try:
             hits = await hardcover.search_books(q, limit=lim)
@@ -495,7 +488,6 @@ async def search_ebook_quick_review(
     else:
         errors.append("Hardcover API key is not configured")
 
-    # Open Library via existing catalog helpers (local dump → live OL → …)
     try:
         ol_data = await google_books.search_volumes(q, max_results=lim)
         books = (ol_data or {}).get("books") if isinstance(ol_data, dict) else None
@@ -512,7 +504,6 @@ async def search_ebook_quick_review(
     results = _merge_search_results([hc_results, ol_results], limit=lim)
 
     if not results and errors and "hardcover" not in providers_used and not ol_results:
-        # Nothing usable from either side — surface the most actionable error.
         if not await hardcover.get_api_key() and "Open Library" not in " ".join(errors):
             raise EbookQuickReviewError(
                 "No metadata matches found (Hardcover not configured; Open Library empty)"
@@ -522,7 +513,6 @@ async def search_ebook_quick_review(
 
     return {
         "ok": True,
-        "request_id": req.id,
         "query": q,
         "provider": "hardcover+open_library",
         "providers": providers_used or ["hardcover", "open_library"],
@@ -530,6 +520,28 @@ async def search_ebook_quick_review(
         "queries": [q],
         "errors": errors,
     }
+
+
+async def search_ebook_quick_review(
+    req: DownloadRequest,
+    *,
+    query: str = "",
+    title: str = "",
+    author: str = "",
+    limit: int = 12,
+) -> dict[str, Any]:
+    """Search Hardcover and Open Library for ebook metadata candidates."""
+    if (req.media_type or "") != "ebook":
+        raise EbookQuickReviewError("Ebook Quick Review search is ebook-only")
+
+    resolve_staging_dir(req.staging_path or "")
+    data = await search_ebook_metadata_candidates(
+        query=query,
+        title=title,
+        author=author,
+        limit=limit,
+    )
+    return {**data, "request_id": req.id}
 
 
 async def apply_ebook_quick_review(

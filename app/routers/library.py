@@ -748,6 +748,112 @@ async def play_library_item(
     }
 
 
+# Chapter-style folder basenames that ABS indexes as separate library items when
+# a multi-file book was extracted into sibling folders (Red Seas Under Red Skies).
+_ABS_CHAPTER_FOLDER_RE = re.compile(
+    r"(?i)^(?:"
+    r"ch(?:apter)?[\s._-]*\d+"
+    r"|prologue\b"
+    r"|epilogue\b"
+    r"|reminiscence[\s._-]*\d*"
+    r"|cards?\s+(?:in|on)\s+the\b"
+    r"|.*\bintro\b"
+    r")"
+)
+
+
+def _abs_folder_basename(item: dict) -> str:
+    rel = str(item.get("relPath") or item.get("path") or "").replace("\\", "/").rstrip("/")
+    return rel.split("/")[-1].strip() if rel else ""
+
+
+def _abs_item_score(item: dict) -> tuple[int, int, int]:
+    """Prefer complete books over single-track chapter fragments."""
+    return (
+        int(item.get("numTracks") or 0),
+        int(item.get("duration") or 0),
+        1 if str(item.get("asin") or "").strip() else 0,
+    )
+
+
+def _dedupe_abs_shelf_items(items: list[dict]) -> list[dict]:
+    """Collapse duplicate ABS rows so the shelf counts unique books.
+
+    Two inflation sources observed live:
+    1. Same ASIN imported under two folder trees (Assassin's Quest, etc.)
+    2. One book split into many chapter folders that all share the book title
+       (26× \"Red Seas Under Red Skies\" single-track items).
+    """
+    from collections import defaultdict
+
+    from app.services.forge_pipeline import normalize_asin
+
+    # Pass 1: unique by ASIN (keep richest item).
+    by_asin: dict[str, dict] = {}
+    remainder: list[dict] = []
+    for item in items:
+        asin = normalize_asin(item.get("asin"))
+        if not asin:
+            remainder.append(item)
+            continue
+        prev = by_asin.get(asin)
+        if prev is None or _abs_item_score(item) > _abs_item_score(prev):
+            by_asin[asin] = item
+
+    candidates = list(by_asin.values()) + remainder
+
+    # Pass 2: title+author groups — drop chapter-folder fragments.
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for item in candidates:
+        key = (
+            str(item.get("title") or "").strip().casefold(),
+            str(item.get("author") or "").strip().casefold(),
+        )
+        groups[key].append(item)
+
+    out: list[dict] = []
+    for (title, _author), group in groups.items():
+        if len(group) == 1:
+            out.extend(group)
+            continue
+
+        canonical: list[dict] = []
+        fragments: list[dict] = []
+        for item in group:
+            base = _abs_folder_basename(item).casefold()
+            tracks = int(item.get("numTracks") or 0)
+            dur = int(item.get("duration") or 0)
+            looks_chapter = bool(base and _ABS_CHAPTER_FOLDER_RE.search(base))
+            short_single = tracks <= 1 and 0 < dur < 8 * 3600
+            folder_is_title = bool(base and title and (base == title or title in base or base in title))
+            if looks_chapter or (short_single and len(group) >= 3 and not folder_is_title):
+                fragments.append(item)
+            else:
+                canonical.append(item)
+
+        if canonical and fragments:
+            # Keep real book folder(s); drop chapter siblings.
+            if len(canonical) == 1:
+                out.extend(canonical)
+            else:
+                # Multiple non-fragment copies (path twins without ASIN) — keep best.
+                out.append(max(canonical, key=_abs_item_score))
+            continue
+
+        if len(group) >= 3 and len(fragments) >= len(group) - 1:
+            out.append(max(group, key=_abs_item_score))
+            continue
+
+        if len(group) == 2 and all(int(it.get("duration") or 0) > 10_000 for it in group):
+            # Likely full-book path duplicate without a shared ASIN.
+            out.append(max(group, key=_abs_item_score))
+            continue
+
+        out.extend(group)
+
+    return out
+
+
 @router.get("/abs/collection")
 async def abs_collection(
     user: User = Depends(get_current_user),
@@ -796,6 +902,9 @@ async def abs_collection(
             cleaned.append(
                 _apply_local_series_fields({**item, "genres": mapped, "series": series_bits})
             )
+        # Collapse ASIN twins + chapter-folder fragments (e.g. 26× Red Seas parts)
+        # so the shelf count tracks unique books (~189) not raw ABS rows (~217).
+        cleaned = _dedupe_abs_shelf_items(cleaned)
         # Skip HC enrich on forced refresh — it fans out 8 concurrent lookups and
         # routinely times out on ~200 items, burning Pi CPU for no genre gain.
         if refresh:
@@ -929,14 +1038,36 @@ async def abs_item_detail(
     }
 
 
-def _kavita_volume_title(series_name: str, vol: dict, chapter: dict) -> str:
+def _kavita_file_stem(file_entry: dict) -> str:
+    path = str(file_entry.get("filePath") or file_entry.get("fileName") or "")
+    return Path(path).stem if path else ""
+
+
+def _kavita_file_name(file_entry: dict) -> str:
+    path = str(file_entry.get("filePath") or file_entry.get("fileName") or "")
+    return Path(path).name if path else ""
+
+
+def _kavita_file_key(file_entry: dict) -> str:
+    """Stable per-file identity when Kavita collapses multiple volumes into one chapter."""
+    path = str(file_entry.get("filePath") or file_entry.get("fileName") or "").strip()
+    if not path:
+        return ""
+    # Prefer basename — local mounts remount under different prefixes.
+    return Path(path).name.lower()
+
+
+def _kavita_volume_title(series_name: str, vol: dict, chapter: dict, file_entry: dict | None = None) -> str:
     """Best display title for one Kavita volume (prefer file stem over placeholder chapter titles)."""
+    if file_entry is not None:
+        stem = _kavita_file_stem(file_entry)
+        if stem:
+            return stem
     files = chapter.get("files") or []
     best_stem = ""
     best_rank = -1
     for f in files:
-        path = str(f.get("filePath") or f.get("fileName") or "")
-        stem = Path(path).stem if path else ""
+        stem = _kavita_file_stem(f)
         if not stem:
             continue
         # Prefer canonical file over re-download duplicates: "Title (2).epub"
@@ -956,6 +1087,28 @@ def _kavita_volume_title(series_name: str, vol: dict, chapter: dict) -> str:
     return series_name
 
 
+def _kavita_chapter_file_entries(vol: dict, chapter: dict) -> list[dict]:
+    """Return one logical volume per distinct ebook file.
+
+    When Kavita merges sibling books into a single chapter (identical series-index
+    after a bad metadata stamp), the shelf must still show one card per file.
+    """
+    files = [f for f in (chapter.get("files") or []) if _kavita_file_key(f)]
+    if not files:
+        return [{}]
+    # Drop obvious re-download duplicates ("Title (2).epub") when a canonical twin exists.
+    stems = {_kavita_file_stem(f) for f in files}
+    filtered: list[dict] = []
+    for f in files:
+        stem = _kavita_file_stem(f)
+        if re.search(r"\s\(\d+\)$", stem):
+            base = re.sub(r"\s\(\d+\)$", "", stem)
+            if base in stems or any(s == base for s in stems):
+                continue
+        filtered.append(f)
+    return filtered or files
+
+
 def _kavita_collection_items_from_series(
     s: dict,
     volumes: list,
@@ -963,7 +1116,7 @@ def _kavita_collection_items_from_series(
     *,
     hidden_titles: set[str],
 ) -> list[dict]:
-    """Expand one Kavita series into one shelf item per volume so series books accumulate."""
+    """Expand one Kavita series into one shelf item per volume/file so series books accumulate."""
     name = s.get("name") or s.get("localizedName") or s.get("originalName") or ""
     if not name or _is_hidden(name, hidden_titles):
         return []
@@ -988,7 +1141,8 @@ def _kavita_collection_items_from_series(
         added_ms = 0
 
     sid = s.get("id")
-    vol_entries: list[tuple[float, dict, dict]] = []
+    # (sort_key, vol, ch, file_entry|None)
+    vol_entries: list[tuple[float, dict, dict, dict | None]] = []
     for vol in volumes or []:
         chapters = vol.get("chapters") or []
         if not chapters:
@@ -996,9 +1150,13 @@ def _kavita_collection_items_from_series(
         ch = chapters[0]
         if ch.get("id") is None:
             continue
-        vol_num = kavita_ebook_match._volume_index(vol)
-        sort_key = vol_num if vol_num is not None else 999.0
-        vol_entries.append((sort_key, vol, ch))
+        file_entries = _kavita_chapter_file_entries(vol, ch)
+        for f in file_entries:
+            stem = _kavita_file_stem(f) if f else ""
+            file_num = kavita_ebook_match._book_number_from_text(stem) if stem else None
+            vol_num = file_num if file_num is not None else kavita_ebook_match._volume_index(vol)
+            sort_key = vol_num if vol_num is not None else 999.0
+            vol_entries.append((sort_key, vol, ch, f or None))
 
     if not vol_entries:
         # Series row with no volumes yet — keep a placeholder card.
@@ -1010,6 +1168,8 @@ def _kavita_collection_items_from_series(
             "author": author,
             "coverUrl": f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else "",
             "chapterId": None,
+            "fileKey": None,
+            "fileName": None,
             "genres": genres,
             "seriesName": "",
             "sequence": "",
@@ -1019,14 +1179,16 @@ def _kavita_collection_items_from_series(
             "source": "kavita",
         }]
 
-    vol_entries.sort(key=lambda x: x[0])
+    vol_entries.sort(key=lambda x: (x[0], (_kavita_file_stem(x[3]) if x[3] else "")))
     multi = len(vol_entries) > 1
     items: list[dict] = []
-    for sort_key, vol, ch in vol_entries:
+    for sort_key, vol, ch, file_entry in vol_entries:
         chapter_id = int(ch["id"])
         volume_id = vol.get("id")
-        vol_num = kavita_ebook_match._volume_index(vol)
-        title = _kavita_volume_title(name, vol, ch) if multi else name
+        stem = _kavita_file_stem(file_entry) if file_entry else ""
+        file_num = kavita_ebook_match._book_number_from_text(stem) if stem else None
+        vol_num = file_num if file_num is not None else kavita_ebook_match._volume_index(vol)
+        title = _kavita_volume_title(name, vol, ch, file_entry) if multi else name
         seq = ""
         if vol_num is not None and vol_num > 0:
             seq = str(int(vol_num)) if float(vol_num).is_integer() else str(vol_num)
@@ -1041,6 +1203,8 @@ def _kavita_collection_items_from_series(
             cover_url += f"&volumeId={volume_id}"
         if cover_url and chapter_id:
             cover_url += f"&chapterId={chapter_id}"
+        file_key = _kavita_file_key(file_entry) if file_entry else None
+        file_name = _kavita_file_name(file_entry) if file_entry else None
 
         items.append({
             "seriesId": sid,
@@ -1050,6 +1214,8 @@ def _kavita_collection_items_from_series(
             "author": author,
             "coverUrl": cover_url,
             "chapterId": chapter_id,
+            "fileKey": file_key,
+            "fileName": file_name,
             "genres": genres,
             "seriesName": sname,
             "sequence": seq,
@@ -1160,23 +1326,29 @@ async def kavita_item_detail(
         if ch_id is None:
             continue
         v_id = vol.get("id")
-        v_num = kavita_ebook_match._volume_index(vol)
-        v_title = _kavita_volume_title(name, vol, ch)
-        volume_list.append({
-            "volumeId": v_id,
-            "volumeNumber": v_num,
-            "chapterId": int(ch_id),
-            "title": v_title,
-        })
-        if chapter_id is not None and int(ch_id) == int(chapter_id):
-            volume_id = v_id
-        elif chapter_id is None:
-            chapter_id = int(ch_id)
-            volume_id = v_id
+        for file_entry in _kavita_chapter_file_entries(vol, ch):
+            stem = _kavita_file_stem(file_entry) if file_entry else ""
+            file_num = kavita_ebook_match._book_number_from_text(stem) if stem else None
+            v_num = file_num if file_num is not None else kavita_ebook_match._volume_index(vol)
+            v_title = _kavita_volume_title(name, vol, ch, file_entry or None)
+            volume_list.append({
+                "volumeId": v_id,
+                "volumeNumber": v_num,
+                "chapterId": int(ch_id),
+                "title": v_title,
+                "fileKey": _kavita_file_key(file_entry) if file_entry else None,
+                "fileName": _kavita_file_name(file_entry) if file_entry else None,
+            })
+            if chapter_id is not None and int(ch_id) == int(chapter_id):
+                volume_id = v_id
+            elif chapter_id is None:
+                chapter_id = int(ch_id)
+                volume_id = v_id
     volume_list.sort(
         key=lambda v: (
             v["volumeNumber"] is None,
             v["volumeNumber"] if v["volumeNumber"] is not None else 999.0,
+            v.get("title") or "",
         )
     )
     cover_url = f"/api/library/reader/cover/ebook?seriesId={series_id}"

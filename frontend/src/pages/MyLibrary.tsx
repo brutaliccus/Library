@@ -149,6 +149,8 @@ interface KavitaItem {
   author: string;
   coverUrl: string;
   chapterId: number | null;
+  fileKey?: string | null;
+  fileName?: string | null;
   genres?: string[];
   seriesName?: string;
   sequence?: string;
@@ -164,7 +166,12 @@ type TabView = "all" | "genre" | "series" | "author";
 export type NavigateToBook = (
   title: string,
   author?: string,
-  target?: { ebookChapterId?: number; ebookSeriesId?: number; absItemId?: string }
+  target?: {
+    ebookChapterId?: number;
+    ebookSeriesId?: number;
+    ebookFileName?: string;
+    absItemId?: string;
+  }
 ) => void;
 
 /** Series label from local item metadata (no Hardcover). */
@@ -585,7 +592,7 @@ export default function MyLibrary() {
       const seen = new Set<string>();
       for (const item of kavitaCollection.items as KavitaItem[]) {
         if (item.seriesId == null) continue;
-        const key = `${item.seriesId}:${item.chapterId ?? item.volumeId ?? "s"}`;
+        const key = `${item.seriesId}:${item.fileKey ?? item.chapterId ?? item.volumeId ?? "s"}`;
         if (seen.has(key)) continue;
         if (
           !match(
@@ -938,13 +945,26 @@ export default function MyLibrary() {
   );
 
   const handleNavigateToBook = useCallback(
-    async (title: string, author?: string, target?: { ebookChapterId?: number; ebookSeriesId?: number; absItemId?: string }) => {
+    async (
+      title: string,
+      author?: string,
+      target?: {
+        ebookChapterId?: number;
+        ebookSeriesId?: number;
+        ebookFileName?: string;
+        absItemId?: string;
+      },
+    ) => {
       persistLibraryUi();
       if (target?.ebookSeriesId != null) {
-        const q =
-          target.ebookChapterId != null
-            ? `?chapter=${encodeURIComponent(String(target.ebookChapterId))}`
-            : "";
+        const params = new URLSearchParams();
+        if (target.ebookChapterId != null) {
+          params.set("chapter", String(target.ebookChapterId));
+        }
+        if (target.ebookFileName) {
+          params.set("file", target.ebookFileName);
+        }
+        const q = params.toString() ? `?${params.toString()}` : "";
         navigate(`/library/ebook/${target.ebookSeriesId}${q}`);
         return;
       }
@@ -1766,6 +1786,9 @@ export default function MyLibrary() {
                       handleNavigateToBook(r.title, r.author, {
                         ebookSeriesId: r.seriesId ?? undefined,
                         ebookChapterId: r.seriesId == null ? r.chapterId ?? undefined : undefined,
+                        ebookFileName: (r as { fileName?: string; fileKey?: string }).fileName
+                          || (r as { fileName?: string; fileKey?: string }).fileKey
+                          || undefined,
                       });
                     }
                   }}
@@ -1943,7 +1966,7 @@ export default function MyLibrary() {
                     <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
                       {filteredEbookItems.map((item) => (
                         <EbookCard
-                          key={`${item.seriesId}-${item.chapterId ?? item.volumeId ?? "x"}`}
+                          key={`${item.seriesId}-${item.fileKey ?? item.chapterId ?? item.volumeId ?? "x"}`}
                           item={item}
                           onNavigateToBook={handleNavigateToBook}
                           hasAudio={formatMatches?.[item.title]?.hasAudio}
@@ -2431,7 +2454,7 @@ function EbookGenreRow({
           const cached = item.chapterId != null && !!cachedIds?.has(item.chapterId);
           return (
             <EbookCard
-              key={`${item.seriesId}-${item.chapterId ?? item.volumeId ?? "x"}`}
+              key={`${item.seriesId}-${item.fileKey ?? item.chapterId ?? item.volumeId ?? "x"}`}
               item={item}
               onNavigateToBook={onNavigateToBook}
               hasAudio={formatMatches?.[item.title]?.hasAudio}
@@ -2526,6 +2549,7 @@ function EbookCard({
     onNavigateToBook(item.title, item.author, {
       ebookSeriesId: item.seriesId,
       ebookChapterId: item.chapterId ?? undefined,
+      ebookFileName: item.fileName || item.fileKey || undefined,
     });
   };
 

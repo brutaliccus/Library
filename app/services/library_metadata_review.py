@@ -16,6 +16,7 @@ from app.services import audiobookshelf, kavita, libraforge
 from app.services.ebook_pipeline import (
     EbookMeta,
     embed_ebook_metadata,
+    ensure_series_index,
     pick_primary_ebook,
     read_ebook_metadata,
 )
@@ -453,36 +454,127 @@ async def _resolve_ebook_series(series_id: int) -> tuple[dict[str, Any], dict[st
     return series, meta or {}, paths
 
 
-async def load_ebook_metadata_review(series_id: int) -> dict[str, Any]:
-    """Load match clues for an in-library ebook (Kavita series)."""
-    series, meta, paths = await _resolve_ebook_series(series_id)
-    title = str(
-        series.get("name") or series.get("localizedName") or series.get("originalName") or ""
-    ).strip()
-    author = _ebook_author_from_meta(meta, series)
+def _local_path_for_kavita_file(file_path: str) -> Path | None:
+    """Map a Kavita chapter filePath to a local Path (same rules as kavita service)."""
+    from app.services.kavita import _kavita_path_to_local
+
+    local = _kavita_path_to_local(file_path or "")
+    return local if local and local.exists() else None
+
+
+async def _paths_for_chapter(series_id: int, chapter_id: int | None) -> list[Path]:
+    """Resolve on-disk ebook path(s) for one Kavita chapter (or all series files)."""
+    if chapter_id is None:
+        return await kavita.get_series_local_file_paths(series_id)
+
+    volumes = await kavita.get_series_volumes(series_id)
+    matched: list[Path] = []
+    seen: set[str] = set()
+    for vol in volumes or []:
+        for ch in vol.get("chapters") or []:
+            if ch.get("id") != chapter_id:
+                continue
+            for f in ch.get("files") or []:
+                local = _local_path_for_kavita_file(str(f.get("filePath") or ""))
+                if not local:
+                    continue
+                key = str(local.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                matched.append(local)
+    if not matched:
+        raise LibraryMetadataReviewError(
+            f"No ebook files found for chapter {chapter_id} in series {series_id}"
+        )
+    return matched
+
+
+def _pick_target_ebook(
+    paths: list[Path],
+    *,
+    chapter_id: int | None,
+    target_filename: str | None = None,
+) -> Path:
+    """Choose the single file that metadata apply may rewrite."""
+    want = (target_filename or "").strip()
+    if want:
+        for p in paths:
+            if p.name == want or p.stem == want:
+                return p
+        # Allow suffix-insensitive match on display titles.
+        want_l = want.lower()
+        for p in paths:
+            if p.name.lower() == want_l or p.stem.lower() == want_l:
+                return p
+        raise LibraryMetadataReviewError(
+            f"target_filename {want!r} not found among chapter files"
+        )
+    if len(paths) == 1:
+        return paths[0]
+    parent = paths[0].parent if paths[0].is_file() else paths[0]
+    if parent.is_dir() and all(p.parent == parent for p in paths if p.is_file()):
+        primary = pick_primary_ebook(parent)
+        if primary is not None and primary.exists():
+            return primary
+    if chapter_id is None or len(paths) > 1:
+        raise LibraryMetadataReviewError(
+            "chapter_id and target_filename are required when a series has "
+            "multiple ebook files (editing one volume must not rewrite siblings)"
+        )
+    return paths[0]
+
+
+async def load_ebook_metadata_review(
+    series_id: int,
+    *,
+    chapter_id: int | None = None,
+    target_filename: str | None = None,
+) -> dict[str, Any]:
+    """Load match clues for an in-library ebook (Kavita series / optional chapter)."""
+    series, meta, all_paths = await _resolve_ebook_series(series_id)
+    target_paths = await _paths_for_chapter(series_id, chapter_id)
+    try:
+        primary = _pick_target_ebook(
+            target_paths, chapter_id=chapter_id, target_filename=target_filename
+        )
+    except LibraryMetadataReviewError:
+        if target_filename:
+            raise
+        primary = target_paths[0]
+
+    disk = await read_ebook_metadata(primary)
+    title = (
+        (disk.get("title") or "").strip()
+        or str(
+            series.get("name")
+            or series.get("localizedName")
+            or series.get("originalName")
+            or ""
+        ).strip()
+    )
+    author = (disk.get("author") or "").strip() or _ebook_author_from_meta(meta, series)
     summary = str(meta.get("summary") or meta.get("description") or "").strip()
     query = f"{title} {author}".strip()
 
-    # Series/sequence: prefer folder cues from primary ebook parent name when present.
-    series_name = ""
-    sequence = ""
-    primary = paths[0]
+    series_name = (disk.get("series") or "").strip()
+    sequence = (disk.get("series_index") or "").strip()
     parent = primary.parent if primary.is_file() else primary
-    # Author / Series / Title layout → parent is title, grandparent may be series.
-    try:
-        ebook_root = Path(settings.ebook_dir).resolve()
-        parts = parent.resolve().relative_to(ebook_root).parts
-        if len(parts) >= 3:
-            series_name = parts[-2]
-        elif len(parts) == 2:
-            # Author/Title — no series folder
-            series_name = ""
-    except (ValueError, OSError):
-        pass
+    if not series_name:
+        try:
+            ebook_root = Path(settings.ebook_dir).resolve()
+            parts = parent.resolve().relative_to(ebook_root).parts
+            if len(parts) >= 3:
+                series_name = parts[-2]
+        except (ValueError, OSError):
+            pass
 
     cover_url = f"/api/library/reader/cover/ebook?seriesId={series_id}"
+    if chapter_id is not None:
+        cover_url += f"&chapterId={int(chapter_id)}"
     return {
         "series_id": series_id,
+        "chapter_id": chapter_id,
         "media_type": "ebook",
         "title": title,
         "author": author or None,
@@ -497,10 +589,11 @@ async def load_ebook_metadata_review(series_id: int) -> dict[str, Any]:
                 "file_count": 1,
                 "is_grouped": False,
             }
-            for p in paths
+            for p in target_paths
         ],
         "selected_relative_path": "",
         "primary_ebook": primary.name,
+        "series_file_count": len(all_paths),
         "queries": [query] if query else [],
         "clues": {
             "query": query,
@@ -558,67 +651,52 @@ async def apply_ebook_metadata_review(
     series_id: int,
     *,
     selected_result: dict[str, Any],
+    chapter_id: int | None = None,
+    target_filename: str | None = None,
 ) -> dict[str, Any]:
-    """Embed selected metadata into library ebook files and refresh Kavita."""
+    """Embed selected metadata into ONE library ebook file and refresh Kavita.
+
+    Multi-volume series must pass ``chapter_id`` so siblings are never rewritten.
+    Sibling files are left untouched — rewriting them previously collapsed
+    distinct volumes (Burning Witch 1/2/3 all became volume 3).
+    """
     if not isinstance(selected_result, dict) or not selected_result:
         raise LibraryMetadataReviewError("selected_result is required")
 
-    series, _meta, paths = await _resolve_ebook_series(series_id)
+    series, _meta, all_paths = await _resolve_ebook_series(series_id)
+    target_paths = await _paths_for_chapter(series_id, chapter_id)
     try:
         ebook_meta = selected_result_to_ebook_meta(selected_result)
     except EbookQuickReviewError as e:
         raise LibraryMetadataReviewError(str(e)) from e
     ebook_meta.score = max(ebook_meta.score, 0.95)
     ebook_meta.ambiguous = False
+    ebook_meta = ensure_series_index(ebook_meta)
 
-    # Prefer the same primary picker when files share a folder; else first path.
-    parent = paths[0].parent if paths[0].is_file() else paths[0]
-    primary = pick_primary_ebook(parent) if parent.is_dir() else paths[0]
-    if primary is None or not primary.exists():
-        primary = paths[0]
+    primary = _pick_target_ebook(target_paths, chapter_id=chapter_id, target_filename=target_filename)
 
     embedded_paths: list[str] = []
-    for path in paths:
-        try:
-            if len(paths) == 1 or path == primary:
-                # Full selected metadata only for the reviewed (primary) file.
-                ok = await embed_ebook_metadata(path, ebook_meta)
-            else:
-                # Sibling volumes keep their own title/series index — stamping
-                # one book's metadata into every file of a Kavita series merged
-                # distinct volumes into one (e.g. all three Burning Witch books
-                # became "Volume 3" and the shelf showed a single card).
-                existing = await read_ebook_metadata(path)
-                own_title = (existing.get("title") or "").strip() or path.stem
-                own_index = (existing.get("series_index") or "").strip() or None
-                if own_index is None:
-                    from app.services.kavita_ebook_match import _book_number_from_text
+    try:
+        ok = await embed_ebook_metadata(primary, ebook_meta)
+        if ok:
+            embedded_paths.append(primary.name)
+    except Exception as e:
+        logger.warning("Could not embed metadata into %s: %s", primary, e)
 
-                    num = _book_number_from_text(path.stem)
-                    own_index = str(num) if num is not None else None
-                sibling_meta = EbookMeta(
-                    title=own_title,
-                    author=ebook_meta.author,
-                    series=ebook_meta.series or (existing.get("series") or "").strip() or None,
-                    series_index=own_index,
-                    score=ebook_meta.score,
-                    source=ebook_meta.source,
-                    reason="series-level apply (title/index preserved)",
-                )
-                ok = await embed_ebook_metadata(path, sibling_meta)
-            if ok:
-                embedded_paths.append(path.name)
-        except Exception as e:
-            logger.warning("Could not embed metadata into %s: %s", path, e)
+    # Never rename a multi-file Kavita series to a single volume title.
+    series_display = (
+        (ebook_meta.series or "").strip()
+        or str(series.get("name") or series.get("localizedName") or "").strip()
+        or ebook_meta.title
+    )
+    kavita_name = series_display if len(all_paths) > 1 else (ebook_meta.title or series_display)
 
     kavita_updated = await kavita.update_series_identity(
         series_id,
-        name=ebook_meta.title,
+        name=kavita_name,
         author=ebook_meta.author,
         summary=str(selected_result.get("summary") or "").strip() or None,
     )
-    # Targeted series scan — a full library scan here (plus the folder watcher
-    # reacting to rewritten files) stacked scans and overloaded the Pi.
     try:
         await kavita.scan_series(series_id)
     except Exception as e:
@@ -628,9 +706,14 @@ async def apply_ebook_metadata_review(
     return {
         "ok": True,
         "series_id": series_id,
+        "chapter_id": chapter_id,
+        "target_filename": primary.name if primary else None,
         "applied": True,
         "embedded": bool(embedded_paths),
         "embedded_files": embedded_paths,
+        "untouched_siblings": [
+            p.name for p in all_paths if p.resolve() != primary.resolve()
+        ],
         "primary_ebook": primary.name if primary else None,
         "kavita_updated": kavita_updated,
         "previous_title": str(

@@ -141,6 +141,10 @@ type Props = {
   requestId?: number;
   /** In-library Kavita series mode (detail-page editor). */
   seriesId?: number;
+  /** Active Kavita chapter / volume being edited (required for multi-file series). */
+  chapterId?: number | null;
+  /** On-disk filename for the volume being edited (disambiguates collapsed chapters). */
+  targetFilename?: string | null;
   title: string;
   open: boolean;
   onClose: () => void;
@@ -151,6 +155,8 @@ type Props = {
 export default function EbookMetadataMatcher({
   requestId,
   seriesId,
+  chapterId,
+  targetFilename,
   title,
   open,
   onClose,
@@ -174,9 +180,9 @@ export default function EbookMetadataMatcher({
   const loadKey = useMemo(
     () =>
       isLibrary
-        ? (["admin-library-ebook-review", seriesId] as const)
+        ? (["admin-library-ebook-review", seriesId, chapterId ?? null, targetFilename ?? null] as const)
         : (["admin-ebook-review", requestId] as const),
-    [isLibrary, seriesId, requestId],
+    [isLibrary, seriesId, chapterId, targetFilename, requestId],
   );
 
   const {
@@ -188,7 +194,12 @@ export default function EbookMetadataMatcher({
     queryKey: loadKey,
     queryFn: async () => {
       if (isLibrary) {
-        const { data } = await api.get(`/admin/library/ebook/${seriesId}/metadata-review`);
+        const { data } = await api.get(`/admin/library/ebook/${seriesId}/metadata-review`, {
+          params: {
+            ...(chapterId != null ? { chapter_id: chapterId } : {}),
+            ...(targetFilename ? { target_filename: targetFilename } : {}),
+          },
+        });
         return data as EbookReviewLoad;
       }
       const { data } = await api.get(`/admin/requests/${requestId}/ebook-review`);
@@ -256,7 +267,11 @@ export default function EbookMetadataMatcher({
         : `/admin/requests/${requestId}/ebook-review/apply`;
       const { data } = await api.post(
         path,
-        { selected_result: selected },
+        {
+          selected_result: selected,
+          ...(isLibrary && chapterId != null ? { chapter_id: chapterId } : {}),
+          ...(isLibrary && targetFilename ? { target_filename: targetFilename } : {}),
+        },
         { timeout: 120_000 },
       );
       return data;

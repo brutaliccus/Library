@@ -6,22 +6,25 @@
  * Soft-refresh (invalidate) is the default after scans/adds so phones never
  * blank the shelf for 30s. Hard purge remains for rare ASIN orphan wipes.
  *
- * Persist blobs are origin-scoped (v7) so multi-library devices never mix catalogs.
+ * Persist blobs are origin-scoped (v8) so multi-library devices never mix catalogs.
  * v6 busts stale Mayfair/Hardcover series snapshots after ABS seriesName preference.
  * v7 busts Kavita shelves collapsed by seriesId-only merge (multi-volume series
  * like Burning Witch were reduced to one card; count stuck near series count).
+ * v8 busts shelves that still collapsed multi-file chapters (same chapterId) and
+ * inflated ABS counts from ASIN duplicates / chapter-folder fragments.
  */
 import type { QueryClient } from "@tanstack/react-query";
 import { currentOrigin } from "../api/libraryRegistry";
 
 /** Base prefix; use shelfPersistKey() for the active origin. */
-export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v7:";
+export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v8:";
 export const SHELF_PERSIST_LEGACY_KEYS = [
   "rq-shelf-cache-v2",
   "rq-shelf-cache-v3",
   "rq-shelf-cache-v4",
   "rq-shelf-cache-v5",
   "rq-shelf-cache-v6",
+  "rq-shelf-cache-v7",
 ] as const;
 
 /** Origin-scoped localStorage key for shelf query persistence. */
@@ -54,6 +57,9 @@ export type KavitaCollectionItem = {
   seriesId?: number;
   volumeId?: number | null;
   chapterId?: number | null;
+  /** Distinct file identity when multiple ebooks share one Kavita chapter. */
+  fileKey?: string | null;
+  fileName?: string | null;
   title?: string;
   addedAt?: number;
 };
@@ -63,10 +69,12 @@ export type KavitaCollectionData = {
   totalItems?: number;
 };
 
-/** Stable identity for one shelf card (series may expand to multiple volumes). */
+/** Stable identity for one shelf card (series may expand to multiple volumes/files). */
 export function kavitaCollectionItemKey(item: KavitaCollectionItem | null | undefined): string | null {
   const sid = item?.seriesId;
   if (sid == null || !Number.isFinite(sid)) return null;
+  const fileKey = (item?.fileKey || "").trim();
+  if (fileKey) return `${sid}:f:${fileKey}`;
   const chapterId = item?.chapterId;
   if (chapterId != null && Number.isFinite(chapterId)) return `${sid}:c:${chapterId}`;
   const volumeId = item?.volumeId;
@@ -361,6 +369,7 @@ export function clearLegacyShelfPersist(
   }
   // Origin-scoped generations use `prefix + origin` (e.g. rq-shelf-cache-v5:https://…).
   const originPrefixes = [
+    "rq-shelf-cache-v7:",
     "rq-shelf-cache-v6:",
     "rq-shelf-cache-v5:",
     "rq-shelf-cache-v4:",

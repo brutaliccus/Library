@@ -15,12 +15,12 @@ ADMIN = ROOT / "frontend" / "src" / "pages" / "Admin.tsx"
 LIBRARY_ROUTER = ROOT / "app" / "routers" / "library.py"
 
 
-def test_persist_buster_is_v7_origin_scoped_and_clears_legacy():
+def test_persist_buster_is_v8_origin_scoped_and_clears_legacy():
     main = MAIN.read_text(encoding="utf-8")
     assert "shelfPersistKey" in main
     assert "clearLegacyShelfPersist" in main
     util = UTIL.read_text(encoding="utf-8")
-    assert 'SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v7:"' in util
+    assert 'SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v8:"' in util
     assert "rq-shelf-cache-v6" in util  # legacy clear list
     assert "rq-shelf-cache-v5" in util
     assert "rq-shelf-cache-v4" in util
@@ -149,6 +149,8 @@ def test_merge_kavita_keeps_multi_volume_series_cards():
 
     def key(item: dict) -> str:
         sid = item["seriesId"]
+        if item.get("fileKey"):
+            return f"{sid}:f:{item['fileKey']}"
         if item.get("chapterId") is not None:
             return f"{sid}:c:{item['chapterId']}"
         if item.get("volumeId") is not None:
@@ -201,3 +203,33 @@ def test_abs_collection_total_items_is_unique_not_genre_slots():
     util = UTIL.read_text(encoding="utf-8")
     assert "const totalItems = items.filter" in util or "totalItems = items.filter" in util
     assert "reduce((n, b) => n + b.length" not in util
+
+
+def test_merge_kavita_keeps_multi_file_same_chapter():
+    """fileKey must keep distinct cards when Kavita collapsed volumes into one chapter."""
+    util = Path(__file__).resolve().parents[1] / "frontend" / "src" / "utils" / "shelfQueryCache.ts"
+    src = util.read_text(encoding="utf-8")
+    assert "fileKey" in src
+    assert "sid}:f:" in src or "${sid}:f:" in src
+
+    def key(item: dict) -> str:
+        sid = item["seriesId"]
+        if item.get("fileKey"):
+            return f"{sid}:f:{item['fileKey']}"
+        if item.get("chapterId") is not None:
+            return f"{sid}:c:{item['chapterId']}"
+        return f"{sid}:s"
+
+    fresh = {
+        "items": [
+            {"seriesId": 106, "chapterId": 189, "fileKey": "bw1.epub", "title": "BW1", "addedAt": 1},
+            {"seriesId": 106, "chapterId": 189, "fileKey": "bw2.epub", "title": "BW2", "addedAt": 2},
+            {"seriesId": 106, "chapterId": 189, "fileKey": "bw3.epub", "title": "BW3", "addedAt": 3},
+        ],
+        "totalItems": 3,
+    }
+    keys = {key(i) for i in fresh["items"]}
+    assert len(keys) == 3
+    # chapterId-only would wrongly collapse to 1
+    assert len({f"{i['seriesId']}:c:{i['chapterId']}" for i in fresh["items"]}) == 1
+

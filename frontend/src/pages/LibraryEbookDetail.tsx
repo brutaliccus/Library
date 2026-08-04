@@ -20,6 +20,8 @@ interface EbookVolume {
   volumeNumber: number | null;
   chapterId: number;
   title: string;
+  fileKey?: string | null;
+  fileName?: string | null;
 }
 
 interface EbookItemDetail {
@@ -64,16 +66,26 @@ export default function LibraryEbookDetail() {
 
   const volumes = item?.volumes || [];
   const preferredChapter = Number(searchParams.get("chapter") || "");
-  const activeChapterId = useMemo(() => {
-    if (Number.isFinite(preferredChapter) && preferredChapter > 0) {
-      if (volumes.some((v) => v.chapterId === preferredChapter)) {
-        return preferredChapter;
-      }
+  const preferredFile = (searchParams.get("file") || "").trim().toLowerCase();
+  const activeVolume = useMemo(() => {
+    if (preferredFile) {
+      const byFile = volumes.find(
+        (v) =>
+          (v.fileKey || "").toLowerCase() === preferredFile ||
+          (v.fileName || "").toLowerCase() === preferredFile ||
+          (v.title || "").toLowerCase() === preferredFile,
+      );
+      if (byFile) return byFile;
     }
-    return item?.chapterId ?? volumes[0]?.chapterId ?? null;
-  }, [item?.chapterId, preferredChapter, volumes]);
-
-  const activeVolume = volumes.find((v) => v.chapterId === activeChapterId) || null;
+    if (Number.isFinite(preferredChapter) && preferredChapter > 0) {
+      const matches = volumes.filter((v) => v.chapterId === preferredChapter);
+      if (matches.length === 1) return matches[0];
+      if (matches.length > 1) return matches[0];
+    }
+    const fallbackChapter = item?.chapterId ?? volumes[0]?.chapterId ?? null;
+    return volumes.find((v) => v.chapterId === fallbackChapter) || volumes[0] || null;
+  }, [item?.chapterId, preferredChapter, preferredFile, volumes]);
+  const activeChapterId = activeVolume?.chapterId ?? null;
   const displayTitle = activeVolume?.title || item?.title || "";
 
   const handleViewInStore = async () => {
@@ -390,15 +402,25 @@ export default function LibraryEbookDetail() {
               </h2>
               <ul className="space-y-1.5">
                 {volumes.map((vol) => {
-                  const active = vol.chapterId === activeChapterId;
+                  const active =
+                    (vol.fileKey && activeVolume?.fileKey
+                      ? vol.fileKey === activeVolume.fileKey
+                      : vol.chapterId === activeChapterId) &&
+                    (!activeVolume?.fileName || !vol.fileName || vol.fileName === activeVolume.fileName);
+                  const fileQs = vol.fileName
+                    ? `&file=${encodeURIComponent(vol.fileName)}`
+                    : vol.fileKey
+                      ? `&file=${encodeURIComponent(vol.fileKey)}`
+                      : "";
                   return (
-                    <li key={vol.chapterId}>
+                    <li key={`${vol.chapterId}-${vol.fileKey || vol.fileName || vol.title}`}>
                       <button
                         type="button"
                         onClick={() =>
-                          navigate(`/library/ebook/${seriesId}?chapter=${vol.chapterId}`, {
-                            replace: true,
-                          })
+                          navigate(
+                            `/library/ebook/${seriesId}?chapter=${vol.chapterId}${fileQs}`,
+                            { replace: true },
+                          )
                         }
                         className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
                           active
@@ -460,6 +482,8 @@ export default function LibraryEbookDetail() {
       {isAdmin && Number.isFinite(seriesId) && (
         <EbookMetadataMatcher
           seriesId={seriesId}
+          chapterId={activeChapterId}
+          targetFilename={activeVolume?.fileName || activeVolume?.title || null}
           title={displayTitle || item.title}
           open={showEditMetadata}
           onClose={() => setShowEditMetadata(false)}

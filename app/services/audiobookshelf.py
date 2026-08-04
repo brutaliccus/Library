@@ -922,6 +922,9 @@ def _normalize_abs_item(lib_item: dict, progress_map: dict | None = None) -> dic
         "isFinished": is_finished,
         "numTracks": media.get("numTracks", 0) or media.get("numAudioFiles", 0) or 0,
         "addedAt": lib_item.get("addedAt", 0),
+        # Used by shelf dedupe (chapter-folder fragments / path twins).
+        "path": str(lib_item.get("path") or ""),
+        "relPath": str(lib_item.get("relPath") or ""),
     }
 
 

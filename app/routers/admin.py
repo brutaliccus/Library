@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -203,6 +203,8 @@ class EbookReviewSearchBody(BaseModel):
 
 class EbookReviewApplyBody(BaseModel):
     selected_result: dict
+    chapter_id: int | None = None
+    target_filename: str | None = None
 
 
 class ContinueForgeBody(BaseModel):
@@ -1527,16 +1529,22 @@ async def post_abs_library_metadata_apply(
 @router.get("/library/ebook/{series_id}/metadata-review")
 async def get_ebook_library_metadata_review(
     series_id: int,
+    chapter_id: int | None = Query(None),
+    target_filename: str | None = Query(None),
     _admin: User = Depends(require_admin),
 ):
-    """Load metadata match clues for an in-library ebook."""
+    """Load metadata match clues for an in-library ebook (optionally one volume)."""
     from app.services.library_metadata_review import (
         LibraryMetadataReviewError,
         load_ebook_metadata_review,
     )
 
     try:
-        return await load_ebook_metadata_review(series_id)
+        return await load_ebook_metadata_review(
+            series_id,
+            chapter_id=chapter_id,
+            target_filename=target_filename,
+        )
     except LibraryMetadataReviewError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -1581,13 +1589,17 @@ async def post_ebook_library_metadata_apply(
         result = await apply_ebook_metadata_review(
             series_id,
             selected_result=body.selected_result,
+            chapter_id=body.chapter_id,
+            target_filename=body.target_filename,
         )
     except LibraryMetadataReviewError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     logger.info(
-        "Admin %s applied library ebook metadata for series %s",
+        "Admin %s applied library ebook metadata for series %s chapter=%s file=%s",
         _admin.username,
         series_id,
+        body.chapter_id,
+        body.target_filename,
     )
     return result
 

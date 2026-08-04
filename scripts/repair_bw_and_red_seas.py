@@ -140,12 +140,14 @@ async def main() -> None:
     if n:
         from app.services import audiobookshelf
 
-        # Best-effort ABS library scan so chapter folders disappear from item list.
+        # Scan, then purge isMissing ghosts left by moved chapter folders.
         try:
-            await audiobookshelf.scan_library()
-            print("ABS scan triggered")
+            status = await audiobookshelf.scan_library_and_wait()
+            print("ABS scan", status)
+            removed = await audiobookshelf.remove_items_with_issues()
+            print("ABS remove_issues", removed)
         except Exception as e:
-            print("ABS scan failed/skipped:", e)
+            print("ABS scan/purge failed/skipped:", e)
         audiobookshelf.invalidate_cache()
 
 

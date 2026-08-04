@@ -999,7 +999,16 @@ async def get_all_items(
         return []
 
     progress_map = await _get_progress_map()
-    items = [_normalize_abs_item(r, progress_map) for r in results if r.get("media", {}).get("metadata", {}).get("title")]
+    items = []
+    for r in results:
+        # Drop ghost rows after folder moves/consolidations (isMissing) so the
+        # shelf does not inflate (e.g. 26 deleted Red Seas chapter folders).
+        if r.get("isMissing") or r.get("isInvalid"):
+            continue
+        title = (r.get("media") or {}).get("metadata", {}).get("title")
+        if not title:
+            continue
+        items.append(_normalize_abs_item(r, progress_map))
     _cache_set(cache_key, items)
     return items
 

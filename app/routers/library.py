@@ -1057,6 +1057,23 @@ def _kavita_file_key(file_entry: dict) -> str:
     return Path(path).name.lower()
 
 
+def _ebook_cover_url(
+    series_id: int | None,
+    *,
+    volume_id: int | None = None,
+    chapter_id: int | None = None,
+) -> str:
+    """Build the proxy cover URL for a Kavita ebook (series → volume → chapter)."""
+    if not series_id:
+        return ""
+    cover_url = f"/api/library/reader/cover/ebook?seriesId={series_id}"
+    if volume_id:
+        cover_url += f"&volumeId={volume_id}"
+    if chapter_id:
+        cover_url += f"&chapterId={chapter_id}"
+    return cover_url
+
+
 def _kavita_local_file_path(file_entry: dict | None) -> Path | None:
     """Resolve an on-disk ebook path from a Kavita file entry."""
     if not file_entry:
@@ -1193,7 +1210,7 @@ def _kavita_collection_items_from_series(
             "volumeNumber": None,
             "title": name,
             "author": author,
-            "coverUrl": f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else "",
+            "coverUrl": _ebook_cover_url(sid),
             "chapterId": None,
             "fileKey": None,
             "fileName": None,
@@ -1225,11 +1242,7 @@ def _kavita_collection_items_from_series(
             if inferred and not is_junk_series_hint(inferred[0]):
                 sname, seq = inferred[0], str(inferred[1] or seq)
 
-        cover_url = f"/api/library/reader/cover/ebook?seriesId={sid}" if sid else ""
-        if cover_url and volume_id:
-            cover_url += f"&volumeId={volume_id}"
-        if cover_url and chapter_id:
-            cover_url += f"&chapterId={chapter_id}"
+        cover_url = _ebook_cover_url(sid, volume_id=volume_id, chapter_id=chapter_id)
         file_key = _kavita_file_key(file_entry) if file_entry else None
         file_name = _kavita_file_name(file_entry) if file_entry else None
 
@@ -1371,14 +1384,27 @@ async def kavita_item_detail(
             file_num = kavita_ebook_match._book_number_from_text(stem) if stem else None
             v_num = file_num if file_num is not None else kavita_ebook_match._volume_index(vol)
             v_title = _kavita_volume_title(name, vol, ch, file_entry or None)
+            seq = ""
+            if v_num is not None and v_num > 0:
+                seq = str(int(v_num)) if float(v_num).is_integer() else str(v_num)
+            ch_summary = (
+                (ch.get("summary") or vol.get("summary") or ch.get("description") or "")
+                .strip()
+            )
             vol_row = {
                 "volumeId": v_id,
                 "volumeNumber": v_num,
                 "chapterId": int(ch_id),
                 "title": v_title,
                 "author": author,
+                "description": ch_summary or None,
+                "coverUrl": _ebook_cover_url(
+                    series_id, volume_id=v_id, chapter_id=int(ch_id)
+                ),
                 "fileKey": _kavita_file_key(file_entry) if file_entry else None,
                 "fileName": _kavita_file_name(file_entry) if file_entry else None,
+                "seriesName": "",
+                "sequence": seq,
             }
             from app.services.ebook_quick_review import apply_ebook_override_fields
 
@@ -1399,18 +1425,26 @@ async def kavita_item_detail(
             v.get("title") or "",
         )
     )
-    cover_url = f"/api/library/reader/cover/ebook?seriesId={series_id}"
-    if volume_id:
-        cover_url += f"&volumeId={volume_id}"
-    if chapter_id:
-        cover_url += f"&chapterId={chapter_id}"
+    multi = len(volume_list) > 1
+    for vol_row in volume_list:
+        if vol_row.get("seriesName"):
+            continue
+        if multi:
+            vol_row["seriesName"] = name
+            continue
+        inferred_one = library_series_from_title(vol_row.get("title") or name)
+        if inferred_one and not is_junk_series_hint(inferred_one[0]):
+            vol_row["seriesName"] = inferred_one[0]
+            if not vol_row.get("sequence"):
+                vol_row["sequence"] = str(inferred_one[1] or "")
+    cover_url = _ebook_cover_url(series_id, volume_id=volume_id, chapter_id=chapter_id)
     genres = _normalize_item_genres(meta.get("genres") or [])
     description = (meta.get("summary") or meta.get("description") or "").strip()
     inferred = library_series_from_title(name)
     sname, seq = "", ""
     if inferred and not is_junk_series_hint(inferred[0]):
         sname, seq = inferred[0], str(inferred[1] or "")
-    if not sname and len(volume_list) > 1:
+    if not sname and multi:
         sname = name
     series_out = [{"name": sname, "sequence": seq}] if sname else []
 
@@ -1425,6 +1459,7 @@ async def kavita_item_detail(
         logger.debug("ABS match for Kavita series %s failed", series_id, exc_info=True)
 
     # Prefer file-scoped override on the active/first volume for detail header fields.
+    # Client re-selects by ?chapter=&file= — volumes[] carry per-volume cover/synopsis.
     active = None
     if chapter_id is not None:
         active = next((v for v in volume_list if v.get("chapterId") == int(chapter_id)), None)
@@ -1570,16 +1605,22 @@ async def search_library_unified(
             ebook_items = []
 
         if ebook_items:
+            seen_kavita_keys: set[str] = set()
             for item in ebook_items:
                 name = item.get("title") or ""
                 if not name or _is_hidden(name, hidden_titles):
                     continue
                 sid = item.get("seriesId")
-                if sid in seen_kavita_ids:
+                # One hit per volume/file (multi-volume series expand on the shelf).
+                file_key = item.get("fileKey") or item.get("fileName") or ""
+                kavita_key = f"{sid}:{file_key or item.get('chapterId') or item.get('volumeId') or 's'}"
+                if kavita_key in seen_kavita_keys:
                     continue
                 if not _tokens_match_metadata(item, tokens):
                     continue
-                seen_kavita_ids.add(sid)
+                seen_kavita_keys.add(kavita_key)
+                if isinstance(sid, int):
+                    seen_kavita_ids.add(sid)
                 results.append({
                     "title": name,
                     "author": item.get("author", ""),
@@ -1587,6 +1628,9 @@ async def search_library_unified(
                     "source": "kavita",
                     "seriesId": sid,
                     "chapterId": item.get("chapterId"),
+                    "volumeId": item.get("volumeId"),
+                    "fileKey": item.get("fileKey"),
+                    "fileName": item.get("fileName"),
                 })
         else:
             # Avoid per-series volume fetches during search (very slow). Collection

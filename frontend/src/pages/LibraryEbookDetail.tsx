@@ -14,6 +14,7 @@ import Modal from "../components/Modal";
 import EbookMetadataMatcher from "../components/admin/EbookMetadataMatcher";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
+import { getProgress } from "../utils/readingProgress";
 
 interface EbookVolume {
   volumeId: number | null;
@@ -22,8 +23,11 @@ interface EbookVolume {
   title: string;
   author?: string | null;
   description?: string | null;
+  coverUrl?: string | null;
   fileKey?: string | null;
   fileName?: string | null;
+  seriesName?: string | null;
+  sequence?: string | null;
 }
 
 interface EbookItemDetail {
@@ -90,7 +94,47 @@ export default function LibraryEbookDetail() {
   const activeChapterId = activeVolume?.chapterId ?? null;
   const displayTitle = activeVolume?.title || item?.title || "";
   const displayAuthor = activeVolume?.author || item?.author || "";
-  const displayDescription = activeVolume?.description || item?.description || "";
+  const multiVolume = volumes.length > 1;
+  // Prefer the selected volume's synopsis; avoid showing volume-1/series blurb for other volumes.
+  const displayDescription = multiVolume
+    ? (activeVolume?.description || "").trim()
+    : (activeVolume?.description || item?.description || "").trim();
+  const displayCover =
+    (activeVolume?.coverUrl || "").trim() ||
+    (item?.coverUrl || "").trim() ||
+    "";
+  const seriesName =
+    (activeVolume?.seriesName || "").trim() ||
+    (item?.series || []).find((s) => s.name)?.name ||
+    (multiVolume ? item?.title || "" : "");
+  const seriesSeq =
+    (activeVolume?.sequence || "").trim() ||
+    (activeVolume?.volumeNumber != null && activeVolume.volumeNumber > 0
+      ? String(
+          Number.isInteger(activeVolume.volumeNumber)
+            ? activeVolume.volumeNumber
+            : activeVolume.volumeNumber,
+        )
+      : "") ||
+    (item?.series || []).find((s) => s.name)?.sequence ||
+    "";
+  const seriesLine = seriesName
+    ? seriesSeq
+      ? `${seriesName} #${seriesSeq}`
+      : seriesName
+    : "";
+  const readingProgress = activeChapterId != null ? getProgress(activeChapterId) : null;
+  const progressLabel = (() => {
+    if (!readingProgress) return null;
+    const total =
+      readingProgress.totalViewportPages ||
+      readingProgress.totalKavitaPages ||
+      0;
+    const page = (readingProgress.viewportPage || 0) + 1;
+    if (total > 0) return `Page ${page} of ${total}`;
+    if (readingProgress.page > 0) return `Page ${readingProgress.page}`;
+    return "In progress";
+  })();
 
   const handleViewInStore = async () => {
     if (!item) return;
@@ -157,8 +201,8 @@ export default function LibraryEbookDetail() {
         series_id: seriesId,
         chapter_id: activeChapterId,
         title: displayTitle,
-        author: item.author,
-        cover_url: item.coverUrl,
+        author: displayAuthor,
+        cover_url: displayCover,
       });
       const added = (data as { added?: { downloadUrl?: string } })?.added;
       const downloadUrl = (added?.downloadUrl || "").trim();
@@ -248,13 +292,13 @@ export default function LibraryEbookDetail() {
     );
   }
 
-  const seriesLine = (item.series || [])
-    .filter((s) => s.name)
-    .map((s) => (s.sequence ? `${s.name} #${s.sequence}` : s.name))
-    .join(" · ");
-
-  const cover = item.coverUrl ? (
-    <CoverImage src={item.coverUrl} alt={displayTitle} className="w-full rounded-xl shadow-2xl shadow-black/40" />
+  const cover = displayCover ? (
+    <CoverImage
+      key={displayCover}
+      src={displayCover}
+      alt={displayTitle}
+      className="w-full rounded-xl shadow-2xl shadow-black/40"
+    />
   ) : (
     <div className="w-full aspect-[2/3] bg-gray-800 rounded-xl flex items-center justify-center text-gray-700">
       <BookOpen size={48} />
@@ -270,7 +314,7 @@ export default function LibraryEbookDetail() {
           className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-amber-600 text-white hover:bg-amber-500 transition-colors"
         >
           <BookOpen size={16} />
-          Read
+          {readingProgress ? "Continue" : "Read"}
         </button>
       )}
       {activeChapterId != null && (
@@ -317,8 +361,8 @@ export default function LibraryEbookDetail() {
             kind: "ebook",
             chapterId: activeChapterId,
             title: displayTitle,
-            author: item.author,
-            coverUrl: item.coverUrl,
+            author: displayAuthor,
+            coverUrl: displayCover,
           }}
         />
       )}
@@ -377,14 +421,17 @@ export default function LibraryEbookDetail() {
         <div className="hidden md:block w-64 shrink-0">{cover}</div>
         <div className="flex-1 min-w-0">
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{displayTitle}</h1>
-          {item.author && (
+          {displayAuthor && (
             <p className="text-gray-300 mt-2 sm:mt-3">
               by <span className="text-gray-100 font-medium">{displayAuthor}</span>
             </p>
           )}
           {seriesLine && <p className="text-sm text-brand-400 mt-1">{seriesLine}</p>}
-          {!seriesLine && volumes.length > 1 && (
+          {!seriesLine && multiVolume && item.title && (
             <p className="text-sm text-brand-400 mt-1">{item.title}</p>
+          )}
+          {progressLabel && (
+            <p className="text-xs text-amber-400/90 mt-2">{progressLabel}</p>
           )}
 
           {(item.genres || []).length > 0 && (
@@ -399,7 +446,7 @@ export default function LibraryEbookDetail() {
 
           <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">{actions}</div>
 
-          {volumes.length > 1 && (
+          {multiVolume && (
             <div className="mt-6">
               <h2 className="text-lg font-semibold text-gray-100 mb-3">
                 Volumes in series ({volumes.length})
@@ -416,6 +463,7 @@ export default function LibraryEbookDetail() {
                     : vol.fileKey
                       ? `&file=${encodeURIComponent(vol.fileKey)}`
                       : "";
+                  const volProgress = getProgress(vol.chapterId);
                   return (
                     <li key={`${vol.chapterId}-${vol.fileKey || vol.fileName || vol.title}`}>
                       <button
@@ -438,6 +486,11 @@ export default function LibraryEbookDetail() {
                             : "•"}
                         </span>
                         {vol.title}
+                        {volProgress && (
+                          <span className="ml-2 text-[10px] uppercase tracking-wide text-amber-400/80">
+                            In progress
+                          </span>
+                        )}
                       </button>
                     </li>
                   );

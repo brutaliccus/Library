@@ -34,6 +34,8 @@ interface LibrarySearchHit {
   libraryItemId?: number;
   seriesId?: number;
   chapterId?: number;
+  fileKey?: string;
+  fileName?: string;
   googleVolumeId?: string;
 }
 
@@ -54,6 +56,9 @@ interface KavitaShelfItem {
   author: string;
   coverUrl: string;
   chapterId: number | null;
+  fileKey?: string | null;
+  fileName?: string | null;
+  volumeId?: number | null;
   genres?: string[];
   seriesName?: string;
   series?: Array<{ name: string }>;
@@ -265,9 +270,11 @@ export default function SearchResults({
     }
 
     if (kavitaCollection?.items) {
-      const seen = new Set<number>();
+      const seen = new Set<string>();
       for (const item of kavitaCollection.items) {
-        if (item.seriesId == null || seen.has(item.seriesId)) continue;
+        if (item.seriesId == null) continue;
+        const key = `${item.seriesId}:${item.fileKey ?? item.chapterId ?? item.volumeId ?? "s"}`;
+        if (seen.has(key)) continue;
         if (
           !match(
             item.title,
@@ -279,14 +286,16 @@ export default function SearchResults({
         ) {
           continue;
         }
-        seen.add(item.seriesId);
+        seen.add(key);
         out.push({
           title: item.title,
           author: item.author,
-          coverUrl: item.coverUrl,
+          coverUrl: item.coverUrl || "",
           source: "kavita",
           seriesId: item.seriesId,
           chapterId: item.chapterId ?? undefined,
+          fileKey: item.fileKey || undefined,
+          fileName: item.fileName || undefined,
         });
       }
     }
@@ -323,11 +332,16 @@ export default function SearchResults({
   const mergedLibraryHits = useMemo(() => {
     const byKey = new Map<string, LibrarySearchHit>();
     const keyOf = (r: LibrarySearchHit) =>
-      `${r.source}:${r.itemId || r.libraryItemId || r.seriesId || r.chapterId || r.title}`;
+      `${r.source}:${r.itemId || r.libraryItemId || `${r.seriesId ?? ""}:${r.fileKey || r.fileName || r.chapterId || ""}` || r.title}`;
     for (const r of localLibraryHits) byKey.set(keyOf(r), r);
     for (const r of libraryHits?.results || []) {
       const k = keyOf(r);
-      if (!byKey.has(k)) byKey.set(k, r);
+      const existing = byKey.get(k);
+      if (!existing) {
+        byKey.set(k, r);
+        continue;
+      }
+      if (!existing.coverUrl && r.coverUrl) byKey.set(k, { ...existing, ...r, coverUrl: r.coverUrl });
     }
     return Array.from(byKey.values());
   }, [localLibraryHits, libraryHits]);
@@ -486,10 +500,15 @@ export default function SearchResults({
   };
 
   const openLibraryHit = (r: LibrarySearchHit) => {
-    if (r.source === "kavita" && r.chapterId) {
+    if (r.source === "kavita" && r.seriesId) {
+      const params = new URLSearchParams();
+      if (r.chapterId != null) params.set("chapter", String(r.chapterId));
+      const file = r.fileName || r.fileKey;
+      if (file) params.set("file", file);
+      const q = params.toString() ? `?${params.toString()}` : "";
+      navigate(`/library/ebook/${r.seriesId}${q}`);
+    } else if (r.source === "kavita" && r.chapterId) {
       navigate(`/read/${r.chapterId}`);
-    } else if (r.source === "kavita" && r.seriesId) {
-      navigate(`/library/ebook/${r.seriesId}`);
     } else if (r.source === "rd" && r.googleVolumeId) {
       navigate(`/book/${encodeURIComponent(r.googleVolumeId)}`);
     } else if (r.source === "abs" && r.itemId) {
@@ -668,13 +687,13 @@ export default function SearchResults({
                 <div className="space-y-1 rounded-xl border border-gray-800 bg-gray-900/40 p-1">
                   {mergedLibraryHits.slice(0, 8).map((r, i) => (
                     <button
-                      key={`${r.source}-${r.itemId || r.libraryItemId || r.seriesId || r.chapterId || i}`}
+                      key={`${r.source}-${r.itemId || r.libraryItemId || `${r.seriesId ?? ""}:${r.fileKey || r.chapterId || i}`}`}
                       type="button"
                       onClick={() => openLibraryHit(r)}
                       className="w-full flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-800/80 transition-colors text-left"
                     >
                       <CoverImage
-                        src={r.coverUrl}
+                        src={r.coverUrl || ""}
                         alt=""
                         className="w-9 h-12 rounded object-cover shrink-0"
                         fallback={

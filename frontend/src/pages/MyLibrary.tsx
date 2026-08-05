@@ -8,7 +8,6 @@ import { usePlayer } from "../contexts/PlayerContext";
 import ABSBookCard from "../components/ABSBookCard";
 import BookCardSkeleton from "../components/BookCardSkeleton";
 import SeriesDrilldown from "../components/SeriesDrilldown";
-import AuthImage from "../components/AuthImage";
 import CoverImage from "../components/CoverImage";
 import Modal from "../components/Modal";
 import {
@@ -136,6 +135,8 @@ interface SearchResult {
   googleVolumeId?: string;
   seriesId?: number;
   chapterId?: number;
+  fileKey?: string;
+  fileName?: string;
   streamStatus?: string;
   tracks?: any[];
 }
@@ -609,10 +610,12 @@ export default function MyLibrary() {
         out.push({
           title: item.title,
           author: item.author,
-          coverUrl: item.coverUrl,
+          coverUrl: item.coverUrl || "",
           source: "kavita",
           seriesId: item.seriesId,
           chapterId: item.chapterId ?? undefined,
+          fileKey: item.fileKey || undefined,
+          fileName: item.fileName || undefined,
         });
       }
     }
@@ -641,11 +644,17 @@ export default function MyLibrary() {
   const mergedSearchResults = useMemo(() => {
     const byKey = new Map<string, SearchResult>();
     const keyOf = (r: SearchResult) =>
-      `${r.source}:${r.itemId || r.libraryItemId || `${r.seriesId ?? ""}:${r.chapterId ?? ""}` || r.title}`;
+      `${r.source}:${r.itemId || r.libraryItemId || `${r.seriesId ?? ""}:${r.fileKey || r.fileName || r.chapterId || ""}` || r.title}`;
     for (const r of localSearchResults) byKey.set(keyOf(r), r);
     for (const r of searchResults?.results || []) {
       const k = keyOf(r);
-      if (!byKey.has(k)) byKey.set(k, r);
+      const existing = byKey.get(k);
+      if (!existing) {
+        byKey.set(k, r);
+        continue;
+      }
+      // Keep whichever hit already has cover art (local collection URLs are preferred).
+      if (!existing.coverUrl && r.coverUrl) byKey.set(k, { ...existing, ...r, coverUrl: r.coverUrl });
     }
     return Array.from(byKey.values());
   }, [localSearchResults, searchResults]);
@@ -1775,7 +1784,7 @@ export default function MyLibrary() {
             <div className="space-y-1">
               {mergedSearchResults.map((r, i) => (
                 <button
-                  key={`${r.source}-${r.itemId || r.libraryItemId || r.seriesId || i}`}
+                  key={`${r.source}-${r.itemId || r.libraryItemId || `${r.seriesId ?? ""}:${r.fileKey || r.chapterId || i}`}`}
                   onClick={() => {
                     if (r.source === "rd" && r.googleVolumeId) {
                       persistLibraryUi();
@@ -1785,35 +1794,23 @@ export default function MyLibrary() {
                     } else if (r.source === "kavita") {
                       handleNavigateToBook(r.title, r.author, {
                         ebookSeriesId: r.seriesId ?? undefined,
-                        ebookChapterId: r.seriesId == null ? r.chapterId ?? undefined : undefined,
-                        ebookFileName: (r as { fileName?: string; fileKey?: string }).fileName
-                          || (r as { fileName?: string; fileKey?: string }).fileKey
-                          || undefined,
+                        ebookChapterId: r.chapterId ?? undefined,
+                        ebookFileName: r.fileName || r.fileKey || undefined,
                       });
                     }
                   }}
                   className="w-full flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-800/60 transition-colors text-left group"
                 >
-                  {r.coverUrl ? (
-                    r.source === "kavita" ? (
-                      <AuthImage
-                        src={r.coverUrl}
-                        alt=""
-                        className="w-10 h-14 rounded object-cover shrink-0"
-                        fallback={
-                          <div className="w-10 h-14 rounded bg-gray-700 shrink-0 flex items-center justify-center">
-                            <BookOpen size={14} className="text-gray-500" />
-                          </div>
-                        }
-                      />
-                    ) : (
-                      <CoverImage src={r.coverUrl} alt="" className="w-10 h-14 rounded object-cover shrink-0" />
-                    )
-                  ) : (
-                    <div className="w-10 h-14 rounded bg-gray-700 shrink-0 flex items-center justify-center">
-                      <BookOpen size={14} className="text-gray-500" />
-                    </div>
-                  )}
+                  <CoverImage
+                    src={r.coverUrl}
+                    alt=""
+                    className="w-10 h-14 rounded object-cover shrink-0"
+                    fallback={
+                      <div className="w-10 h-14 rounded bg-gray-700 shrink-0 flex items-center justify-center">
+                        <BookOpen size={14} className="text-gray-500" />
+                      </div>
+                    }
+                  />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-gray-100 truncate">{r.title}</p>
                     {r.author && <p className="text-xs text-gray-400 truncate">{r.author}</p>}

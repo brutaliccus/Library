@@ -31,8 +31,12 @@ EBOOK_KAVITA_EXCLUDED_DIRNAMES = frozenset({"caltrash", EBOOK_UNORGANIZED_DIRNAM
 # Root .kavitaignore patterns (Glob). Without these, caltrash poison Series tags
 # (e.g. "???…") LocalizedSeries-merge into one mega-series on every scan.
 EBOOK_KAVITA_IGNORE_PATTERNS = (
+    "caltrash",
     "caltrash/*",
+    "caltrash/**",
+    "unorganized",
     "unorganized/*",
+    "unorganized/**",
     "**/caltrash/**",
     "**/unorganized/**",
 )

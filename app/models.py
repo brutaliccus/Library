@@ -131,10 +131,12 @@ class DownloadRequest(Base):
 
 
 class LibrarySweepJob(Base):
-    """Singleton-ish progress row for Admin → Library Sweep."""
+    """One progress row per medium for Admin → Library Sweep."""
     __tablename__ = "library_sweep_jobs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # audiobook | ebook — unique per medium
+    medium: Mapped[str] = mapped_column(String(16), default="audiobook", index=True)
     # idle | running | paused | cancelled | completed
     status: Mapped[str] = mapped_column(String(32), default="idle")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

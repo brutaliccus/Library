@@ -110,6 +110,14 @@ async def lifespan(app: FastAPI):
         await resume_running_sweep_on_startup()
     except Exception as e:
         logger.warning("Library Sweep resume skipped: %s", e)
+    try:
+        from app.services.library_ebook_sweep import (
+            resume_running_sweep_on_startup as resume_ebook_sweep,
+        )
+
+        await resume_ebook_sweep()
+    except Exception as e:
+        logger.warning("Ebook Sweep resume skipped: %s", e)
     start_scraper()
     _shelf_refresh_task = asyncio.create_task(_daily_shelf_refresh_loop())
     _ol_dumps_check_task = asyncio.create_task(_ol_dumps_check_loop())

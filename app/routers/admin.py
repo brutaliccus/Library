@@ -2657,6 +2657,199 @@ async def library_sweep_dismiss_bulk(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+# --- Library Sweep: Ebooks ---
+
+
+@router.post("/library-sweep/ebook/start")
+async def library_sweep_ebook_start(admin: User = Depends(require_admin)):
+    """Start or resume Ebook Sweep (DIY organizer, no download)."""
+    from app.services import library_ebook_sweep
+
+    return await library_ebook_sweep.start_sweep(user_id=admin.id)
+
+
+@router.post("/library-sweep/ebook/pause")
+async def library_sweep_ebook_pause(_admin: User = Depends(require_admin)):
+    from app.services import library_ebook_sweep
+
+    return await library_ebook_sweep.pause_sweep()
+
+
+@router.post("/library-sweep/ebook/cancel")
+async def library_sweep_ebook_cancel(_admin: User = Depends(require_admin)):
+    from app.services import library_ebook_sweep
+
+    return await library_ebook_sweep.cancel_sweep()
+
+
+@router.get("/library-sweep/ebook/status")
+async def library_sweep_ebook_status(_admin: User = Depends(require_admin)):
+    from app.services import library_ebook_sweep
+
+    return await library_ebook_sweep.get_status()
+
+
+@router.get("/library-sweep/ebook/needs-review")
+async def library_sweep_ebook_needs_review(_admin: User = Depends(require_admin)):
+    from app.services import library_ebook_sweep
+
+    items = await library_ebook_sweep.list_needs_review()
+    status = await library_ebook_sweep.get_status()
+    return {
+        "items": items,
+        "review_cursor_request_id": status.get("review_cursor_request_id"),
+        "count": len(items),
+    }
+
+
+@router.put("/library-sweep/ebook/review-cursor")
+async def library_sweep_ebook_review_cursor(
+    body: SweepReviewCursorBody,
+    _admin: User = Depends(require_admin),
+):
+    from app.services import library_ebook_sweep
+
+    return await library_ebook_sweep.set_review_cursor(body.request_id)
+
+
+@router.post("/library-sweep/ebook/skip")
+async def library_sweep_ebook_skip(
+    body: SweepSkipBody = Body(default_factory=SweepSkipBody),
+    _admin: User = Depends(require_admin),
+):
+    """Skip the current (or specified) ebook sweep book without cancelling the job."""
+    from app.services import library_ebook_sweep
+
+    return await library_ebook_sweep.skip_current(request_id=body.request_id)
+
+
+@router.get("/library-sweep/ebook/unprocessed")
+async def library_sweep_ebook_unprocessed(_admin: User = Depends(require_admin)):
+    """Cancelled / failed / skipped ebook sweep books for manual reprocess."""
+    from app.services import library_ebook_sweep
+
+    items = await library_ebook_sweep.list_unprocessed()
+    status = await library_ebook_sweep.get_status()
+    return {
+        "items": items,
+        "count": len(items),
+        "counts": status.get("unprocessed") or {},
+    }
+
+
+@router.get("/library-sweep/ebook/processed")
+async def library_sweep_ebook_processed(
+    limit: int = 50,
+    offset: int = 0,
+    _admin: User = Depends(require_admin),
+):
+    """Successfully completed Ebook Sweep books (paginated)."""
+    from app.services import library_ebook_sweep
+
+    return await library_ebook_sweep.list_processed(limit=limit, offset=offset)
+
+
+@router.post("/library-sweep/ebook/reprocess/{request_id}")
+async def library_sweep_ebook_reprocess(
+    request_id: int,
+    admin: User = Depends(require_admin),
+):
+    """Re-kick the DIY ebook pipeline for an unprocessed sweep book (no debrid)."""
+    from app.services import library_ebook_sweep
+
+    try:
+        return await library_ebook_sweep.reprocess_unprocessed(
+            request_id, user_id=admin.id
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/library-sweep/ebook/dismiss/{request_id}")
+async def library_sweep_ebook_dismiss_one(
+    request_id: int,
+    _admin: User = Depends(require_admin),
+):
+    """Remove a single book from the Ebook Sweep Unprocessed queue (keeps library files)."""
+    from app.services import library_ebook_sweep
+
+    try:
+        return await library_ebook_sweep.dismiss_unprocessed(request_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/library-sweep/ebook/dismiss")
+async def library_sweep_ebook_dismiss_bulk(
+    body: SweepDismissBody,
+    _admin: User = Depends(require_admin),
+):
+    """Bulk-remove books from the Ebook Sweep Unprocessed queue."""
+    from app.services import library_ebook_sweep
+
+    ids = list(body.request_ids or [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="request_ids required")
+    try:
+        return await library_ebook_sweep.dismiss_unprocessed(ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# --- Library Sweep: Cleanup ---
+
+
+class SweepCleanupPreviewBody(BaseModel):
+    """Dry-run preview scopes for orphan cleanup (default both media types)."""
+    scopes: list[str] | None = None
+
+
+class SweepCleanupApplyBody(BaseModel):
+    """Confirm token + optional path subset from a prior cleanup preview."""
+    token: str
+    paths: list[str] | None = None
+
+
+@router.post("/library-sweep/cleanup/preview")
+async def library_sweep_cleanup_preview(
+    body: SweepCleanupPreviewBody = Body(default_factory=SweepCleanupPreviewBody),
+    _admin: User = Depends(require_admin),
+):
+    """Dry-run preview of non-canonical leftovers under the library roots."""
+    from app.services import library_folder_cleanup
+
+    scopes = body.scopes or ["audiobook", "ebook"]
+    invalid = [s for s in scopes if s not in ("audiobook", "ebook")]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid scope(s): {invalid}")
+    preview = library_folder_cleanup.classify_library_orphans(scopes=scopes)
+    return preview.to_dict()
+
+
+@router.post("/library-sweep/cleanup/apply")
+async def library_sweep_cleanup_apply(
+    body: SweepCleanupApplyBody,
+    _admin: User = Depends(require_admin),
+):
+    """Delete previously previewed orphan paths (subset allowed)."""
+    from app.services import library_folder_cleanup
+
+    try:
+        return library_folder_cleanup.apply_cleanup(token=body.token, paths=body.paths)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/library-sweep/cleanup/canonical")
+async def library_sweep_cleanup_canonical(_admin: User = Depends(require_admin)):
+    """Documented canonical library layout (audiobook + ebook)."""
+    from app.services import library_folder_cleanup
+
+    return library_folder_cleanup.canonical_layout_docs()
+
+
 # --- Launch ops: backups, activity, shares, whitelist ---
 
 @router.get("/backups")

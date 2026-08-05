@@ -1,4 +1,9 @@
-"""Admin Library Sweep — backfill ABS audiobooks through forge (no download)."""
+"""Admin Ebook Sweep - backfill the ebook library through the DIY organizer.
+
+Mirrors ``library_sweep.py`` (audiobook/ABS) but walks the ebook library on
+disk instead of an ABS API, and drives ``ebook_pipeline.run_ebook_after_download``
+(identify -> convert/embed -> organize -> Kavita) instead of LibraForge.
+"""
 
 from __future__ import annotations
 
@@ -13,29 +18,31 @@ from sqlalchemy import func, select
 from app.config import get_settings
 from app.database import async_session
 from app.models import DownloadRequest, LibrarySweepJob
-from app.services import audiobookshelf, library_ingest
-from app.services.library_media_delete import resolve_abs_book_dir
+from app.services import ebook_pipeline, kavita, library_ingest
+from app.services import library_folder_cleanup as cleanup
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+MEDIUM = "ebook"
+
 _worker_task: asyncio.Task | None = None
 _worker_lock = asyncio.Lock()
 
-# Book the sweep worker is currently on (metadata / sync forge — not M4B waiters).
+# Book the sweep worker is currently on.
 _current: dict[str, Any] | None = None
-# Next ABS book the worker will actually process (skips already-done / unprocessed).
+# Next book folder the worker will actually process (skips already-done / unprocessed).
 _up_next: dict[str, Any] | None = None
 _skip_request_ids: set[int] = set()
 
-# Completed sweep books since the last batched ABS scan (includes M4B handoffs).
-_completed_since_abs_scan = 0
-_abs_scan_lock = asyncio.Lock()
+# Completed sweep books since the last batched Kavita scan.
+_completed_since_kavita_scan = 0
+_kavita_scan_lock = asyncio.Lock()
 
 
-def _abs_scan_every() -> int:
-    """How many completed books between full ABS scans (min 1)."""
-    raw = getattr(settings, "library_sweep_abs_scan_every", 25)
+def _kavita_scan_every() -> int:
+    """How many completed books between full Kavita scans (min 1)."""
+    raw = getattr(settings, "ebook_sweep_kavita_scan_every", 25)
     try:
         n = int(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -43,35 +50,43 @@ def _abs_scan_every() -> int:
     return max(1, n)
 
 
-async def run_batched_abs_scan(*, reason: str = "sweep") -> dict[str, Any]:
-    """One full ABS library scan + orphan cleanup (used by Sweep cadence)."""
-    global _completed_since_abs_scan
-    async with _abs_scan_lock:
-        logger.info("Library Sweep ABS batch scan (%s)", reason)
+async def run_batched_kavita_scan(*, reason: str = "sweep") -> dict[str, Any]:
+    """One full Kavita library scan (used by Ebook Sweep cadence)."""
+    global _completed_since_kavita_scan
+    async with _kavita_scan_lock:
+        logger.info("Ebook Sweep Kavita batch scan (%s)", reason)
         try:
-            status = await audiobookshelf.scan_library_and_wait(timeout_seconds=240)
-            await audiobookshelf.remove_items_with_issues()
-            audiobookshelf.invalidate_cache()
-            _completed_since_abs_scan = 0
+            status = await kavita.scan_library_and_wait(timeout_seconds=240)
+            kavita.invalidate_cache()
+            _completed_since_kavita_scan = 0
             return {"ok": True, "reason": reason, "scan": status}
         except Exception as e:
-            logger.warning("Library Sweep ABS batch scan failed (%s): %s", reason, e)
+            logger.warning("Ebook Sweep Kavita batch scan failed (%s): %s", reason, e)
             return {"ok": False, "reason": reason, "error": str(e)[:300]}
-
-
-async def on_sweep_book_finalized() -> None:
-    """Called from forge finalize when a sweep book completes without a per-book ABS scan."""
-    global _completed_since_abs_scan
-    _completed_since_abs_scan += 1
-    every = _abs_scan_every()
-    if _completed_since_abs_scan >= every:
-        await run_batched_abs_scan(
-            reason=f"every {every} completed (at {_completed_since_abs_scan})"
-        )
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _rel_posix(root: Path, book_dir: Path) -> str:
+    try:
+        return book_dir.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return book_dir.as_posix()
+
+
+def _folder_title_author_hint(root: Path, book_dir: Path) -> tuple[str, str | None]:
+    """Best-effort title/author from the ``{author}/{series}/{title}`` layout."""
+    try:
+        rel_parts = book_dir.resolve().relative_to(root.resolve()).parts
+    except (OSError, ValueError):
+        rel_parts = (book_dir.name,)
+    if not rel_parts:
+        return book_dir.name, None
+    title = rel_parts[-1]
+    author = rel_parts[0] if len(rel_parts) >= 2 else None
+    return title, author
 
 
 def _set_current(
@@ -81,7 +96,7 @@ def _set_current(
     author: str | None = None,
     cover_url: str | None = None,
     status: str | None = None,
-    abs_item_id: str | None = None,
+    book_dir: str | None = None,
 ) -> None:
     global _current
     if request_id is None and title is None:
@@ -93,7 +108,7 @@ def _set_current(
         "author": author,
         "cover_url": cover_url,
         "status": status or "processing",
-        "abs_item_id": abs_item_id,
+        "book_dir": book_dir,
     }
 
 
@@ -102,32 +117,33 @@ def _set_up_next(preview: dict[str, Any] | None) -> None:
     _up_next = dict(preview) if preview else None
 
 
-def _abs_item_preview(item: dict[str, Any]) -> dict[str, Any]:
-    """Title/author/cover card fields from a raw ABS library item."""
-    media = item.get("media") or {}
-    meta = media.get("metadata") or {}
-    item_id = str(item.get("id") or "").strip()
-    title = (meta.get("title") or meta.get("titleIgnorePrefix") or "Untitled").strip()
-    author = (meta.get("authorName") or "").strip() or None
-    cover_url = f"/api/stream/abs/proxy/cover/{item_id}" if item_id else None
+def _book_dir_preview(root: Path, book_dir: Path, *, applied: Any | None = None) -> dict[str, Any]:
+    title, author = _folder_title_author_hint(root, book_dir)
+    if applied is not None:
+        title = applied.title or title
+        author = applied.author or author
     return {
         "request_id": None,
         "title": title,
         "author": author,
-        "cover_url": cover_url,
-        "abs_item_id": item_id or None,
+        "cover_url": getattr(applied, "cover_url", None) if applied is not None else None,
+        "book_dir": _rel_posix(root, book_dir),
     }
 
 
-async def _item_would_be_processed(item: dict[str, Any]) -> bool:
-    """True when the sweep worker would kick forge for this ABS item (not skip)."""
-    item_id = str(item.get("id") or "").strip()
-    if not item_id:
-        return False
-    fingerprint = library_ingest.sweep_fingerprint(item_id)
+async def _dir_would_be_processed(
+    root: Path, book_dir: Path, *, force_metadata: bool
+) -> bool:
+    """True when the sweep worker would kick the ebook pipeline for this folder."""
+    from app.services.ebook_quick_review import load_applied_ebook_meta
+
+    rel_posix = _rel_posix(root, book_dir)
+    fingerprint = library_ingest.ebook_sweep_fingerprint(rel_posix)
     if await library_ingest.fingerprint_already_swept(fingerprint):
         return False
     if await library_ingest.fingerprint_in_flight(fingerprint):
+        return False
+    if not force_metadata and load_applied_ebook_meta(book_dir) is not None:
         return False
     existing = await library_ingest.latest_sweep_request(fingerprint)
     if not existing:
@@ -136,24 +152,29 @@ async def _item_would_be_processed(item: dict[str, Any]) -> bool:
         return False
     if existing.status in library_ingest._UNPROCESSED_STATUSES:
         return False
-    # quarantined → retry; other statuses → attempt
     return True
 
 
 async def _peek_up_next(
-    books: list[dict[str, Any]], *, after_index: int, lookahead: int = 250
+    root: Path,
+    dirs: list[Path],
+    *,
+    after_index: int,
+    force_metadata: bool,
+    lookahead: int = 250,
 ) -> dict[str, Any] | None:
-    """First upcoming ABS book the worker will process after ``after_index``."""
-    end = min(len(books), max(after_index + 1, 0) + max(1, lookahead))
+    from app.services.ebook_quick_review import load_applied_ebook_meta
+
+    end = min(len(dirs), max(after_index + 1, 0) + max(1, lookahead))
     for j in range(after_index + 1, end):
-        item = books[j]
-        if await _item_would_be_processed(item):
-            return _abs_item_preview(item)
+        book_dir = dirs[j]
+        if await _dir_would_be_processed(root, book_dir, force_metadata=force_metadata):
+            applied = load_applied_ebook_meta(book_dir)
+            return _book_dir_preview(root, book_dir, applied=applied)
     return None
 
 
 async def _refresh_current_from_db(request_id: int) -> None:
-    """Pull latest title/cover/status after metadata forge updates the row."""
     global _current
     async with async_session() as db:
         result = await db.execute(
@@ -168,29 +189,22 @@ async def _refresh_current_from_db(request_id: int) -> None:
         "author": req.author,
         "cover_url": req.cover_url,
         "status": req.status,
-        "abs_item_id": req.abs_item_id,
+        "book_dir": (_current or {}).get("book_dir"),
     }
 
 
-async def get_or_create_job(medium: str = "audiobook") -> LibrarySweepJob:
-    """One progress row per medium. Legacy rows (pre-``medium`` column) default
-    to ``audiobook`` via the migration's server_default, but also match here
-    for safety on databases that still have a null value."""
+async def get_or_create_job() -> LibrarySweepJob:
     async with async_session() as db:
-        where = LibrarySweepJob.medium == medium
-        if medium == "audiobook":
-            where = (LibrarySweepJob.medium == medium) | (LibrarySweepJob.medium.is_(None))
         result = await db.execute(
-            select(LibrarySweepJob).where(where).order_by(LibrarySweepJob.id.desc()).limit(1)
+            select(LibrarySweepJob)
+            .where(LibrarySweepJob.medium == MEDIUM)
+            .order_by(LibrarySweepJob.id.desc())
+            .limit(1)
         )
         job = result.scalar_one_or_none()
         if job:
-            if job.medium != medium:
-                job.medium = medium
-                await db.commit()
-                await db.refresh(job)
             return job
-        job = LibrarySweepJob(status="idle", medium=medium, updated_at=_utcnow())
+        job = LibrarySweepJob(status="idle", medium=MEDIUM, updated_at=_utcnow())
         db.add(job)
         await db.commit()
         await db.refresh(job)
@@ -230,11 +244,25 @@ def _request_to_unprocessed(r: DownloadRequest) -> dict[str, Any]:
         "status": r.status,
         "status_detail": r.status_detail,
         "quarantine_reason": r.quarantine_reason,
-        "abs_item_id": r.abs_item_id,
         "ingest_fingerprint": r.ingest_fingerprint,
         "staging_path": r.staging_path,
         "cover_url": r.cover_url,
         "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
+
+
+def _request_to_processed(r: DownloadRequest) -> dict[str, Any]:
+    return {
+        "id": r.id,
+        "title": r.title,
+        "author": r.author,
+        "status": r.status,
+        "status_detail": r.status_detail,
+        "ingest_fingerprint": r.ingest_fingerprint,
+        "staging_path": r.staging_path,
+        "cover_url": r.cover_url,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
     }
 
 
@@ -245,7 +273,7 @@ async def _unprocessed_counts() -> dict[str, int]:
             select(DownloadRequest.status, func.count())
             .where(
                 DownloadRequest.source == library_ingest.SOURCE_SWEEP,
-                DownloadRequest.media_type == "audiobook",
+                DownloadRequest.media_type == MEDIUM,
                 DownloadRequest.status.in_(statuses),
             )
             .group_by(DownloadRequest.status)
@@ -261,13 +289,13 @@ async def _unprocessed_counts() -> dict[str, int]:
 
 
 async def _resolve_current_book() -> dict[str, Any] | None:
-    """Prefer in-memory worker cursor; fall back to newest active sweep forge row."""
+    """Prefer in-memory worker cursor; fall back to newest active sweep ebook row."""
     if _current and _current.get("request_id"):
         rid = int(_current["request_id"])
         await _refresh_current_from_db(rid)
         if _current:
             return dict(_current)
-    if _current and (_current.get("title") or _current.get("abs_item_id")):
+    if _current and _current.get("title"):
         return dict(_current)
 
     async with async_session() as db:
@@ -275,15 +303,9 @@ async def _resolve_current_book() -> dict[str, Any] | None:
             select(DownloadRequest)
             .where(
                 DownloadRequest.source == library_ingest.SOURCE_SWEEP,
-                DownloadRequest.media_type == "audiobook",
+                DownloadRequest.media_type == MEDIUM,
                 DownloadRequest.status.in_(
-                    (
-                        "metadata_forge",
-                        "m4b_convert",
-                        "chapter_forge",
-                        "folder_forge",
-                        "finalizing",
-                    )
+                    ("metadata_forge", "folder_forge", "finalizing")
                 ),
             )
             .order_by(DownloadRequest.id.desc())
@@ -298,7 +320,7 @@ async def _resolve_current_book() -> dict[str, Any] | None:
         "author": req.author,
         "cover_url": req.cover_url,
         "status": req.status,
-        "abs_item_id": req.abs_item_id,
+        "book_dir": None,
     }
 
 
@@ -314,7 +336,8 @@ def job_to_dict(job: LibrarySweepJob) -> dict[str, Any]:
         "auto_applied": int(job.auto_applied or 0),
         "needs_review": int(job.needs_review or 0),
         "failed": int(job.failed or 0),
-        "m4b_queued": int(job.m4b_queued or 0),
+        # Ebooks never use the M4B queue - always 0.
+        "m4b_queued": 0,
         "review_cursor_request_id": job.review_cursor_request_id,
         "error": job.error,
         "started_by_user_id": job.started_by_user_id,
@@ -335,7 +358,7 @@ async def get_status() -> dict[str, Any]:
                     .select_from(DownloadRequest)
                     .where(
                         DownloadRequest.source == library_ingest.SOURCE_SWEEP,
-                        DownloadRequest.media_type == "audiobook",
+                        DownloadRequest.media_type == MEDIUM,
                         DownloadRequest.status == "completed",
                     )
                 )
@@ -347,18 +370,18 @@ async def get_status() -> dict[str, Any]:
 
 async def set_review_cursor(request_id: int | None) -> dict[str, Any]:
     job = await get_or_create_job()
-    updated = await _update_job(job.id, review_cursor_request_id=request_id)
-    return await get_status() if updated else await get_status()
+    await _update_job(job.id, review_cursor_request_id=request_id)
+    return await get_status()
 
 
 async def list_needs_review(*, limit: int = 200) -> list[dict[str, Any]]:
-    """Quarantined DownloadRequests created by Library Sweep."""
+    """Quarantined DownloadRequests created by Ebook Sweep."""
     async with async_session() as db:
         result = await db.execute(
             select(DownloadRequest)
             .where(
                 DownloadRequest.source == library_ingest.SOURCE_SWEEP,
-                DownloadRequest.media_type == "audiobook",
+                DownloadRequest.media_type == MEDIUM,
                 DownloadRequest.status == "quarantined",
             )
             .order_by(DownloadRequest.id.asc())
@@ -369,14 +392,14 @@ async def list_needs_review(*, limit: int = 200) -> list[dict[str, Any]]:
 
 
 async def list_unprocessed(*, limit: int = 500) -> list[dict[str, Any]]:
-    """Cancelled / failed / skipped / admin_rejected sweep books for manual reprocess."""
+    """Cancelled / failed / skipped / admin_rejected sweep ebooks for manual reprocess."""
     statuses = tuple(library_ingest._UNPROCESSED_STATUSES)
     async with async_session() as db:
         result = await db.execute(
             select(DownloadRequest)
             .where(
                 DownloadRequest.source == library_ingest.SOURCE_SWEEP,
-                DownloadRequest.media_type == "audiobook",
+                DownloadRequest.media_type == MEDIUM,
                 DownloadRequest.status.in_(statuses),
             )
             .order_by(DownloadRequest.id.desc())
@@ -386,26 +409,8 @@ async def list_unprocessed(*, limit: int = 500) -> list[dict[str, Any]]:
     return [_request_to_unprocessed(r) for r in rows]
 
 
-def _request_to_processed(r: DownloadRequest) -> dict[str, Any]:
-    return {
-        "id": r.id,
-        "title": r.title,
-        "author": r.author,
-        "status": r.status,
-        "status_detail": r.status_detail,
-        "abs_item_id": r.abs_item_id,
-        "ingest_fingerprint": r.ingest_fingerprint,
-        "staging_path": r.staging_path,
-        "cover_url": r.cover_url,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
-        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
-    }
-
-
-async def list_processed(
-    *, limit: int = 50, offset: int = 0
-) -> dict[str, Any]:
-    """Successfully completed sweep books (source=sweep, status=completed)."""
+async def list_processed(*, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """Successfully completed sweep ebooks (source=sweep, media_type=ebook, status=completed)."""
     lim = max(1, min(int(limit or 50), 200))
     off = max(0, int(offset or 0))
     async with async_session() as db:
@@ -416,7 +421,7 @@ async def list_processed(
                     .select_from(DownloadRequest)
                     .where(
                         DownloadRequest.source == library_ingest.SOURCE_SWEEP,
-                        DownloadRequest.media_type == "audiobook",
+                        DownloadRequest.media_type == MEDIUM,
                         DownloadRequest.status == "completed",
                     )
                 )
@@ -427,7 +432,7 @@ async def list_processed(
             select(DownloadRequest)
             .where(
                 DownloadRequest.source == library_ingest.SOURCE_SWEEP,
-                DownloadRequest.media_type == "audiobook",
+                DownloadRequest.media_type == MEDIUM,
                 DownloadRequest.status == "completed",
             )
             .order_by(
@@ -448,22 +453,21 @@ async def list_processed(
 
 
 async def start_sweep(*, user_id: int) -> dict[str, Any]:
-    """Start or resume a sweep. Returns job status dict."""
-    global _worker_task, _completed_since_abs_scan
+    """Start or resume an ebook sweep. Returns job status dict."""
+    global _worker_task, _completed_since_kavita_scan
     job = await get_or_create_job()
 
     if job.status == "running":
-        # Worker may have died after cancel/deploy — restart if needed.
         async with _worker_lock:
             if _worker_task is None or _worker_task.done():
                 _worker_task = asyncio.create_task(
-                    _run_sweep_worker(job.id), name="library-sweep"
+                    _run_sweep_worker(job.id), name="ebook-sweep"
                 )
-                return {**(await get_status()), "message": "Sweep worker restarted"}
-        return {**(await get_status()), "message": "Sweep already running"}
+                return {**(await get_status()), "message": "Ebook Sweep worker restarted"}
+        return {**(await get_status()), "message": "Ebook Sweep already running"}
 
     if job.status == "paused":
-        updated = await _update_job(
+        await _update_job(
             job.id,
             status="running",
             error=None,
@@ -472,16 +476,16 @@ async def start_sweep(*, user_id: int) -> dict[str, Any]:
         async with _worker_lock:
             if _worker_task is None or _worker_task.done():
                 _worker_task = asyncio.create_task(
-                    _run_sweep_worker(job.id), name="library-sweep"
+                    _run_sweep_worker(job.id), name="ebook-sweep"
                 )
-        return {**(await get_status()), "message": "Sweep resumed"}
+        return {**(await get_status()), "message": "Ebook Sweep resumed"}
 
     # Fresh start (idle / completed / cancelled)
     _skip_request_ids.clear()
     _set_current()
     _set_up_next(None)
-    _completed_since_abs_scan = 0
-    updated = await _update_job(
+    _completed_since_kavita_scan = 0
+    await _update_job(
         job.id,
         status="running",
         started_at=_utcnow(),
@@ -498,9 +502,9 @@ async def start_sweep(*, user_id: int) -> dict[str, Any]:
         if _worker_task is not None and not _worker_task.done():
             _worker_task.cancel()
         _worker_task = asyncio.create_task(
-            _run_sweep_worker(job.id), name="library-sweep"
+            _run_sweep_worker(job.id), name="ebook-sweep"
         )
-    return {**(await get_status()), "message": "Sweep started"}
+    return {**(await get_status()), "message": "Ebook Sweep started"}
 
 
 async def pause_sweep() -> dict[str, Any]:
@@ -508,7 +512,7 @@ async def pause_sweep() -> dict[str, Any]:
     if job.status != "running":
         return {**(await get_status()), "message": f"Cannot pause from status '{job.status}'"}
     await _update_job(job.id, status="paused")
-    return {**(await get_status()), "message": "Sweep pausing after current book"}
+    return {**(await get_status()), "message": "Ebook Sweep pausing after current book"}
 
 
 async def cancel_sweep() -> dict[str, Any]:
@@ -519,19 +523,17 @@ async def cancel_sweep() -> dict[str, Any]:
     await _update_job(job.id, status="cancelled")
     _set_current()
     _set_up_next(None)
-    # Worker may already have exited (paused) — still flush a batch scan.
     if was_paused:
-        await run_batched_abs_scan(reason="sweep cancelled")
-    return {**(await get_status()), "message": "Sweep cancelled"}
+        await run_batched_kavita_scan(reason="sweep cancelled")
+    return {**(await get_status()), "message": "Ebook Sweep cancelled"}
 
 
 async def skip_current(*, request_id: int | None = None) -> dict[str, Any]:
-    """Mark the current (or given) sweep book as skipped and abort its forge."""
+    """Mark the current (or given) sweep ebook as skipped (aborts the in-flight pipeline)."""
     rid = request_id
     if rid is None and _current and _current.get("request_id"):
         rid = int(_current["request_id"])
     if rid is None:
-        # Fall back to newest active sweep forge row
         current = await _resolve_current_book()
         if current and current.get("request_id"):
             rid = int(current["request_id"])
@@ -539,7 +541,6 @@ async def skip_current(*, request_id: int | None = None) -> dict[str, Any]:
         return {**(await get_status()), "message": "Nothing to skip", "skipped_id": None}
 
     _skip_request_ids.add(rid)
-    forge_run_id: str | None = None
     async with async_session() as db:
         result = await db.execute(
             select(DownloadRequest).where(DownloadRequest.id == rid)
@@ -547,28 +548,21 @@ async def skip_current(*, request_id: int | None = None) -> dict[str, Any]:
         req = result.scalar_one_or_none()
         if not req:
             return {**(await get_status()), "message": "Request not found", "skipped_id": rid}
-        if req.source != library_ingest.SOURCE_SWEEP:
+        if req.source != library_ingest.SOURCE_SWEEP or req.media_type != MEDIUM:
             return {
                 **(await get_status()),
-                "message": "Not a sweep request",
+                "message": "Not an ebook sweep request",
                 "skipped_id": rid,
             }
-        forge_run_id = (getattr(req, "libraforge_run_id", None) or "").strip() or None
+        # Ebook pipeline checks request status between stages (pipeline._is_cancelled
+        # treats "skipped" as an abort signal) - no separate run to cancel.
         req.status = "skipped"
-        req.status_detail = "Skipped during Library Sweep"
+        req.status_detail = "Skipped during Ebook Sweep"
         req.progress_percent = None
         req.progress_bytes = None
         req.progress_total_bytes = None
         req.progress_speed_bps = None
         await db.commit()
-
-    if forge_run_id:
-        try:
-            from app.services import libraforge
-
-            await libraforge.cancel_run(forge_run_id)
-        except Exception:
-            logger.debug("LibraForge cancel_run for skip %s failed", rid, exc_info=True)
 
     if _current and _current.get("request_id") == rid:
         _set_current()
@@ -580,82 +574,125 @@ async def skip_current(*, request_id: int | None = None) -> dict[str, Any]:
     }
 
 
-async def reprocess_unprocessed(request_id: int, *, user_id: int) -> dict[str, Any]:
-    """Kick forge again for a cancelled/failed/skipped sweep book (background).
-
-    Prepares / restages synchronously, then runs forge in a background task so the
-    admin HTTP call returns immediately and does not block on metadata matching.
-    """
-    # Validate + restage + set metadata_forge without awaiting the full forge.
-    try:
-        prepared = await library_ingest.reprocess_local_ingest(
-            request_id,
-            handoff_m4b=True,
-            kick_forge=False,
+async def _request_is_skipped(request_id: int) -> bool:
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest.status).where(DownloadRequest.id == request_id)
         )
-    except FileNotFoundError:
-        raise
-    except ValueError:
-        raise
+        return result.scalar_one_or_none() == "skipped"
 
+
+async def _reprocess_local_ebook_ingest(request_id: int) -> dict[str, Any]:
+    """Resolve (or restage) the ebook staging tree for a manual reprocess."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req = result.scalar_one_or_none()
+        if not req:
+            raise FileNotFoundError(f"Request {request_id} not found")
+        if not library_ingest.is_local_ingest_request(req) or req.media_type != MEDIUM:
+            raise ValueError("Not an ebook sweep/upload ingest request")
+        if req.status in library_ingest._ACTIVE_FORGE:
+            raise ValueError(f"Request already in progress ({req.status})")
+        user_id = int(req.user_id)
+        title = req.title or "Untitled"
+        author = req.author
+        staging_raw = (req.staging_path or "").strip()
+        source_library_path = (req.source_library_path or "").strip() or None
+
+    from app.services.forge_pipeline import resolve_staging_dir
+
+    staging: Path | None = None
+    if staging_raw:
+        candidate = Path(staging_raw)
+        if candidate.is_dir() and ebook_pipeline._collect_ebooks(candidate):
+            staging = candidate
+        else:
+            try:
+                resolved = resolve_staging_dir(staging_raw)
+                if resolved.is_dir() and ebook_pipeline._collect_ebooks(resolved):
+                    staging = resolved
+            except FileNotFoundError:
+                staging = None
+
+    if staging is None and source_library_path:
+        library_dir = Path(source_library_path)
+        if library_dir.is_dir():
+            staging = ebook_pipeline.ebook_staging_dir(request_id, title)
+            library_ingest.stage_tree_from_library(library_dir, staging, prefer_hardlink=True)
+
+    if staging is None:
+        return {"ok": False, "id": request_id, "status": "failed", "reason": "staging_missing"}
+
+    return {
+        "ok": True,
+        "id": request_id,
+        "staging": staging,
+        "user_id": user_id,
+        "title": title,
+        "author": author,
+    }
+
+
+async def reprocess_unprocessed(request_id: int, *, user_id: int) -> dict[str, Any]:
+    """Re-kick the DIY ebook pipeline for a cancelled/failed/skipped/quarantined book.
+
+    Restages synchronously, then runs the pipeline in a background task so the
+    admin HTTP call returns immediately.
+    """
+    prepared = await _reprocess_local_ebook_ingest(request_id)
     if not prepared.get("ok", True):
-        return {
-            "ok": False,
-            "result": prepared,
-            "status": await get_status(),
-        }
+        return {"ok": False, "result": prepared, "status": await get_status()}
 
-    async def _forge() -> None:
+    staging: Path = prepared["staging"]
+    title = prepared["title"]
+    author = prepared["author"]
+    uid = prepared["user_id"]
+    options = await library_ingest.ebook_sweep_options()
+
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req = result.scalar_one_or_none()
+        if req:
+            req.staging_path = ebook_pipeline.staging_path_for_storage(staging)
+            req.status = "metadata_forge"
+            req.status_detail = "Matching ebook metadata..."
+            req.quarantine_reason = None
+            await db.commit()
+
+    async def _run() -> None:
         try:
-            from app.services.forge_pipeline import (
-                resolve_staging_dir,
-                run_forge_after_download,
-            )
-
-            async with async_session() as db:
-                result = await db.execute(
-                    select(DownloadRequest).where(DownloadRequest.id == request_id)
-                )
-                req = result.scalar_one_or_none()
-                if not req:
-                    return
-                uid = int(req.user_id)
-                title = req.title or "Untitled"
-                author = req.author
-                staging_raw = (req.staging_path or "").strip()
-
-            if not staging_raw:
-                logger.error("Reprocess %s: staging_path missing after prepare", request_id)
-                return
-            staging = resolve_staging_dir(staging_raw)
-            await run_forge_after_download(
+            await ebook_pipeline.run_ebook_after_download(
                 request_id,
                 staging=staging,
                 user_id=uid,
                 title=title,
                 author=author,
                 resume_from="metadata",
-                handoff_m4b=True,
+                convert_all_to_epub=options["convert_all_to_epub"],
+                force_metadata=True,
+                provider_order=options["provider_order"],
             )
         except Exception:
-            logger.exception("Background reprocess failed for request %s", request_id)
+            logger.exception("Background ebook reprocess failed for request %s", request_id)
 
-    asyncio.create_task(_forge(), name=f"sweep-reprocess-{request_id}")
+    asyncio.create_task(_run(), name=f"ebook-sweep-reprocess-{request_id}")
     await _refresh_current_from_db(request_id)
 
     return {
         "ok": True,
-        "result": prepared,
+        "result": {"ok": True, "id": request_id, "status": "metadata_forge"},
         "status": await get_status(),
     }
 
 
-async def dismiss_unprocessed(
-    request_ids: list[int] | int,
-) -> dict[str, Any]:
-    """Mark unprocessed sweep book(s) dismissed so they leave the Unprocessed tab.
+async def dismiss_unprocessed(request_ids: list[int] | int) -> dict[str, Any]:
+    """Mark unprocessed sweep ebook(s) dismissed so they leave the Unprocessed tab.
 
-    Does not delete library files or ABS items — only the DownloadRequest status.
+    Does not delete library files - only the DownloadRequest status.
     """
     ids = [request_ids] if isinstance(request_ids, int) else list(request_ids)
     ids = [int(i) for i in ids if i is not None]
@@ -673,8 +710,8 @@ async def dismiss_unprocessed(
             if not req:
                 skipped.append({"id": rid, "reason": "not_found"})
                 continue
-            if (req.source or "").strip().lower() != library_ingest.SOURCE_SWEEP:
-                skipped.append({"id": rid, "reason": "not_sweep"})
+            if (req.source or "").strip().lower() != library_ingest.SOURCE_SWEEP or req.media_type != MEDIUM:
+                skipped.append({"id": rid, "reason": "not_ebook_sweep"})
                 continue
             if req.status not in library_ingest._UNPROCESSED_STATUSES:
                 skipped.append({"id": rid, "reason": f"status_{req.status}"})
@@ -701,75 +738,134 @@ async def resume_running_sweep_on_startup() -> None:
     async with _worker_lock:
         if _worker_task is not None and not _worker_task.done():
             return
-        logger.info("Library Sweep: restarting worker for job %s after startup", job.id)
+        logger.info("Ebook Sweep: restarting worker for job %s after startup", job.id)
         _worker_task = asyncio.create_task(
-            _run_sweep_worker(job.id), name="library-sweep"
+            _run_sweep_worker(job.id), name="ebook-sweep"
         )
 
 
-async def _enumerate_abs_books() -> list[dict[str, Any]]:
-    """Raw ABS library items that look like books (have title + path)."""
-    lid = settings.abs_library_id
-    if not lid or not settings.abs_api_key:
+async def _enumerate_ebook_books() -> list[Path]:
+    """Book folders under the ebook library root (staging excluded)."""
+    root = Path(settings.ebook_dir)
+    if not root.is_dir():
         return []
     try:
-        raw = await audiobookshelf._fetch_library_items_all_pages(lid)
+        dirs = sorted(cleanup.iter_ebook_book_dirs(root))
     except Exception:
-        logger.warning("Library Sweep: failed to enumerate ABS items", exc_info=True)
+        logger.warning("Ebook Sweep: failed to enumerate book folders", exc_info=True)
         return []
-    books: list[dict[str, Any]] = []
-    for item in raw:
-        media = item.get("media") or {}
-        meta = media.get("metadata") or {}
-        title = (meta.get("title") or meta.get("titleIgnorePrefix") or "").strip()
-        if not title:
-            continue
-        item_id = str(item.get("id") or "").strip()
-        if not item_id:
-            continue
-        books.append(item)
-    return books
+    return dirs
+
+
+async def _retry_quarantined_ebook(
+    existing: DownloadRequest,
+    *,
+    user_id: int,
+    title: str,
+    author: str | None,
+    book_dir: Path,
+) -> dict[str, Any]:
+    """Re-kick the ebook pipeline for an existing quarantined sweep request."""
+    from app.services.forge_pipeline import resolve_staging_dir
+
+    staging: Path | None = None
+    staging_raw = (existing.staging_path or "").strip()
+    if staging_raw:
+        try:
+            candidate = resolve_staging_dir(staging_raw)
+            if candidate.is_dir() and ebook_pipeline._collect_ebooks(candidate):
+                staging = candidate
+        except FileNotFoundError:
+            staging = None
+
+    if staging is None:
+        # Staging was already wiped (or missing) - the source folder is still
+        # present in the library since it hasn't been organized yet.
+        staging = ebook_pipeline.ebook_staging_dir(existing.id, title)
+        library_ingest.stage_tree_from_library(book_dir, staging, prefer_hardlink=True)
+
+    options = await library_ingest.ebook_sweep_options()
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == existing.id)
+        )
+        req = result.scalar_one_or_none()
+        if req:
+            req.staging_path = ebook_pipeline.staging_path_for_storage(staging)
+            req.status = "metadata_forge"
+            req.status_detail = "Retrying ebook metadata..."
+            req.quarantine_reason = None
+            await db.commit()
+
+    await ebook_pipeline.run_ebook_after_download(
+        existing.id,
+        staging=staging,
+        user_id=user_id,
+        title=title,
+        author=author,
+        resume_from="metadata",
+        convert_all_to_epub=options["convert_all_to_epub"],
+        force_metadata=True,
+        provider_order=options["provider_order"],
+    )
+
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == existing.id)
+        )
+        req = result.scalar_one_or_none()
+        status = req.status if req else "unknown"
+
+    return {"ok": True, "id": existing.id, "status": status, "retried": True}
 
 
 async def _run_sweep_worker(job_id: int) -> None:
     try:
-        books = await _enumerate_abs_books()
-        await _update_job(job_id, total=len(books))
-        logger.info("Library Sweep job %s: %s ABS items", job_id, len(books))
+        root = Path(settings.ebook_dir)
+        options = await library_ingest.ebook_sweep_options()
+        force_metadata = bool(options["force_metadata"])
+        dirs = await _enumerate_ebook_books()
+        await _update_job(job_id, total=len(dirs))
+        logger.info("Ebook Sweep job %s: %s book folders", job_id, len(dirs))
 
-        for index, item in enumerate(books):
+        for index, book_dir in enumerate(dirs):
             job = await _load_job(job_id)
             if not job:
                 return
             if job.status == "paused":
-                logger.info("Library Sweep job %s paused at index %s", job_id, index)
+                logger.info("Ebook Sweep job %s paused at index %s", job_id, index)
                 _set_current()
-                # Keep up_next so the UI shows what resumes next.
-                _set_up_next(await _peek_up_next(books, after_index=index - 1))
-                await run_batched_abs_scan(reason="sweep paused")
+                _set_up_next(
+                    await _peek_up_next(
+                        root, dirs, after_index=index - 1, force_metadata=force_metadata
+                    )
+                )
+                await run_batched_kavita_scan(reason="sweep paused")
                 return
             if job.status == "cancelled":
-                logger.info("Library Sweep job %s cancelled at index %s", job_id, index)
+                logger.info("Ebook Sweep job %s cancelled at index %s", job_id, index)
                 _set_current()
                 _set_up_next(None)
-                await run_batched_abs_scan(reason="sweep cancelled")
+                await run_batched_kavita_scan(reason="sweep cancelled")
                 return
             if job.status != "running":
                 _set_current()
                 _set_up_next(None)
-                await run_batched_abs_scan(reason=f"sweep stopped ({job.status})")
+                await run_batched_kavita_scan(reason=f"sweep stopped ({job.status})")
                 return
 
-            _set_up_next(await _peek_up_next(books, after_index=index))
+            _set_up_next(
+                await _peek_up_next(
+                    root, dirs, after_index=index, force_metadata=force_metadata
+                )
+            )
 
             try:
-                await _process_one_item(job_id, item, scan_index=index)
+                await _process_one_dir(job_id, root, book_dir, scan_index=index, options=options)
             except asyncio.CancelledError:
-                # Worker task cancelled (fresh start / shutdown) — re-raise.
-                # Per-request cancel raises LibraForgeError, not CancelledError.
                 raise
             except Exception as e:
-                logger.exception("Library Sweep item failed: %s", e)
+                logger.exception("Ebook Sweep item failed: %s", e)
                 job = await _load_job(job_id)
                 if job:
                     await _update_job(
@@ -782,56 +878,51 @@ async def _run_sweep_worker(job_id: int) -> None:
         job = await _load_job(job_id)
         if job and job.status == "running":
             await _update_job(job_id, status="completed", error=None)
-            logger.info("Library Sweep job %s completed", job_id)
-            await run_batched_abs_scan(reason="sweep completed")
+            logger.info("Ebook Sweep job %s completed", job_id)
+            await run_batched_kavita_scan(reason="sweep completed")
         _set_current()
         _set_up_next(None)
     except asyncio.CancelledError:
-        logger.info("Library Sweep worker cancelled")
+        logger.info("Ebook Sweep worker cancelled")
         _set_current()
         _set_up_next(None)
-        await run_batched_abs_scan(reason="sweep stopped")
+        await run_batched_kavita_scan(reason="sweep stopped")
         raise
     except Exception as e:
-        logger.exception("Library Sweep worker crashed: %s", e)
+        logger.exception("Ebook Sweep worker crashed: %s", e)
         job = await _load_job(job_id)
         if job and job.status == "running":
             await _update_job(job_id, status="completed", error=str(e)[:500])
         _set_current()
         _set_up_next(None)
-        await run_batched_abs_scan(reason="sweep error stop")
+        await run_batched_kavita_scan(reason="sweep error stop")
 
 
-async def _bump_failed(job_id: int, scan_index: int, error: str) -> None:
-    job = await _load_job(job_id)
-    if not job:
-        return
-    await _update_job(
-        job_id,
-        scanned=scan_index + 1,
-        failed=int(job.failed or 0) + 1,
-        error=error[:500],
-    )
-
-
-async def _process_one_item(
-    job_id: int, item: dict[str, Any], *, scan_index: int
+async def _process_one_dir(
+    job_id: int,
+    root: Path,
+    book_dir: Path,
+    *,
+    scan_index: int,
+    options: dict[str, Any],
 ) -> None:
-    media = item.get("media") or {}
-    meta = media.get("metadata") or {}
-    item_id = str(item.get("id") or "").strip()
-    title = (meta.get("title") or meta.get("titleIgnorePrefix") or "Untitled").strip()
-    author = (meta.get("authorName") or "").strip() or None
-    fingerprint = library_ingest.sweep_fingerprint(item_id)
-    cover_url = f"/api/stream/abs/proxy/cover/{item_id}" if item_id else None
+    from app.services.ebook_quick_review import load_applied_ebook_meta
+
+    rel_posix = _rel_posix(root, book_dir)
+    fingerprint = library_ingest.ebook_sweep_fingerprint(rel_posix)
+    applied = load_applied_ebook_meta(book_dir)
+    title, author = _folder_title_author_hint(root, book_dir)
+    if applied is not None:
+        title = applied.title or title
+        author = applied.author or author
 
     _set_current(
         request_id=None,
         title=title,
         author=author,
-        cover_url=cover_url,
+        cover_url=getattr(applied, "cover_url", None) if applied is not None else None,
         status="scanning",
-        abs_item_id=item_id,
+        book_dir=rel_posix,
     )
 
     if await library_ingest.fingerprint_already_swept(fingerprint):
@@ -839,13 +930,17 @@ async def _process_one_item(
         return
 
     if await library_ingest.fingerprint_in_flight(fingerprint):
-        # M4B handoff / forge still running — count as scanned, do not re-kick.
+        await _update_job(job_id, scanned=scan_index + 1)
+        return
+
+    if not options["force_metadata"] and applied is not None:
+        # Already organized (has ebook_applied.json) and force-metadata is off.
         await _update_job(job_id, scanned=scan_index + 1)
         return
 
     job = await _load_job(job_id)
     if not job or not job.started_by_user_id:
-        raise RuntimeError("Sweep job missing started_by_user_id")
+        raise RuntimeError("Ebook Sweep job missing started_by_user_id")
     user_id = int(job.started_by_user_id)
 
     existing = await library_ingest.latest_sweep_request(fingerprint)
@@ -854,16 +949,12 @@ async def _process_one_item(
             request_id=existing.id,
             title=existing.title or title,
             author=existing.author or author,
-            cover_url=existing.cover_url or cover_url,
+            cover_url=existing.cover_url,
             status=existing.status,
-            abs_item_id=item_id,
+            book_dir=rel_posix,
         )
-        result = await library_ingest.retry_quarantined_ingest(
-            existing.id,
-            user_id=user_id,
-            title=title,
-            author=author,
-            handoff_m4b=True,
+        result = await _retry_quarantined_ebook(
+            existing, user_id=user_id, title=title, author=author, book_dir=book_dir
         )
         await _refresh_current_from_db(existing.id)
         await _record_sweep_result(job_id, result, scan_index=scan_index)
@@ -873,26 +964,13 @@ async def _process_one_item(
         await _update_job(job_id, scanned=scan_index + 1)
         return
 
-    # Cancelled / failed / skipped / rejected — leave for Unprocessed tab.
     if existing and existing.status in library_ingest._UNPROCESSED_STATUSES:
         await _update_job(job_id, scanned=scan_index + 1)
         logger.debug(
-            "Sweep skip unprocessed fingerprint %s (status=%s)",
+            "Ebook Sweep skip unprocessed fingerprint %s (status=%s)",
             fingerprint,
             existing.status,
         )
-        return
-
-    root = Path(settings.audiobook_dir)
-    try:
-        library_dir = resolve_abs_book_dir(root, item)
-    except ValueError as e:
-        logger.warning("Sweep skip %s (%s): %s", item_id, title, e)
-        await _bump_failed(job_id, scan_index, f"{title}: {e}")
-        return
-
-    if not library_dir.is_dir():
-        await _bump_failed(job_id, scan_index, f"{title}: library folder missing")
         return
 
     async def _on_created(rid: int) -> None:
@@ -900,23 +978,23 @@ async def _process_one_item(
             request_id=rid,
             title=title,
             author=author,
-            cover_url=cover_url,
+            cover_url=None,
             status="metadata_forge",
-            abs_item_id=item_id,
+            book_dir=rel_posix,
         )
 
-    result = await library_ingest.ingest_from_library_folder(
+    result = await library_ingest.ingest_ebook_from_library_folder(
         user_id=user_id,
         title=title,
         author=author,
-        library_dir=library_dir,
-        source=library_ingest.SOURCE_SWEEP,
-        magnet_link=library_ingest.sweep_magnet(item_id),
-        abs_item_id=item_id,
+        library_dir=book_dir,
+        magnet_link=library_ingest.ebook_sweep_magnet(rel_posix),
         ingest_fingerprint=fingerprint,
-        cover_url=cover_url,
-        kick_forge=True,
-        handoff_m4b=True,
+        cover_url=None,
+        convert_all_to_epub=options["convert_all_to_epub"],
+        force_metadata=options["force_metadata"],
+        provider_order=options["provider_order"],
+        kick_pipeline=True,
         on_request_created=_on_created,
     )
 
@@ -935,36 +1013,21 @@ async def _process_one_item(
     await _record_sweep_result(job_id, result, scan_index=scan_index)
 
 
-async def _request_is_skipped(request_id: int) -> bool:
-    async with async_session() as db:
-        result = await db.execute(
-            select(DownloadRequest.status).where(DownloadRequest.id == request_id)
-        )
-        return result.scalar_one_or_none() == "skipped"
-
-
 async def _record_sweep_result(
     job_id: int, result: dict[str, Any], *, scan_index: int
 ) -> None:
+    global _completed_since_kavita_scan
     job = await _load_job(job_id)
     if not job:
         return
 
-    # Absolute position — never accumulate on resume re-walks.
     scanned = scan_index + 1
     auto_applied = int(job.auto_applied or 0)
     needs_review = int(job.needs_review or 0)
     failed = int(job.failed or 0)
-    m4b_queued = int(job.m4b_queued or 0)
 
     status = result.get("status") or ""
     retried = bool(result.get("retried"))
-    handed_off = bool(result.get("m4b_handed_off")) or (
-        status == "m4b_convert" and bool(result.get("needs_m4b"))
-    )
-
-    if handed_off or (result.get("needs_m4b") and status == "m4b_convert"):
-        m4b_queued += 1
 
     if status == "completed":
         auto_applied += 1
@@ -981,13 +1044,9 @@ async def _record_sweep_result(
         pass  # tracked via DownloadRequest; do not inflate failed
     elif status in ("failed", "admin_rejected", "cancelled"):
         failed += 1
-    elif status == "m4b_convert" and handed_off:
-        # Background pipeline will finish — not a failure, not yet auto-applied.
-        pass
-    elif status in ("chapter_forge", "folder_forge", "finalizing", "metadata_forge"):
-        # Sync path finished mid-pipeline somehow (or no-M4B still running).
-        if status != "metadata_forge":
-            auto_applied += 1
+    elif status in ("metadata_forge", "folder_forge", "finalizing"):
+        # Sync path finished mid-pipeline somehow.
+        auto_applied += 1
         if retried:
             needs_review = max(0, needs_review - 1)
     else:
@@ -999,6 +1058,12 @@ async def _record_sweep_result(
         auto_applied=auto_applied,
         needs_review=needs_review,
         failed=failed,
-        m4b_queued=m4b_queued,
         error=None,
     )
+
+    _completed_since_kavita_scan += 1
+    every = _kavita_scan_every()
+    if _completed_since_kavita_scan >= every:
+        await run_batched_kavita_scan(
+            reason=f"every {every} completed (at {_completed_since_kavita_scan})"
+        )

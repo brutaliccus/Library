@@ -14,6 +14,9 @@ ARCHIVE_SUFFIXES = {".rar", ".zip", ".7z", ".tar", ".gz", ".bz2", ".tgz", ".tbz2
 KAVITA_CONVERT_TO_EPUB = {".mobi", ".azw", ".azw3"}
 # Backwards-compatible alias used by convert helpers
 KAVITA_UNSUPPORTED_EBOK = KAVITA_CONVERT_TO_EPUB
+# Library Sweep "convert all to EPUB": everything Calibre can convert except
+# comic archives (CBZ/CBR), which Kavita already renders natively.
+SWEEP_CONVERT_TO_EPUB = {".mobi", ".azw", ".azw3", ".pdf", ".fb2", ".txt"}
 
 
 def sanitize_filename(name: str) -> str:
@@ -188,9 +191,12 @@ def _get_ebook_convert_path() -> str | None:
     return None
 
 
-async def convert_ebook_to_epub(path: Path, ebook_convert: str) -> Path | None:
-    """Convert MOBI/AZW to EPUB for Kavita's HTML reader. Returns path to EPUB or None."""
-    if path.suffix.lower() not in KAVITA_UNSUPPORTED_EBOK:
+async def convert_ebook_to_epub(
+    path: Path, ebook_convert: str, *, allowed_suffixes: set[str] | None = None
+) -> Path | None:
+    """Convert an ebook to EPUB for Kavita's HTML reader. Returns path to EPUB or None."""
+    allowed = allowed_suffixes if allowed_suffixes is not None else KAVITA_CONVERT_TO_EPUB
+    if path.suffix.lower() not in allowed:
         return path
     epub_path = path.with_suffix(".epub")
     logger.info(f"Converting {path.name} to EPUB for Kavita")
@@ -218,8 +224,13 @@ async def convert_ebook_to_epub(path: Path, ebook_convert: str) -> Path | None:
     return epub_path
 
 
-async def convert_ebooks_in_dir(dest_dir: Path) -> None:
-    """Convert MOBI/AZW files in directory to EPUB for Kavita."""
+async def convert_ebooks_in_dir(dest_dir: Path, *, convert_all_to_epub: bool = False) -> None:
+    """Convert ebook files in directory to EPUB for Kavita.
+
+    By default only MOBI/AZW/AZW3 (Kavita can't render these natively). When
+    ``convert_all_to_epub`` is set (Ebook Library Sweep), also convert
+    PDF/FB2/TXT — comic archives (CBZ/CBR) are always left as-is.
+    """
     ebook_convert = _get_ebook_convert_path()
     if not ebook_convert:
         logger.warning("ebook-convert (Calibre) not found - skipping ebook conversion. Install calibre in the container.")
@@ -229,13 +240,14 @@ async def convert_ebooks_in_dir(dest_dir: Path) -> None:
         logger.warning(f"Ebook dir does not exist: {dest_dir}")
         return
 
-    to_convert = [f for f in dest_dir.rglob("*") if f.is_file() and f.suffix.lower() in KAVITA_CONVERT_TO_EPUB]
+    allowed = SWEEP_CONVERT_TO_EPUB if convert_all_to_epub else KAVITA_CONVERT_TO_EPUB
+    to_convert = [f for f in dest_dir.rglob("*") if f.is_file() and f.suffix.lower() in allowed]
     if not to_convert:
-        logger.debug(f"No MOBI/AZW files to convert in {dest_dir}")
+        logger.debug(f"No ebook files to convert in {dest_dir}")
         return
 
     logger.info(f"Found {len(to_convert)} file(s) to convert in {dest_dir}")
     for f in to_convert:
-        result = await convert_ebook_to_epub(f, ebook_convert)
+        result = await convert_ebook_to_epub(f, ebook_convert, allowed_suffixes=allowed)
         if result:
             logger.info(f"Converted {f.name} -> {result.name}")

@@ -271,18 +271,156 @@ def _meta_from_catalog_book(book: dict, *, score: float, source: str) -> EbookMe
     )
 
 
+async def _search_hardcover_meta(
+    search_title: str, hint_author: str, *, min_score: float
+) -> EbookMeta | None:
+    """Title+author search via Hardcover. None when disabled, empty, or no usable hit."""
+    from app.services import hardcover
+
+    if not search_title or not await hardcover.get_api_key():
+        return None
+    try:
+        hits = await hardcover.search_books(f"{search_title} {hint_author}".strip(), limit=8)
+    except Exception as e:
+        logger.warning("Hardcover ebook search failed: %s", e)
+        return None
+
+    ranked: list[tuple[float, dict]] = []
+    for h in hits or []:
+        ht = (h.get("title") or "").strip()
+        if not ht:
+            continue
+        sim = title_similarity(search_title, ht)
+        if sim < 0.35 and not hardcover._titles_compatible(search_title, ht):
+            continue
+        authors = h.get("authors") or []
+        author_ok = True
+        if hint_author and authors:
+            author_ok = hardcover._authors_overlap(hint_author, authors)
+        if hint_author and authors and not author_ok:
+            continue
+        score = 0.55 + 0.40 * sim
+        if author_ok and hint_author:
+            score += 0.08
+        if hardcover._titles_compatible(search_title, ht):
+            score = max(score, 0.72)
+        if _norm(search_title) == _norm(ht) and hint_author and author_ok:
+            score = max(score, 0.92)
+        ranked.append((min(score, 0.99), h))
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    best_score, best = ranked[0]
+    # Ambiguous: second hit nearly as strong with different identity
+    ambiguous = False
+    if len(ranked) > 1:
+        second_score, second = ranked[1]
+        if second_score >= min_score and (best_score - second_score) < 0.08:
+            if _norm(best.get("title") or "") != _norm(second.get("title") or ""):
+                ambiguous = True
+            elif (best.get("seriesName") or "") != (second.get("seriesName") or ""):
+                ambiguous = True
+
+    authors = best.get("authors") or []
+    canon_author = (authors[0] if authors else "") or hint_author or "Unknown"
+    series = (best.get("seriesName") or "").strip() or None
+    seq = str(best.get("seriesBookNumber") or "").strip() or None
+    return EbookMeta(
+        title=(best.get("title") or search_title).strip(),
+        author=str(canon_author).strip() or "Unknown",
+        series=series,
+        series_index=seq,
+        isbn13=(best.get("isbn13") or "").strip() or None,
+        isbn10=(best.get("isbn10") or "").strip() or None,
+        score=best_score,
+        source="hardcover",
+        cover_url=(best.get("coverUrl") or best.get("cover_url") or None),
+        ambiguous=ambiguous,
+        reason=(
+            "Ambiguous Hardcover matches"
+            if ambiguous
+            else f"Hardcover title/author match ({best_score:.2f})"
+        ),
+    )
+
+
+async def _search_open_library_meta(
+    search_title: str, hint_author: str, *, min_score: float
+) -> EbookMeta | None:
+    """Title+author search via Open Library. None when empty or no usable hit."""
+    from app.services import google_books
+
+    if not search_title:
+        return None
+    try:
+        hits = await google_books.search_open_library(
+            f"{search_title} {hint_author}".strip(), limit=8
+        )
+    except Exception as e:
+        logger.warning("Open Library ebook search failed: %s", e)
+        return None
+
+    ranked: list[tuple[float, dict]] = []
+    for h in hits or []:
+        ht = (h.get("title") or "").strip()
+        if not ht:
+            continue
+        sim = title_similarity(search_title, ht)
+        if sim < 0.35:
+            continue
+        authors = h.get("authors") or []
+        author_ok = True
+        if hint_author and authors:
+            author_ok = any(
+                _norm(hint_author) in _norm(str(a)) or _norm(str(a)) in _norm(hint_author)
+                for a in authors
+            )
+        score = 0.5 + 0.35 * sim
+        if author_ok and hint_author:
+            score += 0.10
+        if _norm(search_title) == _norm(ht) and hint_author and author_ok:
+            score = max(score, 0.88)
+        ranked.append((min(score, 0.97), h))
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    best_score, best = ranked[0]
+    ambiguous = False
+    if len(ranked) > 1:
+        second_score, second = ranked[1]
+        if second_score >= min_score and (best_score - second_score) < 0.08:
+            if _norm(best.get("title") or "") != _norm(second.get("title") or ""):
+                ambiguous = True
+
+    meta = _meta_from_catalog_book(best, score=best_score, source="open_library")
+    meta.ambiguous = ambiguous
+    meta.reason = (
+        "Ambiguous Open Library matches"
+        if ambiguous
+        else f"Open Library title/author match ({best_score:.2f})"
+    )
+    return meta
+
+
 async def identify_ebook_metadata(
     *,
     staging: Path,
     title_hint: str,
     author_hint: str,
     google_volume_id: str | None = None,
+    provider_order: list[str] | None = None,
 ) -> EbookMeta:
     """Resolve catalog metadata with confidence score.
 
-    Order: request catalog volume → ISBN (OL / Google / ISBNdb) → title+author (Hardcover).
+    Order: request catalog volume → ISBN (OL / Google / ISBNdb) → title+author
+    providers, tried in ``provider_order`` (default ``["hardcover"]``; Library
+    Sweep passes ``["hardcover", "open_library"]``).
     """
-    from app.services import google_books, hardcover, isbndb, ol_catalog
+    from app.services import google_books, isbndb, ol_catalog
 
     hint_title = (title_hint or "").strip()
     hint_author = (author_hint or "").strip()
@@ -346,7 +484,7 @@ async def identify_ebook_metadata(
                 meta.author = hint_author or meta.author
             return meta
 
-    # 3) Title + author → Hardcover
+    # 3) Title + author → provider_order (default Hardcover only)
     search_title = hint_title
     # Strip common torrent junk for search
     search_title = re.sub(
@@ -356,79 +494,25 @@ async def identify_ebook_metadata(
         flags=re.IGNORECASE,
     ).strip() or hint_title
 
-    if search_title and await hardcover.get_api_key():
-        try:
-            hits = await hardcover.search_books(f"{search_title} {hint_author}".strip(), limit=8)
-        except Exception as e:
-            logger.warning("Hardcover ebook search failed: %s", e)
-            hits = []
-
-        ranked: list[tuple[float, dict]] = []
-        for h in hits or []:
-            ht = (h.get("title") or "").strip()
-            if not ht:
-                continue
-            sim = title_similarity(search_title, ht)
-            if sim < 0.35 and not hardcover._titles_compatible(search_title, ht):
-                continue
-            authors = h.get("authors") or []
-            author_ok = True
-            if hint_author and authors:
-                author_ok = hardcover._authors_overlap(hint_author, authors)
-            if hint_author and authors and not author_ok:
-                continue
-            score = 0.55 + 0.40 * sim
-            if author_ok and hint_author:
-                score += 0.08
-            if hardcover._titles_compatible(search_title, ht):
-                score = max(score, 0.72)
-            if _norm(search_title) == _norm(ht) and hint_author and author_ok:
-                score = max(score, 0.92)
-            ranked.append((min(score, 0.99), h))
-
-        ranked.sort(key=lambda x: x[0], reverse=True)
-        if ranked:
-            best_score, best = ranked[0]
-            # Ambiguous: second hit nearly as strong with different identity
-            ambiguous = False
-            if len(ranked) > 1:
-                second_score, second = ranked[1]
-                if second_score >= min_score and (best_score - second_score) < 0.08:
-                    if _norm(best.get("title") or "") != _norm(second.get("title") or ""):
-                        ambiguous = True
-                    elif (best.get("seriesName") or "") != (second.get("seriesName") or ""):
-                        ambiguous = True
-
-            authors = best.get("authors") or []
-            canon_author = (authors[0] if authors else "") or hint_author or "Unknown"
-            series = (best.get("seriesName") or "").strip() or None
-            seq = str(best.get("seriesBookNumber") or "").strip() or None
-            meta = EbookMeta(
-                title=(best.get("title") or search_title).strip(),
-                author=str(canon_author).strip() or "Unknown",
-                series=series,
-                series_index=seq,
-                isbn13=(best.get("isbn13") or "").strip() or None,
-                isbn10=(best.get("isbn10") or "").strip() or None,
-                score=best_score,
-                source="hardcover",
-                cover_url=(best.get("coverUrl") or best.get("cover_url") or None),
-                ambiguous=ambiguous,
-                reason=(
-                    "Ambiguous Hardcover matches"
-                    if ambiguous
-                    else f"Hardcover title/author match ({best_score:.2f})"
-                ),
-            )
+    providers = provider_order or ["hardcover"]
+    for provider in providers:
+        if provider == "hardcover":
+            meta = await _search_hardcover_meta(search_title, hint_author, min_score=min_score)
+        elif provider == "open_library":
+            meta = await _search_open_library_meta(search_title, hint_author, min_score=min_score)
+        else:
+            meta = None
+        if meta is not None:
             return meta
 
     # Fallback: use request hints at low confidence → quarantine
+    providers_label = "/".join(p.title().replace("_", " ") for p in providers)
     return EbookMeta(
         title=hint_title or "Unknown",
         author=hint_author or "Unknown",
         score=0.2,
         source="hint",
-        reason="No catalog/ISBN/Hardcover match",
+        reason=f"No catalog/ISBN/{providers_label} match",
     )
 
 
@@ -803,6 +887,59 @@ async def _set_quarantine(request_id: int, reason: str, staging: Path) -> None:
                 logger.warning("Ebook quarantine admin push failed", exc_info=True)
 
 
+def _delete_superseded_ebook_source(source_path: str, dest_file: Path) -> None:
+    """Remove the original ebook library folder after Library Sweep re-organizes the book.
+
+    Mirrors ``forge_pipeline._delete_superseded_source_library`` for ebooks.
+    Safe guards: must sit under ``ebook_dir``, must not be (or contain) the
+    unorganized staging folder, must not be the destination (or its parent),
+    and the destination must already exist with an ebook file before delete.
+    """
+    from app.services.library_media_delete import delete_tree_under_library, get_ebook_forbidden_dirnames
+
+    raw = (source_path or "").strip()
+    if not raw:
+        return
+    root = Path(settings.ebook_dir).resolve()
+    src = Path(raw).resolve()
+    forbidden = get_ebook_forbidden_dirnames()
+    try:
+        rel = src.relative_to(root)
+    except ValueError:
+        logger.info("Skip ebook source delete (outside library): %s", src)
+        return
+    if any(part in forbidden for part in rel.parts):
+        logger.info("Skip ebook source delete (staging path): %s", src)
+        return
+    if src == root:
+        return
+
+    dest = dest_file.resolve()
+    if src == dest or src == dest.parent:
+        logger.info("Skip ebook source delete (organized in place): %s", src)
+        return
+    try:
+        dest.relative_to(src)
+        logger.info(
+            "Skip ebook source delete (destination under source): src=%s dest=%s",
+            src,
+            dest,
+        )
+        return
+    except ValueError:
+        pass
+
+    if not dest.is_file() or dest.suffix.lower() not in EBOOK_EXTENSIONS:
+        logger.warning("Skip ebook source delete (destination missing/not an ebook): %s", dest)
+        return
+
+    try:
+        delete_tree_under_library(src, root, forbidden)
+        logger.info("Deleted superseded ebook source folder %s", src)
+    except Exception as e:
+        logger.warning("Could not delete superseded ebook source %s: %s", src, e)
+
+
 def wipe_staging(staging: Path) -> None:
     """Remove the request staging tree after a successful organize."""
     try:
@@ -826,11 +963,22 @@ async def run_ebook_after_download(
     author: str | None,
     google_volume_id: str | None = None,
     resume_from: str = "metadata",
+    convert_all_to_epub: bool = False,
+    force_metadata: bool = False,
+    provider_order: list[str] | None = None,
 ) -> None:
     """Post-download ebook pipeline: metadata → organize → Kavita finalize.
 
     ``resume_from``: ``metadata`` | ``folder`` | ``finalize``
     (no M4B step — ebooks never call LibraForge).
+
+    ``convert_all_to_epub``: Library Sweep — convert PDF/MOBI/AZW/FB2/TXT (not
+    CBZ/CBR) instead of just MOBI/AZW/AZW3.
+    ``force_metadata``: when False and staging already carries a copied-in
+    ``ebook_applied.json`` (Library Sweep re-processing an already organized
+    book), reuse it instead of re-identifying. When True, always re-identify.
+    ``provider_order``: title/author identify provider order (see
+    ``identify_ebook_metadata``).
     """
     p = _pipeline()
     staging = Path(staging)
@@ -839,9 +987,9 @@ async def run_ebook_after_download(
     if await p._is_cancelled(request_id):
         return
 
-    # Convert MOBI/AZW → EPUB in staging before identify/embed.
+    # Convert to EPUB in staging before identify/embed.
     try:
-        await downloader.convert_ebooks_in_dir(staging)
+        await downloader.convert_ebooks_in_dir(staging, convert_all_to_epub=convert_all_to_epub)
     except Exception as e:
         logger.warning("Ebook convert in staging failed (continuing): %s", e)
 
@@ -851,32 +999,39 @@ async def run_ebook_after_download(
         async with async_session() as db:
             await p._update_status(db, request_id, "metadata_forge", "Identifying ebook metadata…")
 
-        meta = await identify_ebook_metadata(
-            staging=staging,
-            title_hint=title,
-            author_hint=author or "",
-            google_volume_id=google_volume_id,
-        )
-        min_score = float(settings.ebook_min_score)
-        if meta.ambiguous or meta.score < min_score:
-            reason = meta.reason or f"Score {meta.score:.2f} below minimum {min_score:.2f}"
-            if meta.ambiguous:
-                reason = meta.reason or "Ambiguous metadata matches"
-            # OpenRouter identify → retry organize clues (same toggle/threshold).
-            meta = await _ebook_llm_identify_retry(
+        if not force_metadata:
+            from app.services.ebook_quick_review import load_applied_ebook_meta
+
+            meta = load_applied_ebook_meta(staging)
+
+        if meta is None:
+            meta = await identify_ebook_metadata(
                 staging=staging,
                 title_hint=title,
                 author_hint=author or "",
                 google_volume_id=google_volume_id,
-                prior_reason=reason,
-                prior_meta=meta,
+                provider_order=provider_order,
             )
-            if meta is None or meta.ambiguous or meta.score < min_score:
-                fail_reason = reason
-                if meta is not None and meta.reason:
-                    fail_reason = meta.reason
-                await _set_quarantine(request_id, fail_reason, staging)
-                return
+            min_score = float(settings.ebook_min_score)
+            if meta.ambiguous or meta.score < min_score:
+                reason = meta.reason or f"Score {meta.score:.2f} below minimum {min_score:.2f}"
+                if meta.ambiguous:
+                    reason = meta.reason or "Ambiguous metadata matches"
+                # OpenRouter identify → retry organize clues (same toggle/threshold).
+                meta = await _ebook_llm_identify_retry(
+                    staging=staging,
+                    title_hint=title,
+                    author_hint=author or "",
+                    google_volume_id=google_volume_id,
+                    prior_reason=reason,
+                    prior_meta=meta,
+                )
+                if meta is None or meta.ambiguous or meta.score < min_score:
+                    fail_reason = reason
+                    if meta is not None and meta.reason:
+                        fail_reason = meta.reason
+                    await _set_quarantine(request_id, fail_reason, staging)
+                    return
 
         meta = ensure_series_index(meta)
         # Embed OPF tags on primary ebook while still in staging
@@ -902,6 +1057,7 @@ async def run_ebook_after_download(
                     title_hint=title,
                     author_hint=author or "",
                     google_volume_id=google_volume_id,
+                    provider_order=provider_order,
                 )
                 if meta.score < 0.5:
                     # Prefer request hints when identification is still weak after review.
@@ -953,6 +1109,26 @@ async def run_ebook_after_download(
                 )
 
         logger.info("Ebook organized for request %s → %s", request_id, dest_file)
+
+        # Delete the pre-sweep source folder once the book lands at a new path
+        # (Library Sweep hardlinks otherwise leave duplicate copies on disk).
+        source_library_path = ""
+        async with async_session() as db:
+            result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
+            req = result.scalar_one_or_none()
+            source_library_path = (getattr(req, "source_library_path", None) or "").strip() if req else ""
+            if req and source_library_path:
+                req.source_library_path = None
+                await db.commit()
+        if source_library_path:
+            try:
+                _delete_superseded_ebook_source(source_library_path, dest_file)
+            except Exception as e:
+                logger.warning(
+                    "Could not delete superseded ebook source for request %s: %s",
+                    request_id,
+                    e,
+                )
 
     if await p._is_cancelled(request_id):
         return

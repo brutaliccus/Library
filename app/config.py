@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     libraforge_metadata_provider: str = "audible"
     # Library Sweep: full ABS scan every N completed books (and on stop).
     library_sweep_abs_scan_every: int = 25
+    # Ebook Library Sweep: Kavita scan every N completed books (and on stop).
+    ebook_sweep_kavita_scan_every: int = 25
+    # Ebook Library Sweep defaults (also Admin → Library Sweep toggles).
+    ebook_sweep_convert_all_to_epub: bool = True
+    ebook_sweep_force_metadata: bool = True
     # Per-run ffmpeg/m4b-tool worker threads on Pi (not cross-request concurrency).
     # Cross-request M4B is serialized by app.services.m4b_queue (concurrency 1).
     libraforge_m4b_jobs: int = 1

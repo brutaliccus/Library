@@ -320,6 +320,43 @@ REGISTRY: list[SettingDef] = [
         ),
     ),
     SettingDef(
+        key="config.ebook_sweep_convert_all_to_epub",
+        group="pipeline",
+        label="Ebook Sweep: convert all to EPUB",
+        value_type="bool",
+        env_attr="ebook_sweep_convert_all_to_epub",
+        env_fallback=True,
+        help=(
+            "When on (default), Ebook Sweep converts PDF/MOBI/AZW/FB2/TXT to EPUB via Calibre. "
+            "Comic archives (CBZ/CBR) are left as-is."
+        ),
+    ),
+    SettingDef(
+        key="config.ebook_sweep_force_metadata",
+        group="pipeline",
+        label="Ebook Sweep: force metadata (Hardcover → Open Library)",
+        value_type="bool",
+        env_attr="ebook_sweep_force_metadata",
+        env_fallback=True,
+        help=(
+            "When on (default), re-identify every ebook via Hardcover then Open Library "
+            "(ISBN still wins when present). Low-confidence books quarantine for manual review. "
+            "When off, skip books that already have ebook_applied.json."
+        ),
+    ),
+    SettingDef(
+        key="config.ebook_sweep_kavita_scan_every",
+        group="pipeline",
+        label="Ebook Sweep: Kavita scan every N books",
+        env_attr="ebook_sweep_kavita_scan_every",
+        value_type="int",
+        help=(
+            "Full Kavita library scan after this many successfully completed Ebook Sweep books "
+            "(and whenever Ebook Sweep completes / pauses / cancels / stops)."
+        ),
+        placeholder="25",
+    ),
+    SettingDef(
         key="allow_user_audiobook_upload",
         group="pipeline",
         label="Allow user audiobook uploads (legacy global)",

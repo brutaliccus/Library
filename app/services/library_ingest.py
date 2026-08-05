@@ -70,6 +70,14 @@ def sweep_fingerprint(abs_item_id: str) -> str:
     return f"abs:{abs_item_id}"
 
 
+def ebook_sweep_fingerprint(rel_key: str) -> str:
+    return f"ebook:{rel_key}"
+
+
+def ebook_sweep_magnet(rel_key: str) -> str:
+    return f"sweep:ebook:{rel_key}"
+
+
 def is_synthetic_magnet(magnet: str | None) -> bool:
     """True for sweep:/upload: magnets that must never hit Real-Debrid."""
     m = (magnet or "").strip().lower()
@@ -406,6 +414,7 @@ async def create_ingest_request(
     cover_url: str | None = None,
     indexer: str | None = None,
     source_library_path: str | None = None,
+    media_type: str = "audiobook",
 ) -> DownloadRequest:
     """Insert a DownloadRequest for sweep/upload. Does **not** call process_download."""
     src_path = (source_library_path or "").strip() or None
@@ -416,7 +425,7 @@ async def create_ingest_request(
             author=(author or None) and (author[:256] if author else None),
             magnet_link=magnet_link,
             indexer=indexer or ("Library Sweep" if source == SOURCE_SWEEP else "Owned upload"),
-            media_type="audiobook",
+            media_type=media_type,
             status="pending",
             status_detail="Staged for forge (no download)",
             source=source,
@@ -564,6 +573,99 @@ async def ingest_from_library_folder(
     result["stage_method"] = method
     result["needs_m4b"] = needs_m4b
     return result
+
+
+async def ingest_ebook_from_library_folder(
+    *,
+    user_id: int,
+    title: str,
+    author: str | None,
+    library_dir: Path,
+    magnet_link: str,
+    ingest_fingerprint: str | None = None,
+    cover_url: str | None = None,
+    convert_all_to_epub: bool = False,
+    force_metadata: bool = False,
+    provider_order: list[str] | None = None,
+    kick_pipeline: bool = True,
+    on_request_created: Callable[[int], Awaitable[None] | None] | None = None,
+) -> dict[str, Any]:
+    """Ebook analogue of ``ingest_from_library_folder`` — no debrid, no LibraForge/M4B.
+
+    Creates a Library Sweep request, stages the ebook folder, and runs the DIY
+    ebook pipeline (identify → convert/embed → organize → Kavita scan).
+    """
+    from app.services.ebook_pipeline import ebook_staging_dir, run_ebook_after_download
+
+    req = await create_ingest_request(
+        user_id=user_id,
+        title=title,
+        author=author,
+        source=SOURCE_SWEEP,
+        magnet_link=magnet_link,
+        ingest_fingerprint=ingest_fingerprint,
+        cover_url=cover_url,
+        source_library_path=str(library_dir.resolve()) if library_dir else None,
+        media_type="ebook",
+    )
+    if on_request_created is not None:
+        maybe = on_request_created(req.id)
+        if maybe is not None and hasattr(maybe, "__await__"):
+            await maybe
+
+    staging = ebook_staging_dir(req.id, title)
+    method = stage_tree_from_library(library_dir, staging, prefer_hardlink=True)
+    logger.info(
+        "Ebook ingest request %s staged from %s via %s → %s",
+        req.id,
+        library_dir,
+        method,
+        staging,
+    )
+
+    if kick_pipeline:
+        await run_ebook_after_download(
+            req.id,
+            staging=staging,
+            user_id=user_id,
+            title=title,
+            author=author,
+            resume_from="metadata",
+            convert_all_to_epub=convert_all_to_epub,
+            force_metadata=force_metadata,
+            provider_order=provider_order,
+        )
+
+    async with async_session() as db:
+        result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == req.id))
+        row = result.scalar_one_or_none()
+        status = row.status if row else "unknown"
+        reason = row.quarantine_reason if row else None
+
+    return {
+        "ok": True,
+        "id": req.id,
+        "status": status,
+        "quarantine_reason": reason,
+        "stage_method": method,
+    }
+
+
+async def ebook_sweep_options() -> dict:
+    """Admin Config → Ebook Sweep toggles, resolved with env fallback."""
+    from app.services import instance_settings
+
+    convert = await instance_settings.get_effective_bool(
+        "config.ebook_sweep_convert_all_to_epub", default=True
+    )
+    force = await instance_settings.get_effective_bool(
+        "config.ebook_sweep_force_metadata", default=True
+    )
+    return {
+        "convert_all_to_epub": convert,
+        "force_metadata": force,
+        "provider_order": ["hardcover", "open_library"],
+    }
 
 
 async def ingest_uploaded_audiobook(

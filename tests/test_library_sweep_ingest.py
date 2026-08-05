@@ -19,6 +19,7 @@ def test_download_request_has_ingest_columns():
 def test_library_sweep_job_model():
     assert LibrarySweepJob.__tablename__ == "library_sweep_jobs"
     for name in (
+        "medium",
         "status",
         "total",
         "scanned",
@@ -31,6 +32,14 @@ def test_library_sweep_job_model():
         "started_by_user_id",
     ):
         assert hasattr(LibrarySweepJob, name)
+
+
+def test_library_sweep_job_medium_default():
+    assert LibrarySweepJob.medium.type.length == 16
+    job = LibrarySweepJob()
+    # Column default is applied at flush time, not on bare instantiation, but the
+    # mapped default should at least be configured for "audiobook".
+    assert LibrarySweepJob.__table__.c.medium.default.arg == "audiobook"
 
 
 def test_synthetic_magnets_and_fingerprint():
@@ -101,6 +110,33 @@ def test_admin_sweep_routes_registered():
     assert any("library-sweep/processed" in p for p in paths)
     assert any("library-sweep/reprocess" in p for p in paths)
     assert any("library-sweep/dismiss" in p for p in paths)
+
+
+def test_admin_ebook_sweep_routes_registered():
+    from app.routers import admin
+
+    paths = {getattr(r, "path", "") for r in admin.router.routes}
+    assert any("library-sweep/ebook/start" in p for p in paths)
+    assert any("library-sweep/ebook/pause" in p for p in paths)
+    assert any("library-sweep/ebook/cancel" in p for p in paths)
+    assert any("library-sweep/ebook/status" in p for p in paths)
+    assert any("library-sweep/ebook/needs-review" in p for p in paths)
+    assert any("library-sweep/ebook/review-cursor" in p for p in paths)
+    assert any("library-sweep/ebook/skip" in p for p in paths)
+    assert any("library-sweep/ebook/unprocessed" in p for p in paths)
+    assert any("library-sweep/ebook/processed" in p for p in paths)
+    assert any("library-sweep/ebook/reprocess" in p for p in paths)
+    assert any(p.endswith("library-sweep/ebook/dismiss") for p in paths)
+    assert any("library-sweep/ebook/dismiss/{request_id}" in p for p in paths)
+
+
+def test_admin_cleanup_routes_registered():
+    from app.routers import admin
+
+    paths = {getattr(r, "path", "") for r in admin.router.routes}
+    assert any("library-sweep/cleanup/preview" in p for p in paths)
+    assert any("library-sweep/cleanup/apply" in p for p in paths)
+    assert any("library-sweep/cleanup/canonical" in p for p in paths)
 
 
 def test_synthetic_magnet_helpers():
@@ -228,3 +264,57 @@ def test_migration_0014_exists():
     assert 'revision = "0014"' in text
     assert 'down_revision = "0013"' in text
     assert "library_sweep_jobs" in text
+
+
+def test_migration_0021_exists():
+    root = Path(__file__).resolve().parents[1]
+    mig = root / "migrations" / "versions" / "0021_library_sweep_medium.py"
+    assert mig.is_file()
+    text = mig.read_text(encoding="utf-8")
+    assert 'revision = "0021"' in text
+    assert "medium" in text
+
+
+def test_job_to_dict_includes_medium():
+    from app.services import library_sweep
+
+    job = LibrarySweepJob(
+        id=1,
+        medium="audiobook",
+        status="idle",
+        total=0,
+        scanned=0,
+        auto_applied=0,
+        needs_review=0,
+        failed=0,
+        m4b_queued=0,
+    )
+    data = library_sweep.job_to_dict(job)
+    assert data["medium"] == "audiobook"
+
+
+def test_ebook_job_to_dict_uses_ebook_medium_and_zero_m4b():
+    from app.services import library_ebook_sweep
+
+    job = LibrarySweepJob(
+        id=1,
+        medium="ebook",
+        status="idle",
+        total=0,
+        scanned=0,
+        auto_applied=0,
+        needs_review=0,
+        failed=0,
+        m4b_queued=7,  # ebook job_to_dict must force this to 0 regardless
+    )
+    data = library_ebook_sweep.job_to_dict(job)
+    assert data["medium"] == "ebook"
+    assert data["m4b_queued"] == 0
+
+
+def test_ebook_sweep_module_uses_own_worker_state():
+    from app.services import library_ebook_sweep, library_sweep
+
+    assert library_ebook_sweep.MEDIUM == "ebook"
+    # Distinct module-level state (not sharing the audiobook worker's globals).
+    assert library_ebook_sweep._worker_lock is not library_sweep._worker_lock

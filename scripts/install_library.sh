@@ -38,50 +38,64 @@ step() {
 
 explain() { c_dim "    $*"; }
 
+# Interactive reads must use /dev/tty so `curl|bash` does not steal script lines as answers.
+_prompt_tty() {
+  if [[ -r /dev/tty ]]; then
+    printf '%s' /dev/tty
+  else
+    printf '%s' /dev/stdin
+  fi
+}
+
 prompt() {
-  local var="$1" msg="$2" def="${3:-}"
-  local val
+  local var="$1" msg="$2" def="${3-}"
+  local val="" tty
+  tty="$(_prompt_tty)"
   if [[ "$NONINTERACTIVE" == "1" ]]; then
     printf -v "$var" '%s' "$def"
     return 0
   fi
   if [[ -n "$def" ]]; then
-    read -r -p "$msg [$def]: " val || true
+    read -r -p "$msg [$def]: " val <"$tty" || true
     val="${val:-$def}"
   else
-    read -r -p "$msg: " val || true
+    read -r -p "$msg: " val <"$tty" || true
+    val="${val-}"
   fi
   printf -v "$var" '%s' "$val"
 }
 
 prompt_secret() {
-  local var="$1" msg="$2" def="${3:-}"
-  local val
+  local var="$1" msg="$2" def="${3-}"
+  local val="" tty
+  tty="$(_prompt_tty)"
   if [[ "$NONINTERACTIVE" == "1" ]]; then
     printf -v "$var" '%s' "$def"
     return 0
   fi
   if [[ -n "$def" ]]; then
-    read -r -s -p "$msg [keep existing / Enter]: " val || true
+    read -r -s -p "$msg [keep existing / Enter]: " val <"$tty" || true
     echo
     val="${val:-$def}"
   else
-    read -r -s -p "$msg (optional, Enter to skip): " val || true
+    read -r -s -p "$msg (optional, Enter to skip): " val <"$tty" || true
     echo
+    val="${val-}"
   fi
   printf -v "$var" '%s' "$val"
 }
 
 yes_no() {
   local msg="$1" def="${2:-n}"
-  local val
+  local val="" tty
+  tty="$(_prompt_tty)"
   if [[ "$NONINTERACTIVE" == "1" ]]; then
     [[ "$def" =~ ^[Yy] ]]
     return $?
   fi
   local hint="y/N"
   [[ "$def" =~ ^[Yy] ]] && hint="Y/n"
-  read -r -p "$msg [$hint]: " val || true
+  read -r -p "$msg [$hint]: " val <"$tty" || true
   val="${val:-$def}"
   [[ "$val" =~ ^[Yy] ]]
 }
@@ -328,12 +342,29 @@ explain "APP_URL — public URL friends open (invite links, CORS, push). Use LAN
 explain "SECRET_KEY — JWT signing secret (random). DATABASE_URL defaults to SQLite under ./data."
 DEFAULT_APP_URL="${LIBRARY_APP_URL:-$(detect_lan_url)}"
 EXISTING_SECRET="$(get_env SECRET_KEY)"
+EXISTING_SECRET="${EXISTING_SECRET-}"
 if [[ -z "$EXISTING_SECRET" || "$EXISTING_SECRET" =~ change-me ]]; then
-  EXISTING_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 32)"
+  EXISTING_SECRET="$(openssl rand -hex 32 2>/dev/null || true)"
+  if [[ -z "$EXISTING_SECRET" ]]; then
+    EXISTING_SECRET="$(head -c 32 /dev/urandom 2>/dev/null | xxd -p -c 32 2>/dev/null || true)"
+  fi
+  if [[ -z "$EXISTING_SECRET" ]]; then
+    EXISTING_SECRET="$(tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c 64 || true)"
+  fi
+  if [[ -z "$EXISTING_SECRET" ]]; then
+    EXISTING_SECRET="lib-$(date +%s)-${RANDOM}${RANDOM}"
+  fi
 fi
+# Pre-bind under `set -u` so a skipped/failed prompt cannot trip unbound expansion.
+APP_URL=""
+SECRET_KEY=""
+TZ_VAL=""
 prompt APP_URL "Public site URL [REQUIRED]" "$DEFAULT_APP_URL"
 prompt SECRET_KEY "Secret key [REQUIRED]" "$EXISTING_SECRET"
 prompt TZ_VAL "Timezone (TZ)" "${LIBRARY_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
+APP_URL="${APP_URL:-$DEFAULT_APP_URL}"
+SECRET_KEY="${SECRET_KEY:-$EXISTING_SECRET}"
+TZ_VAL="${TZ_VAL:-UTC}"
 set_env APP_URL "$APP_URL"
 set_env SECRET_KEY "$SECRET_KEY"
 set_env DATABASE_URL "sqlite+aiosqlite:///data/app.db"
@@ -354,9 +385,15 @@ set_env EBOOK_STAGING_DIRNAME "unorganized"
 step "Host media mounts [REQUIRED]"
 explain "These host paths are bind-mounted into the app (and bundled ABS/Kavita/LibraForge)."
 explain "Use absolute paths for real libraries (e.g. /mnt/Audiobooks). Defaults create ./media/*."
+AUDIO_HOST=""
+EBOOK_HOST=""
+OL_HOST=""
 prompt AUDIO_HOST "Host audiobooks path [REQUIRED]" "${LIBRARY_AUDIO_HOST:-./media/audiobooks}"
 prompt EBOOK_HOST "Host ebooks path [REQUIRED]" "${LIBRARY_EBOOK_HOST:-./media/ebooks}"
 prompt OL_HOST "Host Open Library dumps path [OPTIONAL]" "${LIBRARY_OL_HOST:-./media/openlibrary}"
+AUDIO_HOST="${AUDIO_HOST:-./media/audiobooks}"
+EBOOK_HOST="${EBOOK_HOST:-./media/ebooks}"
+OL_HOST="${OL_HOST:-./media/openlibrary}"
 for p in "$AUDIO_HOST" "$EBOOK_HOST"; do
   if [[ ! -d "$p" ]]; then
     c_yellow "Creating $p"

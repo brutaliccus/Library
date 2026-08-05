@@ -172,17 +172,19 @@ flowchart TB
 ## Prerequisites
 
 - **Docker** with Compose v2
-  - Linux / Raspberry Pi: Docker Engine + Compose plugin
+  - Linux / Raspberry Pi / **Ubuntu Server 24.04**: Docker Engine + Compose plugin
   - Windows: [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/) (WSL2 backend recommended), running before install
 - Git (for clone)
 - Free host ports: **8085** (app), **9696** (Prowlarr), **8191** (FlareSolverr), **9117** (Jackett)
 - A Real-Debrid and/or TorBox account (can add after first boot)
-- Audiobookshelf and/or Kavita reachable from the host (optional at install time)
+- Audiobookshelf and/or Kavita reachable from the host (optional at install time — **bundled-media** includes both)
 - A public HTTPS hostname (or Tailscale Funnel) if you want off-LAN access and push/Android
+
+**New Ubuntu Server laptop?** Step-by-step host prep + guided installer: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
 
 **Mullvad / gluetun is optional.** Fresh installs start without the VPN sidecar so the stack is healthy before you add WireGuard keys. Enable later by adding `vpn` to `COMPOSE_PROFILES` (e.g. `bundled-media,vpn`) and `ABB_PROXY_URL=http://gluetun:8888` (see `.env.example`).
 
-**Bundled media is the default for new installs.** Profile `bundled-media` starts Audiobookshelf, Kavita, and LibraForge on the same Docker network, wires internal URLs into `.env`, and bootstraps API keys (same idea as Jackett/Prowlarr sync). Existing Pi hosts that already use external ABS/Kavita/LF keep those URLs — leave the profile off. Expect ~1–2 GB extra RAM for the media sidecars.
+**Bundled media is the default for new installs.** Profile `bundled-media` starts Audiobookshelf, Kavita, and LibraForge on the same Docker network, wires internal URLs into `.env`, and bootstraps API keys (same idea as Jackett/Prowlarr sync). Existing Pi hosts that already use external ABS/Kavita/LF keep those URLs — leave the profile off. Expect ~1–2 GB extra RAM for the media sidecars. FlareSolverr is resource-capped in `docker-compose.yml` (768m / 1.5 CPU / 200 pids).
 
 ---
 
@@ -208,7 +210,7 @@ Opt out of bundled ABS/Kavita/LibraForge:
 .\scripts\install_library.ps1 -NonInteractive -SkipBundledMedia
 ```
 
-### Linux / Raspberry Pi
+### Linux / Raspberry Pi / Ubuntu Server
 
 ```bash
 git clone https://github.com/brutaliccus/Library.git library
@@ -217,13 +219,19 @@ chmod +x scripts/install_library.sh
 ./scripts/install_library.sh /opt/library
 ```
 
-Or run the installer against a fresh target; it clones from this repo by default:
+Or run the installer against a fresh target; it clones from this repo by default (and can install Docker on Ubuntu if missing):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/brutaliccus/Library/main/scripts/install_library.sh | bash
 ```
 
-The installers write `.env`, create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, then sync Jackett/Prowlarr/ABS/Kavita/LibraForge into `.env`. **Mullvad is optional** (especially on Windows). After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead.
+Unattended smoke test:
+
+```bash
+LIBRARY_NONINTERACTIVE=1 ./scripts/install_library.sh /opt/library --non-interactive
+```
+
+The installers write `.env` (core secrets, media mounts, indexer URLs, pipeline/sweep defaults, optional debrid/catalog/LLM keys, VAPID), create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, sync Jackett/Prowlarr/ABS/Kavita/LibraForge into `.env`, then print a soft health report (app / indexers / Flare / ABS / Kavita / docker.sock). **Mullvad is optional**. After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead. Full Ubuntu checklist: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
 
 ### Indexer cache seed
 
@@ -325,11 +333,12 @@ Most integration keys can also be set in **Admin → Settings** / **Integrations
 | Libraries | `ABS_URL`, `ABS_API_KEY`, `ABS_LIBRARY_ID`, `KAVITA_*` |
 | LibraForge | `LIBRAFORGE_URL`, `LIBRAFORGE_INTERNAL_URL`, `LIBRAFORGE_PIPELINE_ENABLED`, `LIBRAFORGE_MIN_SCORE`, `LIBRAFORGE_NAMING_TEMPLATE`, `LIBRAFORGE_M4B_JOBS` (per-run workers; app also serializes cross-request M4B to 1) |
 | Ebooks | `EBOOK_PIPELINE_ENABLED`, `EBOOK_MIN_SCORE` |
+| Sweep | `LIBRARY_SWEEP_ABS_SCAN_EVERY`, `EBOOK_SWEEP_KAVITA_SCAN_EVERY`, `EBOOK_SWEEP_CONVERT_ALL_TO_EPUB`, `EBOOK_SWEEP_FORCE_METADATA` |
 | Catalog | `HARDCOVER_API_KEY`, `NYT_API_KEY`, `ISBNDB_API_KEY`, `GOOGLE_BOOKS_API_KEY`, `AA_ACCOUNT_ID`, `OPENROUTER_*` (optional LLM assist) |
-| Mobile | `ANDROID_APK_GITHUB_REPO`, `GITHUB_TOKEN` (optional rate-limit) |
+| Mobile | `ANDROID_APK_GITHUB_REPO`, `GITHUB_TOKEN` (optional rate-limit), `ANDROID_MIN_VERSION_CODE`, `ANDROID_FORCE_UPDATES` |
 | VPN | `WIREGUARD_PRIVATE_KEY`, `WIREGUARD_ADDRESSES`, `MULLVAD_*`, `ABB_PROXY_URL` |
 | Push | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (`python scripts/generate_vapid.py`) |
-| Host mounts | `AUDIOBOOK_HOST_DIR`, `EBOOK_HOST_DIR`, `OPENLIBRARY_HOST_DIR`, `PUID`/`PGID` (prefer `1000`), `TZ` |
+| Host mounts | `AUDIOBOOK_HOST_DIR`, `EBOOK_HOST_DIR`, `OPENLIBRARY_HOST_DIR`, `PUID`/`PGID` (prefer `1000`), `DOCKER_GID`, `TZ` |
 
 More detail: [docs/libraforge.md](docs/libraforge.md), [docs/ebooks.md](docs/ebooks.md), [docs/android-app.md](docs/android-app.md).
 

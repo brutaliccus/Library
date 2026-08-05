@@ -1054,7 +1054,9 @@ async def setup_status() -> dict[str, Any]:
             "help": (
                 "Hardcover for store ratings/series/curated shelves (optional). "
                 "My Library keeps ABS/local metadata authoritative; Hardcover genres fill empty only. "
-                "NYT/ISBNdb optional."
+                "OpenRouter LLM assist (Metadata Forge / ebook identify / multi-book / prune / ASIN) "
+                "is off by default — enable only with an API key. "
+                "NYT / ISBNdb / Google Books / Anna's Archive cookie optional."
             ),
         },
         {
@@ -1065,7 +1067,9 @@ async def setup_status() -> dict[str, Any]:
             "help": (
                 "GitHub `owner/repo` whose Releases host the Library APK "
                 "(latest .apk asset). Force updates + minimum versionCode "
-                "(default 54 = 1.53) gate old installs. See docs/android-app.md."
+                "(default 59 = Library 1.58) gate old installs. See docs/android-app.md. "
+                "OPDS for ereaders needs no extra env — members use Settings → Ereader "
+                "(proxied; Kavita key stays server-side)."
             ),
         },
         {
@@ -1073,7 +1077,10 @@ async def setup_status() -> dict[str, Any]:
             "label": "Scraper mode",
             "done": True,  # always "done" once defaults applied
             "required": False,
-            "help": "Defaults to RSS-only (safe on a Pi). Deep crawl is opt-in.",
+            "help": (
+                "Defaults to RSS-only (safe on a Pi/laptop). Deep Flare crawls are opt-in. "
+                "Compose caps FlareSolverr (768m RAM / 1.5 CPU / 200 pids)."
+            ),
             "abbRssOnly": abb_rss,
             "knabenRssOnly": knaben_rss,
         },
@@ -1107,28 +1114,68 @@ async def setup_status() -> dict[str, Any]:
     }
 
 
+async def _probe_docker_socket() -> dict[str, Any]:
+    """Soft probe for Admin Health container controls (docker.sock + DOCKER_GID)."""
+    from app.services import docker_control
+
+    if not docker_control.socket_available():
+        return {
+            "configured": True,
+            "connected": False,
+            "error": f"socket missing ({docker_control.DOCKER_SOCK})",
+        }
+    try:
+        status = await docker_control.list_services()
+        if status.get("available") and not status.get("error"):
+            return {
+                "configured": True,
+                "connected": True,
+                "socket": status.get("socket") or docker_control.DOCKER_SOCK,
+            }
+        return {
+            "configured": True,
+            "connected": False,
+            "socket": status.get("socket") or docker_control.DOCKER_SOCK,
+            "error": status.get("error") or "docker API unavailable",
+        }
+    except Exception as e:
+        return {
+            "configured": True,
+            "connected": False,
+            "error": str(e)[:200],
+        }
+
+
 async def validate_setup_connections() -> dict[str, Any]:
     """Soft health probes for the stack setup step (warnings only — never hard-fail)."""
     import asyncio
 
     from app.services.health_checks import (
         _probe_abs,
+        _probe_flaresolverr,
+        _probe_jackett,
         _probe_kavita,
         _probe_libraforge,
         _probe_prowlarr,
     )
 
-    abs_p, kav_p, lf_p, prow_p = await asyncio.gather(
+    abs_p, kav_p, lf_p, prow_p, jack_p, flare_p, docker_p = await asyncio.gather(
         _probe_abs(),
         _probe_kavita(),
         _probe_libraforge(),
         _probe_prowlarr(),
+        _probe_jackett(),
+        _probe_flaresolverr(),
+        _probe_docker_socket(),
     )
     probes = {
         "audiobookshelf": abs_p,
         "kavita": kav_p,
         "libraforge": lf_p,
         "prowlarr": prow_p,
+        "jackett": jack_p,
+        "flaresolverr": flare_p,
+        "docker": docker_p,
     }
     abs_url, abs_key, _ = await get_abs_connection()
     kav_url, kav_key, _ = await get_kavita_connection()
@@ -1149,6 +1196,11 @@ async def validate_setup_connections() -> dict[str, Any]:
             # Soft: bundled installs may still be warming; never hard-block.
             if bundled_ready and name in ("audiobookshelf", "kavita", "libraforge"):
                 warnings.append(f"{name}: bundled stack still warming ({err})")
+            elif name == "docker":
+                warnings.append(
+                    f"docker.sock: Admin Health Start/Stop needs DOCKER_GID "
+                    f"(host docker group) — {err}"
+                )
             else:
                 warnings.append(f"{name}: configured but not reachable ({err})")
     if not (abs_p.get("configured") or kav_p.get("configured")):

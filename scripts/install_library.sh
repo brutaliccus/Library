@@ -1,22 +1,50 @@
 #!/usr/bin/env bash
 # Install / bootstrap Library on a Linux host (Docker Compose).
+# Tuned for Ubuntu Server 24.04 LTS; works on Debian / Raspberry Pi OS too.
+#
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/brutaliccus/Library/main/scripts/install_library.sh | bash
 #   ./scripts/install_library.sh [/opt/library]
+#   LIBRARY_NONINTERACTIVE=1 ./scripts/install_library.sh /opt/library
+#
+# Env overrides (also used in non-interactive mode):
+#   LIBRARY_SITE_REPO, LIBRARY_SITE_BRANCH, LIBRARY_APP_URL, LIBRARY_AUDIO_HOST,
+#   LIBRARY_EBOOK_HOST, LIBRARY_OL_HOST, LIBRARY_APK_REPO, LIBRARY_TZ,
+#   LIBRARY_SKIP_BUNDLED_MEDIA=1, LIBRARY_ENABLE_VPN=1, LIBRARY_ENABLE_DEEP_SCRAPERS=1,
+#   LIBRARY_SKIP_DOCKER_INSTALL=1, LIBRARY_SKIP_BUILD=1
 set -euo pipefail
 
 TARGET="${1:-/opt/library}"
 REPO_URL="${LIBRARY_SITE_REPO:-https://github.com/brutaliccus/Library.git}"
 BRANCH="${LIBRARY_SITE_BRANCH:-main}"
+NONINTERACTIVE="${LIBRARY_NONINTERACTIVE:-0}"
+[[ "${2:-}" == "--non-interactive" ]] && NONINTERACTIVE=1
+for arg in "$@"; do
+  [[ "$arg" == "--non-interactive" ]] && NONINTERACTIVE=1
+done
 
 c_cyan() { printf '\033[36m%s\033[0m\n' "$*"; }
 c_green() { printf '\033[32m%s\033[0m\n' "$*"; }
 c_yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 c_red() { printf '\033[31m%s\033[0m\n' "$*"; }
+c_dim() { printf '\033[2m%s\033[0m\n' "$*"; }
+
+STEP_N=0
+step() {
+  STEP_N=$((STEP_N + 1))
+  echo ""
+  c_cyan "==> Step ${STEP_N}: $*"
+}
+
+explain() { c_dim "    $*"; }
 
 prompt() {
   local var="$1" msg="$2" def="${3:-}"
   local val
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    printf -v "$var" '%s' "$def"
+    return 0
+  fi
   if [[ -n "$def" ]]; then
     read -r -p "$msg [$def]: " val || true
     val="${val:-$def}"
@@ -27,17 +55,33 @@ prompt() {
 }
 
 prompt_secret() {
-  local var="$1" msg="$2"
+  local var="$1" msg="$2" def="${3:-}"
   local val
-  read -r -s -p "$msg: " val || true
-  echo
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    printf -v "$var" '%s' "$def"
+    return 0
+  fi
+  if [[ -n "$def" ]]; then
+    read -r -s -p "$msg [keep existing / Enter]: " val || true
+    echo
+    val="${val:-$def}"
+  else
+    read -r -s -p "$msg (optional, Enter to skip): " val || true
+    echo
+  fi
   printf -v "$var" '%s' "$val"
 }
 
 yes_no() {
   local msg="$1" def="${2:-n}"
   local val
-  read -r -p "$msg [y/N]: " val || true
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    [[ "$def" =~ ^[Yy] ]]
+    return $?
+  fi
+  local hint="y/N"
+  [[ "$def" =~ ^[Yy] ]] && hint="Y/n"
+  read -r -p "$msg [$hint]: " val || true
   val="${val:-$def}"
   [[ "$val" =~ ^[Yy] ]]
 }
@@ -47,9 +91,93 @@ seed_present() {
   [[ -f "$f" ]] && [[ "$(wc -c <"$f" 2>/dev/null || echo 0)" -gt 1048576 ]]
 }
 
+is_ubuntu_like() {
+  [[ -f /etc/os-release ]] || return 1
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [[ "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *debian* || "${ID:-}" == "debian" ]]
+}
+
+detect_lan_url() {
+  local ip
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if [[ -n "$ip" ]]; then
+    echo "http://${ip}:8085"
+  else
+    echo "http://127.0.0.1:8085"
+  fi
+}
+
+ensure_prereqs() {
+  step "Prerequisites (Ubuntu Server 24.04+)"
+  explain "Required: Docker Engine + Compose plugin, Git, curl, openssl"
+  explain "Optional: git-lfs (indexer seed), python3 (host helpers)"
+
+  local missing=()
+  command -v curl >/dev/null 2>&1 || missing+=("curl")
+  command -v git >/dev/null 2>&1 || missing+=("git")
+  command -v openssl >/dev/null 2>&1 || missing+=("openssl")
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    c_yellow "Missing packages: ${missing[*]}"
+    if is_ubuntu_like && yes_no "Install missing apt packages now?" "y"; then
+      sudo apt-get update -y
+      sudo apt-get install -y "${missing[@]}" ca-certificates
+    else
+      c_red "Install: sudo apt-get install -y ${missing[*]}"
+      exit 1
+    fi
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    c_red "Docker is not installed."
+    if [[ "${LIBRARY_SKIP_DOCKER_INSTALL:-0}" != "1" ]] && is_ubuntu_like \
+      && yes_no "Install Docker Engine + Compose via official apt repo now?" "y"; then
+      sudo apt-get update -y
+      sudo apt-get install -y ca-certificates curl
+      sudo install -m 0755 -d /etc/apt/keyrings
+      if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
+        sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        sudo chmod a+r /etc/apt/keyrings/docker.asc
+      fi
+      # shellcheck disable=SC1091
+      . /etc/os-release
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+        | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+      sudo apt-get update -y
+      sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      sudo systemctl enable --now docker
+      if [[ -n "${SUDO_USER:-}" ]]; then
+        sudo usermod -aG docker "$SUDO_USER" || true
+        c_yellow "Added $SUDO_USER to docker group — re-login (or newgrp docker) if docker needs sudo."
+      fi
+    else
+      c_red "Install Docker Engine + Compose, then re-run. See docs/ubuntu-server-install.md"
+      exit 1
+    fi
+  fi
+
+  if ! docker compose version >/dev/null 2>&1; then
+    c_red "Docker Compose plugin required (docker compose)."
+    exit 1
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    if sudo docker info >/dev/null 2>&1; then
+      c_yellow "Docker needs sudo for this user — installer will use sudo for compose."
+      DOCKER="sudo docker"
+    else
+      c_red "Docker Engine is not running. Try: sudo systemctl start docker"
+      exit 1
+    fi
+  else
+    DOCKER="docker"
+  fi
+
+  c_green "Docker OK: $($DOCKER compose version --short 2>/dev/null || echo compose)"
+}
+
 ensure_indexer_seed() {
-  # Warm torrent/indexer cache (~36 MB gzip → ~150 MB on first-boot import).
-  # Prefer repo/LFS copy; else download the GitHub Release asset (optional if it fails).
   local seed_dir="$TARGET/seed"
   local seed_gz="$seed_dir/indexer_cache.db.gz"
   if seed_present "$seed_gz"; then
@@ -76,52 +204,44 @@ ensure_indexer_seed() {
     "https://github.com/brutaliccus/Library/releases/latest/download/indexer_cache.db.gz"
   do
     c_yellow "Downloading indexer cache seed from $url ..."
-    if command -v curl >/dev/null 2>&1; then
-      if curl -fsSL "$url" -o "$seed_gz"; then
-        if seed_present "$seed_gz"; then
-          c_green "Downloaded indexer cache seed"
-          return 0
-        fi
-      fi
-    elif command -v wget >/dev/null 2>&1; then
-      if wget -q -O "$seed_gz" "$url"; then
-        if seed_present "$seed_gz"; then
-          c_green "Downloaded indexer cache seed"
-          return 0
-        fi
+    if curl -fsSL "$url" -o "$seed_gz"; then
+      if seed_present "$seed_gz"; then
+        c_green "Downloaded indexer cache seed"
+        return 0
       fi
     fi
   done
   c_yellow "Indexer cache seed missing — install continues; first boot starts with an empty cache (optional)."
-  c_yellow "Place seed/indexer_cache.db.gz manually or re-run after the data-seed GitHub Release is available."
   return 0
 }
 
-c_cyan "==> Library installer"
+# --- begin ---
+echo ""
+c_cyan "╔══════════════════════════════════════════════════════════╗"
+c_cyan "║           Library Site — guided host installer           ║"
+c_cyan "╚══════════════════════════════════════════════════════════╝"
 echo "Target directory: $TARGET"
+[[ "$NONINTERACTIVE" == "1" ]] && c_yellow "Non-interactive mode (LIBRARY_NONINTERACTIVE=1)"
 
-if ! command -v docker >/dev/null 2>&1; then
-  c_red "Docker is required. Install Docker Engine + Compose plugin first."
-  exit 1
-fi
-if ! docker compose version >/dev/null 2>&1; then
-  c_red "Docker Compose plugin required (docker compose)."
-  exit 1
-fi
+DOCKER="docker"
+ensure_prereqs
 
+step "Repository checkout"
 if [[ ! -d "$TARGET/.git" ]]; then
-  c_cyan "==> Cloning repository"
   sudo mkdir -p "$(dirname "$TARGET")"
   if [[ -d "$TARGET" ]] && [[ -z "$(ls -A "$TARGET" 2>/dev/null || true)" ]]; then
     sudo rmdir "$TARGET" 2>/dev/null || true
   fi
-  if [[ -d "$TARGET" ]]; then
+  if [[ -d "$TARGET" ]] && [[ -f "$TARGET/docker-compose.yml" ]]; then
+    c_yellow "Directory exists with compose — using existing tree (not re-cloning)."
+  elif [[ -d "$TARGET" ]]; then
     c_yellow "Directory exists — using existing tree (not re-cloning)."
   else
+    c_cyan "Cloning $REPO_URL ($BRANCH) → $TARGET"
     sudo git clone --branch "$BRANCH" "$REPO_URL" "$TARGET"
   fi
 else
-  c_cyan "==> Updating existing checkout"
+  c_cyan "Updating existing checkout"
   (cd "$TARGET" && sudo git fetch --depth 1 origin "$BRANCH" && sudo git checkout "$BRANCH" && sudo git pull --ff-only) || true
 fi
 
@@ -132,13 +252,12 @@ if [[ ! -f .env ]]; then
   cp .env.example .env
   c_green "Created .env from .env.example"
 else
-  c_yellow ".env already exists — will update selected keys only"
+  c_yellow ".env already exists — will update selected keys only (secrets preserved when you press Enter)"
 fi
 
 set_env() {
   local key="$1" value="$2"
   if grep -qE "^${key}=" .env 2>/dev/null; then
-    # Escape sed specials in value lightly
     local esc
     esc=$(printf '%s' "$value" | sed -e 's/[&|\\]/\\&/g')
     sed -i "s|^${key}=.*|${key}=${esc}|" .env
@@ -147,37 +266,21 @@ set_env() {
   fi
 }
 
-c_cyan "==> Core settings"
-prompt APP_URL "Public site URL" "https://library.local"
-prompt SECRET_KEY "Secret key (random string)" "$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 32)"
-set_env APP_URL "$APP_URL"
-set_env SECRET_KEY "$SECRET_KEY"
-# Match LibraForge default UID so M4B/Folder Forge can write shared media.
-set_env PUID "1000"
-set_env PGID "1000"
-# Admin Health Start/Stop/Restart needs docker.sock + docker group membership.
-_docker_gid="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
-set_env DOCKER_GID "${_docker_gid:-998}"
-
-c_cyan "==> Host media mounts (must exist)"
-prompt AUDIO_HOST "Host audiobooks path" "./media/audiobooks"
-prompt EBOOK_HOST "Host ebooks path" "./media/ebooks"
-prompt OL_HOST "Host Open Library dumps path (optional)" "./media/openlibrary"
-for p in "$AUDIO_HOST" "$EBOOK_HOST"; do
-  if [[ ! -d "$p" ]]; then
-    c_yellow "Creating $p"
-    mkdir -p "$p" 2>/dev/null || sudo mkdir -p "$p"
+set_env_if_empty() {
+  local key="$1" value="$2"
+  local cur
+  cur="$(get_env "$key")"
+  if [[ -z "$cur" || "$cur" =~ ^(your-|change-me|placeholder) ]]; then
+    set_env "$key" "$value"
   fi
-done
-mkdir -p "$OL_HOST" 2>/dev/null || sudo mkdir -p "$OL_HOST" 2>/dev/null || true
-# Pipeline staging (ABS skips dot dirs; Kavita must exclude non-dot unorganized)
-mkdir -p "$AUDIO_HOST/.unorganized" 2>/dev/null || sudo mkdir -p "$AUDIO_HOST/.unorganized" 2>/dev/null || true
-mkdir -p "$EBOOK_HOST/unorganized" 2>/dev/null || sudo mkdir -p "$EBOOK_HOST/unorganized" 2>/dev/null || true
-touch "$AUDIO_HOST/.unorganized/.ignore" 2>/dev/null || true
+}
 
-set_env AUDIOBOOK_HOST_DIR "$AUDIO_HOST"
-set_env EBOOK_HOST_DIR "$EBOOK_HOST"
-set_env OPENLIBRARY_HOST_DIR "$OL_HOST"
+set_env_secret() {
+  # Only write when non-empty so re-runs don't wipe secrets with blank prompts.
+  local key="$1" value="$2"
+  [[ -z "$value" ]] && return 0
+  set_env "$key" "$value"
+}
 
 get_env() {
   local key="$1"
@@ -203,7 +306,7 @@ ensure_libraforge_clone() {
     c_yellow "Git required to clone LibraForge — bundled LibraForge skipped"
     return 1
   fi
-  c_cyan "==> Cloning LibraForge companion into ./libraforge"
+  c_cyan "Cloning LibraForge companion into ./libraforge"
   if [[ -d "$lf_dir" ]] && [[ -z "$(ls -A "$lf_dir" 2>/dev/null || true)" ]]; then
     rmdir "$lf_dir" 2>/dev/null || true
   fi
@@ -219,10 +322,65 @@ ensure_libraforge_clone() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+step "Core app settings [REQUIRED]"
+explain "APP_URL — public URL friends open (invite links, CORS, push). Use LAN IP for now; change later for HTTPS."
+explain "SECRET_KEY — JWT signing secret (random). DATABASE_URL defaults to SQLite under ./data."
+DEFAULT_APP_URL="${LIBRARY_APP_URL:-$(detect_lan_url)}"
+EXISTING_SECRET="$(get_env SECRET_KEY)"
+if [[ -z "$EXISTING_SECRET" || "$EXISTING_SECRET" =~ change-me ]]; then
+  EXISTING_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 32)"
+fi
+prompt APP_URL "Public site URL [REQUIRED]" "$DEFAULT_APP_URL"
+prompt SECRET_KEY "Secret key [REQUIRED]" "$EXISTING_SECRET"
+prompt TZ_VAL "Timezone (TZ)" "${LIBRARY_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
+set_env APP_URL "$APP_URL"
+set_env SECRET_KEY "$SECRET_KEY"
+set_env DATABASE_URL "sqlite+aiosqlite:///data/app.db"
+set_env TZ "$TZ_VAL"
+# Match LibraForge default UID so M4B/Folder Forge can write shared media.
+set_env PUID "1000"
+set_env PGID "1000"
+# Admin Health Start/Stop/Restart needs docker.sock + docker group membership.
+_docker_gid="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
+set_env DOCKER_GID "${_docker_gid:-998}"
+set_env AUDIOBOOK_DIR "/audiobooks"
+set_env EBOOK_DIR "/ebooks"
+set_env AUDIOBOOK_STAGING_DIRNAME ".unorganized"
+set_env AUDIOBOOK_STAGING_LEGACY_DIRNAME "_unorganized"
+set_env EBOOK_STAGING_DIRNAME "unorganized"
+
+# ---------------------------------------------------------------------------
+step "Host media mounts [REQUIRED]"
+explain "These host paths are bind-mounted into the app (and bundled ABS/Kavita/LibraForge)."
+explain "Use absolute paths for real libraries (e.g. /mnt/Audiobooks). Defaults create ./media/*."
+prompt AUDIO_HOST "Host audiobooks path [REQUIRED]" "${LIBRARY_AUDIO_HOST:-./media/audiobooks}"
+prompt EBOOK_HOST "Host ebooks path [REQUIRED]" "${LIBRARY_EBOOK_HOST:-./media/ebooks}"
+prompt OL_HOST "Host Open Library dumps path [OPTIONAL]" "${LIBRARY_OL_HOST:-./media/openlibrary}"
+for p in "$AUDIO_HOST" "$EBOOK_HOST"; do
+  if [[ ! -d "$p" ]]; then
+    c_yellow "Creating $p"
+    mkdir -p "$p" 2>/dev/null || sudo mkdir -p "$p"
+  fi
+done
+mkdir -p "$OL_HOST" 2>/dev/null || sudo mkdir -p "$OL_HOST" 2>/dev/null || true
+mkdir -p "$AUDIO_HOST/.unorganized" 2>/dev/null || sudo mkdir -p "$AUDIO_HOST/.unorganized" 2>/dev/null || true
+mkdir -p "$EBOOK_HOST/unorganized" 2>/dev/null || sudo mkdir -p "$EBOOK_HOST/unorganized" 2>/dev/null || true
+touch "$AUDIO_HOST/.unorganized/.ignore" 2>/dev/null || true
+
+set_env AUDIOBOOK_HOST_DIR "$AUDIO_HOST"
+set_env EBOOK_HOST_DIR "$EBOOK_HOST"
+set_env OPENLIBRARY_HOST_DIR "$OL_HOST"
+
+# ---------------------------------------------------------------------------
+step "Bundled media stack (ABS + Kavita + LibraForge) [RECOMMENDED]"
 EXISTING_ABS_URL="$(get_env ABS_URL)"
 EXISTING_ABS_KEY="$(get_env ABS_API_KEY)"
 USE_BUNDLED=true
-if looks_external_media_url "$EXISTING_ABS_URL" || { [[ -n "$EXISTING_ABS_KEY" ]] && [[ ! "$EXISTING_ABS_KEY" =~ your-|placeholder ]]; }; then
+if [[ "${LIBRARY_SKIP_BUNDLED_MEDIA:-0}" == "1" ]]; then
+  USE_BUNDLED=false
+  c_yellow "LIBRARY_SKIP_BUNDLED_MEDIA=1 — bundled media off"
+elif looks_external_media_url "$EXISTING_ABS_URL" || { [[ -n "$EXISTING_ABS_KEY" ]] && [[ ! "$EXISTING_ABS_KEY" =~ your-|placeholder ]]; }; then
   c_yellow "Existing external ABS/Kavita settings detected — bundled media off by default."
   if yes_no "Start bundled Audiobookshelf + Kavita + LibraForge (Docker profile bundled-media)?" "n"; then
     USE_BUNDLED=true
@@ -230,9 +388,8 @@ if looks_external_media_url "$EXISTING_ABS_URL" || { [[ -n "$EXISTING_ABS_KEY" ]
     USE_BUNDLED=false
   fi
 else
-  c_cyan "==> Bundled media stack (recommended for new installs)"
-  echo "Starts Audiobookshelf (:13378), Kavita (:5000), and LibraForge (:5056) on the same Docker network."
-  echo "API keys are bootstrapped into .env after first start — no manual key entry."
+  explain "Starts Audiobookshelf (:13378), Kavita (:5000), and LibraForge (:5056) on the same Docker network."
+  explain "API keys are bootstrapped into .env after first start — no manual key entry."
   c_yellow "Adds ~1–2 GB RAM vs core indexer stack alone. Pi production with external ABS should say n."
   if yes_no "Enable bundled media stack (profile bundled-media)?" "y"; then
     USE_BUNDLED=true
@@ -255,61 +412,116 @@ if $USE_BUNDLED; then
   set_env LIBRAFORGE_INTERNAL_URL "http://libraforge:5056"
   c_green "Bundled-media URLs written (keys sync after containers start)"
 else
-  c_cyan "==> Optional integrations (press Enter to skip — configure later in Admin → Integrations / Settings)"
-  prompt PROWLARR_API_KEY "Prowlarr API key" ""
+  step "External ABS / Kavita / LibraForge [REQUIRED for libraries]"
+  explain "Press Enter to skip keys — finish them later in Admin → Instance setup."
   prompt ABS_URL "Audiobookshelf URL" "${EXISTING_ABS_URL:-http://172.17.0.1:13378}"
-  prompt ABS_API_KEY "Audiobookshelf API key" ""
-  prompt ABS_LIBRARY_ID "Audiobookshelf library ID" ""
+  prompt_secret ABS_API_KEY "Audiobookshelf API key" "$(get_env ABS_API_KEY)"
+  prompt ABS_LIBRARY_ID "Audiobookshelf library ID" "$(get_env ABS_LIBRARY_ID)"
   prompt KAVITA_URL "Kavita URL" "$(get_env KAVITA_URL)"
   KAVITA_URL="${KAVITA_URL:-http://172.17.0.1:5000}"
-  prompt KAVITA_API_KEY "Kavita API key" ""
-  prompt RD_TOKEN "Real-Debrid API token (server default)" ""
-  prompt TORBOX_TOKEN "TorBox API token (optional second debrid)" ""
-
-  [[ -n "$PROWLARR_API_KEY" ]] && set_env PROWLARR_API_KEY "$PROWLARR_API_KEY"
-  set_env ABS_URL "$ABS_URL"
-  [[ -n "$ABS_API_KEY" ]] && set_env ABS_API_KEY "$ABS_API_KEY"
-  [[ -n "$ABS_LIBRARY_ID" ]] && set_env ABS_LIBRARY_ID "$ABS_LIBRARY_ID"
-  set_env KAVITA_URL "$KAVITA_URL"
-  [[ -n "$KAVITA_API_KEY" ]] && set_env KAVITA_API_KEY "$KAVITA_API_KEY"
-  [[ -n "$RD_TOKEN" ]] && set_env REAL_DEBRID_API_TOKEN "$RD_TOKEN"
-  [[ -n "$TORBOX_TOKEN" ]] && set_env TORBOX_API_TOKEN "$TORBOX_TOKEN"
-fi
-
-c_cyan "==> LibraForge audiobook pipeline (see docs/libraforge.md)"
-echo "Flow: .unorganized → Metadata → M4B → Chapter Forge (ASIN) → Folder Forge → ABS"
-echo "M4B: Library Site serializes encodes (concurrency 1) across auto-forge + Quick Review."
-if ! $USE_BUNDLED; then
+  prompt_secret KAVITA_API_KEY "Kavita API key" "$(get_env KAVITA_API_KEY)"
+  prompt KAVITA_LIBRARY_ID "Kavita library ID (0 = first)" "$(get_env KAVITA_LIBRARY_ID)"
+  KAVITA_LIBRARY_ID="${KAVITA_LIBRARY_ID:-0}"
   prompt LF_URL "LibraForge public URL" "$(get_env LIBRAFORGE_URL)"
   LF_URL="${LF_URL:-http://127.0.0.1:5056}"
   prompt LF_INTERNAL "LibraForge internal URL (from Library container)" "$(get_env LIBRAFORGE_INTERNAL_URL)"
   LF_INTERNAL="${LF_INTERNAL:-http://172.17.0.1:5056}"
+  set_env ABS_URL "$ABS_URL"
+  set_env_secret ABS_API_KEY "$ABS_API_KEY"
+  set_env_secret ABS_LIBRARY_ID "$ABS_LIBRARY_ID"
+  set_env KAVITA_URL "$KAVITA_URL"
+  set_env_secret KAVITA_API_KEY "$KAVITA_API_KEY"
+  set_env KAVITA_LIBRARY_ID "$KAVITA_LIBRARY_ID"
   set_env LIBRAFORGE_URL "$LF_URL"
   set_env LIBRAFORGE_INTERNAL_URL "$LF_INTERNAL"
 fi
-set_env LIBRAFORGE_M4B_JOBS "1"
+
+# ---------------------------------------------------------------------------
+step "Download / indexer sidecars [AUTO]"
+explain "Compose always starts Prowlarr, Jackett, FlareSolverr. Keys sync after first boot."
+explain "FlareSolverr has Pi-safe limits in docker-compose (mem 768m, 1.5 CPU, pids 200)."
+set_env PROWLARR_URL "http://prowlarr:9696"
+set_env JACKETT_URL "http://audiobook-jackett:9117"
+set_env FLARESOLVERR_URL "http://flaresolverr:8191"
+set_env_if_empty SCRAPER_ENABLED "true"
+set_env_if_empty SCRAPER_RSS_EVERY_N_JOBS "1"
+
+# ---------------------------------------------------------------------------
+step "Debrid providers [OPTIONAL — can set later]"
+explain "Server defaults for downloads. Users can also set keys per library group."
+explain "TorBox uses qBittorrent-style states internally — no separate qBittorrent container."
+prompt_secret RD_TOKEN "Real-Debrid API token" "$(get_env REAL_DEBRID_API_TOKEN)"
+prompt_secret TORBOX_TOKEN "TorBox API token" "$(get_env TORBOX_API_TOKEN)"
+set_env_secret REAL_DEBRID_API_TOKEN "$RD_TOKEN"
+set_env_secret TORBOX_API_TOKEN "$TORBOX_TOKEN"
+
+# ---------------------------------------------------------------------------
+step "Pipelines & Library Sweep defaults"
+explain "Audiobooks: .unorganized → Metadata → M4B → Chapter Forge → Folder Forge → ABS"
+explain "Ebooks: unorganized → identify → Author/Series/Title → Kavita"
+explain "Sweep scan cadence defaults to every 25 books (ABS / Kavita)."
 if yes_no "Enable automated LibraForge audiobook pipeline?" "y"; then
   set_env LIBRAFORGE_PIPELINE_ENABLED "true"
 else
   set_env LIBRAFORGE_PIPELINE_ENABLED "false"
 fi
-
-c_cyan "==> Ebook pipeline (DIY organizer — see docs/ebooks.md)"
-echo "Flow: unorganized → identify → Author/Series/Title → Kavita"
 if yes_no "Enable ebook organizer pipeline?" "y"; then
   set_env EBOOK_PIPELINE_ENABLED "true"
 else
   set_env EBOOK_PIPELINE_ENABLED "false"
 fi
+set_env LIBRAFORGE_M4B_JOBS "1"
+set_env_if_empty LIBRAFORGE_MIN_SCORE "0.70"
+set_env_if_empty EBOOK_MIN_SCORE "0.70"
+set_env_if_empty LIBRAFORGE_NAMING_TEMPLATE "{author}/{series} [{edition}]/{title}/{filename}"
+set_env_if_empty LIBRAFORGE_METADATA_PROVIDER "audible"
+set_env_if_empty LIBRARY_SWEEP_ABS_SCAN_EVERY "25"
+set_env_if_empty EBOOK_SWEEP_KAVITA_SCAN_EVERY "25"
+set_env_if_empty EBOOK_SWEEP_CONVERT_ALL_TO_EPUB "true"
+set_env_if_empty EBOOK_SWEEP_FORCE_METADATA "true"
 
-c_cyan "==> Android APK updates (GitHub Releases)"
-prompt APK_REPO "GitHub owner/repo for Library APK releases" "brutaliccus/Library"
+# ---------------------------------------------------------------------------
+step "Catalog APIs & LLM assist [OPTIONAL]"
+explain "Hardcover = store ratings/series. OpenRouter = LLM assist for forge/identify (off by default)."
+explain "Anna's Archive membership cookie speeds AA ebook downloads. NYT/ISBNdb/Google Books optional."
+if yes_no "Configure catalog / LLM keys now?" "n"; then
+  prompt_secret HARDCOVER_KEY "Hardcover API key" "$(get_env HARDCOVER_API_KEY)"
+  prompt_secret OPENROUTER_KEY "OpenRouter API key" "$(get_env OPENROUTER_API_KEY)"
+  prompt_secret AA_COOKIE "Anna's Archive membership cookie" "$(get_env AA_ACCOUNT_ID)"
+  prompt_secret NYT_KEY "NYT Books API key" "$(get_env NYT_API_KEY)"
+  prompt_secret ISBNDB_KEY "ISBNdb API key" "$(get_env ISBNDB_API_KEY)"
+  prompt_secret GBOOKS_KEY "Google Books API key" "$(get_env GOOGLE_BOOKS_API_KEY)"
+  set_env_secret HARDCOVER_API_KEY "$HARDCOVER_KEY"
+  set_env_secret OPENROUTER_API_KEY "$OPENROUTER_KEY"
+  set_env_secret AA_ACCOUNT_ID "$AA_COOKIE"
+  set_env_secret NYT_API_KEY "$NYT_KEY"
+  set_env_secret ISBNDB_API_KEY "$ISBNDB_KEY"
+  set_env_secret GOOGLE_BOOKS_API_KEY "$GBOOKS_KEY"
+  if [[ -n "$OPENROUTER_KEY" ]]; then
+    set_env OPENROUTER_ENABLED "true"
+    set_env_if_empty OPENROUTER_MODEL "openai/gpt-4o-mini"
+    set_env_if_empty OPENROUTER_CONFIDENCE_THRESHOLD "0.85"
+  else
+    set_env_if_empty OPENROUTER_ENABLED "false"
+  fi
+else
+  set_env_if_empty OPENROUTER_ENABLED "false"
+  c_green "Skipped — configure later in Admin → Integrations / Catalog"
+fi
+
+# ---------------------------------------------------------------------------
+step "Android APK updates [OPTIONAL]"
+explain "In-app updater reads GitHub Releases for the latest .apk. OPDS for ereaders needs no extra env (uses Kavita key)."
+prompt APK_REPO "GitHub owner/repo for Library APK releases" "${LIBRARY_APK_REPO:-brutaliccus/Library}"
 set_env ANDROID_APK_GITHUB_REPO "$APK_REPO"
+set_env_if_empty ANDROID_MIN_VERSION_CODE "59"
+set_env_if_empty ANDROID_FORCE_UPDATES "true"
 
-c_cyan "==> Scraper mode"
-c_yellow "Deep FlareSolverr crawls are HIGH USAGE on a Pi."
-echo "Recommended: RSS-only (ABB + Knaben) — live Jackett search still works."
-if yes_no "Enable high-usage deep scrapers (ABB author crawl / Knaben full crawl)?" "n"; then
+# ---------------------------------------------------------------------------
+step "Scraper / Flare usage [RECOMMENDED: RSS-only]"
+c_yellow "Deep FlareSolverr crawls are HIGH USAGE (CPU + RAM)."
+explain "Recommended: RSS-only (ABB + Knaben) — live Jackett ABB search still works."
+if [[ "${LIBRARY_ENABLE_DEEP_SCRAPERS:-0}" == "1" ]] || yes_no "Enable high-usage deep scrapers (ABB author crawl / Knaben full crawl)?" "n"; then
   set_env ABB_RSS_ONLY "false"
   set_env ABB_AUTHOR_CRAWL_ENABLED "true"
   set_env SCRAPER_KNABEN_CRAWL_TASKS_PER_JOB "8"
@@ -319,7 +531,7 @@ else
   set_env ABB_AUTHOR_CRAWL_ENABLED "false"
   set_env ABB_DEEP_SEARCH_ENABLED "false"
   set_env ABB_LIVE_SEARCH_ENABLED "false"
-  c_green "RSS-only defaults written to .env"
+  c_green "RSS-only defaults written to .env (Knaben RSS-only applied in Admin setup defaults)"
 fi
 
 mkdir -p data prowlarr-config jackett-config \
@@ -327,9 +539,9 @@ mkdir -p data prowlarr-config jackett-config \
   libraforge-auth libraforge-config libraforge-reports \
   media/audiobooks media/ebooks media/openlibrary
 
-c_cyan "==> Mullvad VPN sidecar (optional — not required)"
-c_yellow "gluetun is behind Docker Compose profile 'vpn' so fresh installs work without WireGuard keys."
-# Enable VPN if keys already present, or when the operator opts in now.
+# ---------------------------------------------------------------------------
+step "Mullvad VPN sidecar (gluetun) [OPTIONAL]"
+c_yellow "gluetun is behind Docker Compose profile 'vpn' — fresh installs work without WireGuard keys."
 _has_wg=false
 if grep -qE '^WIREGUARD_PRIVATE_KEY=.+' .env 2>/dev/null && grep -qE '^WIREGUARD_ADDRESSES=.+' .env 2>/dev/null; then
   _has_wg=true
@@ -338,7 +550,13 @@ PROFILE_PARTS=()
 if $USE_BUNDLED; then
   PROFILE_PARTS+=("bundled-media")
 fi
-if $_has_wg || yes_no "Enable Mullvad VPN sidecar (gluetun) now? Optional — not required. Needs WireGuard keys in .env" "n"; then
+_enable_vpn=false
+if [[ "${LIBRARY_ENABLE_VPN:-0}" == "1" ]]; then
+  _enable_vpn=true
+elif $_has_wg || yes_no "Enable Mullvad VPN sidecar (gluetun) now? Optional — not required." "n"; then
+  _enable_vpn=true
+fi
+if $_enable_vpn; then
   if ! $_has_wg; then
     c_yellow "Add WIREGUARD_PRIVATE_KEY and WIREGUARD_ADDRESSES to .env (or Admin → Integrations)."
   fi
@@ -346,11 +564,15 @@ if $_has_wg || yes_no "Enable Mullvad VPN sidecar (gluetun) now? Optional — no
   set_env ABB_PROXY_URL "http://gluetun:8888"
 else
   set_env ABB_PROXY_URL ""
-  set_env WIREGUARD_PRIVATE_KEY ""
-  set_env WIREGUARD_ADDRESSES ""
+  # Present empty keys so compose does not warn on unset WIREGUARD_* vars.
+  if [[ -z "$(get_env WIREGUARD_PRIVATE_KEY)" ]]; then
+    set_env WIREGUARD_PRIVATE_KEY ""
+  fi
+  if [[ -z "$(get_env WIREGUARD_ADDRESSES)" ]]; then
+    set_env WIREGUARD_ADDRESSES ""
+  fi
   c_green "VPN profile off — stack starts without gluetun (configure Mullvad later)."
 fi
-# Join profiles with commas
 COMPOSE_PROFILES_VAL=""
 for p in "${PROFILE_PARTS[@]+"${PROFILE_PARTS[@]}"}"; do
   if [[ -z "$COMPOSE_PROFILES_VAL" ]]; then
@@ -364,10 +586,12 @@ if $USE_BUNDLED; then
   c_green "COMPOSE_PROFILES=${COMPOSE_PROFILES_VAL} (bundled-media starts ABS/Kavita/LibraForge)"
 fi
 
-c_cyan "==> Ensuring indexer cache seed"
+# ---------------------------------------------------------------------------
+step "Indexer cache seed"
 ensure_indexer_seed
 
-c_cyan "==> Starting Docker stack"
+# ---------------------------------------------------------------------------
+step "Start Docker stack"
 c_yellow "First boot imports seed/indexer_cache.db.gz into an empty DB (~150 MB decompressed)."
 if $USE_BUNDLED; then
   c_yellow "First LibraForge image build can take several minutes."
@@ -376,44 +600,79 @@ else
   c_yellow "After create-admin / create-library / offline PIN, /admin/setup configures ABS, Kavita, and LibraForge."
 fi
 c_yellow "Optional Open Library catalog (multi-GB) can be skipped, built, or scheduled in that wizard."
-docker compose up -d --build
+if [[ "${LIBRARY_SKIP_BUILD:-0}" == "1" ]]; then
+  $DOCKER compose up -d
+else
+  $DOCKER compose up -d --build
+fi
 
-c_cyan "==> Waiting for app health"
-for i in $(seq 1 60); do
+# ---------------------------------------------------------------------------
+step "Wait for app health"
+APP_OK=false
+for i in $(seq 1 90); do
   if curl -fsS "http://127.0.0.1:8085/api/health" >/dev/null 2>&1; then
-    c_green "App is healthy"
+    c_green "App is healthy (http://127.0.0.1:8085/api/health)"
+    APP_OK=true
     break
   fi
   sleep 2
-  if [[ "$i" -eq 60 ]]; then
-    c_yellow "Health check timed out — check: docker compose logs app"
+  if [[ "$i" -eq 90 ]]; then
+    c_yellow "Health check timed out — check: $DOCKER compose logs app"
   fi
 done
 
+# ---------------------------------------------------------------------------
+step "Sync sidecar API keys into .env"
 if [[ -f scripts/sync_jackett_env.sh ]]; then
-  c_cyan "==> Syncing Jackett API key into .env"
   bash scripts/sync_jackett_env.sh || true
 fi
 if [[ -f scripts/sync_prowlarr_env.sh ]]; then
-  c_cyan "==> Syncing Prowlarr API key into .env"
   bash scripts/sync_prowlarr_env.sh || true
 fi
-
 if $USE_BUNDLED; then
   if [[ -f scripts/sync_abs_env.sh ]]; then
-    c_cyan "==> Bootstrapping Audiobookshelf API key + library"
+    c_cyan "Bootstrapping Audiobookshelf API key + library"
     bash scripts/sync_abs_env.sh || true
   fi
   if [[ -f scripts/sync_kavita_env.sh ]]; then
-    c_cyan "==> Bootstrapping Kavita API key + library"
+    c_cyan "Bootstrapping Kavita API key + library"
     bash scripts/sync_kavita_env.sh || true
   fi
   if [[ -f scripts/sync_libraforge_env.sh ]]; then
-    c_cyan "==> Wiring LibraForge URLs"
+    c_cyan "Wiring LibraForge URLs"
     bash scripts/sync_libraforge_env.sh || true
   fi
 fi
-docker compose up -d app || true
+$DOCKER compose up -d app || true
+
+# ---------------------------------------------------------------------------
+step "Web Push (VAPID) keys [OPTIONAL]"
+EXISTING_VAPID="$(get_env VAPID_PUBLIC_KEY)"
+if [[ -n "$EXISTING_VAPID" ]]; then
+  c_green "VAPID keys already present — leaving unchanged"
+elif yes_no "Generate Web Push VAPID keys now (needed for browser notifications)?" "y"; then
+  if VAPID_OUT="$($DOCKER compose exec -T app python scripts/generate_vapid.py 2>/dev/null || true)"; then
+    PRIV_LINE="$(printf '%s\n' "$VAPID_OUT" | grep '^VAPID_PRIVATE_KEY=' | head -1 || true)"
+    PUB_LINE="$(printf '%s\n' "$VAPID_OUT" | grep '^VAPID_PUBLIC_KEY=' | head -1 || true)"
+    if [[ -n "$PRIV_LINE" && -n "$PUB_LINE" ]]; then
+      # strip KEY= and surrounding quotes for set_env
+      PRIV_VAL="${PRIV_LINE#VAPID_PRIVATE_KEY=}"
+      PRIV_VAL="${PRIV_VAL#\"}"
+      PRIV_VAL="${PRIV_VAL%\"}"
+      PUB_VAL="${PUB_LINE#VAPID_PUBLIC_KEY=}"
+      set_env VAPID_PRIVATE_KEY "$PRIV_VAL"
+      set_env VAPID_PUBLIC_KEY "$PUB_VAL"
+      $DOCKER compose up -d app || true
+      c_green "VAPID keys written to .env"
+    else
+      c_yellow "Could not parse VAPID output — run later: docker compose exec app python scripts/generate_vapid.py"
+    fi
+  else
+    c_yellow "VAPID generation skipped — run later: docker compose exec app python scripts/generate_vapid.py"
+  fi
+else
+  c_dim "Skipped — generate later with: docker compose exec app python scripts/generate_vapid.py"
+fi
 
 # Host cron helpers are Linux-oriented; skip quietly on non-Linux.
 if [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
@@ -427,6 +686,49 @@ else
   c_yellow "Skipping host cron installers (non-Linux). Use Admin → Catalog schedule or Task Scheduler."
 fi
 
+# ---------------------------------------------------------------------------
+step "Post-install health report"
+_ok=$'\033[32mOK\033[0m'
+_warn=$'\033[33mwarming / unreachable\033[0m'
+_bad=$'\033[31mmissing\033[0m'
+probe_http() {
+  local name="$1" url="$2"
+  if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
+    printf '  %-16s %s\n' "$name" "$_ok"
+  else
+    local code
+    code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+    if [[ "$code" =~ ^[23] ]]; then
+      printf '  %-16s %s\n' "$name" "$_ok"
+    else
+      printf '  %-16s %s\n' "$name" "$_warn"
+    fi
+  fi
+}
+echo "Host probes (soft — warming services may show yellow):"
+if $APP_OK; then
+  printf '  %-16s %s\n' "app" "$_ok"
+else
+  probe_http "app" "http://127.0.0.1:8085/api/health"
+fi
+probe_http "prowlarr" "http://127.0.0.1:9696/ping"
+probe_http "jackett" "http://127.0.0.1:9117/"
+probe_http "flaresolverr" "http://127.0.0.1:8191/"
+if $USE_BUNDLED; then
+  probe_http "audiobookshelf" "http://127.0.0.1:13378/"
+  probe_http "kavita" "http://127.0.0.1:5000/"
+  probe_http "libraforge" "http://127.0.0.1:5056/health"
+fi
+if [[ -S /var/run/docker.sock ]]; then
+  if $DOCKER info >/dev/null 2>&1; then
+    printf '  %-16s %s (DOCKER_GID=%s)\n' "docker.sock" "$_ok" "$(get_env DOCKER_GID)"
+  else
+    printf '  %-16s %s\n' "docker.sock" $'\033[33mpresent but permission denied for this user\033[0m'
+  fi
+else
+  printf '  %-16s %s\n' "docker.sock" "$_bad"
+fi
+
 if [[ -f "${TARGET}/data/app.db" ]]; then
   c_yellow "Existing data/app.db found — first-run admin create only appears when there are zero users."
   c_yellow "To reset first-run: stop the stack, delete data/app.db (+ -wal/-shm), then docker compose up -d."
@@ -436,13 +738,14 @@ c_green ""
 c_green "Install complete."
 echo ""
 echo "Next steps:"
-echo "  1. Open ${APP_URL%/}/login (or http://<host>:8085/login)"
+echo "  1. Open ${APP_URL%/}/login  (or http://<host>:8085/login)"
 echo "  2. Create the admin account (shown automatically when the DB has zero users)"
-echo "  3. Create library + offline PIN, then /admin/setup"
+echo "  3. Create library + offline PIN, then continue to /admin/setup"
 if $USE_BUNDLED; then
   echo "     Stack step should show Using bundled stack (keys already synced) — Continue"
-  echo "  4. Optional Open Library in that wizard (skip freely — indexer seed is enough for search)"
-  echo "  5. Optional Mullvad later: WireGuard keys + add vpn to COMPOSE_PROFILES"
+  echo "  4. Optional: Audible login (Metadata/Chapter Forge), debrid, Hardcover, OpenRouter"
+  echo "  5. Optional Open Library catalog in that wizard (skip freely — indexer seed is enough)"
+  echo "  6. Optional Mullvad later: WireGuard keys + add vpn to COMPOSE_PROFILES"
 else
   echo "     Stack step: ABS / Kavita / LibraForge presets + soft health probes"
   echo "  4. Optional Open Library in that wizard (skip freely — indexer seed is enough for search)"
@@ -453,13 +756,16 @@ else
 fi
 echo ""
 echo "Notes:"
-echo "  - Profile bundled-media = ABS (:13378) + Kavita (:5000) + LibraForge (:5056) on compose network"
-echo "  - Existing Pi with external ABS/Kavita: leave bundled-media off; keep env URLs"
-echo "  - TorBox/RD: unique cache wins; both/neither → user preferred provider"
-echo "  - PUID/PGID=1000 written so app matches typical LibraForge UID"
+echo "  - Profile bundled-media = ABS (:13378) + Kavita (:5000) + LibraForge (:5056)"
+echo "  - FlareSolverr resource limits are in docker-compose.yml (safe defaults for Pi/laptop)"
+echo "  - Re-run this script anytime — it updates selected .env keys without wiping secrets"
+echo "  - Docs: docs/ubuntu-server-install.md"
 echo ""
 echo "Stack dir: $TARGET"
-echo "Logs:      cd \"$TARGET\" && docker compose logs -f app"
+echo "Logs:      cd \"$TARGET\" && $DOCKER compose logs -f app"
 if $USE_BUNDLED; then
   echo "Ports:     app 8085 | ABS 13378 | Kavita 5000 | LibraForge 5056 | prowlarr 9696 | flare 8191 | jackett 9117"
+else
+  echo "Ports:     app 8085 | prowlarr 9696 | flaresolverr 8191 | jackett 9117"
 fi
+echo ""

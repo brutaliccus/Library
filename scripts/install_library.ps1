@@ -322,14 +322,23 @@ else {
     Write-Warn ".env already exists - will update selected keys only"
 }
 
-Write-Step "==> Core settings"
-$APP_URL = Read-Default "Public site URL" $AppUrl
+Write-Step "==> Core settings [REQUIRED]"
+Write-Host "    APP_URL = public URL friends open (invite links / CORS / push)." -ForegroundColor DarkGray
+Write-Host "    SECRET_KEY = JWT signing secret. DATABASE_URL defaults to SQLite under ./data." -ForegroundColor DarkGray
+$APP_URL = Read-Default "Public site URL [REQUIRED]" $AppUrl
 if (-not $SecretKey) { $SecretKey = New-SecretKey }
-$SECRET_KEY = if ($NonInteractive) { $SecretKey } else { Read-Default "Secret key (random string)" $SecretKey }
+$SECRET_KEY = if ($NonInteractive) { $SecretKey } else { Read-Default "Secret key [REQUIRED]" $SecretKey }
 Set-EnvKey $envPath "APP_URL" $APP_URL
 Set-EnvKey $envPath "SECRET_KEY" $SECRET_KEY
+Set-EnvKey $envPath "DATABASE_URL" "sqlite+aiosqlite:///data/app.db"
+Set-EnvKey $envPath "TZ" "UTC"
 Set-EnvKey $envPath "PUID" "1000"
 Set-EnvKey $envPath "PGID" "1000"
+Set-EnvKey $envPath "AUDIOBOOK_DIR" "/audiobooks"
+Set-EnvKey $envPath "EBOOK_DIR" "/ebooks"
+Set-EnvKey $envPath "AUDIOBOOK_STAGING_DIRNAME" ".unorganized"
+Set-EnvKey $envPath "AUDIOBOOK_STAGING_LEGACY_DIRNAME" "_unorganized"
+Set-EnvKey $envPath "EBOOK_STAGING_DIRNAME" "unorganized"
 # Admin Health Start/Stop/Restart — host docker group GID (WSL/Linux often 998/999).
 $dockerGid = "998"
 try {
@@ -337,6 +346,9 @@ try {
   if ($gidLine -match ":(\d+):") { $dockerGid = $Matches[1] }
 } catch { }
 Set-EnvKey $envPath "DOCKER_GID" $dockerGid
+Set-EnvKey $envPath "PROWLARR_URL" "http://prowlarr:9696"
+Set-EnvKey $envPath "JACKETT_URL" "http://audiobook-jackett:9117"
+Set-EnvKey $envPath "FLARESOLVERR_URL" "http://flaresolverr:8191"
 
 Write-Step "==> Host media mounts (must exist)"
 $AUDIO_HOST = Read-Default "Host audiobooks path" $AudioHost
@@ -438,14 +450,33 @@ if (-not $useBundled) {
 Set-EnvKey $envPath "LIBRAFORGE_M4B_JOBS" "1"
 Set-EnvKey $envPath "LIBRAFORGE_PIPELINE_ENABLED" ($(if ($lfOn) { "true" } else { "false" }))
 Set-EnvKey $envPath "EBOOK_PIPELINE_ENABLED" ($(if ($ebOn) { "true" } else { "false" }))
+if (-not (Get-EnvKeyValue $envPath "LIBRAFORGE_MIN_SCORE")) { Set-EnvKey $envPath "LIBRAFORGE_MIN_SCORE" "0.70" }
+if (-not (Get-EnvKeyValue $envPath "EBOOK_MIN_SCORE")) { Set-EnvKey $envPath "EBOOK_MIN_SCORE" "0.70" }
+if (-not (Get-EnvKeyValue $envPath "LIBRARY_SWEEP_ABS_SCAN_EVERY")) { Set-EnvKey $envPath "LIBRARY_SWEEP_ABS_SCAN_EVERY" "25" }
+if (-not (Get-EnvKeyValue $envPath "EBOOK_SWEEP_KAVITA_SCAN_EVERY")) { Set-EnvKey $envPath "EBOOK_SWEEP_KAVITA_SCAN_EVERY" "25" }
+if (-not (Get-EnvKeyValue $envPath "EBOOK_SWEEP_CONVERT_ALL_TO_EPUB")) { Set-EnvKey $envPath "EBOOK_SWEEP_CONVERT_ALL_TO_EPUB" "true" }
+if (-not (Get-EnvKeyValue $envPath "EBOOK_SWEEP_FORCE_METADATA")) { Set-EnvKey $envPath "EBOOK_SWEEP_FORCE_METADATA" "true" }
+if (-not (Get-EnvKeyValue $envPath "OPENROUTER_ENABLED")) { Set-EnvKey $envPath "OPENROUTER_ENABLED" "false" }
+
+if ($useBundled -and -not $NonInteractive) {
+    Write-Step "==> Debrid providers [OPTIONAL]"
+    Write-Host "    Server defaults; users can also set keys per library. TorBox needs no qBittorrent container." -ForegroundColor DarkGray
+    $rd = Read-Default "Real-Debrid API token (Enter to skip)" (Get-EnvKeyValue $envPath "REAL_DEBRID_API_TOKEN")
+    $tor = Read-Default "TorBox API token (Enter to skip)" (Get-EnvKeyValue $envPath "TORBOX_API_TOKEN")
+    if ($rd) { Set-EnvKey $envPath "REAL_DEBRID_API_TOKEN" $rd }
+    if ($tor) { Set-EnvKey $envPath "TORBOX_API_TOKEN" $tor }
+}
 
 $apk = Read-Default "GitHub owner/repo for Library APK releases" $ApkRepo
 Set-EnvKey $envPath "ANDROID_APK_GITHUB_REPO" $apk
+if (-not (Get-EnvKeyValue $envPath "ANDROID_MIN_VERSION_CODE")) { Set-EnvKey $envPath "ANDROID_MIN_VERSION_CODE" "59" }
+if (-not (Get-EnvKeyValue $envPath "ANDROID_FORCE_UPDATES")) { Set-EnvKey $envPath "ANDROID_FORCE_UPDATES" "true" }
 
-Write-Step "==> Scraper mode"
+Write-Step "==> Scraper mode [RECOMMENDED: RSS-only]"
 $deep = if ($NonInteractive) { [bool]$EnableDeepScrapers } else {
     Write-Warn "Deep FlareSolverr crawls are HIGH USAGE."
     Write-Host "Recommended: RSS-only (ABB + Knaben) - live Jackett search still works."
+    Write-Host "Compose caps FlareSolverr (768m RAM / 1.5 CPU / 200 pids)." -ForegroundColor DarkGray
     Read-YesNo "Enable high-usage deep scrapers?" $false
 }
 if ($deep) {

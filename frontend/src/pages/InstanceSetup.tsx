@@ -125,12 +125,22 @@ const FOLDER_CHECKS: Array<{ title: string; detail: string }> = [
   {
     title: "M4B global encode queue",
     detail:
-      "Library Site runs one M4B encode at a time (auto-forge + Quick Review share the slot). Request cards show Queued for M4B while waiting, Converting M4B when active. LIBRAFORGE_M4B_JOBS=1 is per-run workers — keep at 1 on a Pi.",
+      "Library Site runs one M4B encode at a time (auto-forge + Quick Review share the slot). Request cards show Queued for M4B while waiting, Converting M4B when active. LIBRAFORGE_M4B_JOBS=1 is per-run workers — keep at 1 on a Pi; laptops can raise carefully.",
   },
   {
-    title: "PUID 1000 for shared media",
+    title: "Library Sweep / Ebook Sweep cadence",
     detail:
-      "App and LibraForge should share UID 1000 (see PUID/PGID) so M4B / Folder Forge can write under staging and library folders.",
+      "During Sweep, full ABS/Kavita scans run every N completed books (default 25) and on stop — not per book. Toggle convert-to-EPUB / force-metadata under Admin → Library Sweep.",
+  },
+  {
+    title: "PUID 1000 + Docker socket",
+    detail:
+      "App and LibraForge should share UID 1000 (PUID/PGID) so forge can write staging. Admin Health Start/Stop needs `/var/run/docker.sock` plus DOCKER_GID = host docker group id.",
+  },
+  {
+    title: "FlareSolverr resource caps",
+    detail:
+      "Compose limits FlareSolverr to 768m RAM / 1.5 CPU / 200 pids so Chromium cannot thrash the host. Keep scrapers on RSS-only unless you need deep crawls.",
   },
   {
     title: "Browser extension (optional)",
@@ -138,9 +148,9 @@ const FOLDER_CHECKS: Array<{ title: string; detail: string }> = [
       "Load unpacked from `browser-extension/` to right-click magnets into the request queue. See browser-extension/README.md.",
   },
   {
-    title: "Android APK releases",
+    title: "Android APK + OPDS",
     detail:
-      "Friends install the prebuilt APK from GitHub Releases (owner/repo on the next step). Offline unlock, Downloads tab, Android Auto ±15s / idle resume.",
+      "Friends install the prebuilt APK from GitHub Releases (next step). Ereaders use Settings → Ereader (proxied OPDS; Kavita API key stays server-side).",
   },
 ];
 
@@ -267,9 +277,9 @@ export default function InstanceSetup() {
     }
   }, [status, config, step?.id, presetApplied, drafts]);
 
-  // Soft probe when opening the stack step so bundled installs can show green status.
+  // Soft probe on stack / indexers steps so bundled installs can show green status.
   useEffect(() => {
-    if (step?.id !== "stack") return;
+    if (step?.id !== "stack" && step?.id !== "indexers") return;
     let cancelled = false;
     (async () => {
       try {
@@ -527,6 +537,21 @@ export default function InstanceSetup() {
               LibraForge {liveProbes?.libraforge?.connected ? "connected" : liveProbes?.libraforge?.configured ? "warming…" : "—"}
               {" · "}http://libraforge:5056 → host :5056
             </li>
+            <li className={probeTone("prowlarr")}>
+              Prowlarr {liveProbes?.prowlarr?.connected ? "connected" : liveProbes?.prowlarr?.configured ? "warming…" : "—"}
+              {" · "}:9696
+            </li>
+            <li className={probeTone("jackett")}>
+              Jackett {liveProbes?.jackett?.connected ? "connected" : "warming…"}
+              {" · "}:9117
+            </li>
+            <li className={probeTone("flaresolverr")}>
+              FlareSolverr {liveProbes?.flaresolverr?.connected ? "connected" : "warming…"}
+              {" · "}:8191
+            </li>
+            <li className={probeTone("docker")}>
+              Docker socket {liveProbes?.docker?.connected ? "OK" : liveProbes?.docker?.error || "check DOCKER_GID"}
+            </li>
           </ul>
           {bundledReady && (
             <p className="text-[11px] text-emerald-500/90">
@@ -702,8 +727,10 @@ export default function InstanceSetup() {
           Instance setup
         </h1>
         <p className="text-sm text-gray-500 mt-2">
-          Configure the library stack (ABS / Kavita / LibraForge), Audible metadata login,
-          indexers, and optional catalog. Change anything later in Admin → Settings / Integrations.
+          Guided first-launch checklist: library stack (ABS / Kavita / LibraForge), Audible,
+          indexers, debrid, staging, catalog APIs (Hardcover / OpenRouter), Android, and scraper
+          mode. Required steps are marked; everything else can wait. Change anything later in
+          Admin → Settings / Integrations.
         </p>
       </div>
 
@@ -824,6 +851,37 @@ export default function InstanceSetup() {
                 </li>
               ))}
             </ul>
+          ) : step.id === "catalog" ? (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400 space-y-1">
+                <p>
+                  <strong className="text-gray-300">Optional.</strong> Hardcover improves store
+                  shelves/ratings. OpenRouter is LLM assist only — leave off without a key.
+                </p>
+                <p>
+                  Anna&apos;s Archive cookie, NYT, ISBNdb, and Google Books can be blank forever.
+                </p>
+              </div>
+              {renderFields()}
+            </div>
+          ) : step.id === "indexers" ? (
+            <div className="space-y-4">
+              <ul className="text-xs space-y-1 font-mono rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+                <li className={probeTone("prowlarr")}>
+                  Prowlarr {liveProbes?.prowlarr?.connected ? "connected" : "—"}
+                </li>
+                <li className={probeTone("jackett")}>
+                  Jackett {liveProbes?.jackett?.connected ? "connected" : "—"}
+                </li>
+                <li className={probeTone("flaresolverr")}>
+                  FlareSolverr {liveProbes?.flaresolverr?.connected ? "connected" : "—"}
+                </li>
+                <li className={probeTone("docker")}>
+                  Docker socket {liveProbes?.docker?.connected ? "OK" : "—"}
+                </li>
+              </ul>
+              {renderFields()}
+            </div>
           ) : (
             renderFields()
           )}

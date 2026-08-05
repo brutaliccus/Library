@@ -297,6 +297,39 @@ def upsert_host(domain_name, forward_host, forward_port, advanced="", want_ssl=F
 want_ssl = bool(le_email)
 
 if not domain and not abs_domain and not kavita_domain:
+    # LAN-only: create an HTTP proxy host for the host LAN IP / hostname so
+    # first-time installs work via port 80 without opening the NPM GUI.
+    import socket
+
+    lan_names = []
+    try:
+        hostname = socket.gethostname().strip()
+        if hostname:
+            lan_names.append(hostname)
+            fqdn = socket.getfqdn().strip()
+            if fqdn and fqdn != hostname:
+                lan_names.append(fqdn)
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("1.1.1.1", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            lan_names.append(ip)
+    except Exception:
+        pass
+    seen = set()
+    lan_names = [n for n in lan_names if not (n in seen or seen.add(n))]
+    if lan_names:
+        primary = lan_names[0]
+        print(f"No NPM_DOMAIN — creating LAN HTTP proxy host(s): {', '.join(lan_names)}")
+        for name in lan_names:
+            upsert_host(name, "app", 8080, advanced=library_advanced, want_ssl=False)
+        print(f"LAN Library URL via NPM: http://{primary}/  (also http://<host>:8085)")
+        print(f"  Admin UI: {base}")
+        sys.exit(0)
     print("NPM ready (no domains set — LAN / HTTP-only).")
     print(f"  Admin UI: {base}")
     print("  Set NPM_DOMAIN (+ optional NPM_LETSENCRYPT_EMAIL) and re-run this script to create hosts.")

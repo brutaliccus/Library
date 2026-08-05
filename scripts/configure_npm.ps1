@@ -258,7 +258,41 @@ function Upsert-Host([string]$DomainName, [string]$ForwardHost, [int]$ForwardPor
 }
 
 if (-not $domain -and -not $absDomain -and -not $kavitaDomain) {
-    Write-Host "NPM ready (no domains set — LAN / HTTP-only)."
+    # LAN-only: create HTTP proxy host(s) for hostname / primary IP (no GUI).
+    $lanNames = New-Object System.Collections.Generic.List[string]
+    try {
+        $hn = [System.Net.Dns]::GetHostName()
+        if ($hn) { [void]$lanNames.Add($hn) }
+    } catch {}
+    try {
+        $ip = (
+            Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike '127.*' -and $_.PrefixOrigin -ne 'WellKnown' } |
+            Select-Object -First 1 -ExpandProperty IPAddress
+        )
+        if (-not $ip) {
+            $ip = (
+                Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress -notlike '127.*' } |
+                Select-Object -First 1 -ExpandProperty IPAddress
+            )
+        }
+        if ($ip) { [void]$lanNames.Add([string]$ip) }
+    } catch {}
+    $unique = @()
+    foreach ($n in $lanNames) {
+        if ($n -and ($unique -notcontains $n)) { $unique += $n }
+    }
+    if ($unique.Count -gt 0) {
+        Write-Host ("No NPM_DOMAIN - creating LAN HTTP proxy host(s): " + ($unique -join ', '))
+        foreach ($name in $unique) {
+            Upsert-Host $name "app" 8080 $libraryAdvanced
+        }
+        Write-Host ("LAN Library URL via NPM: http://" + $unique[0] + "/  (also http://127.0.0.1:8085)")
+        Write-Host "  Admin UI: $BaseUrl"
+        exit 0
+    }
+    Write-Host "NPM ready (no domains set - LAN / HTTP-only)."
     Write-Host "  Admin UI: $BaseUrl"
     Write-Host "  Set NPM_DOMAIN (+ optional NPM_LETSENCRYPT_EMAIL) and re-run this script."
     exit 0

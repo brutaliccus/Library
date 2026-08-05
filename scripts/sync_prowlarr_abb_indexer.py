@@ -86,7 +86,13 @@ def main() -> int:
         print("No AudioBook Bay indexer in Prowlarr")
         return 0
 
-    want_base = "http://audiobook-jackett:9117"
+    want_base = (
+        os.environ.get("JACKETT_INTERNAL_URL")
+        or _load_env_key("JACKETT_URL")
+        or "http://audiobook-jackett:9117"
+    ).rstrip("/")
+    if "127.0.0.1" in want_base or "localhost" in want_base:
+        want_base = "http://audiobook-jackett:9117"
     want_path = "/api/v2.0/indexers/audiobookbay/results/torznab/api"
 
     changed = False

@@ -26,3 +26,24 @@ python scripts/export_indexer_seed.py /path/to/app.db ./seed
 ```
 
 Then refresh the `data-seed` release asset if you publish outside git.
+
+## Open Library catalog (optional, large)
+
+A local `ol_catalog.db` (multi‑GB) is **not** shipped in git. Fresh installs can:
+
+1. **Download prebuilt** from the same [`data-seed`](https://github.com/brutaliccus/Library/releases/tag/data-seed) release when assets exist:
+   - `ol_catalog.db.gz` (single file), or
+   - `ol_catalog.manifest.json` + `ol_catalog.db.gz.partNN` (split for GitHub’s ~2 GiB limit)
+2. **Build locally** via `scripts/ol_import_dumps.py` (hours + disk)
+3. **Skip** — indexer seed + live Google Books still work
+
+### Publish a prebuilt catalog (maintainers)
+
+On a host that already has a built DB (e.g. Pi `/opt/stacks/Library Site/data/ol_catalog.db`):
+
+```bash
+python scripts/export_ol_catalog_seed.py /path/to/ol_catalog.db ./seed/ol
+# Upload every file under ./seed/ol to the data-seed GitHub Release
+```
+
+Installers call `scripts/fetch_ol_catalog.py` which reassembles parts and writes `data/ol_catalog.db`.

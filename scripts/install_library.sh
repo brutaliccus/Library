@@ -12,6 +12,9 @@
 #   LIBRARY_EBOOK_HOST, LIBRARY_OL_HOST, LIBRARY_APK_REPO, LIBRARY_TZ,
 #   LIBRARY_SKIP_BUNDLED_MEDIA=1, LIBRARY_SKIP_NPM=1, LIBRARY_ENABLE_VPN=1,
 #   LIBRARY_ENABLE_DEEP_SCRAPERS=1, LIBRARY_SKIP_DOCKER_INSTALL=1, LIBRARY_SKIP_BUILD=1,
+#   LIBRARY_SKIP_JACKETT=1, LIBRARY_SKIP_PROWLARR=1, LIBRARY_JACKETT_URL, LIBRARY_JACKETT_API_KEY,
+#   LIBRARY_PROWLARR_URL, LIBRARY_PROWLARR_API_KEY,
+#   LIBRARY_OL_MODE=download|build|skip (non-interactive Open Library catalog),
 #   LIBRARY_NPM_DOMAIN, LIBRARY_NPM_ABS_DOMAIN, LIBRARY_NPM_KAVITA_DOMAIN,
 #   LIBRARY_NPM_LE_EMAIL, LIBRARY_NPM_ADMIN_EMAIL, LIBRARY_NPM_ADMIN_PASSWORD
 set -euo pipefail
@@ -476,14 +479,107 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "Download / indexer sidecars [AUTO]"
-explain "Compose always starts Prowlarr, Jackett, FlareSolverr. Keys sync after first boot."
-explain "FlareSolverr has Pi-safe limits in docker-compose (mem 768m, 1.5 CPU, pids 200)."
-set_env PROWLARR_URL "http://prowlarr:9696"
-set_env JACKETT_URL "http://audiobook-jackett:9117"
+step "Jackett (AudioBook Bay Torznab) [RECOMMENDED]"
+explain "Bundled Jackett is preconfigured for AudioBookBay (audiobookbay.is) + FlareSolverr."
+explain "Already run Jackett elsewhere? Connect URL + API key instead of using the local container."
+USE_BUNDLED_JACKETT=true
+JACKETT_EXT_URL=""
+JACKETT_EXT_KEY=""
+if [[ "${LIBRARY_SKIP_JACKETT:-0}" == "1" ]]; then
+  USE_BUNDLED_JACKETT=false
+  c_yellow "LIBRARY_SKIP_JACKETT=1 — will connect external Jackett"
+elif [[ -n "${LIBRARY_JACKETT_URL:-}" && -n "${LIBRARY_JACKETT_API_KEY:-}" ]]; then
+  USE_BUNDLED_JACKETT=false
+  JACKETT_EXT_URL="$LIBRARY_JACKETT_URL"
+  JACKETT_EXT_KEY="$LIBRARY_JACKETT_API_KEY"
+elif yes_no "Deploy + preconfigure bundled Jackett? (Already have Jackett? answer n)" "y"; then
+  USE_BUNDLED_JACKETT=true
+else
+  USE_BUNDLED_JACKETT=false
+fi
+if $USE_BUNDLED_JACKETT; then
+  set_env JACKETT_URL "http://audiobook-jackett:9117"
+  c_green "Bundled Jackett — ABB indexer + FlareSolverr wired after first start"
+else
+  prompt JACKETT_EXT_URL "Existing Jackett URL" "${JACKETT_EXT_URL:-$(get_env JACKETT_URL)}"
+  prompt_secret JACKETT_EXT_KEY "Existing Jackett API key" "${JACKETT_EXT_KEY:-$(get_env JACKETT_API_KEY)}"
+  if [[ -n "$JACKETT_EXT_URL" && -n "$JACKETT_EXT_KEY" ]]; then
+    set_env JACKETT_URL "$JACKETT_EXT_URL"
+    set_env JACKETT_API_KEY "$JACKETT_EXT_KEY"
+    c_green "External Jackett credentials saved"
+  else
+    c_yellow "No Jackett URL/key — falling back to bundled Jackett"
+    USE_BUNDLED_JACKETT=true
+    set_env JACKETT_URL "http://audiobook-jackett:9117"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+step "Prowlarr (ABB + Knaben indexers) [RECOMMENDED]"
+explain "Bundled Prowlarr gets native Knaben + AudioBookBay Torznab → Jackett (same as production)."
+explain "Already run Prowlarr elsewhere? Connect URL + API key; installer still tries to add ABB/Knaben."
+USE_BUNDLED_PROWLARR=true
+PROWLARR_EXT_URL=""
+PROWLARR_EXT_KEY=""
+if [[ "${LIBRARY_SKIP_PROWLARR:-0}" == "1" ]]; then
+  USE_BUNDLED_PROWLARR=false
+  c_yellow "LIBRARY_SKIP_PROWLARR=1 — will connect external Prowlarr"
+elif [[ -n "${LIBRARY_PROWLARR_URL:-}" && -n "${LIBRARY_PROWLARR_API_KEY:-}" ]]; then
+  USE_BUNDLED_PROWLARR=false
+  PROWLARR_EXT_URL="$LIBRARY_PROWLARR_URL"
+  PROWLARR_EXT_KEY="$LIBRARY_PROWLARR_API_KEY"
+elif yes_no "Deploy + preconfigure bundled Prowlarr? (Already have Prowlarr? answer n)" "y"; then
+  USE_BUNDLED_PROWLARR=true
+else
+  USE_BUNDLED_PROWLARR=false
+fi
+if $USE_BUNDLED_PROWLARR; then
+  set_env PROWLARR_URL "http://prowlarr:9696"
+  c_green "Bundled Prowlarr — Knaben + ABB wired after first start"
+else
+  prompt PROWLARR_EXT_URL "Existing Prowlarr URL" "${PROWLARR_EXT_URL:-$(get_env PROWLARR_URL)}"
+  prompt_secret PROWLARR_EXT_KEY "Existing Prowlarr API key" "${PROWLARR_EXT_KEY:-$(get_env PROWLARR_API_KEY)}"
+  if [[ -n "$PROWLARR_EXT_URL" && -n "$PROWLARR_EXT_KEY" ]]; then
+    set_env PROWLARR_URL "$PROWLARR_EXT_URL"
+    set_env PROWLARR_API_KEY "$PROWLARR_EXT_KEY"
+    c_green "External Prowlarr credentials saved"
+  else
+    c_yellow "No Prowlarr URL/key — falling back to bundled Prowlarr"
+    USE_BUNDLED_PROWLARR=true
+    set_env PROWLARR_URL "http://prowlarr:9696"
+  fi
+fi
+
 set_env FLARESOLVERR_URL "http://flaresolverr:8191"
 set_env_if_empty SCRAPER_ENABLED "true"
 set_env_if_empty SCRAPER_RSS_EVERY_N_JOBS "1"
+
+# ---------------------------------------------------------------------------
+step "Open Library catalog cache [OPTIONAL]"
+explain "Local OL SQLite catalog (multi-GB) powers browse/match without hitting openlibrary.org."
+explain "Indexer seed is enough for torrent search — OL cache is optional but recommended."
+explain "Choices: Download prebuilt (GitHub data-seed release) | Build locally (hours + disk) | Skip"
+OL_MODE="${LIBRARY_OL_MODE:-}"
+if [[ -z "$OL_MODE" ]]; then
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    OL_MODE="download"
+  else
+    echo "  [1] Download prebuilt cache (recommended when published on data-seed release)"
+    echo "  [2] Build locally from Open Library dumps (slow / multi-GB)"
+    echo "  [3] Skip for now (configure later in Admin → Catalog)"
+    _ol_choice=""
+    prompt _ol_choice "Open Library catalog setup" "1"
+    case "${_ol_choice}" in
+      2|b|B|build|Build) OL_MODE="build" ;;
+      3|s|S|skip|Skip|n|N) OL_MODE="skip" ;;
+      *) OL_MODE="download" ;;
+    esac
+  fi
+fi
+OL_MODE="$(printf '%s' "$OL_MODE" | tr '[:upper:]' '[:lower:]')"
+set_env_if_empty OL_CATALOG_DB_PATH "/app/data/ol_catalog.db"
+set_env_if_empty OL_DUMPS_DIR "/openlibrary/dumps"
+c_green "Open Library mode: ${OL_MODE}"
 
 # ---------------------------------------------------------------------------
 step "Debrid providers [OPTIONAL — can set later]"
@@ -705,6 +801,28 @@ step "Indexer cache seed"
 ensure_indexer_seed
 
 # ---------------------------------------------------------------------------
+step "Open Library catalog action"
+case "$OL_MODE" in
+  download|prebuilt|d)
+    if [[ -f data/ol_catalog.db ]] && [[ "$(wc -c <data/ol_catalog.db 2>/dev/null || echo 0)" -gt 1048576 ]]; then
+      c_green "OL catalog already present at data/ol_catalog.db"
+    elif [[ -f scripts/fetch_ol_catalog.py ]]; then
+      c_cyan "Downloading prebuilt Open Library catalog (data-seed release) ..."
+      if ! python3 scripts/fetch_ol_catalog.py 2>/dev/null && ! python scripts/fetch_ol_catalog.py 2>/dev/null; then
+        c_yellow "Prebuilt OL catalog not available yet — continue without it (Admin → Catalog later)."
+        c_yellow "Maintainers: scripts/export_ol_catalog_seed.py → upload to GitHub Release tag data-seed."
+      fi
+    fi
+    ;;
+  build|b)
+    c_yellow "Local OL build starts after the app container is up (can take many hours)."
+    ;;
+  *)
+    c_dim "Skipped Open Library catalog — store browse still works via Google Books / live APIs."
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
 step "Start Docker stack"
 c_yellow "First boot imports seed/indexer_cache.db.gz into an empty DB (~150 MB decompressed)."
 if $USE_BUNDLED; then
@@ -713,11 +831,21 @@ if $USE_BUNDLED; then
 else
   c_yellow "After create-admin / create-library / offline PIN, /admin/setup configures ABS, Kavita, and LibraForge."
 fi
-c_yellow "Optional Open Library catalog (multi-GB) can be skipped, built, or scheduled in that wizard."
 if [[ "${LIBRARY_SKIP_BUILD:-0}" == "1" ]]; then
   $DOCKER compose up -d
 else
   $DOCKER compose up -d --build
+fi
+
+# When operators connected external Jackett/Prowlarr, stop the unused local containers
+# so they do not compete for RAM (compose still defines them for easy re-enable).
+if ! $USE_BUNDLED_JACKETT; then
+  c_yellow "Stopping bundled Jackett (using external JACKETT_URL)"
+  $DOCKER compose stop jackett >/dev/null 2>&1 || true
+fi
+if ! $USE_BUNDLED_PROWLARR; then
+  c_yellow "Stopping bundled Prowlarr (using external PROWLARR_URL)"
+  $DOCKER compose stop prowlarr >/dev/null 2>&1 || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -736,12 +864,34 @@ for i in $(seq 1 90); do
 done
 
 # ---------------------------------------------------------------------------
-step "Sync sidecar API keys into .env"
-if [[ -f scripts/sync_jackett_env.sh ]]; then
-  bash scripts/sync_jackett_env.sh || true
+step "Configure Jackett / Prowlarr / sync keys"
+if $USE_BUNDLED_JACKETT; then
+  if [[ -f scripts/configure_jackett.sh ]]; then
+    c_cyan "Preconfiguring Jackett (FlareSolverr + AudioBookBay)"
+    bash scripts/configure_jackett.sh --force-bundled || true
+  elif [[ -f scripts/sync_jackett_env.sh ]]; then
+    bash scripts/sync_jackett_env.sh || true
+  fi
+else
+  if [[ -f scripts/configure_jackett.sh && -n "$(get_env JACKETT_API_KEY)" ]]; then
+    bash scripts/configure_jackett.sh \
+      --external-url "$(get_env JACKETT_URL)" \
+      --external-api-key "$(get_env JACKETT_API_KEY)" || true
+  fi
 fi
-if [[ -f scripts/sync_prowlarr_env.sh ]]; then
-  bash scripts/sync_prowlarr_env.sh || true
+if $USE_BUNDLED_PROWLARR; then
+  if [[ -f scripts/configure_prowlarr.sh ]]; then
+    c_cyan "Preconfiguring Prowlarr (Knaben + AudioBookBay → Jackett)"
+    bash scripts/configure_prowlarr.sh --force-bundled || true
+  elif [[ -f scripts/sync_prowlarr_env.sh ]]; then
+    bash scripts/sync_prowlarr_env.sh || true
+  fi
+else
+  if [[ -f scripts/configure_prowlarr.sh && -n "$(get_env PROWLARR_API_KEY)" ]]; then
+    bash scripts/configure_prowlarr.sh \
+      --external-url "$(get_env PROWLARR_URL)" \
+      --external-api-key "$(get_env PROWLARR_API_KEY)" || true
+  fi
 fi
 if $USE_BUNDLED; then
   if [[ -f scripts/sync_abs_env.sh ]]; then
@@ -766,6 +916,15 @@ if $USE_NPM; then
     APP_URL="${APP_URL:-$DEFAULT_APP_URL}"
   fi
 fi
+
+# Optional: kick off local OL build now that the app container exists.
+if [[ "$OL_MODE" == "build" || "$OL_MODE" == "b" ]]; then
+  c_cyan "Starting Open Library catalog build inside the app container (background) ..."
+  $DOCKER compose exec -d -e PYTHONPATH=/app app \
+    python /app/scripts/ol_import_dumps.py || \
+    c_yellow "Could not start OL build — run later: docker compose exec app python /app/scripts/ol_import_dumps.py"
+fi
+
 $DOCKER compose up -d app || true
 
 # ---------------------------------------------------------------------------
@@ -834,8 +993,16 @@ if $APP_OK; then
 else
   probe_http "app" "http://127.0.0.1:8085/api/health"
 fi
-probe_http "prowlarr" "http://127.0.0.1:9696/ping"
-probe_http "jackett" "http://127.0.0.1:9117/"
+if $USE_BUNDLED_PROWLARR; then
+  probe_http "prowlarr" "http://127.0.0.1:9696/ping"
+else
+  printf '  %-16s %s\n' "prowlarr" $'\033[33mexternal\033[0m'
+fi
+if $USE_BUNDLED_JACKETT; then
+  probe_http "jackett" "http://127.0.0.1:9117/"
+else
+  printf '  %-16s %s\n' "jackett" $'\033[33mexternal\033[0m'
+fi
 probe_http "flaresolverr" "http://127.0.0.1:8191/"
 if $USE_BUNDLED; then
   probe_http "audiobookshelf" "http://127.0.0.1:13378/"
@@ -844,6 +1011,31 @@ if $USE_BUNDLED; then
 fi
 if $USE_NPM; then
   probe_http "npm-admin" "http://127.0.0.1:81/"
+  # Soft probe of NPM :80 when a domain or LAN host was configured.
+  code80="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1/" 2>/dev/null || echo 000)"
+  if [[ "$code80" =~ ^[23] ]]; then
+    printf '  %-16s %s\n' "npm-proxy:80" "$_ok"
+  else
+    printf '  %-16s %s\n' "npm-proxy:80" "$_warn"
+  fi
+fi
+if [[ -f "${TARGET}/data/ol_catalog.db" ]] && [[ "$(wc -c <"${TARGET}/data/ol_catalog.db" 2>/dev/null || echo 0)" -gt 1048576 ]]; then
+  _ol_mb=$(awk "BEGIN {printf \"%.0f\", $(wc -c <"${TARGET}/data/ol_catalog.db")/1024/1024}")
+  printf '  %-16s %s (%s MB)\n' "ol-catalog" "$_ok" "$_ol_mb"
+else
+  printf '  %-16s %s\n' "ol-catalog" $'\033[33mabsent (optional)\033[0m'
+fi
+_jk="$(get_env JACKETT_API_KEY)"
+_pk="$(get_env PROWLARR_API_KEY)"
+if [[ -n "$_jk" && ! "$_jk" =~ your- ]]; then
+  printf '  %-16s %s\n' "jackett-key" "$_ok"
+else
+  printf '  %-16s %s\n' "jackett-key" "$_bad"
+fi
+if [[ -n "$_pk" && ! "$_pk" =~ your- ]]; then
+  printf '  %-16s %s\n' "prowlarr-key" "$_ok"
+else
+  printf '  %-16s %s\n' "prowlarr-key" "$_bad"
 fi
 if [[ -S /var/run/docker.sock ]]; then
   if $DOCKER info >/dev/null 2>&1; then
@@ -870,15 +1062,25 @@ echo "  3. Create library + offline PIN, then continue to /admin/setup"
 if $USE_BUNDLED; then
   echo "     Stack step should show Using bundled stack (keys already synced) — Continue"
   echo "  4. Optional: Audible login (Metadata/Chapter Forge), debrid, Hardcover, OpenRouter"
-  echo "  5. Optional Open Library catalog in that wizard (skip freely — indexer seed is enough)"
-  echo "  6. Optional Mullvad later: WireGuard keys + add vpn to COMPOSE_PROFILES"
+  echo "  5. Optional Mullvad later: WireGuard keys + add vpn to COMPOSE_PROFILES"
 else
   echo "     Stack step: ABS / Kavita / LibraForge presets + soft health probes"
-  echo "  4. Optional Open Library in that wizard (skip freely — indexer seed is enough for search)"
-  echo "  5. ABS: confirm audiobook staging (default .unorganized) is ignored"
-  echo "  6. Kavita: exclude ebook staging folder (default unorganized)"
-  echo "  7. Optional LibraForge sibling: bash scripts/install_libraforge.sh (docs/libraforge.md)"
-  echo "  8. Optional Mullvad later: WireGuard keys + COMPOSE_PROFILES=vpn"
+  echo "  4. ABS: confirm audiobook staging (default .unorganized) is ignored"
+  echo "  5. Kavita: exclude ebook staging folder (default unorganized)"
+  echo "  6. Optional LibraForge sibling: bash scripts/install_libraforge.sh (docs/libraforge.md)"
+  echo "  7. Optional Mullvad later: WireGuard keys + COMPOSE_PROFILES=vpn"
+fi
+echo ""
+echo "Indexers (auto-configured when bundled):"
+echo "  - Jackett: AudioBookBay → $(get_env JACKETT_URL)"
+echo "  - Prowlarr: Knaben + AudioBookBay Torznab → $(get_env PROWLARR_URL)"
+echo "  - Re-run anytime: bash scripts/configure_jackett.sh && bash scripts/configure_prowlarr.sh"
+if [[ "$OL_MODE" == "build" || "$OL_MODE" == "b" ]]; then
+  echo "  - Open Library: local build running in background (docker compose logs -f app)"
+elif [[ -f data/ol_catalog.db ]]; then
+  echo "  - Open Library: data/ol_catalog.db present"
+else
+  echo "  - Open Library: skipped — Admin → Catalog or: bash scripts/fetch_ol_catalog.sh"
 fi
 if $USE_NPM; then
   echo ""
@@ -893,7 +1095,8 @@ if $USE_NPM; then
       echo "  - HTTP only — add NPM_LETSENCRYPT_EMAIL to .env and re-run configure_npm.sh for HTTPS"
     fi
   else
-    echo "  - No domain yet — LAN via :8085; set NPM_DOMAIN then: bash scripts/configure_npm.sh"
+    echo "  - LAN proxy hosts created for hostname/IP on :80 (also use :8085 directly)"
+    echo "  - Set NPM_DOMAIN (+ NPM_LETSENCRYPT_EMAIL) then: bash scripts/configure_npm.sh"
   fi
 else
   echo ""
@@ -903,6 +1106,7 @@ echo ""
 echo "Notes:"
 echo "  - Profile bundled-media = ABS (:13378) + Kavita (:5000) + LibraForge (:5056)"
 echo "  - Profile npm = Nginx Proxy Manager (library-npm) on 80/443/81 — skip if you already proxy"
+echo "  - Jackett/Prowlarr/Flare are core sidecars; external URL skip paths stop the local container"
 echo "  - FlareSolverr resource limits are in docker-compose.yml (safe defaults for Pi/laptop)"
 echo "  - Re-run this script anytime — it updates selected .env keys without wiping secrets"
 echo "  - Docs: docs/ubuntu-server-install.md"

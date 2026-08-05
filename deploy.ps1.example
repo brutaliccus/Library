@@ -195,7 +195,7 @@ catch {
     Write-Host "Warning: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 try {
-    Invoke-Ssh "cd '$REMOTE_PATH' && bash scripts/patch_jackett_flare_timeout.sh && bash scripts/patch_jackett_abb_site.sh && bash scripts/wait_for_jackett.sh && bash scripts/sync_jackett_env.sh && bash scripts/wait_for_jackett.sh && bash scripts/sync_prowlarr_abb_indexer.sh" "Jackett/Prowlarr sync failed"
+    Invoke-Ssh "cd '$REMOTE_PATH' && bash scripts/configure_jackett.sh --force-bundled && bash scripts/configure_prowlarr.sh --force-bundled" "Jackett/Prowlarr sync failed"
 }
 catch {
     Write-Host "Warning (non-fatal): $($_.Exception.Message)" -ForegroundColor Yellow

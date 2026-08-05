@@ -22,6 +22,14 @@ param(
     [switch]$DisableEbookPipeline,
     [switch]$SkipBundledMedia,
     [switch]$SkipNpm,
+    [switch]$SkipJackett,
+    [switch]$SkipProwlarr,
+    [string]$JackettUrl = "",
+    [string]$JackettApiKey = "",
+    [string]$ProwlarrUrl = "",
+    [string]$ProwlarrApiKey = "",
+    [ValidateSet("", "download", "build", "skip")]
+    [string]$OlMode = "",
     [string]$NpmDomain = "",
     [string]$NpmAbsDomain = "",
     [string]$NpmKavitaDomain = "",
@@ -353,8 +361,6 @@ try {
   if ($gidLine -match ":(\d+):") { $dockerGid = $Matches[1] }
 } catch { }
 Set-EnvKey $envPath "DOCKER_GID" $dockerGid
-Set-EnvKey $envPath "PROWLARR_URL" "http://prowlarr:9696"
-Set-EnvKey $envPath "JACKETT_URL" "http://audiobook-jackett:9117"
 Set-EnvKey $envPath "FLARESOLVERR_URL" "http://flaresolverr:8191"
 
 Write-Step "==> Host media mounts (must exist)"
@@ -500,6 +506,92 @@ else {
     Write-Ok "RSS-only defaults written to .env"
 }
 
+# Jackett — bundled + ABB preconfigure by default; connect existing if preferred.
+Write-Step "==> Jackett (AudioBook Bay Torznab) [RECOMMENDED]"
+Write-Host "Bundled Jackett is preconfigured for AudioBookBay + FlareSolverr." -ForegroundColor DarkGray
+Write-Host "Already run Jackett elsewhere? Connect URL + API key instead." -ForegroundColor DarkGray
+$useBundledJackett = -not [bool]$SkipJackett
+if ($JackettUrl -and $JackettApiKey) {
+    $useBundledJackett = $false
+}
+elseif (-not $NonInteractive) {
+    $useBundledJackett = Read-YesNo "Deploy + preconfigure bundled Jackett? (Already have Jackett? answer n)" $true
+}
+if ($useBundledJackett) {
+    Set-EnvKey $envPath "JACKETT_URL" "http://audiobook-jackett:9117"
+    Write-Ok "Bundled Jackett — ABB indexer + FlareSolverr wired after first start"
+}
+else {
+    $JackettUrl = Read-Default "Existing Jackett URL" $(if ($JackettUrl) { $JackettUrl } else { Get-EnvKeyValue $envPath "JACKETT_URL" })
+    $JackettApiKey = Read-Default "Existing Jackett API key" $(if ($JackettApiKey) { $JackettApiKey } else { Get-EnvKeyValue $envPath "JACKETT_API_KEY" })
+    if ($JackettUrl -and $JackettApiKey) {
+        Set-EnvKey $envPath "JACKETT_URL" $JackettUrl
+        Set-EnvKey $envPath "JACKETT_API_KEY" $JackettApiKey
+        Write-Ok "External Jackett credentials saved"
+    }
+    else {
+        Write-Warn "No Jackett URL/key — falling back to bundled Jackett"
+        $useBundledJackett = $true
+        Set-EnvKey $envPath "JACKETT_URL" "http://audiobook-jackett:9117"
+    }
+}
+
+# Prowlarr — Knaben + ABB Torznab (matches production Pi).
+Write-Step "==> Prowlarr (ABB + Knaben indexers) [RECOMMENDED]"
+Write-Host "Bundled Prowlarr gets native Knaben + AudioBookBay Torznab -> Jackett." -ForegroundColor DarkGray
+$useBundledProwlarr = -not [bool]$SkipProwlarr
+if ($ProwlarrUrl -and $ProwlarrApiKey) {
+    $useBundledProwlarr = $false
+}
+elseif (-not $NonInteractive) {
+    $useBundledProwlarr = Read-YesNo "Deploy + preconfigure bundled Prowlarr? (Already have Prowlarr? answer n)" $true
+}
+if ($useBundledProwlarr) {
+    Set-EnvKey $envPath "PROWLARR_URL" "http://prowlarr:9696"
+    Write-Ok "Bundled Prowlarr — Knaben + ABB wired after first start"
+}
+else {
+    $ProwlarrUrl = Read-Default "Existing Prowlarr URL" $(if ($ProwlarrUrl) { $ProwlarrUrl } else { Get-EnvKeyValue $envPath "PROWLARR_URL" })
+    $ProwlarrApiKey = Read-Default "Existing Prowlarr API key" $(if ($ProwlarrApiKey) { $ProwlarrApiKey } else { Get-EnvKeyValue $envPath "PROWLARR_API_KEY" })
+    if ($ProwlarrUrl -and $ProwlarrApiKey) {
+        Set-EnvKey $envPath "PROWLARR_URL" $ProwlarrUrl
+        Set-EnvKey $envPath "PROWLARR_API_KEY" $ProwlarrApiKey
+        Write-Ok "External Prowlarr credentials saved"
+    }
+    else {
+        Write-Warn "No Prowlarr URL/key — falling back to bundled Prowlarr"
+        $useBundledProwlarr = $true
+        Set-EnvKey $envPath "PROWLARR_URL" "http://prowlarr:9696"
+    }
+}
+
+# Open Library catalog — download / build / skip
+Write-Step "==> Open Library catalog cache [OPTIONAL]"
+Write-Host "Local OL SQLite catalog (multi-GB). Indexer seed is enough for torrent search." -ForegroundColor DarkGray
+if (-not $OlMode) {
+    if ($NonInteractive) {
+        $OlMode = "download"
+    }
+    else {
+        Write-Host "  [1] Download prebuilt cache (GitHub data-seed release when published)"
+        Write-Host "  [2] Build locally from Open Library dumps (slow / multi-GB)"
+        Write-Host "  [3] Skip for now"
+        $choice = Read-Default "Open Library catalog setup" "1"
+        switch -Regex ($choice) {
+            '^(2|b|build)$' { $OlMode = "build" }
+            '^(3|s|skip|n)$' { $OlMode = "skip" }
+            Default { $OlMode = "download" }
+        }
+    }
+}
+if (-not (Get-EnvKeyValue $envPath "OL_CATALOG_DB_PATH")) {
+    Set-EnvKey $envPath "OL_CATALOG_DB_PATH" "/app/data/ol_catalog.db"
+}
+if (-not (Get-EnvKeyValue $envPath "OL_DUMPS_DIR")) {
+    Set-EnvKey $envPath "OL_DUMPS_DIR" "/openlibrary/dumps"
+}
+Write-Ok "Open Library mode: $OlMode"
+
 # Nginx Proxy Manager — default on; skip if you already reverse-proxy.
 Write-Step "==> Nginx Proxy Manager (reverse proxy) [RECOMMENDED]"
 Write-Host "Remote HTTPS needs a reverse proxy. Fresh installs include NPM (compose profile npm)." -ForegroundColor DarkGray
@@ -621,6 +713,33 @@ function Invoke-Compose {
 Write-Step "==> Ensuring indexer cache seed"
 Ensure-IndexerSeed $TARGET
 
+Write-Step "==> Open Library catalog action"
+switch ($OlMode.ToLowerInvariant()) {
+    { $_ -in @("download", "prebuilt", "d") } {
+        $olDb = Join-Path $TARGET "data\ol_catalog.db"
+        if ((Test-Path $olDb) -and ((Get-Item $olDb).Length -gt 1MB)) {
+            Write-Ok "OL catalog already present at data\ol_catalog.db"
+        }
+        else {
+            $fetch = Join-Path $TARGET "scripts\fetch_ol_catalog.ps1"
+            if (Test-Path $fetch) {
+                Write-Host "Downloading prebuilt Open Library catalog (data-seed release) ..."
+                & powershell -ExecutionPolicy Bypass -File $fetch -RepoRoot $TARGET
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warn "Prebuilt OL catalog not available yet — continue without it (Admin -> Catalog later)."
+                    Write-Warn "Maintainers: scripts/export_ol_catalog_seed.py -> upload to GitHub Release tag data-seed."
+                }
+            }
+        }
+    }
+    { $_ -in @("build", "b") } {
+        Write-Warn "Local OL build starts after the app container is up (can take many hours)."
+    }
+    Default {
+        Write-Host "Skipped Open Library catalog — configure later in Admin -> Catalog." -ForegroundColor DarkGray
+    }
+}
+
 Write-Step "==> Starting Docker stack"
 Write-Warn "First boot imports seed/indexer_cache.db.gz into an empty DB (~150 MB). This may take a few minutes."
 if ($useBundled) {
@@ -639,6 +758,14 @@ else {
 if ($upCode -ne 0) {
     Write-Err "docker compose up failed - check: docker compose logs"
     exit 1
+}
+if (-not $useBundledJackett) {
+    Write-Warn "Stopping bundled Jackett (using external JACKETT_URL)"
+    [void](Invoke-Compose @("compose", "stop", "jackett"))
+}
+if (-not $useBundledProwlarr) {
+    Write-Warn "Stopping bundled Prowlarr (using external PROWLARR_URL)"
+    [void](Invoke-Compose @("compose", "stop", "prowlarr"))
 }
 
 Write-Step "==> Waiting for app health"
@@ -661,16 +788,38 @@ if (-not $healthy) {
     Write-Warn "Health check timed out - check: docker compose logs app"
 }
 
-$syncPs1 = Join-Path $TARGET "scripts\sync_jackett_env.ps1"
-if (Test-Path $syncPs1) {
-    Write-Step "==> Syncing Jackett API key into .env"
-    & powershell -ExecutionPolicy Bypass -File $syncPs1 -RepoRoot $TARGET
+Write-Step "==> Configure Jackett / Prowlarr / sync keys"
+$jackCfg = Join-Path $TARGET "scripts\configure_jackett.ps1"
+$prowlCfg = Join-Path $TARGET "scripts\configure_prowlarr.ps1"
+if ($useBundledJackett) {
+    if (Test-Path $jackCfg) {
+        Write-Host "Preconfiguring Jackett (FlareSolverr + AudioBookBay)"
+        & powershell -ExecutionPolicy Bypass -File $jackCfg -RepoRoot $TARGET -ForceBundled
+    }
+    else {
+        $syncPs1 = Join-Path $TARGET "scripts\sync_jackett_env.ps1"
+        if (Test-Path $syncPs1) { & powershell -ExecutionPolicy Bypass -File $syncPs1 -RepoRoot $TARGET }
+    }
 }
-
-$prowlSyncPs1 = Join-Path $TARGET "scripts\sync_prowlarr_env.ps1"
-if (Test-Path $prowlSyncPs1) {
-    Write-Step "==> Syncing Prowlarr API key into .env"
-    & powershell -ExecutionPolicy Bypass -File $prowlSyncPs1 -RepoRoot $TARGET
+elseif (Test-Path $jackCfg) {
+    & powershell -ExecutionPolicy Bypass -File $jackCfg -RepoRoot $TARGET `
+        -ExternalUrl (Get-EnvKeyValue $envPath "JACKETT_URL") `
+        -ExternalApiKey (Get-EnvKeyValue $envPath "JACKETT_API_KEY")
+}
+if ($useBundledProwlarr) {
+    if (Test-Path $prowlCfg) {
+        Write-Host "Preconfiguring Prowlarr (Knaben + AudioBookBay -> Jackett)"
+        & powershell -ExecutionPolicy Bypass -File $prowlCfg -RepoRoot $TARGET -ForceBundled
+    }
+    else {
+        $prowlSyncPs1 = Join-Path $TARGET "scripts\sync_prowlarr_env.ps1"
+        if (Test-Path $prowlSyncPs1) { & powershell -ExecutionPolicy Bypass -File $prowlSyncPs1 -RepoRoot $TARGET }
+    }
+}
+elseif (Test-Path $prowlCfg) {
+    & powershell -ExecutionPolicy Bypass -File $prowlCfg -RepoRoot $TARGET `
+        -ExternalUrl (Get-EnvKeyValue $envPath "PROWLARR_URL") `
+        -ExternalApiKey (Get-EnvKeyValue $envPath "PROWLARR_API_KEY")
 }
 
 if ($useBundled) {
@@ -701,7 +850,57 @@ if ($useNpm) {
     }
 }
 
+if ($OlMode -match '^(build|b)$') {
+    Write-Host "Starting Open Library catalog build inside the app container (background) ..."
+    docker compose exec -d -e PYTHONPATH=/app app python /app/scripts/ol_import_dumps.py 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Could not start OL build — run later: docker compose exec app python /app/scripts/ol_import_dumps.py"
+    }
+}
+
 [void](Invoke-Compose @("compose", "up", "-d", "app"))
+
+Write-Step "==> Post-install health report"
+function Probe-Http([string]$Name, [string]$Url) {
+    try {
+        $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5
+        if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
+            Write-Host ("  {0,-16} OK" -f $Name) -ForegroundColor Green
+            return
+        }
+    } catch {}
+    Write-Host ("  {0,-16} warming / unreachable" -f $Name) -ForegroundColor Yellow
+}
+if ($healthy) { Write-Host ("  {0,-16} OK" -f "app") -ForegroundColor Green }
+else { Probe-Http "app" "http://127.0.0.1:8085/api/health" }
+if ($useBundledProwlarr) { Probe-Http "prowlarr" "http://127.0.0.1:9696/ping" }
+else { Write-Host ("  {0,-16} external" -f "prowlarr") -ForegroundColor Yellow }
+if ($useBundledJackett) { Probe-Http "jackett" "http://127.0.0.1:9117/" }
+else { Write-Host ("  {0,-16} external" -f "jackett") -ForegroundColor Yellow }
+Probe-Http "flaresolverr" "http://127.0.0.1:8191/"
+if ($useBundled) {
+    Probe-Http "audiobookshelf" "http://127.0.0.1:13378/"
+    Probe-Http "kavita" "http://127.0.0.1:5000/"
+    Probe-Http "libraforge" "http://127.0.0.1:5056/health"
+}
+if ($useNpm) {
+    Probe-Http "npm-admin" "http://127.0.0.1:81/"
+    Probe-Http "npm-proxy:80" "http://127.0.0.1/"
+}
+$olDbPath = Join-Path $TARGET "data\ol_catalog.db"
+if ((Test-Path $olDbPath) -and ((Get-Item $olDbPath).Length -gt 1MB)) {
+    $mb = [math]::Round((Get-Item $olDbPath).Length / 1MB)
+    Write-Host ("  {0,-16} OK ({1} MB)" -f "ol-catalog", $mb) -ForegroundColor Green
+}
+else {
+    Write-Host ("  {0,-16} absent (optional)" -f "ol-catalog") -ForegroundColor Yellow
+}
+$jk = Get-EnvKeyValue $envPath "JACKETT_API_KEY"
+$pk = Get-EnvKeyValue $envPath "PROWLARR_API_KEY"
+if ($jk -and $jk -notmatch 'your-') { Write-Host ("  {0,-16} OK" -f "jackett-key") -ForegroundColor Green }
+else { Write-Host ("  {0,-16} missing" -f "jackett-key") -ForegroundColor Red }
+if ($pk -and $pk -notmatch 'your-') { Write-Host ("  {0,-16} OK" -f "prowlarr-key") -ForegroundColor Green }
+else { Write-Host ("  {0,-16} missing" -f "prowlarr-key") -ForegroundColor Red }
 
 $dbPath = Join-Path $TARGET "data\app.db"
 if (Test-Path $dbPath) {
@@ -722,8 +921,22 @@ if ($useBundled) {
 else {
     Write-Host "     Stack step: ABS / Kavita / LibraForge presets + soft health probes"
 }
-Write-Host "  4. Optional Open Library catalog from that wizard (skip freely - seed cache is enough)"
-Write-Host "  5. Optional Mullvad later: WireGuard keys + add vpn to COMPOSE_PROFILES"
+Write-Host "  4. Optional Mullvad later: WireGuard keys + add vpn to COMPOSE_PROFILES"
+Write-Host ""
+Write-Host "Indexers (auto-configured when bundled):"
+Write-Host ("  - Jackett: " + (Get-EnvKeyValue $envPath "JACKETT_URL"))
+Write-Host ("  - Prowlarr: " + (Get-EnvKeyValue $envPath "PROWLARR_URL"))
+Write-Host "  - Re-run: .\scripts\configure_jackett.ps1 ; .\scripts\configure_prowlarr.ps1"
+$olDb = Join-Path $TARGET "data\ol_catalog.db"
+if (Test-Path $olDb) {
+    Write-Host "  - Open Library: data\ol_catalog.db present"
+}
+elseif ($OlMode -match '^(build|b)$') {
+    Write-Host "  - Open Library: local build running (docker compose logs -f app)"
+}
+else {
+    Write-Host "  - Open Library: skipped — .\scripts\fetch_ol_catalog.ps1 or Admin -> Catalog"
+}
 if ($useNpm) {
     Write-Host ""
     Write-Host "Nginx Proxy Manager:"
@@ -734,7 +947,8 @@ if ($useNpm) {
         Write-Host "  - DNS: point A/AAAA at this host for Let's Encrypt; re-run .\scripts\configure_npm.ps1"
     }
     else {
-        Write-Host "  - No domain yet — LAN via :8085; set NPM_DOMAIN then .\scripts\configure_npm.ps1"
+        Write-Host "  - LAN proxy hosts created for hostname/IP on :80 (also use :8085)"
+        Write-Host "  - Set NPM_DOMAIN then .\scripts\configure_npm.ps1"
     }
 }
 else {

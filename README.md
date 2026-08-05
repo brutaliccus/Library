@@ -250,7 +250,7 @@ LIBRARY_NONINTERACTIVE=1 \
   ./scripts/install_library.sh /opt/library --non-interactive
 ```
 
-The installers write `.env` (core secrets, media mounts, indexer URLs, pipeline/sweep defaults, optional debrid/catalog/LLM keys, VAPID, NPM vars), create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media,npm` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, sync Jackett/Prowlarr/ABS/Kavita/LibraForge into `.env`, configure NPM proxy hosts via API, then print a soft health report (app / indexers / Flare / ABS / Kavita / npm / docker.sock). **Mullvad is optional**; **NPM is default but skippable**. After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead. Full Ubuntu checklist: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
+The installers write `.env` (core secrets, media mounts, indexer URLs, pipeline/sweep defaults, optional debrid/catalog/LLM keys, VAPID, NPM vars), create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), **preconfigure Jackett (AudioBookBay + FlareSolverr) and Prowlarr (Knaben + ABB Torznab)** via CLI (or connect existing URL/API keys), offer **Open Library catalog** download/build/skip, apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media,npm` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, sync ABS/Kavita/LibraForge into `.env`, configure NPM proxy hosts via API (LAN hostname/IP on :80 when no domain), then print a soft health report (app / Jackett / Prowlarr / Flare / OL cache / ABS / Kavita / npm / docker.sock). **Mullvad is optional**; **NPM / Jackett / Prowlarr are default but skippable**. After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead. Full Ubuntu checklist: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
 
 ### Indexer cache seed
 
@@ -377,15 +377,20 @@ Prefer RSS-only unless you know you need the deeper coverage.
 
 A local SQLite catalog avoids hammering live Open Library APIs during scrape/match. It is **not** required for a working install (the indexer cache seed is enough to search releases).
 
-**Admin → Catalog** shows catalog readiness, dump presence, and whether newer remote dumps are available (admins get a notification when dumps change). Use **Generate catalog** / **Update catalog** for an immediate multi-GB download + rebuild, or **schedule** dump download + rebuild for a chosen local time (persists across restarts; cancel/reschedule anytime). That runs the same import as:
+The guided installer asks:
+
+1. **Download prebuilt** — from the GitHub Release tag [`data-seed`](https://github.com/brutaliccus/Library/releases/tag/data-seed) (`ol_catalog.db.gz` or multipart `ol_catalog.manifest.json` + `.partNN`). See `seed/README.md`.
+2. **Build locally** — runs `scripts/ol_import_dumps.py` in the app container (hours + multi‑GB disk).
+3. **Skip** — configure later in Admin → Catalog.
 
 ```bash
-python scripts/ol_import_dumps.py --help
-# Optional host cron (in addition to in-app schedule):
-bash scripts/install_ol_catalog_cron.sh
+bash scripts/fetch_ol_catalog.sh          # download prebuilt into data/ol_catalog.db
+python scripts/export_ol_catalog_seed.py  # maintainers: package a host DB for the release
+python scripts/ol_import_dumps.py --help  # local build
+bash scripts/install_ol_catalog_cron.sh   # optional host cron for dump checks
 ```
 
-Expect multi-GB downloads and a multi-GB finished DB (much larger if you include editions). On a Pi this often takes many hours—prefer scheduling off-peak. Mount dump/working dirs via `OPENLIBRARY_HOST_DIR`.
+**Admin → Catalog** shows readiness, dump presence, and newer-dump notifications. Expect multi‑GB downloads and a multi‑GB finished DB (much larger with editions). Mount dump/working dirs via `OPENLIBRARY_HOST_DIR`.
 
 ---
 
@@ -407,10 +412,14 @@ Expect multi-GB downloads and a multi-GB finished DB (much larger if you include
 | `scripts/install_libraforge.sh` | Sibling LibraForge stack (shared `/audiobooks` mount) |
 | `scripts/generate_vapid.py` | Web Push keypair |
 | `scripts/backup_db.sh` / `install_backup_cron.sh` | DB backups (Linux cron) |
+| `scripts/configure_jackett.sh` / `.ps1` | CLI Jackett bootstrap (Flare + AudioBookBay) + `.env` keys |
+| `scripts/configure_prowlarr.sh` / `.ps1` | CLI Prowlarr bootstrap (Knaben + ABB Torznab → Jackett) |
 | `scripts/sync_jackett_env.sh` / `.ps1` | Copy Jackett API key into `.env` (repo-relative) |
 | `scripts/sync_prowlarr_abb_indexer.sh` | Wire Prowlarr -> Jackett ABB |
+| `scripts/fetch_ol_catalog.sh` / `.ps1` | Download prebuilt Open Library catalog from `data-seed` |
+| `scripts/export_ol_catalog_seed.py` | Package/split `ol_catalog.db` for the `data-seed` release |
 | `scripts/mullvad_register_wg.py` | Register Mullvad WireGuard keys |
-| `scripts/ol_import_dumps.py` / `refresh_ol_catalog.sh` | Open Library catalog |
+| `scripts/ol_import_dumps.py` / `refresh_ol_catalog.sh` | Open Library catalog build / dump check |
 | `scripts/check.ps1` | Pre-deploy tests + typecheck (dev) |
 
 ### Health

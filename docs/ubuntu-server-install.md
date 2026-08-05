@@ -61,14 +61,16 @@ The script walks you through:
 1. **Core** - `APP_URL`, `SECRET_KEY`, `TZ`, `PUID`/`PGID`, `DOCKER_GID`
 2. **Media mounts** - audiobooks / ebooks / Open Library dumps (+ staging folders)
 3. **Bundled media** - ABS + Kavita + LibraForge (default for new servers)
-4. **Indexers** - Prowlarr / Jackett / FlareSolverr URLs (compose sidecars)
-5. **Debrid** - Real-Debrid / TorBox (optional)
-6. **Pipelines + Sweep** - LibraForge / ebook organizer + scan cadence defaults
-7. **Catalog / LLM** - Hardcover, OpenRouter, AA, NYT, ISBNdb, Google Books (optional)
-8. **Android APK repo** + scraper RSS-only defaults
-9. **Nginx Proxy Manager** - default Yes; skip if you already reverse-proxy (ports 80/443)
-10. **VPN** - Mullvad/gluetun (optional profile)
-11. **Start stack** → sync keys → configure NPM via API → optional VAPID → health report
+4. **Jackett** — bundled + AudioBookBay/Flare preconfigure (or connect existing URL + API key)
+5. **Prowlarr** — Knaben + ABB Torznab → Jackett (or connect existing)
+6. **Open Library catalog** — Download prebuilt / Build locally / Skip
+7. **Debrid** — Real-Debrid / TorBox (optional)
+8. **Pipelines + Sweep** — LibraForge / ebook organizer + scan cadence defaults
+9. **Catalog / LLM** — Hardcover, OpenRouter, AA, NYT, ISBNdb, Google Books (optional)
+10. **Android APK repo** + scraper RSS-only defaults
+11. **Nginx Proxy Manager** — default Yes; skip if you already reverse-proxy (ports 80/443)
+12. **VPN** — Mullvad/gluetun (optional profile)
+13. **Start stack** → configure Jackett/Prowlarr → sync ABS/Kavita/LF → NPM API → optional VAPID → health report
 
 Re-runs are safe: existing `.env` secrets are kept when you press Enter on a prompt. NPM proxy hosts are upserted by domain (no duplicates).
 
@@ -121,6 +123,20 @@ LIBRARY_NONINTERACTIVE=1 \
 2. Create library + offline PIN
 3. **`/admin/setup`** - bundled stack should already show green probes; finish Audible / debrid / catalog as needed
 4. Share invite link from Settings
+
+
+
+## Jackett / Prowlarr / Open Library
+
+| Choice | Default | Skip / connect existing |
+|--------|---------|-------------------------|
+| Bundled Jackett | Yes | Answer **n**, then paste Jackett URL + API key (`LIBRARY_SKIP_JACKETT=1` / `LIBRARY_JACKETT_URL`) |
+| Bundled Prowlarr | Yes | Answer **n**, then paste Prowlarr URL + API key (`LIBRARY_SKIP_PROWLARR=1` / `LIBRARY_PROWLARR_URL`) |
+| Open Library cache | Download | `LIBRARY_OL_MODE=download|build|skip` |
+
+After start, `scripts/configure_jackett.sh` and `scripts/configure_prowlarr.sh` idempotently wire FlareSolverr + AudioBookBay and Knaben (same shape as production on the Pi). Re-run anytime.
+
+Prebuilt OL catalog assets live on the GitHub Release tag [`data-seed`](https://github.com/brutaliccus/Library/releases/tag/data-seed). Maintainers package with `scripts/export_ol_catalog_seed.py`.
 
 ## Do not touch the Pi
 

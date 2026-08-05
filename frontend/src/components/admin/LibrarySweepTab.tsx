@@ -1433,6 +1433,9 @@ type CleanupCandidate = {
   reason: string;
   size_bytes: number;
   scope: "audiobook" | "ebook";
+  keep_path?: string | null;
+  default_selected?: boolean;
+  role?: "delete" | "keep" | string;
 };
 
 type CleanupPreview = {
@@ -1472,7 +1475,14 @@ function CleanupSection() {
     },
     onSuccess: (data) => {
       setPreview(data);
-      setSelected(new Set(data.candidates.map((c) => c.path)));
+      // Default: delete older duplicates / orphans; leave newest m4b keepers unchecked.
+      setSelected(
+        new Set(
+          data.candidates
+            .filter((c) => c.default_selected !== false && c.role !== "keep")
+            .map((c) => c.path),
+        ),
+      );
       setConfirmApply(false);
       if (data.count === 0) toast("No orphaned files or folders found", "success");
     },
@@ -1484,10 +1494,10 @@ function CleanupSection() {
   const applyMutation = useMutation({
     mutationFn: async () => {
       if (!preview) throw new Error("No preview to apply");
-      const allSelected = selected.size === preview.candidates.length;
+      // Always send explicit paths so keepers left unchecked are never deleted.
       const { data } = await api.post("/admin/library-sweep/cleanup/apply", {
         token: preview.token,
-        ...(allSelected ? {} : { paths: Array.from(selected) }),
+        paths: Array.from(selected),
       });
       return data as CleanupApplyResult;
     },
@@ -1528,7 +1538,8 @@ function CleanupSection() {
         <p className="text-xs text-gray-500 mt-1 max-w-2xl">
           Dry-run scan for non-canonical leftovers under the library roots: duplicate .m4b files,
           multipart audio left after conversion, numbered ebook duplicates, junk files, and empty
-          folders. Canonical layout is{" "}
+          folders. For duplicate .m4b groups, the newest file is kept by default and older copies
+          are selected for delete — uncheck/check rows to choose otherwise. Canonical layout is{" "}
           <code className="text-gray-400">{"{author}/{series} [{edition}]/{title}/"}</code> under
           each library root; staging folders are always protected. Nothing is deleted without an
           explicit confirmation below.
@@ -1592,6 +1603,21 @@ function CleanupSection() {
                 <button
                   type="button"
                   className="underline hover:text-gray-300"
+                  onClick={() =>
+                    setSelected(
+                      new Set(
+                        candidates
+                          .filter((c) => c.default_selected !== false && c.role !== "keep")
+                          .map((c) => c.path),
+                      ),
+                    )
+                  }
+                >
+                  Select defaults
+                </button>{" "}
+                <button
+                  type="button"
+                  className="underline hover:text-gray-300"
                   onClick={() => setSelected(new Set(candidates.map((c) => c.path)))}
                 >
                   Select all
@@ -1610,41 +1636,71 @@ function CleanupSection() {
             <p className="text-sm text-gray-500">No orphaned files or folders found.</p>
           ) : (
             <ul className="space-y-1.5 max-h-96 overflow-y-auto pr-0.5">
-              {candidates.map((c) => (
-                <li
-                  key={c.path}
-                  className="flex items-start gap-2.5 rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-2"
-                >
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 rounded border-gray-600 bg-gray-900"
-                    checked={selected.has(c.path)}
-                    onChange={() => toggleSelected(c.path)}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs text-gray-300 font-mono truncate" title={c.path}>
-                      {c.path}
-                    </p>
-                    <p className="text-[11px] text-gray-500 mt-0.5">
-                      <span className="uppercase tracking-wide text-gray-600">
-                        {c.kind.replace(/_/g, " ")}
-                      </span>
-                      {" - "}
-                      {c.reason}
-                      {c.size_bytes > 0 && <> - {formatBytes(c.size_bytes)}</>}
-                    </p>
-                  </div>
-                  <span
-                    className={`text-[10px] px-1.5 py-0.5 rounded border shrink-0 ${
-                      c.scope === "audiobook"
-                        ? "border-sky-800/50 bg-sky-950/40 text-sky-300"
-                        : "border-amber-800/40 bg-amber-950/30 text-amber-300"
+              {candidates.map((c) => {
+                const isKeep = c.role === "keep" || (!selected.has(c.path) && !!c.keep_path);
+                const willDelete = selected.has(c.path);
+                return (
+                  <li
+                    key={c.path}
+                    className={`flex items-start gap-2.5 rounded-lg border px-3 py-2 ${
+                      willDelete
+                        ? "border-red-900/50 bg-red-950/20"
+                        : isKeep
+                          ? "border-emerald-900/40 bg-emerald-950/15"
+                          : "border-gray-800 bg-gray-950/40"
                     }`}
                   >
-                    {c.scope}
-                  </span>
-                </li>
-              ))}
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 rounded border-gray-600 bg-gray-900"
+                      checked={willDelete}
+                      onChange={() => toggleSelected(c.path)}
+                      title={willDelete ? "Selected for delete" : "Not selected (kept)"}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded border shrink-0 uppercase tracking-wide ${
+                            willDelete
+                              ? "border-red-800/60 bg-red-950/40 text-red-300"
+                              : "border-emerald-800/50 bg-emerald-950/30 text-emerald-300"
+                          }`}
+                        >
+                          {willDelete ? "Delete" : "Keep"}
+                        </span>
+                        <p className="text-xs text-gray-300 font-mono truncate" title={c.path}>
+                          {c.path}
+                        </p>
+                      </div>
+                      <p className="text-[11px] text-gray-500 mt-0.5">
+                        <span className="uppercase tracking-wide text-gray-600">
+                          {c.kind.replace(/_/g, " ")}
+                        </span>
+                        {" - "}
+                        {c.reason}
+                        {c.size_bytes > 0 && <> - {formatBytes(c.size_bytes)}</>}
+                        {c.keep_path && c.path !== c.keep_path && (
+                          <>
+                            {" - "}
+                            <span className="text-emerald-600/80">
+                              keeper: {c.keep_path.split(/[/\\]/).pop()}
+                            </span>
+                          </>
+                        )}
+                      </p>
+                    </div>
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded border shrink-0 ${
+                        c.scope === "audiobook"
+                          ? "border-sky-800/50 bg-sky-950/40 text-sky-300"
+                          : "border-amber-800/40 bg-amber-950/30 text-amber-300"
+                      }`}
+                    >
+                      {c.scope}
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

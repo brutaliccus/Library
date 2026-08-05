@@ -47,7 +47,7 @@ AUDIO_SIDECARS = {
     ".m4b-tool-metadata.json",
 }
 EBOOK_SIDECARS = {"ebook_applied.json"}
-SKIP_DIRNAMES_COMMON = {".git", "@eaDir", ".DS_Store", "lost+found"}
+SKIP_DIRNAMES_COMMON = {".git", "@eaDir", ".DS_Store", "lost+found", "caltrash"}
 
 _DUP_SUFFIX = re.compile(r"(?:[-_ ](?:copy|\d+)| \(\d+\))$", re.IGNORECASE)
 _PREVIEW_TTL_SEC = 30 * 60
@@ -61,6 +61,9 @@ class CleanupCandidate:
     reason: str
     size_bytes: int = 0
     scope: Scope = "audiobook"
+    keep_path: str | None = None
+    default_selected: bool = True
+    role: str = "delete"  # "delete" | "keep"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +72,9 @@ class CleanupCandidate:
             "reason": self.reason,
             "size_bytes": int(self.size_bytes or 0),
             "scope": self.scope,
+            "keep_path": self.keep_path,
+            "default_selected": bool(self.default_selected),
+            "role": self.role,
         }
 
 
@@ -183,6 +189,11 @@ def iter_ebook_book_dirs(root: Path) -> Iterable[Path]:
 
 
 def pick_m4b_keeper(m4bs: list[Path]) -> Path:
+    """Keep the newest m4b by mtime; ties break by size then clean stem.
+
+    Folder cleanup defaults to deleting older duplicates so the freshest
+    convert/organize output is retained.
+    """
     def score(p: Path) -> tuple:
         try:
             st = p.stat()
@@ -191,7 +202,8 @@ def pick_m4b_keeper(m4bs: list[Path]) -> Path:
             size, mtime = 0, 0.0
         clean = 0 if _DUP_SUFFIX.search(p.stem) else 1
         depth = len(p.parts)
-        return (clean, size, mtime, depth, -len(p.name))
+        # Newest mtime first (keeper); then larger, then clean stem.
+        return (mtime, size, clean, depth, -len(p.name))
 
     return max(m4bs, key=score)
 
@@ -214,16 +226,23 @@ def classify_audiobook_dir(book_dir: Path) -> list[CleanupCandidate]:
     if len(m4bs) >= 2:
         keeper = pick_m4b_keeper(m4bs)
         for f in m4bs:
-            if f != keeper:
-                out.append(
-                    CleanupCandidate(
-                        path=str(f),
-                        kind="duplicate_m4b",
-                        reason=f"Extra .m4b; keeping {keeper.name}",
-                        size_bytes=_safe_size(f),
-                        scope="audiobook",
-                    )
+            is_keep = f == keeper
+            out.append(
+                CleanupCandidate(
+                    path=str(f),
+                    kind="duplicate_m4b",
+                    reason=(
+                        f"Keep (newest by mtime); siblings selected for delete"
+                        if is_keep
+                        else f"Delete (older duplicate); keeping {keeper.name}"
+                    ),
+                    size_bytes=_safe_size(f),
+                    scope="audiobook",
+                    keep_path=str(keeper),
+                    default_selected=not is_keep,
+                    role="keep" if is_keep else "delete",
                 )
+            )
         for f in parts:
             out.append(
                 CleanupCandidate(
@@ -370,15 +389,21 @@ def _classify_hardlinked_m4b_dupes(book_dirs: Iterable[Path]) -> list[CleanupCan
             continue
         keeper = pick_m4b_keeper(paths)
         for p in paths:
-            if p == keeper:
-                continue
+            is_keep = p == keeper
             out.append(
                 CleanupCandidate(
                     path=str(p),
                     kind="hardlink_duplicate",
-                    reason=f"Hardlinked duplicate of {keeper}",
+                    reason=(
+                        f"Keep (newest hardlink); siblings selected for delete"
+                        if is_keep
+                        else f"Hardlinked duplicate of {keeper.name} (older)"
+                    ),
                     size_bytes=0,
                     scope="audiobook",
+                    keep_path=str(keeper),
+                    default_selected=not is_keep,
+                    role="keep" if is_keep else "delete",
                 )
             )
     return out

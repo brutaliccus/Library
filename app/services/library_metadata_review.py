@@ -15,10 +15,13 @@ from app.config import get_settings
 from app.services import audiobookshelf, kavita, libraforge
 from app.services.ebook_pipeline import (
     EbookMeta,
+    clean_ebook_search_title,
     embed_ebook_metadata,
     ensure_series_index,
     pick_primary_ebook,
+    pin_organized_ebook_to_kavita,
     read_ebook_metadata,
+    rename_ebook_to_metadata_title,
 )
 from app.services.ebook_quick_review import (
     EbookQuickReviewError,
@@ -172,7 +175,7 @@ async def load_abs_metadata_review(item_id: str) -> dict[str, Any]:
         "queries": [query] if query else [],
         "clues": {
             "query": query,
-            "title": title,
+            "title": search_title,
             "author": author,
             "series": series,
             "sequence": sequence,
@@ -556,7 +559,8 @@ async def load_ebook_metadata_review(
     )
     author = (disk.get("author") or "").strip() or _ebook_author_from_meta(meta, series)
     summary = str(meta.get("summary") or meta.get("description") or "").strip()
-    query = f"{title} {author}".strip()
+    search_title = clean_ebook_search_title(title) or title
+    query = f"{search_title} {author}".strip()
 
     series_name = (disk.get("series") or "").strip()
     sequence = (disk.get("series_index") or "").strip()
@@ -675,6 +679,10 @@ async def apply_ebook_metadata_review(
     ebook_meta = ensure_series_index(ebook_meta)
 
     primary = _pick_target_ebook(target_paths, chapter_id=chapter_id, target_filename=target_filename)
+    previous_filename = primary.name
+
+    # Rename this volume's file to the metadata title (siblings untouched).
+    primary = rename_ebook_to_metadata_title(primary, ebook_meta.title or primary.stem)
 
     embedded_paths: list[str] = []
     try:
@@ -699,7 +707,7 @@ async def apply_ebook_metadata_review(
     except Exception as e:
         logger.warning("Could not write ebook_applied.json for %s: %s", primary, e)
 
-    # Never rename a multi-file Kavita series to a single volume title.
+    # Never rename a multi-file Kavita series display name to a single volume title.
     series_display = (
         (ebook_meta.series or "").strip()
         or str(series.get("name") or series.get("localizedName") or "").strip()
@@ -713,6 +721,25 @@ async def apply_ebook_metadata_review(
         author=ebook_meta.author,
         summary=summary,
     )
+    cover_updated = False
+    if (ebook_meta.cover_url or "").strip().startswith("http"):
+        try:
+            cover_updated = await kavita.set_series_cover_from_url(
+                series_id, ebook_meta.cover_url or ""
+            )
+        except Exception as e:
+            logger.warning("Kavita cover upload after ebook apply failed: %s", e)
+    try:
+        await pin_organized_ebook_to_kavita(
+            primary,
+            ebook_meta,
+            summary=summary,
+            kavita_series_id=series_id,
+            kavita_chapter_id=chapter_id,
+            manually_applied=True,
+        )
+    except Exception as e:
+        logger.warning("Ebook pin after metadata apply failed: %s", e)
     try:
         await kavita.scan_series(series_id)
     except Exception as e:
@@ -724,14 +751,18 @@ async def apply_ebook_metadata_review(
         "series_id": series_id,
         "chapter_id": chapter_id,
         "target_filename": primary.name if primary else None,
+        "renamed_from": previous_filename if previous_filename != primary.name else None,
         "applied": True,
         "embedded": bool(embedded_paths),
         "embedded_files": embedded_paths,
         "untouched_siblings": [
-            p.name for p in all_paths if p.resolve() != primary.resolve()
+            p.name
+            for p in all_paths
+            if p.name != previous_filename and p.name != primary.name
         ],
         "primary_ebook": primary.name if primary else None,
         "kavita_updated": kavita_updated,
+        "cover_updated": cover_updated,
         "previous_title": str(
             series.get("name") or series.get("localizedName") or ""
         ).strip(),

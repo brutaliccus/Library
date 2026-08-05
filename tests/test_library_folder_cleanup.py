@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import time
 
 import pytest
 
@@ -21,16 +23,24 @@ def test_classify_audiobook_dir_duplicate_m4b(tmp_path: Path):
     book = tmp_path / "Author" / "Title"
     book.mkdir(parents=True)
     keeper = book / "Title.m4b"
-    keeper.write_bytes(b"x" * 100)
     dupe = book / "Title copy.m4b"
     dupe.write_bytes(b"x" * 10)
+    keeper.write_bytes(b"x" * 100)
+    # Newest mtime = keeper (delete older copy by default)
+    st = dupe.stat()
+    os.utime(dupe, (st.st_atime, st.st_mtime - 1000))
 
     candidates = cleanup.classify_audiobook_dir(book)
     kinds = {c.kind for c in candidates}
     assert "duplicate_m4b" in kinds
     dup_paths = {c.path for c in candidates if c.kind == "duplicate_m4b"}
     assert str(dupe) in dup_paths
-    assert str(keeper) not in dup_paths
+    assert str(keeper) in dup_paths
+    by_path = {c.path: c for c in candidates if c.kind == "duplicate_m4b"}
+    assert by_path[str(dupe)].default_selected is True
+    assert by_path[str(dupe)].role == "delete"
+    assert by_path[str(keeper)].default_selected is False
+    assert by_path[str(keeper)].role == "keep"
     assert all(c.scope == "audiobook" for c in candidates)
 
 
@@ -271,3 +281,25 @@ def test_apply_cleanup_refuses_path_outside_preview(tmp_path: Path, monkeypatch)
     assert result["ok"] is False
     assert result["errors"]
     assert sneaky.exists()
+
+
+def test_pick_m4b_keeper_prefers_newest(tmp_path: Path):
+    book = tmp_path / "Author" / "Title"
+    book.mkdir(parents=True)
+    older = book / "Title older.m4b"
+    newer = book / "Title.m4b"
+    older.write_bytes(b"x" * 50)
+    newer.write_bytes(b"x" * 10)  # smaller but newer — still keeper
+    older_stat = older.stat()
+    os.utime(older, (older_stat.st_atime, older_stat.st_mtime - 1000))
+
+    keeper = cleanup.pick_m4b_keeper([older, newer])
+    assert keeper == newer
+
+    candidates = cleanup.classify_audiobook_dir(book)
+    dups = [c for c in candidates if c.kind == "duplicate_m4b"]
+    selected = {c.path for c in dups if c.default_selected}
+    kept = {c.path for c in dups if c.role == "keep"}
+    assert str(older) in selected
+    assert str(newer) in kept
+    assert str(newer) not in selected

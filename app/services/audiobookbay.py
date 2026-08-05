@@ -16,12 +16,13 @@ import time
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
 from app.config import get_settings
+from app.services.flaresolverr_gate import flaresolverr_slot
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -144,18 +145,25 @@ async def _flare_post(payload: dict[str, Any], *, client_timeout: float) -> dict
         return None
     api = f"{flare}/v1" if "/v1" not in flare else flare
     try:
-        async with httpx.AsyncClient(timeout=client_timeout) as client:
-            resp = await client.post(api, json=payload)
-            if resp.status_code >= 500:
-                logger.warning("FlareSolverr HTTP %s for %s", resp.status_code, payload.get("cmd"))
-                return None
-            return resp.json()
+        async with flaresolverr_slot():
+            async with httpx.AsyncClient(timeout=client_timeout) as client:
+                resp = await client.post(api, json=payload)
+                if resp.status_code >= 500:
+                    logger.warning("FlareSolverr HTTP %s for %s", resp.status_code, payload.get("cmd"))
+                    return None
+                return resp.json()
     except httpx.TimeoutException:
         logger.warning("FlareSolverr client timeout (%.0fs) for %s", client_timeout, payload.get("cmd"))
         return None
     except Exception as e:
         logger.warning("FlareSolverr request failed: %s", e)
         return None
+
+
+def _should_warmup(url: str) -> bool:
+    """CF settle wait only on mirror roots — not every /abss/ detail page."""
+    path = (urlparse(url).path or "/").rstrip("/") or "/"
+    return path == "/"
 
 
 async def _ensure_flare_session() -> str | None:
@@ -296,10 +304,9 @@ async def _fetch_html(url: str, timeout: float = 20.0, allow_flare: bool = True)
                 return html
         if not allow_flare or not settings.flaresolverr_url:
             if _needs_flare_only(url):
-                return await _fetch_via_flare(url, warmup=True)
+                return await _fetch_via_flare(url, warmup=_should_warmup(url))
             return None
-        warmup = "page/" not in url and "?" not in url.split("/")[-1]
-        return await _fetch_via_flare(url, warmup=warmup)
+        return await _fetch_via_flare(url, warmup=_should_warmup(url))
 
 
 async def _resolve_base_url() -> str | None:

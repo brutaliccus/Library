@@ -91,6 +91,10 @@ services:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: audiobook-flaresolverr
     shm_size: "256mb"
+    # Pi guardrails: unbounded Chromium routinely pushes load >10 and fills swap.
+    mem_limit: 768m
+    cpus: "1.5"
+    pids_limit: 200
     environment:
       - LOG_LEVEL=info
       - TZ=${TZ:-UTC}

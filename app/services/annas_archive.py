@@ -231,12 +231,15 @@ async def _fetch_via_flaresolverr(
     }
     if wait_seconds > 0:
         payload["waitInSeconds"] = wait_seconds
+    from app.services.flaresolverr_gate import flaresolverr_slot
+
     for attempt in range(retries):
         try:
-            async with httpx.AsyncClient(timeout=req_timeout) as client:
-                resp = await client.post(api_url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
+            async with flaresolverr_slot():
+                async with httpx.AsyncClient(timeout=req_timeout) as client:
+                    resp = await client.post(api_url, json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
             if data.get("status") != "ok":
                 msg = str(data.get("message", data))
                 logger.warning(f"FlareSolverr error: {msg}")

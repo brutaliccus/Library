@@ -178,8 +178,9 @@ def env_defaults() -> dict[str, Any]:
     s = get_settings()
     rss_n = s.scraper_rss_every_n_jobs
     if rss_n is None:
-        # Default RSS cadence is every job when we ship ABB RSS-only by default.
-        rss_n = 1
+        # ABB RSS-only uses Flare+Chromium for listings + hash resolve. Every-job
+        # cadence (~30s) kept the Pi under continuous Chromium load; space it out.
+        rss_n = 10 if s.abb_rss_only else 3
     return {
         "interval_seconds": s.scraper_interval_seconds,
         "queries_per_job": s.scraper_queries_per_job,

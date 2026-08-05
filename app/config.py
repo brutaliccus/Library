@@ -76,8 +76,8 @@ class Settings(BaseSettings):
     scraper_prune_stale_days: int = 30
     scraper_match_batch_size: int = 200
     scraper_knaben_crawl_tasks_per_job: int = 8
-    # Override scraper RSS cadence (jobs between recent-release polls). None = 1 when
-    # abb_rss_only else 3.
+    # Override scraper RSS cadence (jobs between recent-release polls). None = 10 when
+    # abb_rss_only else 3 (ABB RSS uses Flare/Chromium — avoid every-job cadence).
     scraper_rss_every_n_jobs: int | None = None
 
     real_debrid_api_token: str = ""

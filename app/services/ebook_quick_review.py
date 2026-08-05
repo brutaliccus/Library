@@ -17,8 +17,10 @@ from app.models import DownloadRequest
 from app.services.ebook_pipeline import (
     EbookMeta,
     _collect_ebooks,
+    clean_ebook_search_title,
     embed_ebook_metadata,
     pick_primary_ebook,
+    rename_ebook_to_metadata_title,
     title_similarity,
 )
 from app.services.forge_pipeline import (
@@ -96,10 +98,17 @@ def write_applied_ebook_meta(
     Written next to library ebooks as ``ebook_applied.json`` so Kavita scans cannot
     wipe manual titles from the Library Site shelf (file-scoped; one book folder).
     """
+    from app.services.ebook_pipeline import sanitize_ebook_meta
+    from app.utils.book_series import is_corrupt_metadata_value
+
+    meta = sanitize_ebook_meta(meta)
     staging = staging.resolve()
     staging.mkdir(parents=True, exist_ok=True)
     path = staging / APPLIED_META_FILENAME
     summary_text = (summary or "").strip()
+    if is_corrupt_metadata_value(summary_text):
+        summary_text = ""
+    series = None if is_corrupt_metadata_value(meta.series) else meta.series
     payload = {
         "applied": True,
         "manually_applied": bool(manually_applied),
@@ -109,8 +118,8 @@ def write_applied_ebook_meta(
         "meta": {
             "title": meta.title,
             "author": meta.author,
-            "series": meta.series,
-            "series_index": meta.series_index,
+            "series": series,
+            "series_index": meta.series_index if series else None,
             "edition": meta.edition,
             "isbn13": meta.isbn13,
             "isbn10": meta.isbn10,
@@ -274,7 +283,7 @@ def iter_applied_ebook_override_dirs(ebook_root: Path | None = None) -> list[Pat
     root = Path(ebook_root or get_settings().ebook_dir)
     if not root.is_dir():
         return []
-    skip = {"unorganized"}
+    skip = {"unorganized", "caltrash"}
     found: list[Path] = []
     for path in root.rglob(APPLIED_META_FILENAME):
         try:
@@ -297,8 +306,8 @@ async def resync_applied_ebook_overrides_to_kavita() -> dict[str, Any]:
     from app.services import kavita
 
     dirs = iter_applied_ebook_override_dirs()
-    out: dict[str, Any] = {"scanned": len(dirs), "updated": 0, "skipped": 0, "errors": 0}
-    # Group by series_id when known.
+    out: dict[str, Any] = {"scanned": len(dirs), "updated": 0, "skipped": 0, "errors": 0, "resolved": 0}
+    # Group by series_id when known (or resolved from on-disk ebook path).
     by_series: dict[int, list[dict[str, Any]]] = {}
     for folder in dirs:
         data = _read_applied_ebook_raw(folder)
@@ -311,23 +320,78 @@ async def resync_applied_ebook_overrides_to_kavita() -> dict[str, Any]:
         except (TypeError, ValueError):
             sid_i = None
         if sid_i is None:
+            # Sweep organize historically omitted series ids — resolve via primary ebook path.
+            try:
+                from app.services.ebook_pipeline import pick_primary_ebook
+
+                primary = pick_primary_ebook(folder)
+                if primary is not None:
+                    sid_i = await kavita.find_series_id_for_ebook_path(primary)
+                    if sid_i is not None:
+                        from app.services.ebook_pipeline import ebook_series_paths_coherent
+
+                        paths = await kavita.get_series_local_file_paths(sid_i)
+                        if not ebook_series_paths_coherent(primary, paths):
+                            sid_i = None
+                        else:
+                            ov_tmp = load_applied_ebook_override(folder)
+                            meta_tmp = load_applied_ebook_meta(folder)
+                            if meta_tmp is not None:
+                                write_applied_ebook_meta(
+                                    folder,
+                                    meta_tmp,
+                                    summary=(ov_tmp or {}).get("summary"),
+                                    manually_applied=bool(data.get("manually_applied")),
+                                    kavita_series_id=sid_i,
+                                    kavita_chapter_id=data.get("kavita_chapter_id"),
+                                )
+                            out["resolved"] += 1
+            except Exception as resolve_err:
+                logger.debug("Could not resolve Kavita series for %s: %s", folder, resolve_err)
+        if sid_i is None:
             out["skipped"] += 1
             continue
         ov = load_applied_ebook_override(folder)
         if not ov:
             out["skipped"] += 1
             continue
+        ov = {**ov, "_folder": str(folder)}
         by_series.setdefault(sid_i, []).append(ov)
+
+    from app.services.ebook_pipeline import ebook_series_paths_coherent, pick_primary_ebook
+    from app.utils.book_series import is_corrupt_metadata_value
 
     for sid, overrides in by_series.items():
         try:
             paths = await kavita.get_series_local_file_paths(sid)
+            coherent = True
+            for ov in overrides:
+                folder = Path(ov.get("_folder") or "")
+                primary = pick_primary_ebook(folder) if folder.is_dir() else None
+                if primary is None or not ebook_series_paths_coherent(primary, paths):
+                    coherent = False
+                    break
+            if not coherent:
+                logger.warning(
+                    "Skipping Kavita resync for series %s - incoherent (%s files)",
+                    sid,
+                    len(paths),
+                )
+                out["skipped"] += 1
+                continue
             multi = len(paths) > 1
-            # Prefer series name from any override; title only for single-file series.
             series_name = next((o.get("series") for o in overrides if o.get("series")), "") or ""
+            if is_corrupt_metadata_value(series_name):
+                series_name = ""
             title = overrides[0].get("title") or ""
+            if is_corrupt_metadata_value(title):
+                title = ""
             author = next((o.get("author") for o in overrides if o.get("author")), "") or ""
+            if is_corrupt_metadata_value(author):
+                author = ""
             summary = next((o.get("summary") for o in overrides if o.get("summary")), "") or None
+            if is_corrupt_metadata_value(summary):
+                summary = None
             name = series_name if multi else (title or series_name)
             if not name:
                 out["skipped"] += 1
@@ -338,6 +402,12 @@ async def resync_applied_ebook_overrides_to_kavita() -> dict[str, Any]:
                 author=author or None,
                 summary=summary,
             )
+            cover_url = next((o.get("cover_url") for o in overrides if o.get("cover_url")), "") or ""
+            if (not multi) and cover_url.startswith(("http://", "https://")):
+                try:
+                    await kavita.set_series_cover_from_url(sid, cover_url)
+                except Exception as cover_err:
+                    logger.warning("Ebook cover resync for series %s failed: %s", sid, cover_err)
             if ok:
                 out["updated"] += 1
             else:
@@ -603,6 +673,7 @@ async def load_ebook_quick_review(req: DownloadRequest) -> dict[str, Any]:
 
     folder_hint = _folder_title_hint(staging)
     title = clean_catalog_title(req.title or "") or (req.title or "").strip() or folder_hint
+    title = clean_ebook_search_title(title) or title
     author = (req.author or "").strip()
     if author.lower() == "unknown":
         author = ""
@@ -660,11 +731,14 @@ async def search_ebook_metadata_candidates(
     """Search Hardcover + Open Library (shared by quarantine + library editors)."""
     from app.services import google_books, hardcover
 
-    q = (query or "").strip()
-    t = (title or "").strip()
+    t = clean_ebook_search_title((title or "").strip()) or (title or "").strip()
     a = (author or "").strip()
+    q = clean_ebook_search_title((query or "").strip()) or (query or "").strip()
     if not q:
         q = f"{t} {a}".strip()
+    else:
+        # Prefer cleaned title words even when a raw query was provided.
+        q = clean_ebook_search_title(q) or q
     if len(q) < 2:
         raise EbookQuickReviewError("Search query is required")
 
@@ -768,9 +842,12 @@ async def apply_ebook_quick_review(
     if not meta.reason:
         meta.reason = f"Manual {label} match"
 
+    primary = pick_primary_ebook(staging)
+    if primary:
+        primary = rename_ebook_to_metadata_title(primary, meta.title or primary.stem)
+
     applied_path = write_applied_ebook_meta(staging, meta)
 
-    primary = pick_primary_ebook(staging)
     embedded = False
     if primary:
         try:

@@ -26,6 +26,16 @@ settings = get_settings()
 # Default — prefer settings.ebook_staging_dirname (Admin Config → Storage / Paths).
 # Kavita must exclude this folder name from its library root (see docs/ebooks.md).
 EBOOK_UNORGANIZED_DIRNAME = "unorganized"
+# Calibre-Web trash + our staging — must never be ingested by Kavita.
+EBOOK_KAVITA_EXCLUDED_DIRNAMES = frozenset({"caltrash", EBOOK_UNORGANIZED_DIRNAME})
+# Root .kavitaignore patterns (Glob). Without these, caltrash poison Series tags
+# (e.g. "???…") LocalizedSeries-merge into one mega-series on every scan.
+EBOOK_KAVITA_IGNORE_PATTERNS = (
+    "caltrash/*",
+    "unorganized/*",
+    "**/caltrash/**",
+    "**/unorganized/**",
+)
 
 
 def ebook_staging_dirname() -> str:
@@ -59,6 +69,18 @@ _FORMAT_RANK = {
 
 _ISBN13_RE = re.compile(r"(?:97[89][-\s]?)?(?:\d[-\s]?){9}[\dXx]")
 _ISBN_DIGITS_RE = re.compile(r"^(?:\d{9}[\dXx]|\d{13})$")
+# Filename / torrent junk that confuses Hardcover/OL search (trailing only).
+# Allows "-copy" but not hyphen+digits so titles like "Catch-22" stay intact.
+_EBOOK_DUP_SUFFIX_RE = re.compile(
+    r"(?:(?:_|\s)(?:copy|\d+)|-copy| \(\d+\))$",
+    re.IGNORECASE,
+)
+_EBOOK_FORMAT_TAG_RE = re.compile(
+    r"\s*[\[(](?:epub|pdf|mobi|azw3?|kindle|retail|converted)[\])]|\.(?:epub|pdf|mobi|azw3?)$",
+    re.IGNORECASE,
+)
+_EBOOK_NUMERIC_PARENS_RE = re.compile(r"\s*[\(\[]\s*\d+\s*[\)\]]")
+_EBOOK_SYMBOL_RUN_RE = re.compile(r"[^\w\s'':&-]+", re.UNICODE)
 
 EBOOK_PIPELINE_STATUSES = frozenset({
     "metadata_forge",
@@ -92,15 +114,64 @@ def ebook_unorganized_root() -> Path:
     return Path(settings.ebook_dir) / ebook_staging_dirname()
 
 
+def ensure_ebook_kavita_ignores() -> Path:
+    """Write library-root ``.kavitaignore`` so Kavita never scans staging/trash.
+
+    Prior "path-coherent pin" fixes skipped pinning onto mega-series but left
+    ``caltrash/`` + ``unorganized/`` inside the Kavita library root. Kavita's
+    LocalizedSeries merge then matched every real series against a poison
+    ``???…`` Series tag from ``caltrash/Unknown/1/1.epub`` and rebuilt an
+    80+ file mega-series on every scan.
+    """
+    ebook_root = Path(settings.ebook_dir)
+    try:
+        ebook_root.mkdir(parents=True, exist_ok=True)
+        ignore_path = ebook_root / ".kavitaignore"
+        desired = "\n".join(EBOOK_KAVITA_IGNORE_PATTERNS) + "\n"
+        existing = ""
+        if ignore_path.is_file():
+            try:
+                existing = ignore_path.read_text(encoding="utf-8")
+            except OSError:
+                existing = ""
+        # Preserve admin-added patterns; ensure ours are present.
+        lines = [ln.strip() for ln in existing.splitlines() if ln.strip()]
+        changed = False
+        for pat in EBOOK_KAVITA_IGNORE_PATTERNS:
+            if pat not in lines:
+                lines.append(pat)
+                changed = True
+        if changed or not ignore_path.is_file():
+            ignore_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            logger.info("Wrote ebook .kavitaignore at %s", ignore_path)
+
+        for dirname in EBOOK_KAVITA_EXCLUDED_DIRNAMES:
+            folder = ebook_root / dirname
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
+            nested = folder / ".kavitaignore"
+            if not nested.is_file():
+                nested.write_text("*\n", encoding="utf-8")
+    except OSError as e:
+        logger.warning("Could not ensure ebook .kavitaignore under %s: %s", ebook_root, e)
+    return ebook_root
+
+
 def ensure_ebook_unorganized_root() -> Path:
-    """Create ebook staging under the ebook library (Kavita excludes this name)."""
+    """Create ebook staging under the ebook library (excluded via .kavitaignore)."""
+    ensure_ebook_kavita_ignores()
     root = ebook_unorganized_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
-        # Belt-and-suspenders marker; Kavita folder exclusion is the real gate.
+        # Legacy marker (non-Kavita tools); real gate is .kavitaignore.
         ignore = root / ".ignore"
         if not ignore.exists():
             ignore.write_text("", encoding="utf-8")
+        kavita_ignore = root / ".kavitaignore"
+        if not kavita_ignore.is_file():
+            kavita_ignore.write_text("*\n", encoding="utf-8")
     except OSError as e:
         logger.warning("Could not ensure ebook unorganized root %s: %s", root, e)
     return root
@@ -141,6 +212,232 @@ def ebook_destination_dir(request_id: int, author: str, book_title: str) -> Path
 def _norm(s: str) -> str:
     s = (s or "").lower().replace("\u2019", "'").replace("\u2018", "'")
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+def clean_ebook_search_title(title: str) -> str:
+    """Strip filename junk so catalog search keeps meaningful title words.
+
+    Removes trailing ``(12)`` / ``_12`` / ``-copy`` markers, underscore separators,
+    format tags, and pure-numeric parentheticals. Preserves word tokens (including
+    titles that are themselves numeric like ``1984``).
+    """
+    t = (title or "").strip()
+    if not t:
+        return ""
+    t = t.replace("_", " ")
+    t = _EBOOK_FORMAT_TAG_RE.sub("", t)
+    # Drop pure-numeric parentheticals anywhere (disk/volume markers in filenames).
+    t = _EBOOK_NUMERIC_PARENS_RE.sub(" ", t)
+    # Peel trailing duplicate/copy suffixes repeatedly.
+    prev = None
+    while prev != t:
+        prev = t
+        t = _EBOOK_DUP_SUFFIX_RE.sub("", t).strip()
+    # Collapse leftover symbol runs to spaces; keep letters/digits/apostrophes.
+    t = _EBOOK_SYMBOL_RUN_RE.sub(" ", t)
+    t = re.sub(r"\s{2,}", " ", t).strip(" -–_|,.")
+    # Drop trailing bare numeric tokens (e.g. "Book Title 12") but keep sole "1984".
+    parts = t.split()
+    while len(parts) > 1 and parts[-1].isdigit():
+        parts.pop()
+    return " ".join(parts).strip()
+
+
+def is_corrupt_metadata_value(value: str | None) -> bool:
+    """True for mojibake / failed-decode placeholders (long ``????`` runs)."""
+    from app.utils.book_series import is_corrupt_metadata_value as _corrupt
+
+    return _corrupt(value)
+
+
+def sanitize_ebook_meta(meta: EbookMeta) -> EbookMeta:
+    """Drop corrupted identity fields so they are never written to OPF/sidecar/Kavita."""
+    changed = False
+    if is_corrupt_metadata_value(meta.title):
+        meta.title = "Unknown"
+        meta.score = min(float(meta.score or 0), 0.2)
+        changed = True
+    author_l = (meta.author or "").strip().lower()
+    if is_corrupt_metadata_value(meta.author) or author_l in {".caltrash", "caltrash"}:
+        meta.author = "Unknown"
+        if author_l in {".caltrash", "caltrash"} or is_corrupt_metadata_value(author_l):
+            meta.score = min(float(meta.score or 0), 0.2)
+        changed = True
+    if is_corrupt_metadata_value(meta.series):
+        meta.series = None
+        meta.series_index = None
+        changed = True
+    if is_corrupt_metadata_value(meta.edition):
+        meta.edition = None
+        changed = True
+    if changed:
+        note = "rejected corrupt metadata fields"
+        reason = (meta.reason or "").strip()
+        meta.reason = f"{reason} | {note}".strip(" |")[:500] if reason else note
+    return meta
+
+
+def _ebook_excluded_rel_part(part: str) -> bool:
+    return part.casefold() in {n.casefold() for n in EBOOK_KAVITA_EXCLUDED_DIRNAMES}
+
+
+def ebook_series_paths_coherent(dest_file: Path, paths: list[Path]) -> bool:
+    """True when Kavita series files belong to this book / its series folder only.
+
+    Rejects mixed-author mega-series, ``caltrash``/``unorganized`` paths, and
+    multi-file series that do not share the same ``Author/Series`` (or shallow
+    ``Author/Title``) prefix — so an author-root dump cannot pass as coherent.
+    """
+    if not paths:
+        return False
+    try:
+        dest = Path(dest_file).resolve()
+        ebook_root = Path(settings.ebook_dir).resolve()
+        dest_rel = dest.relative_to(ebook_root)
+    except (OSError, ValueError):
+        return False
+    if not dest_rel.parts or any(_ebook_excluded_rel_part(p) for p in dest_rel.parts):
+        return False
+
+    matched_dest = False
+    authors: set[str] = set()
+    prefixes: set[tuple[str, ...]] = set()
+    for raw in paths:
+        try:
+            path = Path(raw).resolve()
+            rel = path.relative_to(ebook_root)
+        except (OSError, ValueError):
+            return False
+        if not rel.parts or any(_ebook_excluded_rel_part(p) for p in rel.parts):
+            return False
+        authors.add(rel.parts[0].casefold())
+        if len(rel.parts) >= 2:
+            prefixes.add(tuple(p.casefold() for p in rel.parts[:2]))
+        else:
+            prefixes.add((rel.parts[0].casefold(),))
+        if path == dest:
+            matched_dest = True
+
+    if not matched_dest or len(authors) != 1:
+        return False
+    if len(paths) > 1 and len(prefixes) != 1:
+        return False
+    return True
+
+
+async def repair_incoherent_kavita_ebook_series() -> dict[str, Any]:
+    """Delete Kavita series that mix authors / trash paths / corrupt names, then rescan.
+
+    Path-coherent pins alone cannot stop mega-series reform: Kavita rebuilds them
+    from scanned files (especially poison caltrash Series tags). Call after ignores
+    are written and before/after sweep batch scans.
+    """
+    ensure_ebook_kavita_ignores()
+    out: dict[str, Any] = {
+        "scanned": 0,
+        "deleted": [],
+        "skipped": 0,
+        "errors": 0,
+        "rescanned": False,
+    }
+    try:
+        series_list = await kavita.get_all_series(
+            formats=kavita.EBOOK_FORMATS, force_refresh=True
+        )
+    except Exception as e:
+        logger.warning("Kavita mega-series repair: list failed: %s", e)
+        out["errors"] += 1
+        return out
+
+    out["scanned"] = len(series_list)
+    ebook_root = Path(settings.ebook_dir).resolve()
+
+    for s in series_list:
+        sid = s.get("id")
+        if sid is None:
+            continue
+        try:
+            sid_i = int(sid)
+        except (TypeError, ValueError):
+            continue
+
+        name = str(s.get("name") or s.get("localizedName") or s.get("sortName") or "")
+        reason: str | None = None
+        if is_corrupt_metadata_value(name):
+            reason = "corrupt_name"
+        else:
+            try:
+                paths = await kavita.get_series_local_file_paths(sid_i)
+            except Exception:
+                out["skipped"] += 1
+                continue
+            if not paths:
+                out["skipped"] += 1
+                continue
+            authors: set[str] = set()
+            has_excluded = False
+            for path in paths:
+                try:
+                    rel = Path(path).resolve().relative_to(ebook_root)
+                except (OSError, ValueError):
+                    has_excluded = True
+                    break
+                if not rel.parts or any(_ebook_excluded_rel_part(p) for p in rel.parts):
+                    has_excluded = True
+                    break
+                authors.add(rel.parts[0].casefold())
+            if has_excluded:
+                reason = "excluded_path"
+            elif len(authors) > 1:
+                reason = f"mixed_authors:{len(authors)}"
+            elif len(paths) >= 15 and len(authors) == 1:
+                # Single-author dump of many unrelated titles under Author/ (no shared series folder).
+                series_folders: set[str] = set()
+                for path in paths:
+                    try:
+                        rel = Path(path).resolve().relative_to(ebook_root)
+                    except (OSError, ValueError):
+                        continue
+                    if len(rel.parts) >= 2:
+                        series_folders.add(rel.parts[1].casefold())
+                if len(series_folders) >= 8:
+                    reason = f"author_dump:{len(series_folders)}_folders"
+
+        if not reason:
+            out["skipped"] += 1
+            continue
+
+        try:
+            ok = await kavita.delete_series(sid_i)
+        except Exception as e:
+            logger.warning("Kavita mega-series repair: delete %s failed: %s", sid_i, e)
+            out["errors"] += 1
+            continue
+        if ok:
+            out["deleted"].append({"id": sid_i, "name": name[:120], "reason": reason})
+            logger.warning(
+                "Deleted incoherent Kavita ebook series %s (%r) — %s",
+                sid_i,
+                name[:80],
+                reason,
+            )
+        else:
+            out["errors"] += 1
+
+    if out["deleted"]:
+        try:
+            await kavita.scan_library_and_wait(timeout_seconds=240)
+            kavita.invalidate_cache()
+            out["rescanned"] = True
+        except Exception as e:
+            logger.warning("Kavita mega-series repair rescan failed: %s", e)
+            out["errors"] += 1
+            try:
+                await kavita.scan_library()
+                kavita.invalidate_cache()
+            except Exception:
+                pass
+    return out
 
 
 def title_similarity(a: str, b: str) -> float:
@@ -228,14 +525,31 @@ def final_ebook_path(meta: EbookMeta, *, suffix: str = ".epub") -> Path:
 
 def ensure_series_index(meta: EbookMeta) -> EbookMeta:
     """Fill missing series / series_index from title cues so Kavita keeps distinct volumes."""
-    from app.utils.book_series import detect_series_from_title, extract_book_numbers_from_text
+    from app.utils.book_series import (
+        detect_series_from_title,
+        extract_book_numbers_from_text,
+        is_junk_series_hint,
+        library_series_from_title,
+    )
+
+    if is_corrupt_metadata_value(meta.series) or is_junk_series_hint(meta.series):
+        meta.series = None
+        meta.series_index = None
 
     title = (meta.title or "").strip()
     detected = detect_series_from_title(title)
-    if not meta.series and detected:
-        meta.series = detected[0]
+    inferred = library_series_from_title(title)
+    if not meta.series:
+        if inferred and inferred[0]:
+            meta.series = inferred[0]
+            if not meta.series_index and inferred[1]:
+                meta.series_index = inferred[1]
+        elif detected:
+            meta.series = detected[0]
     if meta.series and not meta.series_index:
-        if detected and detected[1]:
+        if inferred and inferred[1]:
+            meta.series_index = inferred[1]
+        elif detected and detected[1]:
             meta.series_index = detected[1]
         else:
             nums = sorted(n for n in extract_book_numbers_from_text(title) if 0 < n < 200)
@@ -485,14 +799,7 @@ async def identify_ebook_metadata(
             return meta
 
     # 3) Title + author → provider_order (default Hardcover only)
-    search_title = hint_title
-    # Strip common torrent junk for search
-    search_title = re.sub(
-        r"\s*[\[(](?:epub|pdf|mobi|azw3?|kindle|retail|converted)[\])]|\.(?:epub|pdf|mobi)$",
-        "",
-        search_title,
-        flags=re.IGNORECASE,
-    ).strip() or hint_title
+    search_title = clean_ebook_search_title(hint_title) or hint_title
 
     providers = provider_order or ["hardcover"]
     for provider in providers:
@@ -532,14 +839,123 @@ def _get_ebook_meta_bin() -> str | None:
     return None
 
 
+def download_ebook_cover_bytes(cover_url: str) -> tuple[bytes, str] | None:
+    """Fetch cover image bytes and a file suffix (``.jpg`` / ``.png`` / ``.webp``)."""
+    import urllib.request
+
+    url = (cover_url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+    suffix = ".jpg"
+    lower = url.lower()
+    if ".png" in lower:
+        suffix = ".png"
+    elif ".webp" in lower:
+        suffix = ".webp"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            data = resp.read(10 * 1024 * 1024 + 1)
+        if not data or len(data) > 10 * 1024 * 1024:
+            return None
+        if "png" in ctype:
+            suffix = ".png"
+        elif "webp" in ctype:
+            suffix = ".webp"
+        elif "jpeg" in ctype or "jpg" in ctype:
+            suffix = ".jpg"
+        return data, suffix
+    except Exception as e:
+        logger.warning("Could not download ebook cover %s: %s", url[:120], e)
+        return None
+
+
+def save_ebook_cover_beside(folder: Path, cover_url: str | None) -> Path | None:
+    """Write ``cover.jpg`` (or png/webp) next to the ebook for shelf/Kavita cues."""
+    url = (cover_url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+    fetched = download_ebook_cover_bytes(url)
+    if not fetched:
+        return None
+    data, suffix = fetched
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    # Prefer cover.jpg so existing cleanup keep-lists recognize it.
+    dest = folder / ("cover.jpg" if suffix == ".jpg" else f"cover{suffix}")
+    try:
+        dest.write_bytes(data)
+        # Remove alternate cover.* siblings so one canonical cover remains.
+        for sibling in folder.glob("cover.*"):
+            if sibling.resolve() == dest.resolve():
+                continue
+            if sibling.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                sibling.unlink(missing_ok=True)
+        return dest
+    except OSError as e:
+        logger.warning("Could not write ebook cover beside %s: %s", folder, e)
+        return None
+
+
+def rename_ebook_to_metadata_title(ebook_path: Path, title: str) -> Path:
+    """Rename an ebook file to a filesystem-safe metadata title (same folder).
+
+    Collision-safe: reuses an identical-size existing target, otherwise picks
+    ``Title (N).ext``. Does not move across directories (sibling volumes stay put).
+    """
+    src = Path(ebook_path)
+    if not src.is_file():
+        return src
+    safe = downloader.sanitize_filename(title or src.stem) or src.stem
+    suffix = src.suffix.lower() or ".epub"
+    dest = src.with_name(f"{safe}{suffix}")
+    try:
+        if dest.resolve() == src.resolve():
+            return src
+    except OSError:
+        if dest.name == src.name:
+            return src
+
+    if dest.exists():
+        try:
+            if dest.stat().st_size == src.stat().st_size and dest.stat().st_size > 0:
+                if dest.resolve() != src.resolve():
+                    src.unlink(missing_ok=True)
+                return dest
+        except OSError:
+            pass
+        stem = safe
+        n = 2
+        while True:
+            candidate = src.with_name(f"{stem} ({n}){suffix}")
+            if not candidate.exists():
+                dest = candidate
+                break
+            n += 1
+
+    try:
+        src.rename(dest)
+        logger.info("Renamed ebook %s → %s", src.name, dest.name)
+        return dest
+    except OSError as e:
+        logger.warning("Could not rename ebook %s → %s: %s", src, dest.name, e)
+        return src
+
+
 async def embed_ebook_metadata(ebook_path: Path, meta: EbookMeta) -> bool:
-    """Write title/author/series/cover (OPF) via Calibre ``ebook-meta``."""
+    """Write title/author/series/cover (OPF) via Calibre ``ebook-meta``.
+
+    Also persists a ``cover.*`` sidecar beside the ebook when a cover URL is
+    available, even if Calibre embed is skipped (PDF / missing ebook-meta).
+    """
+    cover_saved = save_ebook_cover_beside(ebook_path.parent, meta.cover_url)
+
     if ebook_path.suffix.lower() not in {".epub", ".mobi", ".azw3", ".azw"}:
-        return False
+        return bool(cover_saved)
     ebook_meta = _get_ebook_meta_bin()
     if not ebook_meta:
         logger.warning("ebook-meta not found — skipping OPF embed for %s", ebook_path.name)
-        return False
+        return bool(cover_saved)
 
     cmd = [
         ebook_meta,
@@ -549,41 +965,41 @@ async def embed_ebook_metadata(ebook_path: Path, meta: EbookMeta) -> bool:
         "--authors",
         meta.author or "Unknown",
     ]
-    if meta.series:
+    if meta.series and not is_corrupt_metadata_value(meta.series):
         cmd.extend(["--series", meta.series])
         if meta.series_index:
             cmd.extend(["--index", str(meta.series_index)])
+    else:
+        # Standalone / cleared series: stamp Series=Title so Kavita never leaves
+        # an empty/localized series key that LocalizedSeries-merges into trash.
+        standalone = (meta.title or ebook_path.stem or "").strip()
+        if standalone and not is_corrupt_metadata_value(standalone):
+            cmd.extend(["--series", standalone, "--index", "1"])
     isbn = meta.isbn13 or meta.isbn10
     if isbn:
         cmd.extend(["--isbn", isbn])
 
     cover_tmp: Path | None = None
-    cover_url = (meta.cover_url or "").strip()
-    if cover_url.startswith("http"):
-        try:
-            import tempfile
-            import urllib.request
+    cover_for_meta = cover_saved
+    if cover_for_meta is None:
+        cover_url = (meta.cover_url or "").strip()
+        if cover_url.startswith("http"):
+            fetched = download_ebook_cover_bytes(cover_url)
+            if fetched:
+                import tempfile
 
-            suffix = ".jpg"
-            lower = cover_url.lower()
-            if ".png" in lower:
-                suffix = ".png"
-            elif ".webp" in lower:
-                suffix = ".webp"
-            fd, tmp_name = tempfile.mkstemp(prefix="ebook-cover-", suffix=suffix)
-            cover_tmp = Path(tmp_name)
-            with urllib.request.urlopen(cover_url, timeout=30) as resp:  # noqa: S310
-                data = resp.read(10 * 1024 * 1024 + 1)
-            if len(data) > 10 * 1024 * 1024:
-                raise RuntimeError("cover too large")
-            with open(fd, "wb") as fh:
-                fh.write(data)
-            cmd.extend(["--cover", str(cover_tmp)])
-        except Exception as e:
-            logger.warning("Could not download ebook cover for embed: %s", e)
-            if cover_tmp and cover_tmp.exists():
-                cover_tmp.unlink(missing_ok=True)
-            cover_tmp = None
+                data, suffix = fetched
+                fd, tmp_name = tempfile.mkstemp(prefix="ebook-cover-", suffix=suffix)
+                cover_tmp = Path(tmp_name)
+                try:
+                    with open(fd, "wb") as fh:
+                        fh.write(data)
+                    cover_for_meta = cover_tmp
+                except OSError:
+                    cover_tmp.unlink(missing_ok=True)
+                    cover_tmp = None
+    if cover_for_meta is not None:
+        cmd.extend(["--cover", str(cover_for_meta)])
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -602,9 +1018,161 @@ async def embed_ebook_metadata(ebook_path: Path, meta: EbookMeta) -> bool:
             ebook_path.name,
             stderr.decode(errors="replace")[:400],
         )
-        return False
+        return bool(cover_saved)
     logger.info("Embedded ebook metadata into %s (series=%r)", ebook_path.name, meta.series)
     return True
+
+
+async def pin_organized_ebook_to_kavita(
+    dest_file: Path,
+    meta: EbookMeta,
+    *,
+    summary: str | None = None,
+    kavita_series_id: int | None = None,
+    kavita_chapter_id: int | None = None,
+    manually_applied: bool = False,
+) -> dict[str, Any]:
+    """After organize/apply: ensure cover file + Kavita identity/cover + sidecar ids.
+
+    Mirrors ABS ``sync_book_dir_metadata_to_abs`` for ebooks.
+
+    Never pins identity/cover onto an incoherent mega-series (mixed authors), and
+    never falls back to fuzzy title matching for series ids — path ownership only.
+    """
+    from app.services.ebook_quick_review import (
+        _read_applied_ebook_raw,
+        write_applied_ebook_meta,
+    )
+
+    out: dict[str, Any] = {
+        "series_id": None,
+        "identity_updated": False,
+        "cover_updated": False,
+        "cover_file": None,
+        "sidecar_updated": False,
+        "pin_skipped_reason": None,
+    }
+    dest = Path(dest_file)
+    if not dest.is_file():
+        return out
+
+    meta = sanitize_ebook_meta(ensure_series_index(meta))
+    cover_path = save_ebook_cover_beside(dest.parent, meta.cover_url)
+    if cover_path is not None:
+        out["cover_file"] = str(cover_path)
+
+    existing = _read_applied_ebook_raw(dest.parent) or {}
+    if manually_applied or existing.get("manually_applied"):
+        manually_applied = True
+    chapter_id = kavita_chapter_id
+    if chapter_id is None and existing.get("kavita_chapter_id") is not None:
+        try:
+            chapter_id = int(existing["kavita_chapter_id"])
+        except (TypeError, ValueError):
+            chapter_id = None
+
+    # Prefer live path ownership. Stale sidecar series ids caused every book to
+    # pin onto one mega-series after a bad Kavita merge.
+    series_id: int | None = None
+    try:
+        series_id = await kavita.find_series_id_for_ebook_path(dest)
+    except Exception as e:
+        logger.debug("Kavita path lookup failed for %s: %s", dest, e)
+        series_id = None
+
+    if series_id is None and kavita_series_id is not None:
+        try:
+            candidate = int(kavita_series_id)
+            paths = await kavita.get_series_local_file_paths(candidate)
+            if any(Path(p).resolve() == dest.resolve() for p in paths):
+                series_id = candidate
+        except Exception:
+            series_id = None
+
+    if series_id is not None:
+        try:
+            paths = await kavita.get_series_local_file_paths(series_id)
+        except Exception:
+            paths = []
+        series_name = ""
+        try:
+            all_s = await kavita.get_all_series(
+                formats=kavita.EBOOK_FORMATS, force_refresh=False
+            )
+            detail = next(
+                (x for x in all_s if int(x.get("id") or -1) == int(series_id)),
+                None,
+            )
+            if isinstance(detail, dict):
+                series_name = str(
+                    detail.get("name")
+                    or detail.get("localizedName")
+                    or detail.get("sortName")
+                    or ""
+                )
+        except Exception:
+            series_name = ""
+        incoherent = (
+            not ebook_series_paths_coherent(dest, paths)
+            or is_corrupt_metadata_value(series_name)
+        )
+        if incoherent:
+            logger.warning(
+                "Skipping Kavita identity/cover pin for %s — series %s is incoherent "
+                "(%d files, name=%r); deleting series so scan can rebuild cleanly",
+                dest,
+                series_id,
+                len(paths),
+                series_name[:80],
+            )
+            out["pin_skipped_reason"] = "incoherent_series"
+            try:
+                await kavita.delete_series(series_id)
+                out["incoherent_series_deleted"] = series_id
+            except Exception as del_err:
+                logger.warning(
+                    "Could not delete incoherent Kavita series %s: %s", series_id, del_err
+                )
+            series_id = None
+        else:
+            out["series_id"] = series_id
+            multi = len(paths) > 1
+            series_display = (meta.series or "").strip() or meta.title
+            kavita_name = series_display if multi else (meta.title or series_display)
+            if not is_corrupt_metadata_value(kavita_name):
+                try:
+                    out["identity_updated"] = await kavita.update_series_identity(
+                        series_id,
+                        name=kavita_name or meta.title,
+                        author=meta.author,
+                        summary=summary,
+                    )
+                except Exception as e:
+                    logger.warning("Kavita identity pin failed for series %s: %s", series_id, e)
+            # Only stamp series cover for single-file series, or book 1 of a real series.
+            seq = str(meta.series_index or "").strip()
+            allow_cover = (not multi) or seq in {"", "1", "1.0"}
+            if allow_cover and (meta.cover_url or "").strip().startswith("http"):
+                try:
+                    out["cover_updated"] = await kavita.set_series_cover_from_url(
+                        series_id, meta.cover_url or ""
+                    )
+                except Exception as e:
+                    logger.warning("Kavita cover pin failed for series %s: %s", series_id, e)
+
+    try:
+        write_applied_ebook_meta(
+            dest.parent,
+            meta,
+            summary=summary,
+            manually_applied=manually_applied,
+            kavita_series_id=series_id,
+            kavita_chapter_id=chapter_id,
+        )
+        out["sidecar_updated"] = True
+    except Exception as e:
+        logger.warning("Could not refresh ebook_applied.json for %s: %s", dest, e)
+    return out
 
 
 async def read_ebook_metadata(ebook_path: Path) -> dict[str, str | None]:
@@ -769,10 +1337,16 @@ async def _ebook_llm_identify_retry(
     google_volume_id: str | None,
     prior_reason: str,
     prior_meta: EbookMeta,
+    provider_order: list[str] | None = None,
 ) -> EbookMeta | None:
-    """OpenRouter identify → re-run catalog identify with seeded title/author.
+    """OpenRouter identify then re-run catalog identify with seeded title/author.
 
-    Soft-fails to None when assist is off, low confidence, or API errors.
+    Soft-fails to None when assist is off or API errors.
+
+    Soft-confidence (below the hard OpenRouter threshold but at/above ebook_min_score)
+    still retries Hardcover/OL with the LLM title/author — matching what admins see
+    when Search returns a 100% catalog hit. Raw LLM fields auto-apply only at/above
+    the hard threshold.
     """
     from app.services import llm_assist, openrouter
 
@@ -794,11 +1368,16 @@ async def _ebook_llm_identify_retry(
         return None
 
     threshold = await openrouter.get_confidence_threshold()
-    if hit.confidence < threshold:
+    min_score = float(settings.ebook_min_score)
+    soft_floor = min(min_score, threshold)
+    retry_title = (hit.title or title_hint or "").strip()
+    retry_author = (hit.author or author_hint or "").strip()
+    has_clues = bool(retry_title) and retry_title.lower() not in {"unknown", "untitled"}
+
+    if hit.confidence < soft_floor or not has_clues:
         logger.info(
-            "Ebook LLM assist low confidence (%.2f < %.2f) — quarantining",
+            "Ebook LLM assist low confidence (%.2f) — quarantining",
             hit.confidence,
-            threshold,
         )
         prior_meta.reason = (
             f"{prior_reason} | AI assist confidence {hit.confidence:.2f} "
@@ -807,52 +1386,80 @@ async def _ebook_llm_identify_retry(
         )[:500]
         return prior_meta
 
-    # Retry identify with LLM clues as stronger hints.
-    retry_title = hit.title or title_hint
-    retry_author = hit.author or author_hint
-    logger.info(
-        "Ebook LLM assist: title=%r author=%r confidence=%.2f — retrying identify",
-        retry_title,
-        retry_author,
-        hit.confidence,
-    )
+    if hit.confidence < threshold:
+        logger.info(
+            "Ebook LLM assist soft confidence (%.2f) — retrying catalog identify",
+            hit.confidence,
+        )
+    else:
+        logger.info(
+            "Ebook LLM assist: title=%r author=%r confidence=%.2f — retrying identify",
+            retry_title,
+            retry_author,
+            hit.confidence,
+        )
+
     try:
         meta = await identify_ebook_metadata(
             staging=staging,
             title_hint=retry_title,
             author_hint=retry_author,
             google_volume_id=google_volume_id,
+            provider_order=provider_order,
         )
     except Exception as e:
         logger.warning("Ebook identify retry after LLM failed: %s", e)
-        # Fall back to LLM clues directly at the model's confidence.
-        return EbookMeta(
-            title=retry_title or "Unknown",
-            author=retry_author or "Unknown",
-            series=hit.series or None,
-            score=hit.confidence,
-            source="openrouter",
-            reason=hit.rationale or "OpenRouter ebook identify",
+        if hit.confidence < threshold:
+            prior_meta.reason = (
+                f"{prior_reason} | AI assist confidence {hit.confidence:.2f}; "
+                f"catalog retry failed: {e}"
+            )[:500]
+            return prior_meta
+        return sanitize_ebook_meta(
+            EbookMeta(
+                title=retry_title or "Unknown",
+                author=retry_author or "Unknown",
+                series=hit.series or None,
+                score=hit.confidence,
+                source="openrouter",
+                reason=hit.rationale or "OpenRouter ebook identify",
+            )
         )
 
-    min_score = float(settings.ebook_min_score)
-    if meta.score < min_score and hit.confidence >= threshold:
+    meta = sanitize_ebook_meta(meta)
+    if (
+        meta.score >= min_score
+        and not meta.ambiguous
+        and not is_corrupt_metadata_value(meta.title)
+        and meta.title != "Unknown"
+    ):
+        return meta
+
+    if hit.confidence >= threshold:
         # Trust high-confidence LLM clues when catalog still weak.
-        return EbookMeta(
-            title=retry_title or meta.title,
-            author=retry_author or meta.author,
-            series=hit.series or meta.series,
-            series_index=meta.series_index,
-            edition=meta.edition,
-            isbn13=meta.isbn13,
-            isbn10=meta.isbn10,
-            score=max(meta.score, hit.confidence),
-            source="openrouter",
-            cover_url=meta.cover_url,
-            ambiguous=False,
-            reason=hit.rationale or "OpenRouter ebook identify",
+        return sanitize_ebook_meta(
+            EbookMeta(
+                title=retry_title or meta.title,
+                author=retry_author or meta.author,
+                series=hit.series or meta.series,
+                series_index=meta.series_index,
+                edition=meta.edition,
+                isbn13=meta.isbn13,
+                isbn10=meta.isbn10,
+                score=max(meta.score, hit.confidence),
+                source="openrouter",
+                cover_url=meta.cover_url,
+                ambiguous=False,
+                reason=hit.rationale or "OpenRouter ebook identify",
+            )
         )
-    return meta
+
+    prior_meta.reason = (
+        f"{prior_reason} | AI assist confidence {hit.confidence:.2f} "
+        f"below {threshold:.2f}; catalog still weak ({meta.score:.2f})"
+        + (f" ({hit.rationale})" if hit.rationale else "")
+    )[:500]
+    return prior_meta
 
 
 async def _set_quarantine(request_id: int, reason: str, staging: Path) -> None:
@@ -994,6 +1601,7 @@ async def run_ebook_after_download(
         logger.warning("Ebook convert in staging failed (continuing): %s", e)
 
     meta: EbookMeta | None = None
+    dest_file: Path | None = None
 
     if resume_from in ("metadata",):
         async with async_session() as db:
@@ -1005,16 +1613,25 @@ async def run_ebook_after_download(
             meta = load_applied_ebook_meta(staging)
 
         if meta is None:
-            meta = await identify_ebook_metadata(
-                staging=staging,
-                title_hint=title,
-                author_hint=author or "",
-                google_volume_id=google_volume_id,
-                provider_order=provider_order,
+            meta = sanitize_ebook_meta(
+                await identify_ebook_metadata(
+                    staging=staging,
+                    title_hint=title,
+                    author_hint=author or "",
+                    google_volume_id=google_volume_id,
+                    provider_order=provider_order,
+                )
             )
             min_score = float(settings.ebook_min_score)
-            if meta.ambiguous or meta.score < min_score:
+            if (
+                meta.ambiguous
+                or meta.score < min_score
+                or is_corrupt_metadata_value(meta.title)
+                or meta.title == "Unknown"
+            ):
                 reason = meta.reason or f"Score {meta.score:.2f} below minimum {min_score:.2f}"
+                if is_corrupt_metadata_value(meta.title) or meta.title == "Unknown":
+                    reason = meta.reason or "Corrupt or unusable metadata title"
                 if meta.ambiguous:
                     reason = meta.reason or "Ambiguous metadata matches"
                 # OpenRouter identify → retry organize clues (same toggle/threshold).
@@ -1025,6 +1642,7 @@ async def run_ebook_after_download(
                     google_volume_id=google_volume_id,
                     prior_reason=reason,
                     prior_meta=meta,
+                    provider_order=provider_order,
                 )
                 if meta is None or meta.ambiguous or meta.score < min_score:
                     fail_reason = reason
@@ -1133,15 +1751,21 @@ async def run_ebook_after_download(
     if await p._is_cancelled(request_id):
         return
 
-    # Finalize — Kavita scan
+    # Finalize — Kavita scan, then pin identity/cover like ABS sidecar sync.
     async with async_session() as db:
         await p._update_status(db, request_id, "finalizing", "Scanning Kavita…")
 
     try:
-        await kavita.scan_library()
+        # Modest wait so pin can resolve series_id; sweep also batch-scans + resyncs.
+        await kavita.scan_library_and_wait(timeout_seconds=45, poll_interval=3.0)
         kavita.invalidate_cache()
     except Exception as e:
         logger.warning("Kavita scan after ebook organize failed (non-fatal): %s", e)
+        try:
+            await kavita.scan_library()
+            kavita.invalidate_cache()
+        except Exception:
+            pass
         try:
             async with async_session() as db:
                 await push.notify_admins(db, {
@@ -1152,6 +1776,20 @@ async def run_ebook_after_download(
                 })
         except Exception:
             pass
+
+    if meta is not None and dest_file is not None:
+        try:
+            # Always persist cover sidecar + ebook_applied.json; Kavita pin is best-effort.
+            pin = await pin_organized_ebook_to_kavita(dest_file, meta)
+            logger.info(
+                "Pinned ebook to Kavita for request %s: series=%s identity=%s cover=%s",
+                request_id,
+                pin.get("series_id"),
+                pin.get("identity_updated"),
+                pin.get("cover_updated"),
+            )
+        except Exception as e:
+            logger.warning("Ebook Kavita pin failed for request %s: %s", request_id, e)
 
     async with async_session() as db:
         await p._update_status(db, request_id, "completed", "Ready in Kavita")

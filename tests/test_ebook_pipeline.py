@@ -240,3 +240,90 @@ def test_identify_catalog_high_score(_ebook_dirs):
     assert meta.score >= 0.85
     assert meta.series == "Saga"
     assert meta.source == "catalog"
+
+
+def test_corrupt_metadata_rejected():
+    from app.services.ebook_pipeline import (
+        EbookMeta,
+        is_corrupt_metadata_value,
+        sanitize_ebook_meta,
+    )
+    from app.utils.book_series import library_series_from_title
+
+    assert is_corrupt_metadata_value("?" * 20)
+    assert is_corrupt_metadata_value("?????? ?????? 2")
+    assert not is_corrupt_metadata_value("A Game of Thrones")
+
+    meta = sanitize_ebook_meta(
+        EbookMeta(
+            title="?" * 30,
+            author=".caltrash",
+            series="?" * 20,
+            score=0.99,
+            source="hardcover",
+        )
+    )
+    assert meta.title == "Unknown"
+    assert meta.author == "Unknown"
+    assert meta.series is None
+    assert meta.score <= 0.2
+
+    inferred = library_series_from_title("Leviathan Wakes: Book 1 of the Expanse")
+    assert inferred is not None
+    assert inferred[0].lower() == "expanse"
+    assert inferred[1] == "1"
+
+
+def test_ebook_series_paths_coherent_rejects_mixed_authors(_ebook_dirs):
+    from app.services.ebook_pipeline import ebook_series_paths_coherent
+
+    ebook, _ = _ebook_dirs
+    a = ebook / "Author A" / "Series" / "Book A" / "a.epub"
+    b = ebook / "Author B" / "Series" / "Book B" / "b.epub"
+    a.parent.mkdir(parents=True)
+    b.parent.mkdir(parents=True)
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    assert ebook_series_paths_coherent(a, [a])
+    assert not ebook_series_paths_coherent(a, [a, b])
+
+
+def test_ebook_series_paths_coherent_rejects_caltrash_and_author_dump(_ebook_dirs):
+    from app.services.ebook_pipeline import (
+        ensure_ebook_kavita_ignores,
+        ebook_series_paths_coherent,
+    )
+
+    ebook, _ = _ebook_dirs
+    ensure_ebook_kavita_ignores()
+    ignore = ebook / ".kavitaignore"
+    assert ignore.is_file()
+    text = ignore.read_text(encoding="utf-8")
+    assert "caltrash/*" in text
+    assert "unorganized/*" in text
+
+    good = ebook / "Matt Dinniman" / "Dungeon Crawler Carl" / "Book1" / "b1.epub"
+    good2 = ebook / "Matt Dinniman" / "Dungeon Crawler Carl" / "Book2" / "b2.epub"
+    trash = ebook / "caltrash" / "Unknown" / "1" / "1.epub"
+    other = ebook / "Matt Dinniman" / "Other Series" / "Book3" / "b3.epub"
+    for p in (good, good2, trash, other):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+
+    assert ebook_series_paths_coherent(good, [good, good2])
+    assert not ebook_series_paths_coherent(good, [good, trash])
+    assert not ebook_series_paths_coherent(good, [good, other])
+
+
+def test_ensure_series_from_book_n_of_title():
+    from app.services.ebook_pipeline import EbookMeta, ensure_series_index
+
+    meta = ensure_series_index(
+        EbookMeta(
+            title="Leviathan Wakes: Book 1 of the Expanse",
+            author="James S. A. Corey",
+            score=0.99,
+        )
+    )
+    assert meta.series and "expanse" in meta.series.lower()
+    assert meta.series_index == "1"

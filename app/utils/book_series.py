@@ -19,6 +19,12 @@ _PAREN_SERIES = re.compile(
     r"[\(\[]\s*(?P<series>[^)\]]+?)\s*(?:,\s*(?:Book|Vol\.?|#)?\s*\d+(?:\.\d+)?)?\s*[\)\]]\s*$",
     re.IGNORECASE,
 )
+# "Leviathan Wakes: Book 1 of the Expanse" / "Title Book 2 of Series"
+_BOOK_N_OF_SERIES = re.compile(
+    r"^(?P<title>.+?)(?::|\s+)\s*Book\s+(?P<seq>\d+(?:\.\d+)?)\s+of\s+(?:the\s+)?(?P<series>.+)$",
+    re.IGNORECASE,
+)
+_CORRUPT_QMARK_RE = re.compile(r"\?{6,}")
 
 # Media-format labels that must never appear as series/genre shelves
 JUNK_LIBRARY_LABELS = frozenset({
@@ -42,10 +48,28 @@ _AMAZON_SERIES_JUNK = re.compile(
 )
 
 
+def is_corrupt_metadata_value(value: str | None) -> bool:
+    """True for mojibake / failed-decode placeholders like long ``????`` runs."""
+    s = (value or "").strip()
+    if not s:
+        return False
+    if "\ufffd" in s:
+        return True
+    letters = sum(1 for c in s if c.isalpha())
+    qmarks = s.count("?")
+    if qmarks >= 6 and (letters == 0 or qmarks >= letters):
+        return True
+    if _CORRUPT_QMARK_RE.search(s) and qmarks / max(len(s), 1) >= 0.35:
+        return True
+    return False
+
+
 def is_junk_series_hint(name: str | None) -> bool:
     """True for labels that must never be passed to Hardcover as a series hint."""
     n = (name or "").strip()
     if not n or is_junk_library_label(n):
+        return True
+    if is_corrupt_metadata_value(n):
         return True
     if _ASIN_RE.search(n) or _AMAZON_SERIES_JUNK.search(n):
         return True
@@ -102,6 +126,13 @@ def library_series_from_title(title: str) -> tuple[str, str] | None:
     t = (title or "").strip()
     if not t:
         return None
+
+    of_m = _BOOK_N_OF_SERIES.match(t)
+    if of_m:
+        series = of_m.group("series").strip().rstrip(".,;:")
+        seq = of_m.group("seq").strip()
+        if series and not is_junk_series_hint(series):
+            return series, seq
 
     m = _BOOK_NN_PREFIX.match(t)
     if m:

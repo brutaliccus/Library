@@ -454,7 +454,8 @@ def _kavita_path_to_local(kavita_path: str) -> Path | None:
                 return cand
         except OSError:
             continue
-    return candidates[0] if candidates else None
+    # Do not invent non-existent paths — callers treat returns as real files.
+    return None
 
 
 async def get_book_info(chapter_id: int) -> dict | None:
@@ -553,6 +554,18 @@ async def update_series_identity(
     title = (name or "").strip()
     if not title:
         return False
+    try:
+        from app.utils.book_series import is_corrupt_metadata_value
+
+        if is_corrupt_metadata_value(title):
+            logger.warning(
+                "Refusing Kavita identity pin for series %s — corrupt name %r",
+                series_id,
+                title[:80],
+            )
+            return False
+    except Exception:
+        pass
 
     ok_name = False
     ok_meta = False
@@ -689,3 +702,99 @@ async def get_series_local_file_paths(series_id: int) -> list[Path]:
                 seen.add(key)
                 paths.append(local)
     return paths
+
+
+async def find_series_id_for_ebook_path(ebook_path: Path | str) -> int | None:
+    """Locate the Kavita series id that owns ``ebook_path`` on disk."""
+    try:
+        target = Path(ebook_path).resolve()
+    except OSError:
+        return None
+    if not target.is_file():
+        return None
+
+    folder_key = target.parent.name.casefold()
+    series_list = await get_all_series(formats=EBOOK_FORMATS, force_refresh=True)
+    if not series_list:
+        return None
+
+    def _name_hit(s: dict) -> bool:
+        for key in ("name", "localizedName", "originalName", "sortName"):
+            val = str(s.get(key) or "").strip().casefold()
+            if val and (val == folder_key or folder_key in val or val in folder_key):
+                return True
+        return False
+
+    ordered = [s for s in series_list if _name_hit(s)]
+    ordered.extend(s for s in series_list if s not in ordered)
+
+    for s in ordered:
+        sid = s.get("id")
+        if sid is None:
+            continue
+        try:
+            sid_i = int(sid)
+        except (TypeError, ValueError):
+            continue
+        try:
+            paths = await get_series_local_file_paths(sid_i)
+        except Exception:
+            continue
+        for p in paths:
+            try:
+                if p.resolve() == target:
+                    return sid_i
+            except OSError:
+                continue
+    return None
+
+
+async def set_series_cover_from_url(series_id: int, cover_url: str) -> bool:
+    """Download a cover URL and lock it on the Kavita series via Upload/series.
+
+    Sends raw base64 (no data-URI prefix) — Kavita silently fails when the
+    prefix is included.
+    """
+    import base64
+
+    url = (cover_url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return False
+    api_url, key, _ = await _conn()
+    if not key:
+        return False
+
+    try:
+        async with httpx.AsyncClient() as client:
+            img_resp = await client.get(url, timeout=45, follow_redirects=True)
+            img_resp.raise_for_status()
+            data = img_resp.content
+            if not data or len(data) > 10 * 1024 * 1024:
+                return False
+            # Strip accidental data-URI prefix if a proxy returned one.
+            if data[:5] == b"data:":
+                try:
+                    data = base64.b64decode(data.split(b",", 1)[1])
+                except Exception:
+                    return False
+            b64 = base64.b64encode(data).decode("ascii")
+            resp = await client.post(
+                f"{api_url}/api/Upload/series",
+                headers={**_headers(key), "Content-Type": "application/json"},
+                json={"id": int(series_id), "url": b64, "lockCover": True},
+                timeout=60,
+            )
+            ok = resp.status_code in (200, 204)
+            if not ok:
+                logger.warning(
+                    "Kavita Upload/series cover for %s failed: HTTP %s %s",
+                    series_id,
+                    resp.status_code,
+                    (resp.text or "")[:200],
+                )
+                return False
+            invalidate_cache()
+            return True
+    except Exception as e:
+        logger.warning("Kavita set cover for series %s failed: %s", series_id, e)
+        return False

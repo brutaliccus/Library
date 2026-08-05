@@ -21,6 +21,13 @@ param(
     [switch]$DisableLibraForgePipeline,
     [switch]$DisableEbookPipeline,
     [switch]$SkipBundledMedia,
+    [switch]$SkipNpm,
+    [string]$NpmDomain = "",
+    [string]$NpmAbsDomain = "",
+    [string]$NpmKavitaDomain = "",
+    [string]$NpmLetsEncryptEmail = "",
+    [string]$NpmAdminEmail = "admin@example.com",
+    [string]$NpmAdminPassword = "",
     [switch]$NonInteractive,
     [switch]$SkipBuild
 )
@@ -493,6 +500,66 @@ else {
     Write-Ok "RSS-only defaults written to .env"
 }
 
+# Nginx Proxy Manager — default on; skip if you already reverse-proxy.
+Write-Step "==> Nginx Proxy Manager (reverse proxy) [RECOMMENDED]"
+Write-Host "Remote HTTPS needs a reverse proxy. Fresh installs include NPM (compose profile npm)." -ForegroundColor DarkGray
+Write-Host "Already have NPM / Caddy / Traefik / nginx? Skip — install continues without it." -ForegroundColor DarkGray
+$useNpm = -not [bool]$SkipNpm
+if (-not $NonInteractive) {
+    $useNpm = Read-YesNo "Enable Nginx Proxy Manager? (Already have a reverse proxy? Skip NPM)" $true
+}
+elseif ($SkipNpm) {
+    $useNpm = $false
+    Write-Warn "SkipNpm - Nginx Proxy Manager off"
+}
+if ($useNpm) {
+    Write-Host "Ports 80 + 443 (public) and 81 (NPM admin). Container: library-npm." -ForegroundColor DarkGray
+    $NpmDomain = Read-Default "Library public domain (blank = LAN / configure hosts later)" $NpmDomain
+    if ($useBundled) {
+        $NpmAbsDomain = Read-Default "Audiobookshelf domain (optional)" $NpmAbsDomain
+        $NpmKavitaDomain = Read-Default "Kavita domain (optional)" $NpmKavitaDomain
+    }
+    $NpmLetsEncryptEmail = Read-Default "Let's Encrypt email (blank = HTTP only)" $NpmLetsEncryptEmail
+    $NpmAdminEmail = Read-Default "NPM admin email" $NpmAdminEmail
+    if (-not $NpmAdminPassword) {
+        $existingNpmPass = Get-EnvKeyValue $envPath "NPM_ADMIN_PASSWORD"
+        if ($existingNpmPass -and $existingNpmPass -ne "changeme") {
+            $NpmAdminPassword = $existingNpmPass
+        }
+        else {
+            $NpmAdminPassword = New-SecretKey
+        }
+    }
+    $NpmAdminPassword = Read-Default "NPM admin password" $NpmAdminPassword
+    Set-EnvKey $envPath "NPM_ADMIN_EMAIL" $NpmAdminEmail
+    Set-EnvKey $envPath "NPM_ADMIN_PASSWORD" $NpmAdminPassword
+    Set-EnvKey $envPath "NPM_DOMAIN" $NpmDomain
+    Set-EnvKey $envPath "NPM_ABS_DOMAIN" $NpmAbsDomain
+    Set-EnvKey $envPath "NPM_KAVITA_DOMAIN" $NpmKavitaDomain
+    Set-EnvKey $envPath "NPM_LETSENCRYPT_EMAIL" $NpmLetsEncryptEmail
+    Set-EnvKey $envPath "NPM_DISABLE_IPV6" "true"
+    if ($NpmDomain) {
+        if ($NpmLetsEncryptEmail) {
+            Set-EnvKey $envPath "APP_URL" "https://$NpmDomain"
+            $APP_URL = "https://$NpmDomain"
+            Write-Ok "APP_URL -> https://$NpmDomain (Let's Encrypt after DNS points here)"
+        }
+        else {
+            Set-EnvKey $envPath "APP_URL" "http://$NpmDomain"
+            $APP_URL = "http://$NpmDomain"
+            Write-Ok "APP_URL -> http://$NpmDomain (HTTP; add LE email later for HTTPS)"
+        }
+    }
+    else {
+        Write-Warn "No domain - NPM admin on :81; use LAN APP_URL until DNS is ready."
+        Write-Warn "Next: set NPM_DOMAIN in .env, then .\scripts\configure_npm.ps1"
+    }
+}
+else {
+    Write-Warn "Skipped NPM. For remote HTTPS later, point your reverse proxy at http://127.0.0.1:8085"
+    Write-Warn "APP_URL should be the public https:// URL friends open."
+}
+
 # VPN / gluetun is optional and OFF by default on Windows (Mullvad not required).
 $vpn = [bool]$EnableVpn
 if (-not $NonInteractive) {
@@ -500,6 +567,7 @@ if (-not $NonInteractive) {
 }
 $profileParts = @()
 if ($useBundled) { $profileParts += "bundled-media" }
+if ($useNpm) { $profileParts += "npm" }
 if ($vpn) {
     $profileParts += "vpn"
     Set-EnvKey $envPath "ABB_PROXY_URL" "http://gluetun:8888"
@@ -514,14 +582,18 @@ else {
 }
 $mergedProfiles = Merge-ComposeProfiles $profileParts
 Set-EnvKey $envPath "COMPOSE_PROFILES" $mergedProfiles
-if ($useBundled) {
-    Write-Ok "COMPOSE_PROFILES=$mergedProfiles (bundled-media starts ABS/Kavita/LibraForge)"
+$profileNote = @()
+if ($useBundled) { $profileNote += "bundled-media" }
+if ($useNpm) { $profileNote += "npm" }
+if ($profileNote.Count -gt 0) {
+    Write-Ok "COMPOSE_PROFILES=$mergedProfiles ($($profileNote -join ', '))"
 }
 
 foreach ($d in @(
         "data", "prowlarr-config", "jackett-config",
         "audiobookshelf-config", "audiobookshelf-metadata", "kavita-config",
         "libraforge-auth", "libraforge-config", "libraforge-reports",
+        "npm-data", "npm-letsencrypt",
         "media\audiobooks", "media\ebooks", "media\openlibrary"
     )) {
     $p = Join-Path $TARGET $d
@@ -619,6 +691,16 @@ if ($useBundled) {
     }
 }
 
+if ($useNpm) {
+    $npmCfg = Join-Path $TARGET "scripts\configure_npm.ps1"
+    if (Test-Path $npmCfg) {
+        Write-Step "==> Configuring Nginx Proxy Manager (admin + proxy hosts via API)"
+        & powershell -ExecutionPolicy Bypass -File $npmCfg -RepoRoot $TARGET
+        $updatedUrl = Get-EnvKeyValue $envPath "APP_URL"
+        if ($updatedUrl) { $APP_URL = $updatedUrl }
+    }
+}
+
 [void](Invoke-Compose @("compose", "up", "-d", "app"))
 
 $dbPath = Join-Path $TARGET "data\app.db"
@@ -642,15 +724,34 @@ else {
 }
 Write-Host "  4. Optional Open Library catalog from that wizard (skip freely - seed cache is enough)"
 Write-Host "  5. Optional Mullvad later: WireGuard keys + add vpn to COMPOSE_PROFILES"
+if ($useNpm) {
+    Write-Host ""
+    Write-Host "Nginx Proxy Manager:"
+    Write-Host "  - Admin UI: http://127.0.0.1:81  (NPM_ADMIN_EMAIL / NPM_ADMIN_PASSWORD in .env)"
+    $npmDom = Get-EnvKeyValue $envPath "NPM_DOMAIN"
+    if ($npmDom) {
+        Write-Host ("  - Library proxy: " + $APP_URL)
+        Write-Host "  - DNS: point A/AAAA at this host for Let's Encrypt; re-run .\scripts\configure_npm.ps1"
+    }
+    else {
+        Write-Host "  - No domain yet — LAN via :8085; set NPM_DOMAIN then .\scripts\configure_npm.ps1"
+    }
+}
+else {
+    Write-Host ""
+    Write-Host "Reverse proxy: skipped. Remote HTTPS needs a proxy -> http://127.0.0.1:8085"
+}
 Write-Host ""
 Write-Host ("Stack dir: " + $TARGET)
 Write-Host ("Logs:      Set-Location '" + $TARGET + "'; docker compose logs -f app")
 if ($useBundled) {
-    Write-Host "Ports:     app 8085 | ABS 13378 | Kavita 5000 | LibraForge 5056 | prowlarr 9696 | flare 8191 | jackett 9117"
+    $ports = "app 8085 | ABS 13378 | Kavita 5000 | LibraForge 5056 | prowlarr 9696 | flare 8191 | jackett 9117"
 }
 else {
-    Write-Host "Ports:     app 8085 | prowlarr 9696 | flaresolverr 8191 | jackett 9117"
+    $ports = "app 8085 | prowlarr 9696 | flaresolverr 8191 | jackett 9117"
 }
+if ($useNpm) { $ports = "$ports | npm 80/443/81" }
+Write-Host "Ports:     $ports"
 Write-Host ""
 Write-Host "Note: Linux host cron helpers are skipped on Windows."
 Write-Host "      Use Task Scheduler or Admin -> Catalog schedule instead."

@@ -161,6 +161,35 @@ services:
       - TZ=${TZ:-UTC}
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # Nginx Proxy Manager — optional reverse proxy for remote HTTPS.
+  # Enable with COMPOSE_PROFILES=npm (default for fresh installers).
+  # Skip if you already run NPM / Caddy / Traefik / nginx elsewhere (ports 80/443).
+  # Container name is library-npm to avoid clashing with a host-level "npm" stack.
+  # Admin UI: http://<host>:81  |  HTTP/HTTPS: 80/443
+  # ---------------------------------------------------------------------------
+  nginx-proxy-manager:
+    image: jc21/nginx-proxy-manager:2.12.6
+    container_name: library-npm
+    profiles:
+      - npm
+    ports:
+      - "80:80"
+      - "443:443"
+      - "81:81"
+    environment:
+      - TZ=${TZ:-UTC}
+      - INITIAL_ADMIN_EMAIL=${NPM_ADMIN_EMAIL:-admin@example.com}
+      - INITIAL_ADMIN_PASSWORD=${NPM_ADMIN_PASSWORD:-changeme}
+      # Pi / many hosts lack IPv6 — avoids "Address family not supported" noise.
+      - DISABLE_IPV6=${NPM_DISABLE_IPV6:-true}
+    volumes:
+      - ./npm-data:/data
+      - ./npm-letsencrypt:/etc/letsencrypt
+      # Long timeouts for search streams / ABS scans (included in every proxy host).
+      - ./nginx/npm-server_proxy.conf:/data/nginx/custom/server_proxy.conf:ro
+    restart: unless-stopped
+
   # Companion app — installers clone https://github.com/coconautilus17/LibraForge
   # into ./libraforge (gitignored) before starting this profile.
   libraforge:

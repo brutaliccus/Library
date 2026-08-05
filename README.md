@@ -182,9 +182,11 @@ flowchart TB
 
 **New Ubuntu Server laptop?** Step-by-step host prep + guided installer: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
 
-**Mullvad / gluetun is optional.** Fresh installs start without the VPN sidecar so the stack is healthy before you add WireGuard keys. Enable later by adding `vpn` to `COMPOSE_PROFILES` (e.g. `bundled-media,vpn`) and `ABB_PROXY_URL=http://gluetun:8888` (see `.env.example`).
+**Mullvad / gluetun is optional.** Fresh installs start without the VPN sidecar so the stack is healthy before you add WireGuard keys. Enable later by adding `vpn` to `COMPOSE_PROFILES` (e.g. `bundled-media,npm,vpn`) and `ABB_PROXY_URL=http://gluetun:8888` (see `.env.example`).
 
 **Bundled media is the default for new installs.** Profile `bundled-media` starts Audiobookshelf, Kavita, and LibraForge on the same Docker network, wires internal URLs into `.env`, and bootstraps API keys (same idea as Jackett/Prowlarr sync). Existing Pi hosts that already use external ABS/Kavita/LF keep those URLs — leave the profile off. Expect ~1–2 GB extra RAM for the media sidecars. FlareSolverr is resource-capped in `docker-compose.yml` (768m / 1.5 CPU / 200 pids).
+
+**Nginx Proxy Manager is included by default** (compose profile `npm`, container `library-npm`). The installer asks *“Enable Nginx Proxy Manager? (Already have a reverse proxy? Skip NPM)”* — answer No if ports 80/443 are already taken. When enabled it bootstraps the admin user and proxy hosts via the NPM API (`scripts/configure_npm.sh` / `.ps1`) — no UI click-path required. Provide a domain + Let's Encrypt email for HTTPS; leave domain blank for LAN and configure later.
 
 ---
 
@@ -210,6 +212,12 @@ Opt out of bundled ABS/Kavita/LibraForge:
 .\scripts\install_library.ps1 -NonInteractive -SkipBundledMedia
 ```
 
+Skip NPM (you already reverse-proxy):
+
+```powershell
+.\scripts\install_library.ps1 -NonInteractive -SkipNpm
+```
+
 ### Linux / Raspberry Pi / Ubuntu Server
 
 ```bash
@@ -228,10 +236,21 @@ curl -fsSL https://raw.githubusercontent.com/brutaliccus/Library/main/scripts/in
 Unattended smoke test:
 
 ```bash
-LIBRARY_NONINTERACTIVE=1 ./scripts/install_library.sh /opt/library --non-interactive
+LIBRARY_NONINTERACTIVE=1 LIBRARY_SKIP_NPM=1 ./scripts/install_library.sh /opt/library --non-interactive
 ```
 
-The installers write `.env` (core secrets, media mounts, indexer URLs, pipeline/sweep defaults, optional debrid/catalog/LLM keys, VAPID), create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, sync Jackett/Prowlarr/ABS/Kavita/LibraForge into `.env`, then print a soft health report (app / indexers / Flare / ABS / Kavita / docker.sock). **Mullvad is optional**. After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead. Full Ubuntu checklist: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
+With NPM + domain (DNS must point here for Let's Encrypt):
+
+```bash
+LIBRARY_NONINTERACTIVE=1 \
+  LIBRARY_NPM_DOMAIN=library.example.com \
+  LIBRARY_NPM_LE_EMAIL=you@example.com \
+  LIBRARY_NPM_ADMIN_EMAIL=you@example.com \
+  LIBRARY_NPM_ADMIN_PASSWORD='choose-a-strong-password' \
+  ./scripts/install_library.sh /opt/library --non-interactive
+```
+
+The installers write `.env` (core secrets, media mounts, indexer URLs, pipeline/sweep defaults, optional debrid/catalog/LLM keys, VAPID, NPM vars), create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media,npm` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, sync Jackett/Prowlarr/ABS/Kavita/LibraForge into `.env`, configure NPM proxy hosts via API, then print a soft health report (app / indexers / Flare / ABS / Kavita / npm / docker.sock). **Mullvad is optional**; **NPM is default but skippable**. After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead. Full Ubuntu checklist: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
 
 ### Indexer cache seed
 
@@ -309,12 +328,14 @@ Set `PUID`/`PGID` to `1000` when sharing the audiobook mount with LibraForge (av
 
 ### Reverse proxy
 
-Example configs:
+**Preferred on a fresh host:** enable the `npm` compose profile (installer default). It starts Nginx Proxy Manager as `library-npm`, sets the admin password from prompts, and creates proxy hosts via `scripts/configure_npm.sh` (upstream `app:8080` on the compose network; optional ABS/Kavita hosts). Point DNS at the host before Let's Encrypt can succeed; re-run `configure_npm.sh` anytime (idempotent).
+
+If you already proxy elsewhere, skip NPM and use the examples:
 
 - `nginx/library.example.com.conf` - full site proxy (long timeouts for search streams + WebSockets)
-- `nginx/npm-server_proxy.conf` - Nginx Proxy Manager custom locations
+- `nginx/npm-server_proxy.conf` - custom locations (also bind-mounted into bundled NPM)
 
-Proxy to `http://127.0.0.1:8085`.
+External proxies should target `http://127.0.0.1:8085`. Set `APP_URL` to the public `https://` URL.
 
 ---
 
@@ -337,6 +358,7 @@ Most integration keys can also be set in **Admin → Settings** / **Integrations
 | Catalog | `HARDCOVER_API_KEY`, `NYT_API_KEY`, `ISBNDB_API_KEY`, `GOOGLE_BOOKS_API_KEY`, `AA_ACCOUNT_ID`, `OPENROUTER_*` (optional LLM assist) |
 | Mobile | `ANDROID_APK_GITHUB_REPO`, `GITHUB_TOKEN` (optional rate-limit), `ANDROID_MIN_VERSION_CODE`, `ANDROID_FORCE_UPDATES` |
 | VPN | `WIREGUARD_PRIVATE_KEY`, `WIREGUARD_ADDRESSES`, `MULLVAD_*`, `ABB_PROXY_URL` |
+| NPM | `NPM_ADMIN_EMAIL`, `NPM_ADMIN_PASSWORD`, `NPM_DOMAIN`, `NPM_ABS_DOMAIN`, `NPM_KAVITA_DOMAIN`, `NPM_LETSENCRYPT_EMAIL` (profile `npm`) |
 | Push | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (`python scripts/generate_vapid.py`) |
 | Host mounts | `AUDIOBOOK_HOST_DIR`, `EBOOK_HOST_DIR`, `OPENLIBRARY_HOST_DIR`, `PUID`/`PGID` (prefer `1000`), `DOCKER_GID`, `TZ` |
 
@@ -379,8 +401,9 @@ Expect multi-GB downloads and a multi-GB finished DB (much larger if you include
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/install_library.sh` | Full host bootstrap on Linux/Pi (pipelines, staging dirs, PUID 1000, APK repo) |
-| `scripts/install_library.ps1` | Same bootstrap for Windows + Docker Desktop (`-NonInteractive` supported) |
+| `scripts/install_library.sh` | Full host bootstrap on Linux/Pi (pipelines, staging dirs, PUID 1000, APK repo, optional NPM) |
+| `scripts/install_library.ps1` | Same bootstrap for Windows + Docker Desktop (`-NonInteractive` / `-SkipNpm` supported) |
+| `scripts/configure_npm.sh` / `.ps1` | Idempotent NPM admin + proxy-host bootstrap via API |
 | `scripts/install_libraforge.sh` | Sibling LibraForge stack (shared `/audiobooks` mount) |
 | `scripts/generate_vapid.py` | Web Push keypair |
 | `scripts/backup_db.sh` / `install_backup_cron.sh` | DB backups (Linux cron) |
@@ -456,7 +479,7 @@ seed/                Warm indexer-cache DB (gzipped; auto-imported on first boot
 nginx/               Reverse-proxy examples
 scripts/             Install, backup, catalog, indexer helpers
 tests/               Pytest suite
-docker-compose.yml   App + Prowlarr + Jackett + FlareSolverr + gluetun
+docker-compose.yml   App + indexers + Flare + optional ABS/Kavita/LF, NPM, gluetun
 Dockerfile           Multi-stage: Node frontend build -> Python app image
 .env.example         Documented environment template
 ```

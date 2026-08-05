@@ -10,8 +10,10 @@
 # Env overrides (also used in non-interactive mode):
 #   LIBRARY_SITE_REPO, LIBRARY_SITE_BRANCH, LIBRARY_APP_URL, LIBRARY_AUDIO_HOST,
 #   LIBRARY_EBOOK_HOST, LIBRARY_OL_HOST, LIBRARY_APK_REPO, LIBRARY_TZ,
-#   LIBRARY_SKIP_BUNDLED_MEDIA=1, LIBRARY_ENABLE_VPN=1, LIBRARY_ENABLE_DEEP_SCRAPERS=1,
-#   LIBRARY_SKIP_DOCKER_INSTALL=1, LIBRARY_SKIP_BUILD=1
+#   LIBRARY_SKIP_BUNDLED_MEDIA=1, LIBRARY_SKIP_NPM=1, LIBRARY_ENABLE_VPN=1,
+#   LIBRARY_ENABLE_DEEP_SCRAPERS=1, LIBRARY_SKIP_DOCKER_INSTALL=1, LIBRARY_SKIP_BUILD=1,
+#   LIBRARY_NPM_DOMAIN, LIBRARY_NPM_ABS_DOMAIN, LIBRARY_NPM_KAVITA_DOMAIN,
+#   LIBRARY_NPM_LE_EMAIL, LIBRARY_NPM_ADMIN_EMAIL, LIBRARY_NPM_ADMIN_PASSWORD
 set -euo pipefail
 
 TARGET="${1:-/opt/library}"
@@ -574,7 +576,76 @@ fi
 mkdir -p data prowlarr-config jackett-config \
   audiobookshelf-config audiobookshelf-metadata kavita-config \
   libraforge-auth libraforge-config libraforge-reports \
+  npm-data npm-letsencrypt \
   media/audiobooks media/ebooks media/openlibrary
+
+# ---------------------------------------------------------------------------
+step "Nginx Proxy Manager (reverse proxy) [RECOMMENDED]"
+explain "Remote HTTPS needs a reverse proxy. Fresh installs include NPM (compose profile npm)."
+explain "Already have NPM / Caddy / Traefik / nginx? Skip — install continues without it."
+USE_NPM=false
+if [[ "${LIBRARY_SKIP_NPM:-0}" == "1" ]]; then
+  c_yellow "LIBRARY_SKIP_NPM=1 — Nginx Proxy Manager off"
+elif yes_no "Enable Nginx Proxy Manager? (Already have a reverse proxy? Skip NPM)" "y"; then
+  USE_NPM=true
+else
+  c_yellow "Skipped NPM. For remote HTTPS later, point your reverse proxy at http://127.0.0.1:8085"
+  c_yellow "APP_URL should be the public https:// URL friends open (e.g. https://library.example.com)."
+fi
+
+NPM_DOMAIN=""
+NPM_ABS_DOMAIN=""
+NPM_KAVITA_DOMAIN=""
+NPM_LE_EMAIL=""
+NPM_ADMIN_EMAIL=""
+NPM_ADMIN_PASSWORD=""
+if $USE_NPM; then
+  explain "Ports 80 + 443 (public) and 81 (NPM admin UI). Container name: library-npm."
+  # Soft conflict check — do not fail install; user may free ports before compose up.
+  if command -v ss >/dev/null 2>&1; then
+    if ss -tln 2>/dev/null | grep -qE ':80\s'; then
+      c_yellow "Port 80 looks busy — NPM may fail to bind. Skip NPM or free the port."
+    fi
+    if ss -tln 2>/dev/null | grep -qE ':443\s'; then
+      c_yellow "Port 443 looks busy — NPM may fail to bind HTTPS."
+    fi
+  fi
+  prompt NPM_DOMAIN "Library public domain (blank = LAN / configure hosts later)" "${LIBRARY_NPM_DOMAIN:-}"
+  if $USE_BUNDLED; then
+    prompt NPM_ABS_DOMAIN "Audiobookshelf domain (optional)" "${LIBRARY_NPM_ABS_DOMAIN:-}"
+    prompt NPM_KAVITA_DOMAIN "Kavita domain (optional)" "${LIBRARY_NPM_KAVITA_DOMAIN:-}"
+  fi
+  prompt NPM_LE_EMAIL "Let's Encrypt email (blank = HTTP only, no SSL yet)" "${LIBRARY_NPM_LE_EMAIL:-}"
+  prompt NPM_ADMIN_EMAIL "NPM admin email" "${LIBRARY_NPM_ADMIN_EMAIL:-admin@example.com}"
+  EXISTING_NPM_PASS="$(get_env NPM_ADMIN_PASSWORD)"
+  if [[ -z "$EXISTING_NPM_PASS" || "$EXISTING_NPM_PASS" == "changeme" ]]; then
+    EXISTING_NPM_PASS="$(openssl rand -hex 12 2>/dev/null || echo "library-npm-$(date +%s)")"
+  fi
+  prompt_secret NPM_ADMIN_PASSWORD "NPM admin password" "${LIBRARY_NPM_ADMIN_PASSWORD:-$EXISTING_NPM_PASS}"
+  NPM_ADMIN_EMAIL="${NPM_ADMIN_EMAIL:-admin@example.com}"
+  NPM_ADMIN_PASSWORD="${NPM_ADMIN_PASSWORD:-$EXISTING_NPM_PASS}"
+  set_env NPM_ADMIN_EMAIL "$NPM_ADMIN_EMAIL"
+  set_env NPM_ADMIN_PASSWORD "$NPM_ADMIN_PASSWORD"
+  set_env NPM_DOMAIN "$NPM_DOMAIN"
+  set_env NPM_ABS_DOMAIN "$NPM_ABS_DOMAIN"
+  set_env NPM_KAVITA_DOMAIN "$NPM_KAVITA_DOMAIN"
+  set_env NPM_LETSENCRYPT_EMAIL "$NPM_LE_EMAIL"
+  set_env NPM_DISABLE_IPV6 "true"
+  if [[ -n "$NPM_DOMAIN" ]]; then
+    if [[ -n "$NPM_LE_EMAIL" ]]; then
+      set_env APP_URL "https://${NPM_DOMAIN}"
+      APP_URL="https://${NPM_DOMAIN}"
+      c_green "APP_URL → https://${NPM_DOMAIN} (Let's Encrypt after DNS points here)"
+    else
+      set_env APP_URL "http://${NPM_DOMAIN}"
+      APP_URL="http://${NPM_DOMAIN}"
+      c_green "APP_URL → http://${NPM_DOMAIN} (HTTP; add LE email later for HTTPS)"
+    fi
+  else
+    c_yellow "No domain — NPM admin on :81; use LAN APP_URL (${APP_URL}) until DNS is ready."
+    c_yellow "Next: set NPM_DOMAIN (+ NPM_LETSENCRYPT_EMAIL) in .env, then: bash scripts/configure_npm.sh"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 step "Mullvad VPN sidecar (gluetun) [OPTIONAL]"
@@ -586,6 +657,9 @@ fi
 PROFILE_PARTS=()
 if $USE_BUNDLED; then
   PROFILE_PARTS+=("bundled-media")
+fi
+if $USE_NPM; then
+  PROFILE_PARTS+=("npm")
 fi
 _enable_vpn=false
 if [[ "${LIBRARY_ENABLE_VPN:-0}" == "1" ]]; then
@@ -619,8 +693,11 @@ for p in "${PROFILE_PARTS[@]+"${PROFILE_PARTS[@]}"}"; do
   fi
 done
 set_env COMPOSE_PROFILES "$COMPOSE_PROFILES_VAL"
-if $USE_BUNDLED; then
-  c_green "COMPOSE_PROFILES=${COMPOSE_PROFILES_VAL} (bundled-media starts ABS/Kavita/LibraForge)"
+_profile_note=""
+$USE_BUNDLED && _profile_note="${_profile_note}bundled-media "
+$USE_NPM && _profile_note="${_profile_note}npm "
+if [[ -n "$_profile_note" ]]; then
+  c_green "COMPOSE_PROFILES=${COMPOSE_PROFILES_VAL} (${_profile_note})"
 fi
 
 # ---------------------------------------------------------------------------
@@ -678,6 +755,15 @@ if $USE_BUNDLED; then
   if [[ -f scripts/sync_libraforge_env.sh ]]; then
     c_cyan "Wiring LibraForge URLs"
     bash scripts/sync_libraforge_env.sh || true
+  fi
+fi
+if $USE_NPM; then
+  if [[ -f scripts/configure_npm.sh ]]; then
+    c_cyan "Configuring Nginx Proxy Manager (admin + proxy hosts via API)"
+    bash scripts/configure_npm.sh || true
+    # Reload APP_URL if configure_npm updated it.
+    APP_URL="$(get_env APP_URL)"
+    APP_URL="${APP_URL:-$DEFAULT_APP_URL}"
   fi
 fi
 $DOCKER compose up -d app || true
@@ -756,6 +842,9 @@ if $USE_BUNDLED; then
   probe_http "kavita" "http://127.0.0.1:5000/"
   probe_http "libraforge" "http://127.0.0.1:5056/health"
 fi
+if $USE_NPM; then
+  probe_http "npm-admin" "http://127.0.0.1:81/"
+fi
 if [[ -S /var/run/docker.sock ]]; then
   if $DOCKER info >/dev/null 2>&1; then
     printf '  %-16s %s (DOCKER_GID=%s)\n' "docker.sock" "$_ok" "$(get_env DOCKER_GID)"
@@ -791,9 +880,29 @@ else
   echo "  7. Optional LibraForge sibling: bash scripts/install_libraforge.sh (docs/libraforge.md)"
   echo "  8. Optional Mullvad later: WireGuard keys + COMPOSE_PROFILES=vpn"
 fi
+if $USE_NPM; then
+  echo ""
+  echo "Nginx Proxy Manager:"
+  echo "  - Admin UI: http://<host>:81  (email/password from prompts / .env NPM_ADMIN_*)"
+  if [[ -n "$(get_env NPM_DOMAIN)" ]]; then
+    echo "  - Library proxy: $(get_env APP_URL)  (upstream app:8080 on compose network)"
+    if [[ -n "$(get_env NPM_LETSENCRYPT_EMAIL)" ]]; then
+      echo "  - DNS: point A/AAAA for $(get_env NPM_DOMAIN) at this host before LE succeeds"
+      echo "  - Re-run: bash scripts/configure_npm.sh  (idempotent — refreshes certs/hosts)"
+    else
+      echo "  - HTTP only — add NPM_LETSENCRYPT_EMAIL to .env and re-run configure_npm.sh for HTTPS"
+    fi
+  else
+    echo "  - No domain yet — LAN via :8085; set NPM_DOMAIN then: bash scripts/configure_npm.sh"
+  fi
+else
+  echo ""
+  echo "Reverse proxy: skipped. Remote HTTPS needs NPM/Caddy/nginx → http://127.0.0.1:8085"
+fi
 echo ""
 echo "Notes:"
 echo "  - Profile bundled-media = ABS (:13378) + Kavita (:5000) + LibraForge (:5056)"
+echo "  - Profile npm = Nginx Proxy Manager (library-npm) on 80/443/81 — skip if you already proxy"
 echo "  - FlareSolverr resource limits are in docker-compose.yml (safe defaults for Pi/laptop)"
 echo "  - Re-run this script anytime — it updates selected .env keys without wiping secrets"
 echo "  - Docs: docs/ubuntu-server-install.md"
@@ -801,8 +910,12 @@ echo ""
 echo "Stack dir: $TARGET"
 echo "Logs:      cd \"$TARGET\" && $DOCKER compose logs -f app"
 if $USE_BUNDLED; then
-  echo "Ports:     app 8085 | ABS 13378 | Kavita 5000 | LibraForge 5056 | prowlarr 9696 | flare 8191 | jackett 9117"
+  _ports="app 8085 | ABS 13378 | Kavita 5000 | LibraForge 5056 | prowlarr 9696 | flare 8191 | jackett 9117"
 else
-  echo "Ports:     app 8085 | prowlarr 9696 | flaresolverr 8191 | jackett 9117"
+  _ports="app 8085 | prowlarr 9696 | flaresolverr 8191 | jackett 9117"
 fi
+if $USE_NPM; then
+  _ports="${_ports} | npm 80/443/81"
+fi
+echo "Ports:     $_ports"
 echo ""

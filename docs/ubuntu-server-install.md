@@ -9,16 +9,16 @@ Guided path for a **fresh** host (e.g. spare laptop). Does **not** migrate or st
 | Ubuntu Server 24.04 LTS | Recommended OS (OpenSSH enabled at install) |
 | Docker Engine + Compose plugin | Runs the stack |
 | Git | Clone / update the repo |
-| curl, openssl | Installer + secrets |
-| Free ports | `8085`, `9696`, `8191`, `9117` (+ `13378`, `5000`, `5056` if bundled-media) |
+| curl, openssl, python3 | Installer + secrets + NPM API JSON |
+| Free ports | `8085`, `9696`, `8191`, `9117` (+ `13378`, `5000`, `5056` if bundled-media; **`80`/`443`/`81` if NPM**) |
 
-Optional later: Tailscale Funnel or reverse proxy for HTTPS; Mullvad WireGuard for ABB egress.
+Optional later: Mullvad WireGuard for ABB egress. Remote HTTPS is covered by the bundled Nginx Proxy Manager profile (or your own reverse proxy / Tailscale Funnel).
 
 ### One-time host prep
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl git openssl
+sudo apt-get install -y ca-certificates curl git openssl python3
 
 # Docker Engine + Compose (official apt repo)
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -66,28 +66,65 @@ The script walks you through:
 6. **Pipelines + Sweep** - LibraForge / ebook organizer + scan cadence defaults
 7. **Catalog / LLM** - Hardcover, OpenRouter, AA, NYT, ISBNdb, Google Books (optional)
 8. **Android APK repo** + scraper RSS-only defaults
-9. **VPN** - Mullvad/gluetun (optional profile)
-10. **Start stack** → sync keys → optional VAPID → health report
+9. **Nginx Proxy Manager** - default Yes; skip if you already reverse-proxy (ports 80/443)
+10. **VPN** - Mullvad/gluetun (optional profile)
+11. **Start stack** → sync keys → configure NPM via API → optional VAPID → health report
 
-Re-runs are safe: existing `.env` secrets are kept when you press Enter on a prompt.
+Re-runs are safe: existing `.env` secrets are kept when you press Enter on a prompt. NPM proxy hosts are upserted by domain (no duplicates).
+
+### Nginx Proxy Manager prompts
+
+| Prompt | Notes |
+|--------|--------|
+| Enable NPM? (Already have a reverse proxy? Skip NPM) | Default **Yes**. Answer **n** if something else already owns 80/443. |
+| Library public domain | e.g. `library.example.com`. Blank = LAN-only; use `:8085` until DNS is ready. |
+| ABS / Kavita domains | Optional when bundled-media is on |
+| Let's Encrypt email | Blank = HTTP-only proxy hosts; add later and re-run `bash scripts/configure_npm.sh` |
+| NPM admin email / password | Bootstraps admin via `INITIAL_ADMIN_*` + API (no UI click-path) |
+
+**With a domain (remote HTTPS):**
+
+1. Point DNS **A/AAAA** for the domain at this laptop's public IP (router port-forward 80/443 if needed).
+2. Enter domain + LE email in the installer.
+3. `APP_URL` becomes `https://your.domain`.
+4. If LE fails (DNS not ready), fix DNS and re-run `bash scripts/configure_npm.sh`.
+
+**LAN-only:**
+
+1. Leave domain blank (or skip NPM if you only need `:8085`).
+2. Open `http://<lan-ip>:8085/login`.
+3. NPM admin stays at `http://<lan-ip>:81` when the profile is on.
+
+Container name is `library-npm` so it does not clash with a host-level NPM stack on the Pi. Production Pi installs that already reverse-proxy should answer **Skip NPM**.
 
 ### Unattended smoke test
 
 ```bash
-LIBRARY_NONINTERACTIVE=1 LIBRARY_APP_URL="http://127.0.0.1:8085" \
+LIBRARY_NONINTERACTIVE=1 LIBRARY_SKIP_NPM=1 LIBRARY_APP_URL="http://127.0.0.1:8085" \
+  ./scripts/install_library.sh /opt/library --non-interactive
+```
+
+Full stack with NPM + Let's Encrypt (DNS must already point here):
+
+```bash
+LIBRARY_NONINTERACTIVE=1 \
+  LIBRARY_NPM_DOMAIN=library.example.com \
+  LIBRARY_NPM_LE_EMAIL=you@example.com \
+  LIBRARY_NPM_ADMIN_EMAIL=you@example.com \
+  LIBRARY_NPM_ADMIN_PASSWORD='choose-a-strong-password' \
   ./scripts/install_library.sh /opt/library --non-interactive
 ```
 
 ## First launch (web)
 
-1. Open `http://<laptop-ip>:8085/login` → create **admin**
+1. Open `APP_URL/login` (or `http://<laptop-ip>:8085/login`) → create **admin**
 2. Create library + offline PIN
 3. **`/admin/setup`** - bundled stack should already show green probes; finish Audible / debrid / catalog as needed
 4. Share invite link from Settings
 
 ## Do not touch the Pi
 
-Production remains on the Pi (`pihole@192.168.68.76` / existing mounts). This laptop install uses its own `/opt/library` and local or separately mounted media unless you deliberately point host paths at shared storage.
+Production remains on the Pi (`pihole@192.168.68.76` / existing mounts). This laptop install uses its own `/opt/library` and local or separately mounted media unless you deliberately point host paths at shared storage. Do **not** enable the `npm` profile on the Pi if it already runs a reverse proxy on 80/443.
 
 ## SSH from a Windows admin PC
 
@@ -104,5 +141,8 @@ ssh USER@LAPTOP_IP
 | Admin Health Start/Stop fails | `DOCKER_GID` = host docker group id, recreate app |
 | ABS/Kavita yellow in setup | Wait for first boot; `docker compose logs audiobookshelf kavita` |
 | Flare thrashing CPU | Keep RSS-only; compose already caps FlareSolverr |
+| NPM ports busy | Skip NPM (`LIBRARY_SKIP_NPM=1`) or free 80/443; container is `library-npm` |
+| Let's Encrypt failed | DNS A/AAAA + port-forward 80/443, then `bash scripts/configure_npm.sh` |
+| NPM login failed | Check `NPM_ADMIN_EMAIL` / `NPM_ADMIN_PASSWORD` in `.env`; admin UI on `:81` |
 
 See also: [README Quick start](../README.md#quick-start), [`.env.example`](../.env.example).

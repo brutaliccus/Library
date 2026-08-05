@@ -68,6 +68,9 @@ kavita-config/
 libraforge-auth/
 libraforge-config/
 libraforge-reports/
+# Nginx Proxy Manager (compose profile npm)
+npm-data/
+npm-letsencrypt/
 
 # --- Local-only / unrelated trees ---
 libraforge/

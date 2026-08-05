@@ -85,11 +85,12 @@ export default function MobileExpandableSearch({
 
   const bar = (
     <div className="pointer-events-auto relative max-w-xl mx-auto flex justify-end">
+      {/* Closed: no overflow-hidden/border so the FAB + filter ring aren't clipped. */}
       <div
-        className={`flex items-center justify-end overflow-hidden transition-[width,background-color,box-shadow,border-color] duration-300 ease-out ${
+        className={`flex items-center justify-end transition-[width,background-color,box-shadow,border-color,padding] duration-300 ease-out ${
           expanded
-            ? "w-full rounded-full bg-gray-900/90 backdrop-blur-md border border-gray-700/70 shadow-lg shadow-black/40"
-            : "w-14 border border-transparent"
+            ? "w-full overflow-hidden rounded-full bg-gray-900/90 backdrop-blur-md border border-gray-700/70 shadow-lg shadow-black/40"
+            : "w-auto overflow-visible border-0 p-1.5"
         }`}
       >
         <input

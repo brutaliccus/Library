@@ -20,7 +20,7 @@ def test_persist_buster_is_v8_origin_scoped_and_clears_legacy():
     assert "shelfPersistKey" in main
     assert "clearLegacyShelfPersist" in main
     util = UTIL.read_text(encoding="utf-8")
-    assert 'SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v8:"' in util
+    assert 'SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v9:"' in util
     assert "rq-shelf-cache-v6" in util  # legacy clear list
     assert "rq-shelf-cache-v5" in util
     assert "rq-shelf-cache-v4" in util

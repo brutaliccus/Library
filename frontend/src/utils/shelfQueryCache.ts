@@ -6,18 +6,19 @@
  * Soft-refresh (invalidate) is the default after scans/adds so phones never
  * blank the shelf for 30s. Hard purge remains for rare ASIN orphan wipes.
  *
- * Persist blobs are origin-scoped (v8) so multi-library devices never mix catalogs.
+ * Persist blobs are origin-scoped (v9) so multi-library devices never mix catalogs.
  * v6 busts stale Mayfair/Hardcover series snapshots after ABS seriesName preference.
  * v7 busts Kavita shelves collapsed by seriesId-only merge (multi-volume series
  * like Burning Witch were reduced to one card; count stuck near series count).
  * v8 busts shelves that still collapsed multi-file chapters (same chapterId) and
  * inflated ABS counts from ASIN duplicates / chapter-folder fragments.
+ * v9 busts shelves that ignored file-scoped ebook_applied.json overrides after Kavita refresh.
  */
 import type { QueryClient } from "@tanstack/react-query";
 import { currentOrigin } from "../api/libraryRegistry";
 
 /** Base prefix; use shelfPersistKey() for the active origin. */
-export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v8:";
+export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v9:";
 export const SHELF_PERSIST_LEGACY_KEYS = [
   "rq-shelf-cache-v2",
   "rq-shelf-cache-v3",
@@ -25,6 +26,7 @@ export const SHELF_PERSIST_LEGACY_KEYS = [
   "rq-shelf-cache-v5",
   "rq-shelf-cache-v6",
   "rq-shelf-cache-v7",
+  "rq-shelf-cache-v8",
 ] as const;
 
 /** Origin-scoped localStorage key for shelf query persistence. */
@@ -369,6 +371,7 @@ export function clearLegacyShelfPersist(
   }
   // Origin-scoped generations use `prefix + origin` (e.g. rq-shelf-cache-v5:https://…).
   const originPrefixes = [
+    "rq-shelf-cache-v8:",
     "rq-shelf-cache-v7:",
     "rq-shelf-cache-v6:",
     "rq-shelf-cache-v5:",

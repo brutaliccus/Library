@@ -10,8 +10,10 @@ import pytest
 from app.services.ebook_pipeline import EbookMeta
 from app.services.ebook_quick_review import (
     EbookQuickReviewError,
+    apply_ebook_override_fields,
     list_ebook_staging_targets,
     load_applied_ebook_meta,
+    load_applied_ebook_override,
     selected_result_to_ebook_meta,
     write_applied_ebook_meta,
 )
@@ -256,3 +258,62 @@ def test_search_ebook_quick_review_ol_only_without_hardcover_key(tmp_path, monke
     assert len(out["results"]) == 1
     assert out["results"][0]["source"] == "open_library"
     assert "open_library" in out["providers"]
+
+
+def test_library_override_sidecar_roundtrip(tmp_path):
+    """Library ebook folder keeps applied metadata for shelf merge after Kavita refresh."""
+    book_dir = tmp_path / "Author" / "Series" / "Book"
+    book_dir.mkdir(parents=True)
+    (book_dir / "Book.epub").write_bytes(b"epub")
+    meta = EbookMeta(
+        title="Pinned Title",
+        author="Pinned Author",
+        series="Pinned Series",
+        series_index="2",
+        score=0.99,
+        source="hardcover",
+    )
+    write_applied_ebook_meta(
+        book_dir,
+        meta,
+        summary="Pinned blurb",
+        manually_applied=True,
+        kavita_series_id=42,
+        kavita_chapter_id=7,
+    )
+    ov = load_applied_ebook_override(book_dir / "Book.epub")
+    assert ov is not None
+    assert ov["title"] == "Pinned Title"
+    assert ov["author"] == "Pinned Author"
+    assert ov["series"] == "Pinned Series"
+    assert ov["series_index"] == "2"
+    assert ov["summary"] == "Pinned blurb"
+
+
+def test_apply_ebook_override_fields_prefers_sidecar():
+    item = {
+        "title": "Filename Stem",
+        "author": "Kavita Author",
+        "seriesName": "",
+        "sequence": "",
+        "coverUrl": "/api/library/reader/cover/ebook?seriesId=1",
+    }
+    apply_ebook_override_fields(
+        item,
+        {
+            "title": "Real Title",
+            "author": "Real Author",
+            "series": "Real Series",
+            "series_index": "3",
+            "summary": "Blurb",
+            "cover_url": "https://example.com/c.jpg",
+        },
+        multi_volume=True,
+    )
+    assert item["title"] == "Real Title"
+    assert item["author"] == "Real Author"
+    assert item["seriesName"] == "Real Series"
+    assert item["sequence"] == "3"
+    assert item["description"] == "Blurb"
+    assert item["coverUrl"] == "https://example.com/c.jpg"
+    assert item["metadataOverride"] is True

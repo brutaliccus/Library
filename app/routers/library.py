@@ -1057,6 +1057,33 @@ def _kavita_file_key(file_entry: dict) -> str:
     return Path(path).name.lower()
 
 
+def _kavita_local_file_path(file_entry: dict | None) -> Path | None:
+    """Resolve an on-disk ebook path from a Kavita file entry."""
+    if not file_entry:
+        return None
+    raw = str(file_entry.get("filePath") or file_entry.get("fileName") or "").strip()
+    if not raw:
+        return None
+    from app.services.kavita import _kavita_path_to_local
+
+    local = _kavita_path_to_local(raw)
+    if local is not None:
+        return local
+    # Basename-only fallback: search is too expensive; return Path for sidecar parent guess.
+    p = Path(raw)
+    return p if p.is_file() else None
+
+
+def _ebook_override_for_file_entry(file_entry: dict | None) -> dict | None:
+    """Load file-scoped ebook_applied.json override for a Kavita file entry."""
+    from app.services.ebook_quick_review import load_applied_ebook_override
+
+    local = _kavita_local_file_path(file_entry)
+    if local is None:
+        return None
+    return load_applied_ebook_override(local)
+
+
 def _kavita_volume_title(series_name: str, vol: dict, chapter: dict, file_entry: dict | None = None) -> str:
     """Best display title for one Kavita volume (prefer file stem over placeholder chapter titles)."""
     if file_entry is not None:
@@ -1206,7 +1233,7 @@ def _kavita_collection_items_from_series(
         file_key = _kavita_file_key(file_entry) if file_entry else None
         file_name = _kavita_file_name(file_entry) if file_entry else None
 
-        items.append({
+        item = {
             "seriesId": sid,
             "volumeId": volume_id,
             "volumeNumber": vol_num,
@@ -1223,7 +1250,16 @@ def _kavita_collection_items_from_series(
             "addedAt": added_ms,
             "volumeCount": len(vol_entries),
             "source": "kavita",
-        })
+        }
+        # Prefer manually saved / pipeline sidecar over live Kavita (ABS pattern).
+        from app.services.ebook_quick_review import apply_ebook_override_fields
+
+        apply_ebook_override_fields(
+            item,
+            _ebook_override_for_file_entry(file_entry),
+            multi_volume=multi,
+        )
+        items.append(item)
     return items
 
 
@@ -1313,6 +1349,10 @@ async def kavita_item_detail(
         kavita.get_series_metadata(series_id),
     )
     meta = meta or {}
+    writers = meta.get("writers") or series.get("authors") or []
+    author = ""
+    if writers:
+        author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
     book_num = kavita_ebook_match._book_number_from_text(name)
     chapter_id = kavita_ebook_match._pick_chapter_id(volumes, book_num)
     volume_id: int | None = None
@@ -1331,14 +1371,22 @@ async def kavita_item_detail(
             file_num = kavita_ebook_match._book_number_from_text(stem) if stem else None
             v_num = file_num if file_num is not None else kavita_ebook_match._volume_index(vol)
             v_title = _kavita_volume_title(name, vol, ch, file_entry or None)
-            volume_list.append({
+            vol_row = {
                 "volumeId": v_id,
                 "volumeNumber": v_num,
                 "chapterId": int(ch_id),
                 "title": v_title,
+                "author": author,
                 "fileKey": _kavita_file_key(file_entry) if file_entry else None,
                 "fileName": _kavita_file_name(file_entry) if file_entry else None,
-            })
+            }
+            from app.services.ebook_quick_review import apply_ebook_override_fields
+
+            ov = _ebook_override_for_file_entry(file_entry)
+            apply_ebook_override_fields(vol_row, ov, multi_volume=True)
+            if ov and ov.get("summary"):
+                vol_row["description"] = ov["summary"]
+            volume_list.append(vol_row)
             if chapter_id is not None and int(ch_id) == int(chapter_id):
                 volume_id = v_id
             elif chapter_id is None:
@@ -1356,10 +1404,6 @@ async def kavita_item_detail(
         cover_url += f"&volumeId={volume_id}"
     if chapter_id:
         cover_url += f"&chapterId={chapter_id}"
-    writers = meta.get("writers") or series.get("authors") or []
-    author = ""
-    if writers:
-        author = (writers[0] or {}).get("name", "") if isinstance(writers[0], dict) else str(writers[0])
     genres = _normalize_item_genres(meta.get("genres") or [])
     description = (meta.get("summary") or meta.get("description") or "").strip()
     inferred = library_series_from_title(name)
@@ -1380,9 +1424,33 @@ async def kavita_item_detail(
     except Exception:
         logger.debug("ABS match for Kavita series %s failed", series_id, exc_info=True)
 
+    # Prefer file-scoped override on the active/first volume for detail header fields.
+    active = None
+    if chapter_id is not None:
+        active = next((v for v in volume_list if v.get("chapterId") == int(chapter_id)), None)
+    if active is None and volume_list:
+        active = volume_list[0]
+    detail_title = name
+    if active and active.get("metadataOverride") and active.get("title"):
+        # Multi-volume: keep series name as header only when volumes disagree; else use override.
+        if len(volume_list) <= 1:
+            detail_title = active["title"]
+        else:
+            detail_title = name
+    if active and active.get("author"):
+        author = active["author"]
+    if active and active.get("description"):
+        description = active["description"]
+    if active and active.get("coverUrl"):
+        cover_url = active["coverUrl"]
+    if active and active.get("seriesName"):
+        sname = active["seriesName"]
+        seq = str(active.get("sequence") or seq or "")
+        series_out = [{"name": sname, "sequence": seq}] if sname else series_out
+
     return {
         "seriesId": series_id,
-        "title": name,
+        "title": detail_title,
         "author": author,
         "description": description,
         "genres": genres,

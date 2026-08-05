@@ -77,11 +77,24 @@ async def _run_pipeline() -> None:
         _status["phase"] = "kavita"
         try:
             kv_result = await kavita.scan_library_and_wait()
+            override_sync = None
+            try:
+                from app.services.ebook_quick_review import (
+                    resync_applied_ebook_overrides_to_kavita,
+                )
+
+                override_sync = await resync_applied_ebook_overrides_to_kavita()
+            except Exception as sync_err:
+                logger.warning(
+                    "Library refresh: ebook override resync failed: %s", sync_err
+                )
+            kavita.invalidate_cache()
             _status["kavita"] = {
                 "ok": True,
                 "scan_complete": bool(kv_result.get("scan_complete")),
                 "timed_out": bool(kv_result.get("timed_out")),
                 "waited_seconds": kv_result.get("waited_seconds"),
+                "ebook_overrides": override_sync,
             }
         except Exception as e:
             logger.warning("Library refresh: Kavita stage failed: %s", e)

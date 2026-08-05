@@ -20,6 +20,8 @@ interface EbookVolume {
   volumeNumber: number | null;
   chapterId: number;
   title: string;
+  author?: string | null;
+  description?: string | null;
   fileKey?: string | null;
   fileName?: string | null;
 }
@@ -87,13 +89,15 @@ export default function LibraryEbookDetail() {
   }, [item?.chapterId, preferredChapter, preferredFile, volumes]);
   const activeChapterId = activeVolume?.chapterId ?? null;
   const displayTitle = activeVolume?.title || item?.title || "";
+  const displayAuthor = activeVolume?.author || item?.author || "";
+  const displayDescription = activeVolume?.description || item?.description || "";
 
   const handleViewInStore = async () => {
     if (!item) return;
     setStoreLoading(true);
     try {
-      const q = item.author
-        ? `intitle:${JSON.stringify(displayTitle)} inauthor:${item.author}`
+      const q = displayAuthor
+        ? `intitle:${JSON.stringify(displayTitle)} inauthor:${displayAuthor}`
         : displayTitle;
       const { data } = await api.get(`/books/search?q=${encodeURIComponent(q)}&pageSize=5`);
       const books = (data as { books?: { id: string; title: string }[] })?.books;
@@ -375,7 +379,7 @@ export default function LibraryEbookDetail() {
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{displayTitle}</h1>
           {item.author && (
             <p className="text-gray-300 mt-2 sm:mt-3">
-              by <span className="text-gray-100 font-medium">{item.author}</span>
+              by <span className="text-gray-100 font-medium">{displayAuthor}</span>
             </p>
           )}
           {seriesLine && <p className="text-sm text-brand-400 mt-1">{seriesLine}</p>}
@@ -442,12 +446,12 @@ export default function LibraryEbookDetail() {
             </div>
           )}
 
-          {item.description && (
+          {displayDescription && (
             <div className="mt-6">
               <h2 className="text-lg font-semibold text-gray-100 mb-3">Synopsis</h2>
               <div
                 className="text-gray-300 text-sm leading-relaxed prose prose-invert prose-sm max-w-none"
-                dangerouslySetInnerHTML={{ __html: item.description }}
+                dangerouslySetInnerHTML={{ __html: displayDescription }}
               />
             </div>
           )}

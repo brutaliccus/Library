@@ -24,6 +24,7 @@ from app.services.ebook_quick_review import (
     EbookQuickReviewError,
     search_ebook_metadata_candidates,
     selected_result_to_ebook_meta,
+    write_applied_ebook_meta,
 )
 from app.services.forge_pipeline import (
     _collect_audio,
@@ -683,6 +684,21 @@ async def apply_ebook_metadata_review(
     except Exception as e:
         logger.warning("Could not embed metadata into %s: %s", primary, e)
 
+    # Persist file-scoped override (ABS metadata.json analogue) so Kavita refresh
+    # cannot wipe manual/pipeline titles from Library Site shelf/detail.
+    summary = str(selected_result.get("summary") or "").strip() or None
+    try:
+        write_applied_ebook_meta(
+            primary.parent,
+            ebook_meta,
+            summary=summary,
+            manually_applied=True,
+            kavita_series_id=series_id,
+            kavita_chapter_id=chapter_id,
+        )
+    except Exception as e:
+        logger.warning("Could not write ebook_applied.json for %s: %s", primary, e)
+
     # Never rename a multi-file Kavita series to a single volume title.
     series_display = (
         (ebook_meta.series or "").strip()
@@ -695,7 +711,7 @@ async def apply_ebook_metadata_review(
         series_id,
         name=kavita_name,
         author=ebook_meta.author,
-        summary=str(selected_result.get("summary") or "").strip() or None,
+        summary=summary,
     )
     try:
         await kavita.scan_series(series_id)

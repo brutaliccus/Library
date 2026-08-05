@@ -82,15 +82,30 @@ def list_ebook_staging_targets(staging: Path) -> list[dict[str, Any]]:
     return targets
 
 
-def write_applied_ebook_meta(staging: Path, meta: EbookMeta) -> Path:
-    """Persist admin-selected ebook identity for Continue organize."""
+def write_applied_ebook_meta(
+    staging: Path,
+    meta: EbookMeta,
+    *,
+    summary: str | None = None,
+    manually_applied: bool = True,
+    kavita_series_id: int | None = None,
+    kavita_chapter_id: int | None = None,
+) -> Path:
+    """Persist pipeline/admin ebook identity beside the ebook file (ABS sidecar analogue).
+
+    Written next to library ebooks as ``ebook_applied.json`` so Kavita scans cannot
+    wipe manual titles from the Library Site shelf (file-scoped; one book folder).
+    """
     staging = staging.resolve()
     staging.mkdir(parents=True, exist_ok=True)
     path = staging / APPLIED_META_FILENAME
+    summary_text = (summary or "").strip()
     payload = {
         "applied": True,
-        "manually_applied": True,
+        "manually_applied": bool(manually_applied),
         "source": meta.source or "manual",
+        "kavita_series_id": kavita_series_id,
+        "kavita_chapter_id": kavita_chapter_id,
         "meta": {
             "title": meta.title,
             "author": meta.author,
@@ -103,17 +118,18 @@ def write_applied_ebook_meta(staging: Path, meta: EbookMeta) -> Path:
             "source": meta.source,
             "cover_url": meta.cover_url,
             "reason": meta.reason,
+            "summary": summary_text or None,
         },
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
 
 
-def load_applied_ebook_meta(staging: Path) -> EbookMeta | None:
-    """Load manually applied ebook metadata from staging, if present."""
-    if not staging or not staging.is_dir():
+def _read_applied_ebook_raw(folder: Path) -> dict[str, Any] | None:
+    """Load raw ``ebook_applied.json`` from a folder, or None."""
+    if not folder or not folder.is_dir():
         return None
-    path = staging / APPLIED_META_FILENAME
+    path = folder / APPLIED_META_FILENAME
     if not path.is_file():
         return None
     try:
@@ -124,7 +140,107 @@ def load_applied_ebook_meta(staging: Path) -> EbookMeta | None:
         return None
     if not (data.get("applied") or data.get("manually_applied")):
         return None
+    return data
+
+
+def load_applied_ebook_override(folder_or_file: Path | str | None) -> dict[str, Any] | None:
+    """Return override fields from ``ebook_applied.json`` beside a library ebook.
+
+    Accepts a file path (uses parent) or a book directory. Prefer these fields over
+    live Kavita metadata when building shelf/detail responses (mirrors ABS sidecar
+    precedence after scan).
+    """
+    if not folder_or_file:
+        return None
+    path = Path(folder_or_file)
+    folder = path.parent if path.suffix else path
+    data = _read_applied_ebook_raw(folder)
+    if not data:
+        return None
     raw = data.get("meta") if isinstance(data.get("meta"), dict) else data
+    if not isinstance(raw, dict):
+        return None
+    title = str(raw.get("title") or "").strip()
+    if not title:
+        return None
+    summary = str(raw.get("summary") or raw.get("description") or "").strip()
+    return {
+        "title": title,
+        "author": str(raw.get("author") or "").strip(),
+        "series": str(raw.get("series") or "").strip(),
+        "series_index": str(raw.get("series_index") or raw.get("sequence") or "").strip(),
+        "edition": str(raw.get("edition") or "").strip(),
+        "isbn13": str(raw.get("isbn13") or "").strip(),
+        "isbn10": str(raw.get("isbn10") or "").strip(),
+        "cover_url": str(raw.get("cover_url") or "").strip(),
+        "summary": summary,
+        "source": str(raw.get("source") or data.get("source") or "manual").strip() or "manual",
+        "manually_applied": bool(data.get("manually_applied")),
+    }
+
+
+def apply_ebook_override_fields(
+    item: dict[str, Any],
+    override: dict[str, Any] | None,
+    *,
+    multi_volume: bool = False,
+) -> dict[str, Any]:
+    """Prefer saved override fields over live Kavita values (in-place)."""
+    if not override:
+        return item
+    title = str(override.get("title") or "").strip()
+    author = str(override.get("author") or "").strip()
+    series = str(override.get("series") or "").strip()
+    sequence = str(override.get("series_index") or "").strip()
+    summary = str(override.get("summary") or "").strip()
+    cover = str(override.get("cover_url") or "").strip()
+
+    if title:
+        item["title"] = title
+    if author:
+        item["author"] = author
+    if summary:
+        item["description"] = summary
+    if cover and (
+        cover.startswith("http://")
+        or cover.startswith("https://")
+        or cover.startswith("/")
+    ):
+        item["coverUrl"] = cover
+
+    if sequence:
+        item["sequence"] = sequence
+        try:
+            num = float(sequence)
+            item["volumeNumber"] = int(num) if num.is_integer() else num
+        except (TypeError, ValueError):
+            pass
+
+    if series and series.casefold() != (title or str(item.get("title") or "")).casefold():
+        item["seriesName"] = series
+        item["series"] = [
+            {"name": series, "sequence": sequence or str(item.get("sequence") or "")}
+        ]
+    elif multi_volume and series:
+        item["seriesName"] = series
+        item["series"] = [
+            {"name": series, "sequence": sequence or str(item.get("sequence") or "")}
+        ]
+
+    item["metadataOverride"] = True
+    return item
+
+
+def load_applied_ebook_meta(staging: Path) -> EbookMeta | None:
+    """Load manually applied ebook metadata from staging, if present."""
+    if not staging:
+        return None
+    data = _read_applied_ebook_raw(Path(staging))
+    if not data:
+        return None
+    raw = data.get("meta") if isinstance(data.get("meta"), dict) else data
+    if not isinstance(raw, dict):
+        return None
     title = str(raw.get("title") or "").strip()
     author = str(raw.get("author") or "").strip()
     if not title:
@@ -149,6 +265,90 @@ def load_applied_ebook_meta(staging: Path) -> EbookMeta | None:
         ambiguous=False,
         reason=str(raw.get("reason") or f"Manual {label} match").strip(),
     )
+
+
+def iter_applied_ebook_override_dirs(ebook_root: Path | None = None) -> list[Path]:
+    """Find folders under the ebook library that contain ``ebook_applied.json``."""
+    from app.config import get_settings
+
+    root = Path(ebook_root or get_settings().ebook_dir)
+    if not root.is_dir():
+        return []
+    skip = {"unorganized"}
+    found: list[Path] = []
+    for path in root.rglob(APPLIED_META_FILENAME):
+        try:
+            if any(part.lower() in skip for part in path.parts):
+                continue
+        except Exception:
+            continue
+        if path.is_file():
+            found.append(path.parent)
+    return found
+
+
+async def resync_applied_ebook_overrides_to_kavita() -> dict[str, Any]:
+    """Re-pin Kavita series locks from on-disk ``ebook_applied.json`` after a scan.
+
+    Mirrors ABS ``sync_book_dir_metadata_to_abs``: scan may re-read file tags, then
+    we push saved identity back. File-scoped: multi-volume series keep the series
+    name (never stamp one volume title onto siblings).
+    """
+    from app.services import kavita
+
+    dirs = iter_applied_ebook_override_dirs()
+    out: dict[str, Any] = {"scanned": len(dirs), "updated": 0, "skipped": 0, "errors": 0}
+    # Group by series_id when known.
+    by_series: dict[int, list[dict[str, Any]]] = {}
+    for folder in dirs:
+        data = _read_applied_ebook_raw(folder)
+        if not data:
+            out["skipped"] += 1
+            continue
+        sid = data.get("kavita_series_id")
+        try:
+            sid_i = int(sid) if sid is not None else None
+        except (TypeError, ValueError):
+            sid_i = None
+        if sid_i is None:
+            out["skipped"] += 1
+            continue
+        ov = load_applied_ebook_override(folder)
+        if not ov:
+            out["skipped"] += 1
+            continue
+        by_series.setdefault(sid_i, []).append(ov)
+
+    for sid, overrides in by_series.items():
+        try:
+            paths = await kavita.get_series_local_file_paths(sid)
+            multi = len(paths) > 1
+            # Prefer series name from any override; title only for single-file series.
+            series_name = next((o.get("series") for o in overrides if o.get("series")), "") or ""
+            title = overrides[0].get("title") or ""
+            author = next((o.get("author") for o in overrides if o.get("author")), "") or ""
+            summary = next((o.get("summary") for o in overrides if o.get("summary")), "") or None
+            name = series_name if multi else (title or series_name)
+            if not name:
+                out["skipped"] += 1
+                continue
+            ok = await kavita.update_series_identity(
+                sid,
+                name=name,
+                author=author or None,
+                summary=summary,
+            )
+            if ok:
+                out["updated"] += 1
+            else:
+                out["errors"] += 1
+        except Exception as e:
+            logger.warning("Ebook override resync for series %s failed: %s", sid, e)
+            out["errors"] += 1
+
+    if out["updated"]:
+        kavita.invalidate_cache()
+    return out
 
 
 def _normalize_source(raw: Any) -> str:

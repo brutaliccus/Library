@@ -599,6 +599,8 @@ def organize_ebook_files(staging: Path, meta: EbookMeta) -> Path:
 
     Same-sized existing destinations are reused (no ``Title (2).epub`` churn).
     Sibling duplicate ``(N)`` copies of the same stem are removed after a successful move.
+    Writes ``ebook_applied.json`` beside the library file so shelf/detail prefer
+    pipeline metadata over later Kavita scan drift.
     """
     meta = ensure_series_index(meta)
     primary = pick_primary_ebook(staging)
@@ -609,6 +611,26 @@ def organize_ebook_files(staging: Path, meta: EbookMeta) -> Path:
     dest_dir = dest_file.parent
     dest_dir.mkdir(parents=True, exist_ok=True)
     canonical = dest_file
+
+    def _persist_override(target: Path) -> None:
+        try:
+            from app.services.ebook_quick_review import write_applied_ebook_meta
+
+            # Prefer staging manual apply flag when present; else pipeline match.
+            staging_applied = False
+            try:
+                from app.services.ebook_quick_review import load_applied_ebook_meta
+
+                staging_applied = load_applied_ebook_meta(staging) is not None
+            except Exception:
+                staging_applied = False
+            write_applied_ebook_meta(
+                target.parent,
+                meta,
+                manually_applied=staging_applied,
+            )
+        except Exception as e:
+            logger.warning("Could not write ebook_applied.json for %s: %s", target, e)
 
     # Identical re-download — keep the library file, drop the staging copy.
     if dest_file.exists():
@@ -623,6 +645,7 @@ def organize_ebook_files(staging: Path, meta: EbookMeta) -> Path:
                 except OSError:
                     pass
                 _cleanup_numbered_ebook_duplicates(dest_dir, canonical)
+                _persist_override(dest_file)
                 return dest_file
         except OSError:
             pass
@@ -639,6 +662,7 @@ def organize_ebook_files(staging: Path, meta: EbookMeta) -> Path:
     shutil.move(str(primary), str(dest_file))
     if dest_file == canonical:
         _cleanup_numbered_ebook_duplicates(dest_dir, canonical)
+    _persist_override(dest_file)
     logger.info("Organized ebook → %s", dest_file)
     return dest_file
 

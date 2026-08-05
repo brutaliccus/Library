@@ -177,6 +177,16 @@ def test_title_similarity_and_isbn_extract():
     assert any(i.startswith("978") or len(i) in (10, 13) for i in isbns)
 
 
+def test_default_ebook_provider_order():
+    from app.services.ebook_pipeline import DEFAULT_EBOOK_PROVIDER_ORDER
+
+    assert DEFAULT_EBOOK_PROVIDER_ORDER == [
+        "hardcover",
+        "google_books",
+        "open_library",
+    ]
+
+
 def test_identify_quarantine_low_score(_ebook_dirs, monkeypatch):
     import asyncio
 
@@ -188,17 +198,26 @@ def test_identify_quarantine_low_score(_ebook_dirs, monkeypatch):
         "app.services.ebook_pipeline.settings.ebook_min_score",
         0.70,
     )
+    monkeypatch.setattr(
+        "app.services.ebook_pipeline.settings.google_books_api_key",
+        "",
+    )
 
     async def _run():
         with (
             patch("app.services.google_books.get_catalog_volume", new_callable=AsyncMock) as cat,
             patch("app.services.hardcover.get_api_key", new_callable=AsyncMock) as key,
             patch("app.services.hardcover.search_books", new_callable=AsyncMock) as search,
+            patch(
+                "app.services.google_books.search_open_library",
+                new_callable=AsyncMock,
+            ) as ol_search,
             patch("app.services.ol_catalog.catalog_ready", return_value=False),
         ):
             cat.return_value = None
             key.return_value = ""
             search.return_value = []
+            ol_search.return_value = []
             return await identify_ebook_metadata(
                 staging=staging,
                 title_hint="Mystery",
@@ -209,6 +228,65 @@ def test_identify_quarantine_low_score(_ebook_dirs, monkeypatch):
     meta = asyncio.run(_run())
     assert meta.score < 0.70
     assert meta.source == "hint"
+
+
+def test_identify_uses_google_books_when_hardcover_empty(_ebook_dirs, monkeypatch):
+    import asyncio
+
+    staging = ebook_staging_dir(51, "Timeline")
+    staging.mkdir(parents=True)
+    (staging / "timeline.epub").write_bytes(b"e")
+
+    monkeypatch.setattr(
+        "app.services.ebook_pipeline.settings.ebook_min_score",
+        0.70,
+    )
+    monkeypatch.setattr(
+        "app.services.ebook_pipeline.settings.google_books_api_key",
+        "test-key",
+    )
+
+    gb_book = {
+        "id": "gbTimeline1",
+        "title": "Timeline",
+        "authors": ["Michael Crichton"],
+        "isbn13": "9780345468260",
+        "coverUrl": "https://example.com/gb.jpg",
+    }
+
+    async def _run():
+        with (
+            patch("app.services.google_books.get_catalog_volume", new_callable=AsyncMock) as cat,
+            patch("app.services.hardcover.get_api_key", new_callable=AsyncMock) as key,
+            patch("app.services.hardcover.search_books", new_callable=AsyncMock) as search,
+            patch(
+                "app.services.google_books.search_google_books",
+                new_callable=AsyncMock,
+            ) as gb_search,
+            patch(
+                "app.services.google_books.search_open_library",
+                new_callable=AsyncMock,
+            ) as ol_search,
+            patch("app.services.ol_catalog.catalog_ready", return_value=False),
+        ):
+            cat.return_value = None
+            key.return_value = "Bearer x"
+            search.return_value = []
+            gb_search.return_value = {"books": [gb_book], "totalItems": 1}
+            ol_search.return_value = [{"title": "Should not be used"}]
+            return await identify_ebook_metadata(
+                staging=staging,
+                title_hint="Timeline",
+                author_hint="Michael Crichton",
+                google_volume_id=None,
+                provider_order=["hardcover", "google_books", "open_library"],
+            )
+
+    meta = asyncio.run(_run())
+    assert meta.source == "google_books"
+    assert meta.title == "Timeline"
+    assert meta.score >= 0.70
+    assert "Google Books" in (meta.reason or "")
 
 
 def test_identify_catalog_high_score(_ebook_dirs):

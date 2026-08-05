@@ -1,4 +1,4 @@
-"""Tests for ebook Hardcover + Open Library metadata matcher helpers."""
+"""Tests for ebook Hardcover + Google Books + Open Library metadata matcher helpers."""
 
 from __future__ import annotations
 
@@ -109,7 +109,25 @@ def test_selected_result_to_ebook_meta_maps_open_library_fields():
     assert "Open Library" in meta.reason
 
 
-def test_search_ebook_quick_review_merges_hardcover_and_ol(tmp_path, monkeypatch):
+
+def test_selected_result_to_ebook_meta_maps_google_books_fields():
+    meta = selected_result_to_ebook_meta(
+        {
+            "id": "zyTCAlFPjgYC",
+            "title": "Timeline",
+            "authors": ["Michael Crichton"],
+            "isbn13": "9780345468260",
+            "cover_url": "https://books.google.com/cover.jpg",
+            "source": "google_books",
+            "score": 0.91,
+        }
+    )
+    assert meta.source == "google_books"
+    assert meta.isbn13 == "9780345468260"
+    assert "Google Books" in meta.reason
+
+
+def test_search_ebook_quick_review_merges_hardcover_gb_and_ol(tmp_path, monkeypatch):
     import asyncio
 
     from app.services import ebook_quick_review as eqr
@@ -120,7 +138,6 @@ def test_search_ebook_quick_review_merges_hardcover_and_ol(tmp_path, monkeypatch
     (staging / "Timeline.epub").write_bytes(b"epub")
     monkeypatch.setattr("app.services.ebook_pipeline.settings.ebook_dir", str(ebook))
     monkeypatch.setattr("app.services.forge_pipeline.settings.ebook_dir", str(ebook))
-
     req = MagicMock()
     req.id = 9
     req.media_type = "ebook"
@@ -146,6 +163,21 @@ def test_search_ebook_quick_review_merges_hardcover_and_ol(tmp_path, monkeypatch
             "hardcoverSlug": "timeline",
             "infoLink": "https://hardcover.app/books/timeline",
             "previewLink": "",
+        }
+    ]
+    gb_books = [
+        {
+            "id": "gbTimeline1",
+            "title": "Timeline",
+            "authors": ["Michael Crichton"],
+            "coverUrl": "https://books.google.com/cover.jpg",
+            "isbn13": "9780345468260",
+            "isbn10": "",
+            "publishedDate": "1999",
+            "description": "",
+            "publisher": "Ballantine",
+            "language": "en",
+            "infoLink": "https://books.google.com/books?id=gbTimeline1",
         }
     ]
     ol_books = [
@@ -187,8 +219,16 @@ def test_search_ebook_quick_review_merges_hardcover_and_ol(tmp_path, monkeypatch
             patch("app.services.hardcover.get_api_key", new=AsyncMock(return_value="Bearer x")),
             patch("app.services.hardcover.search_books", new=AsyncMock(return_value=hc_hits)),
             patch(
-                "app.services.google_books.search_volumes",
-                new=AsyncMock(return_value={"books": ol_books, "totalItems": 2}),
+                "app.services.google_books.search_google_books",
+                new=AsyncMock(return_value={"books": gb_books, "totalItems": 1}),
+            ),
+            patch(
+                "app.services.google_books.search_open_library",
+                new=AsyncMock(return_value=ol_books),
+            ),
+            patch(
+                "app.config.get_settings",
+                return_value=type("S", (), {"google_books_api_key": "test-key"})(),
             ),
         ):
             return await eqr.search_ebook_quick_review(
@@ -199,10 +239,11 @@ def test_search_ebook_quick_review_merges_hardcover_and_ol(tmp_path, monkeypatch
             )
 
     out = asyncio.run(_run())
-    assert out["provider"] == "hardcover+open_library"
+    assert out["provider"] == "hardcover+google_books+open_library"
     assert "hardcover" in out["providers"]
+    assert "google_books" in out["providers"]
     assert "open_library" in out["providers"]
-    # ISBN-identical HC + OL rows collapse; unrelated OL remains.
+    # ISBN-identical HC + GB + OL rows collapse; unrelated OL remains.
     assert len(out["results"]) == 2
     top = out["results"][0]
     assert top["title"] == "Timeline"
@@ -248,8 +289,12 @@ def test_search_ebook_quick_review_ol_only_without_hardcover_key(tmp_path, monke
             patch.object(eqr, "resolve_staging_dir", return_value=staging),
             patch("app.services.hardcover.get_api_key", new=AsyncMock(return_value="")),
             patch(
-                "app.services.google_books.search_volumes",
-                new=AsyncMock(return_value={"books": ol_books, "totalItems": 1}),
+                "app.services.google_books.search_open_library",
+                new=AsyncMock(return_value=ol_books),
+            ),
+            patch(
+                "app.config.get_settings",
+                return_value=type("S", (), {"google_books_api_key": ""})(),
             ),
         ):
             return await eqr.search_ebook_quick_review(req, query="Book Author", title="Book")
@@ -258,6 +303,65 @@ def test_search_ebook_quick_review_ol_only_without_hardcover_key(tmp_path, monke
     assert len(out["results"]) == 1
     assert out["results"][0]["source"] == "open_library"
     assert "open_library" in out["providers"]
+    assert "google_books" not in out["providers"]
+
+
+def test_search_ebook_quick_review_includes_google_books_candidates(tmp_path, monkeypatch):
+    import asyncio
+
+    from app.services import ebook_quick_review as eqr
+
+    ebook = tmp_path / "ebooks"
+    staging = ebook / "unorganized" / "req_11_Book"
+    staging.mkdir(parents=True)
+    (staging / "Book.epub").write_bytes(b"epub")
+    monkeypatch.setattr("app.services.ebook_pipeline.settings.ebook_dir", str(ebook))
+    monkeypatch.setattr("app.services.forge_pipeline.settings.ebook_dir", str(ebook))
+
+    req = MagicMock()
+    req.id = 11
+    req.media_type = "ebook"
+    req.staging_path = str(staging.as_posix())
+    req.title = "Unique GB Title"
+    req.author = "GB Author"
+
+    gb_books = [
+        {
+            "id": "gbOnly1",
+            "title": "Unique GB Title",
+            "authors": ["GB Author"],
+            "coverUrl": "https://books.google.com/c.jpg",
+            "isbn13": "9781111111111",
+            "publishedDate": "2021",
+            "infoLink": "https://books.google.com/books?id=gbOnly1",
+        }
+    ]
+
+    async def _run():
+        with (
+            patch.object(eqr, "resolve_staging_dir", return_value=staging),
+            patch("app.services.hardcover.get_api_key", new=AsyncMock(return_value="")),
+            patch(
+                "app.services.google_books.search_google_books",
+                new=AsyncMock(return_value={"books": gb_books, "totalItems": 1}),
+            ),
+            patch(
+                "app.services.google_books.search_open_library",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "app.config.get_settings",
+                return_value=type("S", (), {"google_books_api_key": "test-key"})(),
+            ),
+        ):
+            return await eqr.search_ebook_quick_review(
+                req, query="Unique GB Title GB Author", title="Unique GB Title"
+            )
+
+    out = asyncio.run(_run())
+    assert len(out["results"]) == 1
+    assert out["results"][0]["source"] == "google_books"
+    assert "google_books" in out["providers"]
 
 
 def test_library_override_sidecar_roundtrip(tmp_path):

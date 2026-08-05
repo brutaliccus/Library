@@ -1220,15 +1220,53 @@ async def get_open_library_work(ol_key: str) -> dict | None:
     return result
 
 
+async def search_google_books(
+    query: str,
+    max_results: int = 20,
+    start_index: int = 0,
+    order_by: str = "relevance",
+) -> dict:
+    """Search Google Books API directly (requires ``GOOGLE_BOOKS_API_KEY``).
+
+    Unlike :func:`search_volumes`, this does not fall back to Open Library /
+    ISBNdb — use it when Google Books should be a first-class provider.
+    """
+    return await _google_books_search(query, max_results, start_index, order_by)
+
+
 async def search_open_library(query: str, *, limit: int = 20) -> list[dict]:
-    """Search Open Library; each book has id like OL:/works/OL123W."""
-    result = await search_volumes(query, max_results=limit, start_index=0)
-    return result.get("books") or []
+    """Search Open Library only (local dump, then live API).
+
+    Each book id looks like ``OL:/works/OL123W``. Does **not** fall through to
+    Google Books — ebook identify/matcher treat GB as its own provider.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    result: dict = {"books": [], "totalItems": 0}
+    try:
+        from app.services import ol_catalog
+
+        if ol_catalog.catalog_ready():
+            books = await ol_catalog.search_by_title(q, limit=limit, offset=0)
+            if books:
+                result = {"books": books, "totalItems": len(books)}
+    except Exception as e:
+        logger.debug("ol_catalog search_open_library failed for %r: %s", q[:60], e)
+
+    if not result.get("books"):
+        result = await _open_library_search_volumes(q, limit, 0, "relevance")
+
+    books = result.get("books") or []
+    if not books:
+        return []
+    enriched = await asyncio.gather(*(enrich_cover_if_missing(b) for b in books))
+    return list(enriched)
 
 
 async def _open_library_search(
     query: str, limit: int = 20,
 ) -> list[dict]:
-    """General-purpose Open Library search."""
-    result = await search_volumes(query, max_results=limit, start_index=0)
-    return result.get("books") or []
+    """General-purpose Open Library search (OL-only; no Google Books fallback)."""
+    return await search_open_library(query, limit=limit)

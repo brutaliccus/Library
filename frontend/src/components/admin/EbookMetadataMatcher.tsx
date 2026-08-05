@@ -75,6 +75,9 @@ function sourceLabel(source?: string): string {
   if (s === "open_library" || s === "ol" || s === "ol_catalog" || s === "openlibrary") {
     return "Open Library";
   }
+  if (s === "google_books" || s === "googlebooks" || s === "gb" || s === "gbooks" || s === "google") {
+    return "Google Books";
+  }
   if (s === "hardcover" || s === "hc") return "Hardcover";
   return source?.trim() || "Catalog";
 }

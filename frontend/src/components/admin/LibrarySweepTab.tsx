@@ -1332,7 +1332,7 @@ const EBOOK_BOOL_LABELS: Record<(typeof EBOOK_BOOL_KEYS)[number], { label: strin
     },
     "config.ebook_sweep_force_metadata": {
       label: "Force metadata (Hardcover to OL)",
-      help: "Re-identify every ebook via Hardcover then Open Library, even if already organized. Default on.",
+      help: "Re-identify every ebook via Hardcover → Google Books → Open Library, even if already organized. Default on.",
     },
   };
 

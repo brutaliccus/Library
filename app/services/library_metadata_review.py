@@ -1,7 +1,7 @@
 """Admin metadata match/apply for a single in-library audiobook or ebook.
 
 Reuses the request-pipeline matchers' search/apply backends (LibraForge Manual
-Review for audio; Hardcover + Open Library + Calibre embed for ebooks) against
+Review for audio; Hardcover + Google Books + Open Library + Calibre embed for ebooks) against
 library item paths instead of quarantine staging.
 """
 
@@ -617,7 +617,7 @@ async def load_ebook_metadata_review(
             "cover_url": cover_url,
         },
         "already_applied": False,
-        "provider": "hardcover+open_library",
+        "provider": "hardcover+google_books+open_library",
     }
 
 
@@ -629,7 +629,7 @@ async def search_ebook_metadata_review(
     author: str = "",
     limit: int = 12,
 ) -> dict[str, Any]:
-    """Search Hardcover + Open Library for a library ebook."""
+    """Search Hardcover + Google Books + Open Library for a library ebook."""
     await _resolve_ebook_series(series_id)
     try:
         data = await search_ebook_metadata_candidates(

@@ -664,22 +664,23 @@ async def _search_hardcover_meta(
     )
 
 
-async def _search_open_library_meta(
-    search_title: str, hint_author: str, *, min_score: float
+DEFAULT_EBOOK_PROVIDER_ORDER: list[str] = [
+    "hardcover",
+    "google_books",
+    "open_library",
+]
+
+
+def _rank_catalog_title_author_hits(
+    hits: list[dict],
+    search_title: str,
+    hint_author: str,
+    *,
+    min_score: float,
+    source: str,
+    source_label: str,
 ) -> EbookMeta | None:
-    """Title+author search via Open Library. None when empty or no usable hit."""
-    from app.services import google_books
-
-    if not search_title:
-        return None
-    try:
-        hits = await google_books.search_open_library(
-            f"{search_title} {hint_author}".strip(), limit=8
-        )
-    except Exception as e:
-        logger.warning("Open Library ebook search failed: %s", e)
-        return None
-
+    """Shared title/author ranking for Open Library / Google Books catalog cards."""
     ranked: list[tuple[float, dict]] = []
     for h in hits or []:
         ht = (h.get("title") or "").strip()
@@ -714,14 +715,70 @@ async def _search_open_library_meta(
             if _norm(best.get("title") or "") != _norm(second.get("title") or ""):
                 ambiguous = True
 
-    meta = _meta_from_catalog_book(best, score=best_score, source="open_library")
+    meta = _meta_from_catalog_book(best, score=best_score, source=source)
     meta.ambiguous = ambiguous
     meta.reason = (
-        "Ambiguous Open Library matches"
+        f"Ambiguous {source_label} matches"
         if ambiguous
-        else f"Open Library title/author match ({best_score:.2f})"
+        else f"{source_label} title/author match ({best_score:.2f})"
     )
     return meta
+
+
+async def _search_open_library_meta(
+    search_title: str, hint_author: str, *, min_score: float
+) -> EbookMeta | None:
+    """Title+author search via Open Library. None when empty or no usable hit."""
+    from app.services import google_books
+
+    if not search_title:
+        return None
+    try:
+        hits = await google_books.search_open_library(
+            f"{search_title} {hint_author}".strip(), limit=8
+        )
+    except Exception as e:
+        logger.warning("Open Library ebook search failed: %s", e)
+        return None
+
+    return _rank_catalog_title_author_hits(
+        hits or [],
+        search_title,
+        hint_author,
+        min_score=min_score,
+        source="open_library",
+        source_label="Open Library",
+    )
+
+
+async def _search_google_books_meta(
+    search_title: str, hint_author: str, *, min_score: float
+) -> EbookMeta | None:
+    """Title+author search via Google Books. None when key missing or no usable hit."""
+    from app.services import google_books
+
+    if not search_title or not (settings.google_books_api_key or "").strip():
+        return None
+    try:
+        result = await google_books.search_google_books(
+            f"{search_title} {hint_author}".strip(),
+            max_results=8,
+        )
+        hits = (result or {}).get("books") if isinstance(result, dict) else None
+        if not isinstance(hits, list):
+            hits = []
+    except Exception as e:
+        logger.warning("Google Books ebook search failed: %s", e)
+        return None
+
+    return _rank_catalog_title_author_hits(
+        hits,
+        search_title,
+        hint_author,
+        min_score=min_score,
+        source="google_books",
+        source_label="Google Books",
+    )
 
 
 async def identify_ebook_metadata(
@@ -734,9 +791,10 @@ async def identify_ebook_metadata(
 ) -> EbookMeta:
     """Resolve catalog metadata with confidence score.
 
-    Order: request catalog volume → ISBN (OL / Google / ISBNdb) → title+author
-    providers, tried in ``provider_order`` (default ``["hardcover"]``; Library
-    Sweep passes ``["hardcover", "open_library"]``).
+    Order: request catalog volume → ISBN (OL / ISBNdb / Google Books) →
+    title+author providers in ``provider_order`` (default Hardcover →
+    Google Books → Open Library). Hardcover leads for series/sequence quality;
+    Google Books next for catalog breadth; Open Library last as free/local dump.
     """
     from app.services import google_books, isbndb, ol_catalog
 
@@ -787,9 +845,12 @@ async def identify_ebook_metadata(
                 book = None
         if not book:
             try:
-                # Google Books ISBN query
-                result = await google_books.search_volumes(f"isbn:{isbn}", max_results=1)
-                books = (result or {}).get("books") or (result if isinstance(result, list) else [])
+                result = await google_books.search_google_books(
+                    f"isbn:{isbn}", max_results=1
+                )
+                books = (result or {}).get("books") or (
+                    result if isinstance(result, list) else []
+                )
                 if books:
                     book = books[0]
                     source = "google_books"
@@ -802,13 +863,15 @@ async def identify_ebook_metadata(
                 meta.author = hint_author or meta.author
             return meta
 
-    # 3) Title + author → provider_order (default Hardcover only)
+    # 3) Title + author → provider_order
     search_title = clean_ebook_search_title(hint_title) or hint_title
 
-    providers = provider_order or ["hardcover"]
+    providers = list(provider_order) if provider_order else list(DEFAULT_EBOOK_PROVIDER_ORDER)
     for provider in providers:
         if provider == "hardcover":
             meta = await _search_hardcover_meta(search_title, hint_author, min_score=min_score)
+        elif provider == "google_books":
+            meta = await _search_google_books_meta(search_title, hint_author, min_score=min_score)
         elif provider == "open_library":
             meta = await _search_open_library_meta(search_title, hint_author, min_score=min_score)
         else:
@@ -1348,9 +1411,9 @@ async def _ebook_llm_identify_retry(
     Soft-fails to None when assist is off or API errors.
 
     Soft-confidence (below the hard OpenRouter threshold but at/above ebook_min_score)
-    still retries Hardcover/OL with the LLM title/author — matching what admins see
-    when Search returns a 100% catalog hit. Raw LLM fields auto-apply only at/above
-    the hard threshold.
+    still retries Hardcover/Google Books/OL with the LLM title/author — matching what
+    admins see when Search returns a 100% catalog hit. Raw LLM fields auto-apply only
+    at/above the hard threshold.
     """
     from app.services import llm_assist, openrouter
 

@@ -664,7 +664,7 @@ async def ebook_sweep_options() -> dict:
     return {
         "convert_all_to_epub": convert,
         "force_metadata": force,
-        "provider_order": ["hardcover", "open_library"],
+        "provider_order": ["hardcover", "google_books", "open_library"],
     }
 
 

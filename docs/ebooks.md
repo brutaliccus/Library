@@ -8,9 +8,10 @@ local organizer that mirrors ABS/Folder Forge layout as closely as Kavita allows
 1. **Download** lands in `/ebooks/unorganized/req_{id}_{slug}/`  
    (host: `/mnt/eBooks/unorganized/…`).
 2. **Convert** MOBI/AZW → EPUB when Calibre `ebook-convert` is available.
-3. **Metadata** — request catalog volume → ISBN (OL / Google / ISBNdb) →
-   title+author (Hardcover). Score must be ≥ `EBOOK_MIN_SCORE` (default `0.70`)
-   or the request is **quarantined**.
+3. **Metadata** — request catalog volume → ISBN (OL / ISBNdb / Google Books) →
+   title+author (**Hardcover → Google Books → Open Library**). Score must be
+   ≥ `EBOOK_MIN_SCORE` (default `0.70`) or the request is **quarantined**.
+   Google Books needs `GOOGLE_BOOKS_API_KEY` (optional; skipped when unset).
 4. **Embed** — Calibre `ebook-meta` writes title/author/series into OPF (Kavita
    series grouping depends on series tags).
 5. **Organize** — single primary file into:
@@ -38,8 +39,9 @@ After a successful organize, Library Site calls Kavita’s scan API so the new
 
 Quarantined ebooks keep files under `unorganized`. Admin → Requests offers:
 
-- **Match metadata** — Hardcover search → cover cards → apply (writes
-  `ebook_applied.json` + OPF tags; Continue uses the selected match)
+- **Match metadata** — Hardcover / Google Books / Open Library search → cover
+  cards → apply (writes `ebook_applied.json` + OPF tags; Continue uses the
+  selected match)
 - **Staging files** — browse / delete entries
 - **Continue pipeline** — skip the confidence gate, organize + scan
 - **Reject / delete** — wipe the request’s `unorganized/req_{id}_*` tree

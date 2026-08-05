@@ -1,4 +1,4 @@
-"""In-app ebook metadata matcher: Hardcover + Open Library search -> select -> apply.
+"""In-app ebook metadata matcher: Hardcover + Google Books + Open Library -> select -> apply.
 
 Mirrors audiobook Quick Review's load/search/apply UX without LibraForge.
 Applied matches are persisted as ``ebook_applied.json`` so Continue organize
@@ -36,6 +36,7 @@ APPLIED_META_FILENAME = "ebook_applied.json"
 
 _SOURCE_LABELS = {
     "hardcover": "Hardcover",
+    "google_books": "Google Books",
     "open_library": "Open Library",
     "ol_catalog": "Open Library",
 }
@@ -425,13 +426,15 @@ def _normalize_source(raw: Any) -> str:
     src = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
     if src in ("ol", "openlibrary", "open_library", "ol_catalog"):
         return "open_library"
+    if src in ("gb", "gbooks", "google", "google_books", "googlebooks"):
+        return "google_books"
     if src in ("hc", "hardcover"):
         return "hardcover"
     return src or "manual"
 
 
 def selected_result_to_ebook_meta(selected: dict[str, Any]) -> EbookMeta:
-    """Map a search card payload (Hardcover or Open Library) into EbookMeta."""
+    """Map a search card payload (Hardcover / Google Books / Open Library) into EbookMeta."""
     if not isinstance(selected, dict) or not selected:
         raise EbookQuickReviewError("selected_result is required")
 
@@ -462,14 +465,20 @@ def selected_result_to_ebook_meta(selected: dict[str, Any]) -> EbookMeta:
         score = 1.0
 
     source = _normalize_source(selected.get("source"))
-    # Infer Open Library from volume id when source omitted (older clients).
+    # Infer provider from volume id when source omitted (older clients).
     vid = str(selected.get("id") or selected.get("volumeId") or "").strip()
     if source in ("", "manual") and vid.upper().startswith("OL:"):
         source = "open_library"
-    if source not in ("hardcover", "open_library"):
-        source = "hardcover" if selected.get("hardcover_id") or selected.get("hardcoverId") else (
-            "open_library" if vid.upper().startswith("OL:") else "manual"
-        )
+    if source not in ("hardcover", "google_books", "open_library"):
+        if selected.get("hardcover_id") or selected.get("hardcoverId"):
+            source = "hardcover"
+        elif vid.upper().startswith("OL:"):
+            source = "open_library"
+        elif vid and not vid.upper().startswith(("OL:", "ISBN:", "HC:")):
+            # Bare Google Books volume ids (e.g. zyTCAlFPjgYC).
+            source = "google_books"
+        else:
+            source = "manual"
 
     label = _SOURCE_LABELS.get(source, source.replace("_", " ").title())
     return EbookMeta(
@@ -507,8 +516,10 @@ def _result_dedupe_key(result: dict[str, Any]) -> str:
 
 
 def _source_rank(source: str) -> int:
-    # Prefer Hardcover when titles collide — usually richer series/sequence.
+    # Prefer Hardcover (series/sequence), then Google Books, then Open Library.
     if source == "hardcover":
+        return 3
+    if source == "google_books":
         return 2
     if source == "open_library":
         return 1
@@ -520,7 +531,7 @@ def _merge_search_results(
     *,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Merge provider result lists, dedupe, prefer Hardcover, keep best cover/series."""
+    """Merge provider result lists, dedupe, prefer Hardcover > GB > OL, keep best cover/series."""
     merged: dict[str, dict[str, Any]] = {}
     order: list[str] = []
 
@@ -612,8 +623,13 @@ def _hc_hit_to_result(hit: dict[str, Any], *, query_title: str = "") -> dict[str
     }
 
 
-def _ol_hit_to_result(hit: dict[str, Any], *, query_title: str = "") -> dict[str, Any]:
-    """Normalize google_books / ol_catalog volume cards into matcher results."""
+def _catalog_hit_to_result(
+    hit: dict[str, Any],
+    *,
+    query_title: str = "",
+    source: str = "open_library",
+) -> dict[str, Any]:
+    """Normalize OL / Google Books volume cards into matcher results."""
     authors = hit.get("authors") if isinstance(hit.get("authors"), list) else []
     title = str(hit.get("title") or "").strip()
     cover = str(
@@ -653,8 +669,16 @@ def _ol_hit_to_result(hit: dict[str, Any], *, query_title: str = "") -> dict[str
         "language": str(hit.get("language") or "").strip(),
         "score": score,
         "info_link": info,
-        "source": "open_library",
+        "source": source,
     }
+
+
+def _ol_hit_to_result(hit: dict[str, Any], *, query_title: str = "") -> dict[str, Any]:
+    return _catalog_hit_to_result(hit, query_title=query_title, source="open_library")
+
+
+def _gb_hit_to_result(hit: dict[str, Any], *, query_title: str = "") -> dict[str, Any]:
+    return _catalog_hit_to_result(hit, query_title=query_title, source="google_books")
 
 
 async def load_ebook_quick_review(req: DownloadRequest) -> dict[str, Any]:
@@ -716,8 +740,8 @@ async def load_ebook_quick_review(req: DownloadRequest) -> dict[str, Any]:
             "source": (applied.source if applied else "") or "",
         },
         "already_applied": applied is not None,
-        "provider": "hardcover+open_library",
-        "providers": ["hardcover", "open_library"],
+        "provider": "hardcover+google_books+open_library",
+        "providers": ["hardcover", "google_books", "open_library"],
     }
 
 
@@ -728,7 +752,8 @@ async def search_ebook_metadata_candidates(
     author: str = "",
     limit: int = 12,
 ) -> dict[str, Any]:
-    """Search Hardcover + Open Library (shared by quarantine + library editors)."""
+    """Search Hardcover + Google Books + Open Library (quarantine + library editors)."""
+    from app.config import get_settings
     from app.services import google_books, hardcover
 
     t = clean_ebook_search_title((title or "").strip()) or (title or "").strip()
@@ -747,7 +772,9 @@ async def search_ebook_metadata_candidates(
     errors: list[str] = []
     providers_used: list[str] = []
     hc_results: list[dict[str, Any]] = []
+    gb_results: list[dict[str, Any]] = []
     ol_results: list[dict[str, Any]] = []
+    settings = get_settings()
 
     if await hardcover.get_api_key():
         try:
@@ -762,12 +789,27 @@ async def search_ebook_metadata_candidates(
     else:
         errors.append("Hardcover API key is not configured")
 
+    if (settings.google_books_api_key or "").strip():
+        try:
+            gb_data = await google_books.search_google_books(q, max_results=lim)
+            books = (gb_data or {}).get("books") if isinstance(gb_data, dict) else None
+            if isinstance(books, list):
+                gb_results = [
+                    _gb_hit_to_result(b, query_title=query_title) for b in books if b
+                ]
+                if gb_results:
+                    providers_used.append("google_books")
+        except Exception as e:
+            logger.warning("Google Books ebook review search failed: %s", e)
+            errors.append(f"Google Books: {e}")
+    else:
+        errors.append("Google Books API key is not configured")
+
     try:
-        ol_data = await google_books.search_volumes(q, max_results=lim)
-        books = (ol_data or {}).get("books") if isinstance(ol_data, dict) else None
-        if isinstance(books, list):
+        ol_books = await google_books.search_open_library(q, limit=lim)
+        if isinstance(ol_books, list):
             ol_results = [
-                _ol_hit_to_result(b, query_title=query_title) for b in books if b
+                _ol_hit_to_result(b, query_title=query_title) for b in ol_books if b
             ]
             if ol_results:
                 providers_used.append("open_library")
@@ -775,21 +817,21 @@ async def search_ebook_metadata_candidates(
         logger.warning("Open Library ebook review search failed: %s", e)
         errors.append(f"Open Library: {e}")
 
-    results = _merge_search_results([hc_results, ol_results], limit=lim)
+    results = _merge_search_results([hc_results, gb_results, ol_results], limit=lim)
 
-    if not results and errors and "hardcover" not in providers_used and not ol_results:
-        if not await hardcover.get_api_key() and "Open Library" not in " ".join(errors):
-            raise EbookQuickReviewError(
-                "No metadata matches found (Hardcover not configured; Open Library empty)"
-            )
-        if errors:
-            raise EbookQuickReviewError("; ".join(errors))
+    if not results and errors and not (hc_results or gb_results or ol_results):
+        raise EbookQuickReviewError(
+            "; ".join(errors)
+            if errors
+            else "No metadata matches found (Hardcover / Google Books / Open Library empty)"
+        )
 
     return {
         "ok": True,
         "query": q,
-        "provider": "hardcover+open_library",
-        "providers": providers_used or ["hardcover", "open_library"],
+        "provider": "hardcover+google_books+open_library",
+        "providers": providers_used
+        or ["hardcover", "google_books", "open_library"],
         "results": results,
         "queries": [q],
         "errors": errors,
@@ -804,7 +846,7 @@ async def search_ebook_quick_review(
     author: str = "",
     limit: int = 12,
 ) -> dict[str, Any]:
-    """Search Hardcover and Open Library for ebook metadata candidates."""
+    """Search Hardcover, Google Books, and Open Library for ebook metadata candidates."""
     if (req.media_type or "") != "ebook":
         raise EbookQuickReviewError("Ebook Quick Review search is ebook-only")
 
@@ -823,7 +865,7 @@ async def apply_ebook_quick_review(
     *,
     selected_result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Apply selected Hardcover/Open Library metadata to staging + request display."""
+    """Apply selected Hardcover/Google Books/Open Library metadata to staging + request display."""
     if (req.media_type or "") != "ebook":
         raise EbookQuickReviewError("Ebook Quick Review apply is ebook-only")
     if req.status not in ("quarantined", "metadata_forge"):

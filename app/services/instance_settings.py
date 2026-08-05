@@ -334,13 +334,14 @@ REGISTRY: list[SettingDef] = [
     SettingDef(
         key="config.ebook_sweep_force_metadata",
         group="pipeline",
-        label="Ebook Sweep: force metadata (Hardcover → Open Library)",
+        label="Ebook Sweep: force metadata (Hardcover → Google Books → Open Library)",
         value_type="bool",
         env_attr="ebook_sweep_force_metadata",
         env_fallback=True,
         help=(
-            "When on (default), re-identify every ebook via Hardcover then Open Library "
-            "(ISBN still wins when present). Low-confidence books quarantine for manual review. "
+            "When on (default), re-identify every ebook via Hardcover → Google Books → "
+            "Open Library (ISBN still wins when present; Google Books needs "
+            "GOOGLE_BOOKS_API_KEY). Low-confidence books quarantine for manual review. "
             "When off, skip books that already have ebook_applied.json."
         ),
     ),

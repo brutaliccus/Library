@@ -36,7 +36,7 @@ def test_ebook_sweep_options_defaults(monkeypatch):
     options = asyncio.run(library_ingest.ebook_sweep_options())
     assert options["convert_all_to_epub"] is True
     assert options["force_metadata"] is True
-    assert options["provider_order"] == ["hardcover", "open_library"]
+    assert options["provider_order"] == ["hardcover", "google_books", "open_library"]
 
 
 def test_ebook_sweep_options_respects_false_overrides(monkeypatch):

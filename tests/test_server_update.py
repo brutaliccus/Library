@@ -74,7 +74,7 @@ def test_check_up_to_date(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         with (
             patch.object(
                 server_update,
-                "discover_host_root",
+                "resolve_validated_host_root",
                 AsyncMock(return_value={"hostRoot": "/opt/library", "source": "env", "error": None}),
             ),
             patch.object(server_update.docker_control, "socket_available", return_value=True),
@@ -115,7 +115,7 @@ def test_check_update_available(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
         with (
             patch.object(
                 server_update,
-                "discover_host_root",
+                "resolve_validated_host_root",
                 AsyncMock(return_value={"hostRoot": "/opt/library", "source": "env", "error": None}),
             ),
             patch.object(server_update.docker_control, "socket_available", return_value=True),

@@ -540,10 +540,15 @@ async def _reconcile_job_with_sidecars() -> dict[str, Any]:
 
 async def get_status() -> dict[str, Any]:
     local = await get_local_version()
-    root = await discover_host_root()
     job = await _reconcile_job_with_sidecars()
     sock_ok = docker_control.socket_available()
-    host_ok = bool(root.get("hostRoot"))
+    # Match start_apply: status must not claim Apply when the bind-mount probe fails.
+    if sock_ok:
+        root = await resolve_validated_host_root()
+    else:
+        root = await discover_host_root()
+    host_root = root.get("hostRoot")
+    host_ok = bool(host_root)
     apply_ready = host_ok and sock_ok and not job.get("running")
     if apply_ready:
         reason = None
@@ -563,13 +568,17 @@ async def get_status() -> dict[str, Any]:
         "branch": DEFAULT_BRANCH,
         "remoteName": DEFAULT_REMOTE,
         "repo": await _github_repo(),
-        "hostRoot": root.get("hostRoot"),
+        "hostRoot": host_root,
         "hostRootSource": root.get("source"),
         "applyAvailable": apply_ready,
         "applyUnavailableReason": reason,
         "dockerSocket": sock_ok,
         "job": job,
-        "manualCommand": "cd /opt/library && bash scripts/update_library.sh",
+        "manualCommand": (
+            f'cd "{host_root}" && bash scripts/update_library.sh'
+            if host_root
+            else "cd /opt/library && bash scripts/update_library.sh"
+        ),
     }
 
 

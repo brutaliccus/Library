@@ -418,6 +418,8 @@ set_env PGID "1000"
 # Admin Health Start/Stop/Restart needs docker.sock + docker group membership.
 _docker_gid="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
 set_env DOCKER_GID "${_docker_gid:-998}"
+# Admin Health → Server stack update (sidecar bind + compose --project-directory).
+set_env_if_empty LIBRARY_HOST_ROOT "$TARGET"
 set_env AUDIOBOOK_DIR "/audiobooks"
 set_env EBOOK_DIR "/ebooks"
 set_env AUDIOBOOK_STAGING_DIRNAME ".unorganized"
@@ -1095,6 +1097,47 @@ if [[ -f scripts/apply_indexer_keys.sh ]]; then
   fi
 else
   $DOCKER compose up -d --force-recreate --no-deps app || true
+fi
+
+# Seed Admin Health version compare before the first manual update.
+step "Admin update metadata"
+mkdir -p data
+if [[ -d .git ]] && command -v git >/dev/null 2>&1; then
+  _rev_sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  _rev_short="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  _rev_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+  _rev_msg="$(git log -1 --pretty=format:%s 2>/dev/null || echo "")"
+  _rev_when="$(git log -1 --pretty=format:%cI 2>/dev/null || echo "")"
+  _rev_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+  if command -v python3 >/dev/null 2>&1; then
+    SHA="$_rev_sha" SHORT="$_rev_short" BRANCH_V="$_rev_branch" MSG="$_rev_msg" \
+      COMMITTED="$_rev_when" TRACKING="origin/${BRANCH:-main}" UPDATED="$_rev_ts" \
+      python3 - <<'PY'
+import json, os
+from pathlib import Path
+Path("data/install_revision.json").write_text(
+    json.dumps(
+        {
+            "sha": os.environ.get("SHA", ""),
+            "shortSha": os.environ.get("SHORT", ""),
+            "branch": os.environ.get("BRANCH_V", ""),
+            "message": os.environ.get("MSG", ""),
+            "committedAt": os.environ.get("COMMITTED", ""),
+            "tracking": os.environ.get("TRACKING", ""),
+            "updatedAt": os.environ.get("UPDATED", ""),
+            "source": "install_library.sh",
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+  else
+    printf '{\n  "sha": "%s",\n  "shortSha": "%s",\n  "branch": "%s",\n  "tracking": "origin/%s",\n  "updatedAt": "%s",\n  "source": "install_library.sh"\n}\n' \
+      "$_rev_sha" "$_rev_short" "$_rev_branch" "${BRANCH:-main}" "$_rev_ts" > data/install_revision.json
+  fi
+  c_green "Wrote data/install_revision.json ($_rev_short)"
 fi
 
 # ---------------------------------------------------------------------------

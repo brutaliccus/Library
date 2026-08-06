@@ -26,14 +26,19 @@ services:
       # With VPN: COMPOSE_PROFILES=vpn and ABB_PROXY_URL=http://gluetun:8888
       - ABB_PROXY_URL=${ABB_PROXY_URL:-}
       - FLARESOLVERR_URL=http://flaresolverr:8191
-      - JACKETT_URL=http://audiobook-jackett:9117
-      - PROWLARR_URL=${PROWLARR_URL:-http://prowlarr:9696}
+      # Prefer container_name DNS (stable across profile resumes). Keys must come from .env
+      # after configure_jackett/prowlarr — apply_indexer_keys.sh force-recreates app.
+      - JACKETT_URL=${JACKETT_URL:-http://audiobook-jackett:9117}
+      - JACKETT_API_KEY=${JACKETT_API_KEY:-}
+      - PROWLARR_URL=${PROWLARR_URL:-http://audiobook-prowlarr:9696}
+      - PROWLARR_API_KEY=${PROWLARR_API_KEY:-}
       - PYTHONUNBUFFERED=1
     dns:
       - 1.1.1.1
       - 8.8.8.8
     depends_on:
       - prowlarr
+      - jackett
       - flaresolverr
     restart: unless-stopped
 

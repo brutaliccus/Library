@@ -77,5 +77,9 @@ def test_list_services_without_socket():
         assert out["available"] is False
         assert len(out["services"]) == len(docker_control.MANAGED_SERVICES)
         assert out["appServiceId"] == "app"
+        abs_svc = next(s for s in out["services"] if s["id"] == "audiobookshelf")
+        assert abs_svc["container"] == "audiobookshelf-server"
+        assert "openUrl" in abs_svc
+        assert abs_svc.get("stats") is None
 
     asyncio.run(_run())

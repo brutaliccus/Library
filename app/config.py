@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
-    prowlarr_url: str = "http://prowlarr:9696"
+    prowlarr_url: str = "http://audiobook-prowlarr:9696"
     prowlarr_api_key: str = ""
     # Max seconds to wait for Prowlarr to query all indexers (each indexer can add latency).
     prowlarr_search_timeout: int = 90

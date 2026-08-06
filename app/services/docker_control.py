@@ -11,6 +11,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -20,6 +21,33 @@ Action = Literal["start", "stop", "restart"]
 DOCKER_SOCK = os.environ.get("DOCKER_SOCK", "/var/run/docker.sock")
 API_PREFIX = "/v1.41"
 SELF_RESTART_DELAY_SEC = 2.0
+
+# Alternate container_name values seen across installs (Pi external stack vs bundled compose).
+CONTAINER_ALIASES: dict[str, tuple[str, ...]] = {
+    "audiobookshelf-server": ("audiobookshelf-server", "audiobookshelf"),
+}
+
+# Preferred container-side port when picking a published HostPort for Open links.
+PREFERRED_CONTAINER_PORTS: dict[str, int] = {
+    "app": 8080,
+    "prowlarr": 9696,
+    "jackett": 9117,
+    "flaresolverr": 8191,
+    "audiobookshelf": 80,
+    "kavita": 5000,
+    "libraforge": 5056,
+}
+
+# Fallback host ports when inspect has no binding (compose defaults).
+DEFAULT_HOST_PORTS: dict[str, int] = {
+    "app": 8085,
+    "prowlarr": 9696,
+    "jackett": 9117,
+    "flaresolverr": 8191,
+    "audiobookshelf": 13378,
+    "kavita": 5000,
+    "libraforge": 5056,
+}
 
 
 @dataclass(frozen=True)
@@ -124,6 +152,13 @@ def get_service(service_id: str) -> ManagedService | None:
     return MANAGED_SERVICES.get(service_id)
 
 
+def _container_candidates(svc: ManagedService) -> tuple[str, ...]:
+    aliases = CONTAINER_ALIASES.get(svc.container)
+    if aliases:
+        return aliases
+    return (svc.container,)
+
+
 def _client() -> httpx.AsyncClient:
     transport = httpx.AsyncHTTPTransport(uds=DOCKER_SOCK)
     return httpx.AsyncClient(
@@ -148,6 +183,17 @@ async def _inspect(container: str) -> dict[str, Any] | None:
         return resp.json()
 
 
+async def _inspect_service(svc: ManagedService) -> tuple[str, dict[str, Any] | None]:
+    """Inspect the first matching container name (supports ABS aliases)."""
+    last_name = svc.container
+    for name in _container_candidates(svc):
+        last_name = name
+        info = await _inspect(name)
+        if info is not None:
+            return name, info
+    return last_name, None
+
+
 def _state_from_inspect(info: dict[str, Any] | None) -> dict[str, Any]:
     if not info:
         return {
@@ -167,6 +213,213 @@ def _state_from_inspect(info: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _cpu_percent(stats: dict[str, Any]) -> float | None:
+    """Docker CLI-compatible CPU percentage from a one-shot stats payload."""
+    try:
+        cpu = stats.get("cpu_stats") or {}
+        precpu = stats.get("precpu_stats") or {}
+        cpu_usage = (cpu.get("cpu_usage") or {}).get("total_usage")
+        precpu_usage = (precpu.get("cpu_usage") or {}).get("total_usage")
+        system = cpu.get("system_cpu_usage")
+        presystem = precpu.get("system_cpu_usage")
+        if None in (cpu_usage, precpu_usage, system, presystem):
+            return None
+        cpu_delta = float(cpu_usage) - float(precpu_usage)
+        system_delta = float(system) - float(presystem)
+        if system_delta <= 0 or cpu_delta < 0:
+            return None
+        online = cpu.get("online_cpus")
+        if not online:
+            percpu = (cpu.get("cpu_usage") or {}).get("percpu_usage") or []
+            online = len(percpu) or 1
+        return round((cpu_delta / system_delta) * float(online) * 100.0, 1)
+    except Exception:
+        return None
+
+
+def _memory_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    mem = stats.get("memory_stats") or {}
+    usage = int(mem.get("usage") or 0)
+    limit = int(mem.get("limit") or 0)
+    detail = mem.get("stats") or {}
+    # Prefer working set (usage minus cache) when cgroup reports cache.
+    cache = int(detail.get("cache") or detail.get("total_cache") or 0)
+    used = max(0, usage - cache) if cache and usage >= cache else usage
+    percent = round((used / limit) * 100.0, 1) if limit > 0 else None
+    return {
+        "usageBytes": used or None,
+        "limitBytes": limit or None,
+        "percent": percent,
+    }
+
+
+async def _container_stats(container: str) -> dict[str, Any] | None:
+    """One-shot Docker stats (CPU / memory). Returns None if unavailable."""
+    try:
+        async with _client() as client:
+            resp = await client.get(
+                f"{API_PREFIX}/containers/{container}/stats",
+                params={"stream": "false", "one-shot": "true"},
+                timeout=8.0,
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+    except Exception as e:
+        logger.debug("docker stats %s failed: %s", container, e)
+        return None
+
+    mem = _memory_stats(data)
+    return {
+        "cpuPercent": _cpu_percent(data),
+        "memoryUsageBytes": mem["usageBytes"],
+        "memoryLimitBytes": mem["limitBytes"],
+        "memoryPercent": mem["percent"],
+    }
+
+
+def _host_ports_from_inspect(info: dict[str, Any] | None) -> list[tuple[int, int]]:
+    """Return (container_port, host_port) pairs from NetworkSettings.Ports."""
+    if not info:
+        return []
+    ports = ((info.get("NetworkSettings") or {}).get("Ports")) or {}
+    out: list[tuple[int, int]] = []
+    for key, bindings in ports.items():
+        if not bindings:
+            continue
+        try:
+            container_port = int(str(key).split("/")[0])
+        except ValueError:
+            continue
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            hp = binding.get("HostPort")
+            if not hp:
+                continue
+            try:
+                out.append((container_port, int(hp)))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _is_browser_reachable_url(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    # Docker DNS / bridge hosts are not reachable from the admin browser.
+    if host in {
+        "audiobookshelf",
+        "audiobookshelf-server",
+        "kavita",
+        "libraforge",
+        "audiobook-prowlarr",
+        "prowlarr",
+        "audiobook-jackett",
+        "jackett",
+        "flaresolverr",
+        "audiobook-flaresolverr",
+        "gluetun",
+        "audiobook-request",
+        "app",
+    }:
+        return False
+    if host.endswith(".internal") or host.startswith("172.17."):
+        return False
+    return True
+
+
+def _public_url_for_service(svc: ManagedService) -> str | None:
+    """Prefer configured public / NPM URLs for Open links."""
+    if svc.id == "libraforge":
+        try:
+            from app.config import get_settings
+
+            url = (get_settings().libraforge_url or "").strip().rstrip("/")
+            if _is_browser_reachable_url(url):
+                return url
+        except Exception:
+            pass
+        return None
+
+    if svc.id == "audiobookshelf":
+        domain = (os.environ.get("NPM_ABS_DOMAIN") or "").strip()
+        if domain:
+            return f"https://{domain}"
+        try:
+            from app.config import get_settings
+
+            url = (get_settings().abs_url or "").strip().rstrip("/")
+            if _is_browser_reachable_url(url):
+                return url
+        except Exception:
+            pass
+        return None
+
+    if svc.id == "kavita":
+        domain = (os.environ.get("NPM_KAVITA_DOMAIN") or "").strip()
+        if domain:
+            return f"https://{domain}"
+        try:
+            from app.config import get_settings
+
+            url = (get_settings().kavita_url or "").strip().rstrip("/")
+            if _is_browser_reachable_url(url):
+                return url
+        except Exception:
+            pass
+        return None
+
+    if svc.id == "app":
+        try:
+            from app.config import get_settings
+
+            url = (get_settings().app_url or "").strip().rstrip("/")
+            if _is_browser_reachable_url(url):
+                return url
+        except Exception:
+            pass
+        return None
+
+    return None
+
+
+def _open_url_for_service(
+    svc: ManagedService,
+    *,
+    info: dict[str, Any] | None,
+) -> str | None:
+    public = _public_url_for_service(svc)
+    if public:
+        return public
+
+    # gluetun has no admin UI worth opening
+    if svc.id == "gluetun":
+        return None
+
+    preferred = PREFERRED_CONTAINER_PORTS.get(svc.id)
+    host_port: int | None = None
+    for cport, hport in _host_ports_from_inspect(info):
+        if preferred is not None and cport == preferred:
+            host_port = hport
+            break
+        if host_port is None:
+            host_port = hport
+    if host_port is None:
+        host_port = DEFAULT_HOST_PORTS.get(svc.id)
+    if host_port is None:
+        return None
+    # Frontend rewrites 127.0.0.1 → window.location.hostname for LAN browsers.
+    return f"http://127.0.0.1:{host_port}"
+
+
 async def list_services() -> dict[str, Any]:
     """Return managed services and live Docker state (best-effort)."""
     available = socket_available()
@@ -176,7 +429,16 @@ async def list_services() -> dict[str, Any]:
     if not available:
         socket_error = f"Docker socket not mounted ({DOCKER_SOCK})"
         for svc in MANAGED_SERVICES.values():
-            services.append(_service_payload(svc, state=None, available=False))
+            services.append(
+                _service_payload(
+                    svc,
+                    state=None,
+                    available=False,
+                    container_name=svc.container,
+                    stats=None,
+                    open_url=_open_url_for_service(svc, info=None),
+                )
+            )
         return {
             "available": False,
             "socket": DOCKER_SOCK,
@@ -186,22 +448,37 @@ async def list_services() -> dict[str, Any]:
             "appServiceId": "app",
         }
 
-    for svc in MANAGED_SERVICES.values():
+    async def _one(svc: ManagedService) -> dict[str, Any]:
+        nonlocal socket_error
         state: dict[str, Any] | None = None
         err: str | None = None
+        stats: dict[str, Any] | None = None
+        container_name = svc.container
+        info: dict[str, Any] | None = None
         try:
-            info = await _inspect(svc.container)
+            container_name, info = await _inspect_service(svc)
             state = _state_from_inspect(info)
+            if state.get("running"):
+                stats = await _container_stats(container_name)
         except PermissionError as e:
             socket_error = str(e)
             err = str(e)
         except Exception as e:
             err = str(e)[:200]
             logger.debug("docker inspect %s failed: %s", svc.container, e)
-        payload = _service_payload(svc, state=state, available=err is None and available)
+        payload = _service_payload(
+            svc,
+            state=state,
+            available=err is None and available,
+            container_name=container_name,
+            stats=stats,
+            open_url=_open_url_for_service(svc, info=info),
+        )
         if err:
             payload["error"] = err
-        services.append(payload)
+        return payload
+
+    services = list(await asyncio.gather(*[_one(svc) for svc in MANAGED_SERVICES.values()]))
 
     return {
         "available": available and socket_error is None,
@@ -218,16 +495,21 @@ def _service_payload(
     *,
     state: dict[str, Any] | None,
     available: bool,
+    container_name: str | None = None,
+    stats: dict[str, Any] | None = None,
+    open_url: str | None = None,
 ) -> dict[str, Any]:
     return {
         "id": svc.id,
         "label": svc.label,
-        "container": svc.container,
+        "container": container_name or svc.container,
         "composeService": svc.compose_service,
         "healthKey": svc.health_key,
         "isSelf": svc.is_self,
         "actions": allowed_actions(svc),
         "available": available,
+        "stats": stats,
+        "openUrl": open_url,
         "state": state
         or {
             "exists": False,
@@ -271,6 +553,18 @@ async def _deferred_restart(container: str) -> None:
         logger.exception("Deferred restart of %s failed", container)
 
 
+async def _resolve_container_name(svc: ManagedService) -> str:
+    """Pick the live container name (ABS may be audiobookshelf-server or audiobookshelf)."""
+    try:
+        name, info = await _inspect_service(svc)
+        if info is not None:
+            return name
+        return name or svc.container
+    except Exception as e:
+        logger.debug("resolve container name for %s failed: %s", svc.id, e)
+        return svc.container
+
+
 async def control_service(service_id: str, action: Action) -> dict[str, Any]:
     """Run start/stop/restart for a managed service. Admin-only caller required."""
     if action not in ("start", "stop", "restart"):
@@ -296,8 +590,11 @@ async def control_service(service_id: str, action: Action) -> dict[str, Any]:
     if not socket_available():
         raise RuntimeError(f"Docker socket not available ({DOCKER_SOCK})")
 
+    # Self-restart: use the known container name without inspecting first so the
+    # HTTP response can return before the process exits (and tests stay offline).
     if svc.is_self and action == "restart":
-        asyncio.create_task(_deferred_restart(svc.container))
+        container = svc.container
+        asyncio.create_task(_deferred_restart(container))
         return {
             "ok": True,
             "serviceId": svc.id,
@@ -307,14 +604,15 @@ async def control_service(service_id: str, action: Action) -> dict[str, Any]:
                 f"{svc.label} restart scheduled in {int(SELF_RESTART_DELAY_SEC)}s "
                 "(API will briefly drop while the container restarts)"
             ),
-            "container": svc.container,
+            "container": container,
         }
 
-    await _engine_action(svc.container, action)
+    container = await _resolve_container_name(svc)
+    await _engine_action(container, action)
     # Best-effort fresh state
     state = None
     try:
-        state = _state_from_inspect(await _inspect(svc.container))
+        state = _state_from_inspect(await _inspect(container))
     except Exception:
         pass
 
@@ -325,6 +623,6 @@ async def control_service(service_id: str, action: Action) -> dict[str, Any]:
         "action": action,
         "deferred": False,
         "message": f"{svc.label} {verb}",
-        "container": svc.container,
+        "container": container,
         "state": state,
     }

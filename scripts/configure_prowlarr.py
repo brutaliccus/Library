@@ -30,7 +30,7 @@ JACKETT_CFG = Path(
         ROOT / "jackett-config" / "Jackett" / "ServerConfig.json",
     )
 )
-BUNDLED_URL = os.environ.get("PROWLARR_BUNDLED_URL", "http://prowlarr:9696")
+BUNDLED_URL = os.environ.get("PROWLARR_BUNDLED_URL", "http://audiobook-prowlarr:9696")
 HOST_URL = os.environ.get("PROWLARR_HOST_URL", "http://127.0.0.1:9696").rstrip("/")
 ABB_PATH = "/api/v2.0/indexers/audiobookbay/results/torznab/api"
 
@@ -89,7 +89,11 @@ def _looks_placeholder(value: str) -> bool:
 
 def _is_bundled_url(url: str) -> bool:
     u = (url or "").lower()
-    return "://prowlarr" in u or u.rstrip("/").endswith(":9696") and "127.0.0.1" in u
+    return (
+        "audiobook-prowlarr" in u
+        or "://prowlarr" in u
+        or (u.rstrip("/").endswith(":9696") and "127.0.0.1" in u)
+    )
 
 
 def _read_api_key_from_config() -> str:

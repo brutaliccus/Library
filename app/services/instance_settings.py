@@ -383,7 +383,7 @@ REGISTRY: list[SettingDef] = [
         group="indexers",
         label="Prowlarr URL",
         env_attr="prowlarr_url",
-        placeholder="http://prowlarr:9696",
+        placeholder="http://audiobook-prowlarr:9696",
     ),
     SettingDef(
         key="config.prowlarr_api_key",

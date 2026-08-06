@@ -577,7 +577,7 @@ else
   USE_BUNDLED_PROWLARR=false
 fi
 if $USE_BUNDLED_PROWLARR; then
-  set_env PROWLARR_URL "http://prowlarr:9696"
+  set_env PROWLARR_URL "http://audiobook-prowlarr:9696"
   c_green "Bundled Prowlarr — Knaben + ABB wired after first start"
 else
   prompt PROWLARR_EXT_URL "Existing Prowlarr URL" "${PROWLARR_EXT_URL:-$(get_env PROWLARR_URL)}"
@@ -589,7 +589,7 @@ else
   else
     c_yellow "No Prowlarr URL/key — falling back to bundled Prowlarr"
     USE_BUNDLED_PROWLARR=true
-    set_env PROWLARR_URL "http://prowlarr:9696"
+    set_env PROWLARR_URL "http://audiobook-prowlarr:9696"
   fi
 fi
 
@@ -948,11 +948,52 @@ done
 # ---------------------------------------------------------------------------
 step "Configure Jackett / Prowlarr / sync keys"
 INDEXER_CFG_FAIL=0
+
+# Wait until indexer HTTP ports answer — configure_* need ServerConfig/APIKey on disk.
+wait_indexer_http() {
+  local name="$1" url="$2" tries="${3:-90}"
+  local i code
+  for i in $(seq 1 "$tries"); do
+    code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+    if [[ "$code" =~ ^[2345] ]]; then
+      c_green "$name is up ($url → HTTP $code)"
+      return 0
+    fi
+    sleep 2
+  done
+  c_yellow "$name not ready at $url after ${tries} tries (last HTTP ${code:-000})"
+  return 1
+}
+
+run_with_retries() {
+  local label="$1"
+  shift
+  local attempt
+  for attempt in 1 2 3; do
+    c_cyan "$label (attempt $attempt/3)"
+    if "$@"; then
+      return 0
+    fi
+    c_yellow "$label failed — retrying in 5s ..."
+    sleep 5
+  done
+  return 1
+}
+
+if $USE_BUNDLED_JACKETT; then
+  c_cyan "Waiting for Jackett on :9117 before configure ..."
+  wait_indexer_http "jackett" "http://127.0.0.1:9117/" 90 || true
+fi
+if $USE_BUNDLED_PROWLARR; then
+  c_cyan "Waiting for Prowlarr on :9696 before configure ..."
+  wait_indexer_http "prowlarr" "http://127.0.0.1:9696/ping" 90 || true
+fi
+
 if $USE_BUNDLED_JACKETT; then
   if [[ -f scripts/configure_jackett.sh ]]; then
-    c_cyan "Preconfiguring Jackett (FlareSolverr + AudioBookBay)"
-    if ! bash scripts/configure_jackett.sh --force-bundled; then
-      c_red "Jackett configure failed — Admin will show Jackett as Not configured"
+    if ! run_with_retries "Preconfiguring Jackett (FlareSolverr + AudioBookBay)" \
+      bash scripts/configure_jackett.sh --force-bundled; then
+      c_red "Jackett configure failed after 3 attempts"
       INDEXER_CFG_FAIL=1
     fi
   elif [[ -f scripts/sync_jackett_env.sh ]]; then
@@ -967,9 +1008,9 @@ else
 fi
 if $USE_BUNDLED_PROWLARR; then
   if [[ -f scripts/configure_prowlarr.sh ]]; then
-    c_cyan "Preconfiguring Prowlarr (Knaben + AudioBookBay → Jackett)"
-    if ! bash scripts/configure_prowlarr.sh --force-bundled; then
-      c_red "Prowlarr configure failed — Admin will show Prowlarr as Not configured"
+    if ! run_with_retries "Preconfiguring Prowlarr (Knaben + AudioBookBay → Jackett)" \
+      bash scripts/configure_prowlarr.sh --force-bundled; then
+      c_red "Prowlarr configure failed after 3 attempts"
       INDEXER_CFG_FAIL=1
     fi
   elif [[ -f scripts/sync_prowlarr_env.sh ]]; then
@@ -1050,7 +1091,7 @@ if [[ -f scripts/apply_indexer_keys.sh ]]; then
     c_red "FATAL: Jackett/Prowlarr API keys are not in .env / app Settings."
     c_red "Admin Overview will show them as Not configured until this succeeds."
     c_yellow "Repair: bash scripts/configure_jackett.sh --force-bundled && bash scripts/configure_prowlarr.sh --force-bundled && bash scripts/apply_indexer_keys.sh"
-    INDEXER_CFG_FAIL=1
+    exit 1
   fi
 else
   $DOCKER compose up -d --force-recreate --no-deps app || true
@@ -1172,14 +1213,15 @@ fi
 if [[ "$_keys_ok" -ne 1 || "${INDEXER_CFG_FAIL:-0}" -eq 1 ]]; then
   c_red ""
   c_red "**********************************************************************"
-  c_red "* Jackett/Prowlarr keys missing or configure failed.                 *"
-  c_red "* Admin Overview will show them as Not configured.                   *"
-  c_red "* Fix now:                                                           *"
-  c_red "*   bash scripts/configure_jackett.sh --force-bundled                *"
-  c_red "*   bash scripts/configure_prowlarr.sh --force-bundled               *"
-  c_red "*   bash scripts/apply_indexer_keys.sh                               *"
+  c_red "* FATAL: Jackett/Prowlarr URL/API keys are not configured.           *"
+  c_red "* Admin Overview will show them as Not configured until fixed.      *"
+  c_red "* Repair:                                                           *"
+  c_red "*   bash scripts/configure_jackett.sh --force-bundled               *"
+  c_red "*   bash scripts/configure_prowlarr.sh --force-bundled              *"
+  c_red "*   bash scripts/apply_indexer_keys.sh                              *"
   c_red "**********************************************************************"
   c_red ""
+  exit 1
 fi
 if [[ -S /var/run/docker.sock ]]; then
   if $DOCKER info >/dev/null 2>&1; then

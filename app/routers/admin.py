@@ -1677,6 +1677,14 @@ async def system_health(_admin: User = Depends(require_admin)):
     return await collect_system_health()
 
 
+@router.get("/health/pending-actions")
+async def health_pending_actions(_admin: User = Depends(require_admin)):
+    """Aggregated admin review queues for the Health dashboard (counts + deep links)."""
+    from app.services.pending_actions import collect_pending_actions
+
+    return await collect_pending_actions()
+
+
 @router.get("/docker/services")
 async def docker_services(_admin: User = Depends(require_admin)):
     """List Docker-managed stack services and live container state (admin only)."""

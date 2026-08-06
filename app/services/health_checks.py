@@ -432,6 +432,83 @@ async def _probe_libraforge() -> dict[str, Any]:
         }
 
 
+def _browser_open_url(url: str | None, *, fallback_host_port: int | None = None) -> str | None:
+    """Return a URL the admin browser can open, or a localhost fallback port."""
+    from urllib.parse import urlparse
+
+    raw = (url or "").strip().rstrip("/")
+    if raw:
+        try:
+            parsed = urlparse(raw)
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme in ("http", "https") and host and not (
+                host.endswith(".internal")
+                or host.startswith("172.17.")
+                or host
+                in {
+                    "audiobookshelf",
+                    "audiobookshelf-server",
+                    "kavita",
+                    "libraforge",
+                    "audiobook-prowlarr",
+                    "prowlarr",
+                    "audiobook-jackett",
+                    "jackett",
+                    "flaresolverr",
+                    "audiobook-flaresolverr",
+                    "gluetun",
+                    "audiobook-request",
+                    "app",
+                }
+            ):
+                return raw
+        except Exception:
+            pass
+    if fallback_host_port:
+        return f"http://127.0.0.1:{fallback_host_port}"
+    return None
+
+
+def _enrich_open_urls(health: dict[str, Any]) -> None:
+    """Attach openUrl for browser deep-links (may rewrite Docker-internal probe URLs)."""
+    import os
+
+    abs_npm = (os.environ.get("NPM_ABS_DOMAIN") or "").strip()
+    kavita_npm = (os.environ.get("NPM_KAVITA_DOMAIN") or "").strip()
+
+    mapping: dict[str, tuple[str | None, int | None]] = {
+        "audiobookshelf": (
+            f"https://{abs_npm}" if abs_npm else (health.get("audiobookshelf") or {}).get("url"),
+            13378,
+        ),
+        "kavita": (
+            f"https://{kavita_npm}" if kavita_npm else (health.get("kavita") or {}).get("url"),
+            5000,
+        ),
+        "prowlarr": ((health.get("prowlarr") or {}).get("url"), 9696),
+        "jackett": ((health.get("jackett") or {}).get("url"), 9117),
+        "flaresolverr": ((health.get("flaresolverr") or {}).get("url"), 8191),
+        "libraforge": ((health.get("libraforge") or {}).get("url"), 5056),
+        "knaben": ((health.get("knaben") or {}).get("url"), None),
+        "real_debrid": ("https://real-debrid.com", None),
+        "torbox": ("https://torbox.app", None),
+        "nyt": ("https://developer.nytimes.com", None),
+    }
+    for key, (url, port) in mapping.items():
+        probe = health.get(key)
+        if not isinstance(probe, dict):
+            continue
+        if key in ("real_debrid", "torbox", "nyt"):
+            probe["openUrl"] = url
+            continue
+        if key == "libraforge":
+            probe["openUrl"] = _browser_open_url(url) or _browser_open_url(
+                None, fallback_host_port=port
+            )
+            continue
+        probe["openUrl"] = _browser_open_url(url, fallback_host_port=port)
+
+
 async def collect_system_health() -> dict[str, Any]:
     """Run all connection probes in parallel (short timeouts)."""
     from app.services.debrid_tokens import apply_server_debrid_tokens
@@ -478,4 +555,5 @@ async def collect_system_health() -> dict[str, Any]:
             out[name] = {"configured": True, "connected": False, "error": _err(result)}
         else:
             out[name] = result
+    _enrich_open_urls(out)
     return out

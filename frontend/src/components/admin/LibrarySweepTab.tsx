@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
   Play,
@@ -259,15 +260,32 @@ function MediumSweepSection({
   showM4bCounter,
   toggles,
   renderReviewModal,
-}: MediumSweepSectionProps) {
+  initialQueue,
+  focusSection,
+}: MediumSweepSectionProps & {
+  initialQueue?: QueueTab | null;
+  focusSection?: boolean;
+}) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const sectionRef = useRef<HTMLElement | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [cursorRestored, setCursorRestored] = useState(false);
-  const [queueTab, setQueueTab] = useState<QueueTab>("needs-review");
+  const [queueTab, setQueueTab] = useState<QueueTab>(
+    () => initialQueue || "needs-review",
+  );
   const [processedOffset, setProcessedOffset] = useState(0);
   const [confirmAction, setConfirmAction] = useState<SweepConfirm | null>(null);
+
+  useEffect(() => {
+    if (initialQueue) setQueueTab(initialQueue);
+  }, [initialQueue]);
+
+  useEffect(() => {
+    if (!focusSection || !sectionRef.current) return;
+    sectionRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [focusSection, initialQueue]);
 
   const STATUS_KEY = useMemo(() => ["admin-library-sweep-status", medium] as const, [medium]);
   const REVIEW_KEY = useMemo(
@@ -565,7 +583,11 @@ function MediumSweepSection({
   ];
 
   return (
-    <section className="rounded-xl border border-gray-800 bg-gray-900/50 p-4 space-y-4">
+    <section
+      ref={sectionRef}
+      id={`sweep-${medium}`}
+      className="rounded-xl border border-gray-800 bg-gray-900/50 p-4 space-y-4"
+    >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-base font-semibold text-gray-100 flex items-center gap-2">
@@ -1292,6 +1314,14 @@ function AudiobookSection() {
     </div>
   );
 
+  const [searchParams] = useSearchParams();
+  const focus = searchParams.get("sweep") === "audiobook";
+  const queueParam = searchParams.get("queue");
+  const initialQueue: QueueTab | null =
+    focus && (queueParam === "needs-review" || queueParam === "unprocessed" || queueParam === "processed")
+      ? queueParam
+      : null;
+
   return (
     <MediumSweepSection
       medium="audiobook"
@@ -1302,6 +1332,8 @@ function AudiobookSection() {
       startConfirmText={AUDIOBOOK_START_CONFIRM}
       showM4bCounter
       toggles={toggles}
+      initialQueue={initialQueue}
+      focusSection={focus}
       renderReviewModal={({ item, open, onClose }) => (
         <QuickReviewWizard
           key={item.id}
@@ -1400,6 +1432,14 @@ function EbookSection() {
     </div>
   );
 
+  const [searchParams] = useSearchParams();
+  const focus = searchParams.get("sweep") === "ebook";
+  const queueParam = searchParams.get("queue");
+  const initialQueue: QueueTab | null =
+    focus && (queueParam === "needs-review" || queueParam === "unprocessed" || queueParam === "processed")
+      ? queueParam
+      : null;
+
   return (
     <MediumSweepSection
       medium="ebook"
@@ -1410,6 +1450,8 @@ function EbookSection() {
       startConfirmText={EBOOK_START_CONFIRM}
       showM4bCounter={false}
       toggles={toggles}
+      initialQueue={initialQueue}
+      focusSection={focus}
       renderReviewModal={({ item, open, onClose }) => (
         <EbookMetadataMatcher
           key={item.id}

@@ -14,7 +14,7 @@
 #   LIBRARY_ENABLE_DEEP_SCRAPERS=1, LIBRARY_SKIP_DOCKER_INSTALL=1, LIBRARY_SKIP_BUILD=1,
 #   LIBRARY_SKIP_JACKETT=1, LIBRARY_SKIP_PROWLARR=1, LIBRARY_JACKETT_URL, LIBRARY_JACKETT_API_KEY,
 #   LIBRARY_PROWLARR_URL, LIBRARY_PROWLARR_API_KEY,
-#   LIBRARY_OL_MODE=download|build|skip (non-interactive Open Library catalog),
+#   LIBRARY_OL_MODE=skip|build|download (Open Library catalog; default skip -- indexers are day-one),
 #   LIBRARY_NPM_DOMAIN, LIBRARY_NPM_ABS_DOMAIN, LIBRARY_NPM_KAVITA_DOMAIN,
 #   LIBRARY_NPM_LE_EMAIL, LIBRARY_NPM_ADMIN_EMAIL, LIBRARY_NPM_ADMIN_PASSWORD
 set -euo pipefail
@@ -589,24 +589,23 @@ set_env_if_empty SCRAPER_ENABLED "true"
 set_env_if_empty SCRAPER_RSS_EVERY_N_JOBS "1"
 
 # ---------------------------------------------------------------------------
-step "Open Library catalog cache [OPTIONAL]"
-explain "Local OL SQLite catalog (multi-GB) powers browse/match without hitting openlibrary.org."
-explain "Indexer seed is enough for torrent search — OL cache is optional but recommended."
-explain "Choices: Download prebuilt (GitHub data-seed release) | Build locally (hours + disk) | Skip"
+step "Open Library catalog [ADVANCED / OPTIONAL]"
+explain "Day-one search uses Jackett/Prowlarr + the indexer cache seed (~36 MB) — not Open Library."
+explain "A local OL SQLite DB is multi-GB and optional (Admin → Catalog later). Skip is recommended."
 OL_MODE="${LIBRARY_OL_MODE:-}"
 if [[ -z "$OL_MODE" ]]; then
   if [[ "$NONINTERACTIVE" == "1" ]]; then
-    OL_MODE="download"
+    OL_MODE="skip"
   else
-    echo "  [1] Download prebuilt cache (recommended when published on data-seed release)"
-    echo "  [2] Build locally from Open Library dumps (slow / multi-GB)"
-    echo "  [3] Skip for now (configure later in Admin → Catalog)"
+    echo "  [1] Skip for now (recommended — indexers cover search)"
+    echo "  [2] Build locally from Open Library dumps (hours + multi-GB disk)"
+    echo "  [3] Download a prebuilt OL DB if a maintainer published one (very large; usually unavailable)"
     _ol_choice=""
     prompt _ol_choice "Open Library catalog setup" "1"
     case "${_ol_choice}" in
       2|b|B|build|Build) OL_MODE="build" ;;
-      3|s|S|skip|Skip|n|N) OL_MODE="skip" ;;
-      *) OL_MODE="download" ;;
+      3|d|D|download|Download|prebuilt) OL_MODE="download" ;;
+      *) OL_MODE="skip" ;;
     esac
   fi
 fi
@@ -870,10 +869,10 @@ case "$OL_MODE" in
     if [[ -f data/ol_catalog.db ]] && [[ "$(wc -c <data/ol_catalog.db 2>/dev/null || echo 0)" -gt 1048576 ]]; then
       c_green "OL catalog already present at data/ol_catalog.db"
     elif [[ -f scripts/fetch_ol_catalog.py ]]; then
-      c_cyan "Downloading prebuilt Open Library catalog (data-seed release) ..."
+      c_cyan "Attempting optional prebuilt Open Library catalog download (large; soft-fail if missing) ..."
       if ! python3 scripts/fetch_ol_catalog.py 2>/dev/null && ! python scripts/fetch_ol_catalog.py 2>/dev/null; then
-        c_yellow "Prebuilt OL catalog not available yet — continue without it (Admin → Catalog later)."
-        c_yellow "Maintainers: scripts/export_ol_catalog_seed.py → upload to GitHub Release tag data-seed."
+        c_yellow "No prebuilt OL DB on the release — continuing. Indexer search still works."
+        c_yellow "Advanced: Admin → Catalog, or scripts/ol_import_dumps.py / scripts/fetch_ol_catalog.sh later."
       fi
     fi
     ;;
@@ -1182,7 +1181,7 @@ if [[ "$OL_MODE" == "build" || "$OL_MODE" == "b" ]]; then
 elif [[ -f data/ol_catalog.db ]]; then
   echo "  - Open Library: data/ol_catalog.db present"
 else
-  echo "  - Open Library: skipped — Admin → Catalog or: bash scripts/fetch_ol_catalog.sh"
+  echo "  - Open Library: skipped (optional) — Admin → Catalog later if you want a local OL DB"
 fi
 if $USE_NPM; then
   echo ""

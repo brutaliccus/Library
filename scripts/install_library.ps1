@@ -565,22 +565,23 @@ else {
     }
 }
 
-# Open Library catalog — download / build / skip
-Write-Step "==> Open Library catalog cache [OPTIONAL]"
-Write-Host "Local OL SQLite catalog (multi-GB). Indexer seed is enough for torrent search." -ForegroundColor DarkGray
+# Open Library catalog — skip by default; indexers + indexer_cache seed are day-one search.
+Write-Step "==> Open Library catalog [ADVANCED / OPTIONAL]"
+Write-Host "Day-one search uses Jackett/Prowlarr + indexer cache seed (~36 MB) — not Open Library." -ForegroundColor DarkGray
+Write-Host "A local OL SQLite DB is multi-GB and optional (Admin -> Catalog later). Skip is recommended." -ForegroundColor DarkGray
 if (-not $OlMode) {
     if ($NonInteractive) {
-        $OlMode = "download"
+        $OlMode = "skip"
     }
     else {
-        Write-Host "  [1] Download prebuilt cache (GitHub data-seed release when published)"
-        Write-Host "  [2] Build locally from Open Library dumps (slow / multi-GB)"
-        Write-Host "  [3] Skip for now"
+        Write-Host "  [1] Skip for now (recommended — indexers cover search)"
+        Write-Host "  [2] Build locally from Open Library dumps (hours + multi-GB disk)"
+        Write-Host "  [3] Download a prebuilt OL DB if published (very large; usually unavailable)"
         $choice = Read-Default "Open Library catalog setup" "1"
         switch -Regex ($choice) {
             '^(2|b|build)$' { $OlMode = "build" }
-            '^(3|s|skip|n)$' { $OlMode = "skip" }
-            Default { $OlMode = "download" }
+            '^(3|d|download|prebuilt)$' { $OlMode = "download" }
+            Default { $OlMode = "skip" }
         }
     }
 }
@@ -752,11 +753,11 @@ switch ($OlMode.ToLowerInvariant()) {
         else {
             $fetch = Join-Path $TARGET "scripts\fetch_ol_catalog.ps1"
             if (Test-Path $fetch) {
-                Write-Host "Downloading prebuilt Open Library catalog (data-seed release) ..."
+                Write-Host "Attempting optional prebuilt Open Library catalog download (large; soft-fail if missing) ..."
                 & powershell -ExecutionPolicy Bypass -File $fetch -RepoRoot $TARGET
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Warn "Prebuilt OL catalog not available yet — continue without it (Admin -> Catalog later)."
-                    Write-Warn "Maintainers: scripts/export_ol_catalog_seed.py -> upload to GitHub Release tag data-seed."
+                    Write-Warn "No prebuilt OL DB on the release — continuing. Indexer search still works."
+                    Write-Warn "Advanced: Admin -> Catalog, or scripts/ol_import_dumps.py / scripts/fetch_ol_catalog.ps1 later."
                 }
             }
         }
@@ -1002,7 +1003,7 @@ elseif ($OlMode -match '^(build|b)$') {
     Write-Host "  - Open Library: local build running (docker compose logs -f app)"
 }
 else {
-    Write-Host "  - Open Library: skipped — .\scripts\fetch_ol_catalog.ps1 or Admin -> Catalog"
+    Write-Host "  - Open Library: skipped (optional) — Admin -> Catalog later if you want a local OL DB"
 }
 if ($useNpm) {
     Write-Host ""

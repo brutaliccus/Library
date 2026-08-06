@@ -63,7 +63,7 @@ The script walks you through:
 3. **Bundled media** - ABS + Kavita + LibraForge (default for new servers)
 4. **Jackett** — bundled + AudioBookBay/Flare preconfigure (or connect existing URL + API key)
 5. **Prowlarr** — Knaben + ABB Torznab → Jackett (or connect existing)
-6. **Open Library catalog** — Download prebuilt / Build locally / Skip
+6. **Open Library catalog** — Skip by default (advanced multi-GB option; indexers cover day-one search)
 7. **Debrid** — Real-Debrid / TorBox (optional)
 8. **Pipelines + Sweep** — LibraForge / ebook organizer + scan cadence defaults
 9. **Catalog / LLM** — Hardcover, OpenRouter, AA, NYT, ISBNdb, Google Books (optional)
@@ -133,7 +133,7 @@ LIBRARY_NONINTERACTIVE=1 \
 |--------|---------|-------------------------|
 | Bundled Jackett | Yes | Answer **n**, then paste Jackett URL + API key (`LIBRARY_SKIP_JACKETT=1` / `LIBRARY_JACKETT_URL`) |
 | Bundled Prowlarr | Yes | Answer **n**, then paste Prowlarr URL + API key (`LIBRARY_SKIP_PROWLARR=1` / `LIBRARY_PROWLARR_URL`) |
-| Open Library cache | Download | `LIBRARY_OL_MODE=download|build|skip` |
+| Open Library cache | Skip | LIBRARY_OL_MODE=skip|build|download (default skip; multi-GB optional) |build|skip` |
 
 After start, `scripts/configure_jackett.sh` and `scripts/configure_prowlarr.sh` idempotently wire FlareSolverr + AudioBookBay and Knaben (same shape as production on the Pi). Re-run anytime.
 

@@ -250,7 +250,7 @@ LIBRARY_NONINTERACTIVE=1 \
   ./scripts/install_library.sh /opt/library --non-interactive
 ```
 
-The installers write `.env` (core secrets, media mounts, indexer URLs, pipeline/sweep defaults, optional debrid/catalog/LLM keys, VAPID, NPM vars), create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), **preconfigure Jackett (AudioBookBay + FlareSolverr) and Prowlarr (Knaben + ABB Torznab)** via CLI (or connect existing URL/API keys), offer **Open Library catalog** download/build/skip, apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media,npm` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, sync ABS/Kavita/LibraForge into `.env`, configure NPM proxy hosts via API (LAN hostname/IP on :80 when no domain), then print a soft health report (app / Jackett / Prowlarr / Flare / OL cache / ABS / Kavita / npm / docker.sock). **Mullvad is optional**; **NPM / Jackett / Prowlarr are default but skippable**. After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead. Full Ubuntu checklist: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
+The installers write `.env` (core secrets, media mounts, indexer URLs, pipeline/sweep defaults, optional debrid/catalog/LLM keys, VAPID, NPM vars), create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), **preconfigure Jackett (AudioBookBay + FlareSolverr) and Prowlarr (Knaben + ABB Torznab)** via CLI (or connect existing URL/API keys), default **skip** for optional Open Library multi-GB catalog (indexers are day-one), apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media,npm` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, sync ABS/Kavita/LibraForge into `.env`, configure NPM proxy hosts via API (LAN hostname/IP on :80 when no domain), then print a soft health report (app / Jackett / Prowlarr / Flare / OL cache / ABS / Kavita / npm / docker.sock). **Mullvad is optional**; **NPM / Jackett / Prowlarr are default but skippable**. After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead. Full Ubuntu checklist: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
 
 ### Indexer cache seed
 
@@ -373,24 +373,25 @@ More detail: [docs/libraforge.md](docs/libraforge.md), [docs/ebooks.md](docs/ebo
 
 Prefer RSS-only unless you know you need the deeper coverage.
 
-### Open Library catalog (optional)
+### Open Library catalog (advanced / optional)
 
-A local SQLite catalog avoids hammering live Open Library APIs during scrape/match. It is **not** required for a working install (the indexer cache seed is enough to search releases).
+Day-one release search does **not** need a local Open Library DB. The guided install seeds `seed/indexer_cache.db.gz` (~36 MB) and preconfigures Jackett (AudioBookBay + FlareSolverr) and Prowlarr (Knaben + ABB Torznab). Store browse still works via live Google Books / Open Library APIs.
 
-The guided installer asks:
+A local `ol_catalog.db` (multi‑GB) is optional and **skipped by default**. The [`data-seed`](https://github.com/brutaliccus/Library/releases/tag/data-seed) release ships the **indexer cache** only — not the OL dump.
 
-1. **Download prebuilt** — from the GitHub Release tag [`data-seed`](https://github.com/brutaliccus/Library/releases/tag/data-seed) (`ol_catalog.db.gz` or multipart `ol_catalog.manifest.json` + `.partNN`). See `seed/README.md`.
-2. **Build locally** — runs `scripts/ol_import_dumps.py` in the app container (hours + multi‑GB disk).
-3. **Skip** — configure later in Admin → Catalog.
+Advanced later (Admin → Catalog, or installer choice):
+
+1. **Skip** (default / recommended)
+2. **Build locally** — `scripts/ol_import_dumps.py` in the app container (hours + multi‑GB disk)
+3. **Download prebuilt** — only if a maintainer explicitly published OL assets (rare)
 
 ```bash
-bash scripts/fetch_ol_catalog.sh          # download prebuilt into data/ol_catalog.db
-python scripts/export_ol_catalog_seed.py  # maintainers: package a host DB for the release
 python scripts/ol_import_dumps.py --help  # local build
+bash scripts/fetch_ol_catalog.sh          # only if prebuilt OL assets exist
 bash scripts/install_ol_catalog_cron.sh   # optional host cron for dump checks
 ```
 
-**Admin → Catalog** shows readiness, dump presence, and newer-dump notifications. Expect multi‑GB downloads and a multi‑GB finished DB (much larger with editions). Mount dump/working dirs via `OPENLIBRARY_HOST_DIR`.
+**Admin → Catalog** shows readiness and dump presence. Mount dump/working dirs via `OPENLIBRARY_HOST_DIR`.
 
 ---
 

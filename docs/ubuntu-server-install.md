@@ -170,7 +170,7 @@ Preserved: .env secrets, media mounts, data/, NPM / reverse-proxy config. Does *
 
 Useful flags: --force (discard local tracked changes), --skip-build, --skip-keys, --branch NAME.
 
-Admin UI (**Admin → Health**) includes a **Server stack update** card (version compare, **Check for updates**, **Update**) that mirrors the Android APK updater. Check uses the GitHub API against your configured repo; **Update** runs `scripts/update_library.sh --force` on the host via a one-shot Docker sidecar (requires `docker.sock` and the compose project directory — discovered from compose labels, or set `LIBRARY_HOST_ROOT=/opt/library` in `.env`). SSH one-liner still works when the Admin bridge is unavailable:
+Admin UI (**Admin → Health**) includes a **Server stack update** card (version compare, **Check for updates**, **Update**) that mirrors the Android APK updater. Check uses the GitHub API against your configured repo; **Update** runs `scripts/update_library.sh --force` on the host via a one-shot Docker sidecar (requires `docker.sock` and the compose project directory — discovered from compose labels, or set `LIBRARY_HOST_ROOT=/opt/library` in `.env`). Host path validation for Apply uses a short Docker bind-mount probe (the app container does not need `/opt/library` mounted locally). SSH one-liner still works when the Admin bridge is unavailable:
 
 ```bash
 cd /opt/library && bash scripts/update_library.sh

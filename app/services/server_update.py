@@ -717,7 +717,7 @@ async def _start_update_container(host_root: str) -> str:
     # recreates ``audiobook-request``; the app must not ``wait``/force-delete the
     # sidecar (that killed mid-recreate and left the stack down).
     cmd = (
-        "apk add --no-cache git bash >/dev/null && "
+        "apk add --no-cache git bash python3 >/dev/null && "
         "git config --global --add safe.directory /library && "
         "git config --global --add safe.directory '*' && "
         "bash /library/scripts/admin_server_update.sh"

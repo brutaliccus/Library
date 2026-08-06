@@ -59,9 +59,18 @@ if fin:
 path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
   else
-    printf '{"phase":"%s","running":%s,"updatedAt":"%s"}\n' \
-      "$phase" "$([[ "$phase" == "updating" ]] && echo true || echo false)" "$(ts)" \
-      > "$JOB_JSON"
+    local running_json="false" ok_json="null"
+    [[ "$phase" == "updating" ]] && running_json="true"
+    if [[ "$ok" == "1" || "$ok" == "true" ]]; then ok_json="true"
+    elif [[ "$ok" == "0" || "$ok" == "false" ]]; then ok_json="false"
+    fi
+    if [[ -n "$finished" ]]; then
+      printf '{"phase":"%s","running":%s,"ok":%s,"updatedAt":"%s","finishedAt":"%s"}\n' \
+        "$phase" "$running_json" "$ok_json" "$(ts)" "$finished" > "$JOB_JSON"
+    else
+      printf '{"phase":"%s","running":%s,"ok":%s,"updatedAt":"%s"}\n' \
+        "$phase" "$running_json" "$ok_json" "$(ts)" > "$JOB_JSON"
+    fi
   fi
 }
 

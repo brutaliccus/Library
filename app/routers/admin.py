@@ -1763,7 +1763,7 @@ async def server_update_job(_admin: User = Depends(require_admin)):
     """Poll apply job phase + log tail (persisted under data/)."""
     from app.services import server_update
 
-    return server_update.get_job()
+    return await server_update.get_job()
 
 
 @router.get("/libraforge")

@@ -4,6 +4,11 @@ The app container typically has no writable .git checkout. Updates run in a
 one-shot sidecar with the compose project directory and docker.sock mounted,
 invoking scripts/admin_server_update.sh (same work as update_library.sh).
 
+The sidecar is **detached**: the app must not wait on or force-delete it.
+``update_library.sh`` recreates the app container; an in-process waiter that
+cleaned up the sidecar on cancel previously killed mid-recreate and left the
+stack stopped.
+
 Version checks prefer GitHub compare against data/install_revision.json when
 live git is unavailable inside the app.
 """
@@ -491,14 +496,54 @@ def _job_snapshot() -> dict[str, Any]:
     }
 
 
+async def _reconcile_job_with_sidecars() -> dict[str, Any]:
+    """Refresh job snapshot; if phase is updating but no sidecar remains, mark failed/idle."""
+    await _reap_exited_update_sidecars()
+    job = _job_snapshot()
+    phase = str(job.get("phase") or "")
+    if phase not in ("updating", "validating") and not job.get("running"):
+        return job
+    if await _update_sidecar_running():
+        return job
+    # No running sidecar — if still "updating", the apply was interrupted (historic bug)
+    # or finished without writing status. Prefer sidecar-written terminal phases.
+    raw = _read_json(JOB_FILE) or {}
+    if str(raw.get("phase") or "") in ("succeeded", "failed"):
+        return _job_snapshot()
+    # Stale updating with no sidecar: clear running so UI un-wedges.
+    age_ok = True
+    try:
+        age_ok = (time.time() - JOB_FILE.stat().st_mtime) > 90
+    except Exception:
+        pass
+    if age_ok:
+        raw.update(
+            {
+                "phase": "failed",
+                "running": False,
+                "ok": False,
+                "error": raw.get("error")
+                or "update sidecar stopped before finishing (stack may need: "
+                "bash scripts/update_library.sh --force --yes)",
+                "finishedAt": _now_iso(),
+                "updatedAt": _now_iso(),
+            }
+        )
+        _write_json(JOB_FILE, raw)
+    return _job_snapshot()
+
+
 async def get_status() -> dict[str, Any]:
     local = await get_local_version()
     root = await discover_host_root()
-    job = _job_snapshot()
+    job = await _reconcile_job_with_sidecars()
     sock_ok = docker_control.socket_available()
-    apply_ready = bool(root.get("hostRoot")) and sock_ok
+    host_ok = bool(root.get("hostRoot"))
+    apply_ready = host_ok and sock_ok and not job.get("running")
     if apply_ready:
         reason = None
+    elif job.get("running"):
+        reason = "Server update already running"
     elif not sock_ok:
         reason = (
             "docker.sock not available in the app container — mount "
@@ -509,7 +554,7 @@ async def get_status() -> dict[str, Any]:
     return {
         "local": local,
         "remote": None,
-        "state": "unknown",
+        "state": "updating" if job.get("running") else "unknown",
         "branch": DEFAULT_BRANCH,
         "remoteName": DEFAULT_REMOTE,
         "repo": await _github_repo(),
@@ -662,6 +707,10 @@ async def _start_update_container(host_root: str) -> str:
     sock = docker_control.DOCKER_SOCK
     # Sidecar runs as root; host checkout is often uid 1000 → git "dubious ownership"
     # unless safe.directory is set. Container path is always /library (bind target).
+    #
+    # IMPORTANT: this container must outlive the app process. ``update_library.sh``
+    # recreates ``audiobook-request``; the app must not ``wait``/force-delete the
+    # sidecar (that killed mid-recreate and left the stack down).
     cmd = (
         "apk add --no-cache git bash >/dev/null && "
         "git config --global --add safe.directory /library && "
@@ -670,7 +719,8 @@ async def _start_update_container(host_root: str) -> str:
     )
     body = {
         "Image": UPDATE_IMAGE,
-        "Cmd": ["sh", "-c", cmd],
+        "Entrypoint": ["sh", "-c"],
+        "Cmd": [cmd],
         "WorkingDir": "/library",
         "Env": [
             "LIBRARY_UPDATE_YES=1",
@@ -687,6 +737,8 @@ async def _start_update_container(host_root: str) -> str:
             ],
             "AutoRemove": False,
             "NetworkMode": "bridge",
+            # Survive if someone stops the compose project; only explicit delete removes it.
+            "RestartPolicy": {"Name": "no"},
         },
     }
     async with _docker_client() as client:
@@ -716,105 +768,92 @@ async def _start_update_container(host_root: str) -> str:
         return cid
 
 
-async def _await_container(cid: str) -> int:
-    async with _docker_client() as client:
-        # Wait up to 45 minutes for compose build
-        resp = await client.post(
-            f"{docker_control.API_PREFIX}/containers/{cid}/wait",
-            timeout=2700.0,
-        )
-        if resp.status_code >= 400:
-            return 1
-        data = resp.json() or {}
-        return _docker_status_code(data, default=1)
-
-
-async def _cleanup_container(cid: str) -> None:
+async def _cleanup_container(cid: str, *, force: bool = True) -> None:
     try:
         async with _docker_client() as client:
             await client.delete(
                 f"{docker_control.API_PREFIX}/containers/{cid}",
-                params={"force": "true"},
+                params={"force": "true" if force else "false"},
             )
     except Exception as e:
         logger.debug("cleanup update container failed: %s", e)
 
 
+async def _list_update_sidecars(*, all_containers: bool = True) -> list[dict[str, Any]]:
+    """Containers labeled com.library.server-update=1."""
+    if not docker_control.socket_available():
+        return []
+    try:
+        async with _docker_client() as client:
+            resp = await client.get(
+                f"{docker_control.API_PREFIX}/containers/json",
+                params={
+                    "all": "true" if all_containers else "false",
+                    "filters": json.dumps({"label": ["com.library.server-update=1"]}),
+                },
+            )
+            if resp.status_code >= 400:
+                return []
+            data = resp.json()
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.debug("list update sidecars failed: %s", e)
+        return []
+
+
+async def _update_sidecar_running() -> bool:
+    for c in await _list_update_sidecars(all_containers=True):
+        state = str((c.get("State") or "")).lower()
+        if state == "running":
+            return True
+    return False
+
+
+async def _reap_exited_update_sidecars() -> None:
+    """Remove finished update sidecars (never force-kill a running one)."""
+    for c in await _list_update_sidecars(all_containers=True):
+        state = str((c.get("State") or "")).lower()
+        cid = str(c.get("Id") or "")
+        if cid and state in ("exited", "dead", "created"):
+            await _cleanup_container(cid, force=True)
+
+
 def is_apply_running() -> bool:
     job = _job_snapshot()
-    if job.get("running"):
+    if job.get("running") or str(job.get("phase") or "") in ("updating", "validating"):
         return True
     global _task
     return _task is not None and not _task.done()
 
 
-async def _run_apply_job(host_root: str) -> None:
-    cid: str | None = None
-    try:
-        _write_json(
-            JOB_FILE,
-            {
-                "phase": "updating",
-                "running": True,
-                "ok": None,
-                "error": None,
-                "startedAt": _now_iso(),
-                "finishedAt": None,
-                "updatedAt": _now_iso(),
-                "hostRoot": host_root,
-            },
-        )
-        JOB_LOG.write_text(
-            f"[server_update] starting sidecar image={UPDATE_IMAGE} "
-            f"hostRoot={host_root} (bind → /library)\n",
-            encoding="utf-8",
-        )
-        cid = await _start_update_container(host_root)
-        job = _read_json(JOB_FILE) or {}
-        job.update({"containerId": cid, "updatedAt": _now_iso()})
-        _write_json(JOB_FILE, job)
+async def _launch_detached_update(host_root: str) -> str:
+    """Start the update sidecar and return immediately — do not wait or delete it.
 
-        code = await _await_container(cid)
-        # Prefer sidecar-written status; fill gaps if needed.
-        job = _read_json(JOB_FILE) or {}
-        if job.get("phase") in (None, "updating", "idle"):
-            job.update(
-                {
-                    "phase": "succeeded" if code == 0 else "failed",
-                    "running": False,
-                    "ok": code == 0,
-                    "error": None if code == 0 else f"update container exited {code}",
-                    "finishedAt": _now_iso(),
-                    "updatedAt": _now_iso(),
-                }
+    Waiting from the app process is unsafe: compose recreates this container, and
+    task cancellation used to force-delete the sidecar mid-recreate.
+    """
+    cid = await _start_update_container(host_root)
+    job = _read_json(JOB_FILE) or {}
+    job.update(
+        {
+            "phase": "updating",
+            "running": True,
+            "containerId": cid,
+            "hostRoot": host_root,
+            "detached": True,
+            "updatedAt": _now_iso(),
+        }
+    )
+    _write_json(JOB_FILE, job)
+    try:
+        with JOB_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(
+                f"[server_update] detached sidecar id={cid[:12]} "
+                f"(app may restart; sidecar continues on host)\n"
             )
-            _write_json(JOB_FILE, job)
-        else:
-            job["running"] = False
-            job["updatedAt"] = _now_iso()
-            _write_json(JOB_FILE, job)
-    except Exception as e:
-        logger.exception("server update apply failed")
-        _write_json(
-            JOB_FILE,
-            {
-                **(_read_json(JOB_FILE) or {}),
-                "phase": "failed",
-                "running": False,
-                "ok": False,
-                "error": str(e),
-                "finishedAt": _now_iso(),
-                "updatedAt": _now_iso(),
-            },
-        )
-        try:
-            with JOB_LOG.open("a", encoding="utf-8") as fh:
-                fh.write(f"[server_update] error: {e}\n")
-        except Exception:
-            pass
-    finally:
-        if cid:
-            await _cleanup_container(cid)
+    except Exception:
+        pass
+    return cid
 
 
 def _reset_job_state(
@@ -849,16 +888,21 @@ def _reset_job_state(
 
 
 async def start_apply() -> dict[str, Any]:
-    """Kick async host update. Returns immediately for polling."""
+    """Start detached host update sidecar; return immediately for job polling."""
     global _task
-    if is_apply_running():
-        return {
-            "ok": True,
-            "started": False,
-            "already_running": True,
-            "message": "Server update already running",
-            "job": _job_snapshot(),
-        }
+    _task = None  # legacy; apply no longer depends on an in-process waiter
+
+    if await _update_sidecar_running() or is_apply_running():
+        # Reconcile stale "running" with no sidecar before blocking the user.
+        job = await _reconcile_job_with_sidecars()
+        if await _update_sidecar_running() or job.get("running"):
+            return {
+                "ok": True,
+                "started": False,
+                "already_running": True,
+                "message": "Server update already running",
+                "job": job,
+            }
 
     # Clear stale job/log immediately so the UI shows this attempt, not an old failure.
     _reset_job_state(
@@ -891,24 +935,38 @@ async def start_apply() -> dict[str, Any]:
         host_root=str(host_root),
         host_root_source=root.get("source"),
         log_line=(
-            f"[server_update] starting sidecar image={UPDATE_IMAGE} "
+            f"[server_update] starting detached sidecar image={UPDATE_IMAGE} "
             f"hostRoot={host_root} (bind → /library)\n"
         ),
     )
-    _task = asyncio.create_task(_run_apply_job(str(host_root)))
+    try:
+        cid = await _launch_detached_update(str(host_root))
+    except Exception as e:
+        _reset_job_state(
+            phase="failed",
+            running=False,
+            ok=False,
+            error=str(e),
+            host_root=str(host_root),
+            log_line=f"[server_update] failed to start sidecar: {e}\n",
+        )
+        raise RuntimeError(str(e)) from e
+
     return {
         "ok": True,
         "started": True,
         "already_running": False,
         "message": (
             "Server update started — git reset --hard to origin/main and rebuild "
-            "the stack. The app may restart mid-update; keep this page open."
+            "the stack. The app will restart mid-update; keep this page open and "
+            "poll until the job finishes."
         ),
         "job": _job_snapshot(),
         "hostRoot": host_root,
         "hostRootSource": root.get("source"),
+        "containerId": cid,
     }
 
 
-def get_job() -> dict[str, Any]:
-    return _job_snapshot()
+async def get_job() -> dict[str, Any]:
+    return await _reconcile_job_with_sidecars()

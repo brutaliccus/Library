@@ -403,6 +403,36 @@ def test_probe_accepts_env_host_root_when_docker_wait_zero(monkeypatch: pytest.M
     asyncio.run(_run())
 
 
+def test_launch_detached_update_does_not_await_or_cleanup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Regression: awaiting/force-deleting the sidecar killed compose mid-recreate."""
+    monkeypatch.setattr(server_update, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_update, "JOB_FILE", tmp_path / "job.json")
+    monkeypatch.setattr(server_update, "JOB_LOG", tmp_path / "job.log")
+    (tmp_path / "job.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "job.log").write_text("", encoding="utf-8")
+
+    cleanup = AsyncMock()
+
+    async def _run():
+        with (
+            patch.object(
+                server_update,
+                "_start_update_container",
+                AsyncMock(return_value="deadbeefcafebabe"),
+            ),
+            patch.object(server_update, "_cleanup_container", cleanup),
+        ):
+            cid = await server_update._launch_detached_update("/opt/library")
+        assert cid == "deadbeefcafebabe"
+        job = json.loads((tmp_path / "job.json").read_text(encoding="utf-8"))
+        assert job["detached"] is True
+        assert job["containerId"] == "deadbeefcafebabe"
+        assert job["running"] is True
+        cleanup.assert_not_called()
+
+    asyncio.run(_run())
+
+
 def test_start_apply_clears_stale_job_log_on_validation_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -429,6 +459,7 @@ def test_start_apply_clears_stale_job_log_on_validation_failure(
     async def _run():
         with (
             patch.object(server_update, "is_apply_running", return_value=False),
+            patch.object(server_update, "_update_sidecar_running", AsyncMock(return_value=False)),
             patch.object(server_update.docker_control, "socket_available", return_value=True),
             patch.object(
                 server_update,
@@ -438,7 +469,7 @@ def test_start_apply_clears_stale_job_log_on_validation_failure(
             pytest.raises(RuntimeError, match="no valid host"),
         ):
             await server_update.start_apply()
-        job = server_update.get_job()
+        job = await server_update.get_job()
         assert job["phase"] == "failed"
         assert "no valid host" in (job.get("error") or "")
         assert "17:12:32" not in (job.get("logTail") or "")

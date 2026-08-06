@@ -1,5 +1,14 @@
 # Ubuntu Server 24.04 - Library Site install
 
+
+## Install vs update (hand-in-hand)
+
+- **Install** (`scripts/install_library.sh`) and **update** (`scripts/update_library.sh`) share the same host root (default `/opt/library`).
+- Always set **`LIBRARY_HOST_ROOT`** in `.env` to that absolute host path — **Admin → Health → Server stack update** needs it for the Docker sidecar bind.
+- Interactive install asks **Full CLI** vs **Minimal browser bootstrap** first (`LIBRARY_SETUP_MODE=cli|browser` for noninteractive). Browser mode starts the stack + indexers, then finish at `/admin/setup`.
+- Media defaults to `$LIBRARY_HOST_ROOT/media/{audiobooks,ebooks,openlibrary}` (preserve these trees across wipe/reinstall).
+
+
 Guided path for a **fresh** host (e.g. spare laptop). Does **not** migrate or stop the production Pi.
 
 ## Prerequisites

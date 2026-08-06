@@ -10,6 +10,7 @@
 # Env overrides (also used in non-interactive mode):
 #   LIBRARY_SITE_REPO, LIBRARY_SITE_BRANCH, LIBRARY_APP_URL, LIBRARY_AUDIO_HOST,
 #   LIBRARY_EBOOK_HOST, LIBRARY_OL_HOST, LIBRARY_APK_REPO, LIBRARY_TZ,
+#   LIBRARY_SETUP_MODE=cli|browser (first choice after clone; browser = minimal + /admin/setup),
 #   LIBRARY_SKIP_BUNDLED_MEDIA=1, LIBRARY_SKIP_NPM=1, LIBRARY_ENABLE_VPN=1,
 #   LIBRARY_ENABLE_DEEP_SCRAPERS=1, LIBRARY_SKIP_DOCKER_INSTALL=1, LIBRARY_SKIP_BUILD=1,
 #   LIBRARY_SKIP_JACKETT=1, LIBRARY_SKIP_PROWLARR=1, LIBRARY_JACKETT_URL, LIBRARY_JACKETT_API_KEY,
@@ -380,6 +381,324 @@ ensure_libraforge_clone() {
 }
 
 # ---------------------------------------------------------------------------
+normalize_app_url() {
+  # Strip whitespace, collapse duplicated schemes, ensure http(s), drop trailing slash.
+  local u="${1-}"
+  u="$(printf '%s' "$u" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  [[ -z "$u" ]] && { printf '%s' ""; return 0; }
+  while [[ "$u" =~ ^[Hh][Tt][Tt][Pp][Ss]?://[Hh][Tt][Tt][Pp][Ss]?:// ]]; do
+    u="$(printf '%s' "$u" | sed -E 's|^[Hh][Tt][Tt][Pp][Ss]?://||')"
+  done
+  if [[ ! "$u" =~ ^[Hh][Tt][Tt][Pp][Ss]?:// ]]; then
+    u="https://${u#/}"
+  fi
+  u="${u%/}"
+  printf '%s' "$u"
+}
+
+port_listening() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -tln 2>/dev/null | grep -qE ":${port}[[:space:]]" && return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+write_install_revision_file() {
+  mkdir -p data
+  local _rev_sha _rev_short _rev_branch _rev_msg _rev_when _rev_ts
+  _rev_sha="unknown"
+  _rev_short="unknown"
+  _rev_branch="${BRANCH:-main}"
+  _rev_msg=""
+  _rev_when=""
+  _rev_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+  if [[ -d .git ]] && command -v git >/dev/null 2>&1; then
+    _rev_sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    _rev_short="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    _rev_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+    _rev_msg="$(git log -1 --pretty=format:%s 2>/dev/null || echo "")"
+    _rev_when="$(git log -1 --pretty=format:%cI 2>/dev/null || echo "")"
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    SHA="$_rev_sha" SHORT="$_rev_short" BRANCH_V="$_rev_branch" MSG="$_rev_msg" \
+      COMMITTED="$_rev_when" TRACKING="origin/${BRANCH:-main}" UPDATED="$_rev_ts" \
+      python3 - <<'PY'
+import json, os
+from pathlib import Path
+Path("data/install_revision.json").write_text(
+    json.dumps(
+        {
+            "sha": os.environ.get("SHA", ""),
+            "shortSha": os.environ.get("SHORT", ""),
+            "branch": os.environ.get("BRANCH_V", ""),
+            "message": os.environ.get("MSG", ""),
+            "committedAt": os.environ.get("COMMITTED", ""),
+            "tracking": os.environ.get("TRACKING", ""),
+            "updatedAt": os.environ.get("UPDATED", ""),
+            "source": "install_library.sh",
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+  else
+    printf '{\n  "sha": "%s",\n  "shortSha": "%s",\n  "branch": "%s",\n  "tracking": "origin/%s",\n  "updatedAt": "%s",\n  "source": "install_library.sh"\n}\n' \
+      "$_rev_sha" "$_rev_short" "$_rev_branch" "${BRANCH:-main}" "$_rev_ts" > data/install_revision.json
+  fi
+  c_green "Wrote data/install_revision.json ($_rev_short)"
+}
+
+# ---------------------------------------------------------------------------
+step "Setup mode (CLI vs browser)"
+explain "Full CLI walks every optional key (debrid, catalog, NPM domains, VAPID, …)."
+explain "Minimal browser bootstrap starts the stack, then finish in /admin/setup."
+SETUP_MODE="${LIBRARY_SETUP_MODE:-}"
+SETUP_MODE="$(printf '%s' "$SETUP_MODE" | tr '[:upper:]' '[:lower:]')"
+if [[ -z "$SETUP_MODE" ]]; then
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    SETUP_MODE="cli"
+  else
+    c_cyan "Choose how to finish configuration:"
+    echo "  1) Full CLI guided setup (all prompts here)"
+    echo "  2) Minimal bootstrap + browser setup wizard (/admin/setup)"
+    _mode_choice=""
+    prompt _mode_choice "Setup mode [1=cli, 2=browser]" "2"
+    case "${_mode_choice}" in
+      2|b|browser|minimal|m) SETUP_MODE="browser" ;;
+      *) SETUP_MODE="cli" ;;
+    esac
+  fi
+fi
+case "$SETUP_MODE" in
+  browser|minimal|web) SETUP_MODE="browser" ;;
+  *) SETUP_MODE="cli" ;;
+esac
+c_green "LIBRARY_SETUP_MODE=${SETUP_MODE}"
+
+if [[ "$SETUP_MODE" == "browser" ]]; then
+  # shellcheck disable=SC1091
+  # Minimal path: core env + media + compose up + indexer bootstrap + revision, then exit.
+  step "Minimal browser bootstrap"
+  explain "Writes core .env, creates media under \$TARGET/media, starts bundled stack, configures indexers."
+  DEFAULT_APP_URL="${LIBRARY_APP_URL:-$(detect_lan_url)}"
+  APP_URL="$(normalize_app_url "${DEFAULT_APP_URL}")"
+  EXISTING_SECRET="$(get_env SECRET_KEY)"
+  EXISTING_SECRET="${EXISTING_SECRET-}"
+  if [[ -z "$EXISTING_SECRET" || "$EXISTING_SECRET" =~ change-me ]]; then
+    EXISTING_SECRET="$(openssl rand -hex 32 2>/dev/null || true)"
+    if [[ -z "$EXISTING_SECRET" ]]; then
+      EXISTING_SECRET="$(tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c 64 || true)"
+    fi
+    if [[ -z "$EXISTING_SECRET" ]]; then
+      EXISTING_SECRET="lib-$(date +%s)-${RANDOM}${RANDOM}"
+    fi
+  fi
+  TZ_VAL="${LIBRARY_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
+  TZ_VAL="${TZ_VAL:-UTC}"
+  set_env APP_URL "$APP_URL"
+  set_env SECRET_KEY "$EXISTING_SECRET"
+  set_env DATABASE_URL "sqlite+aiosqlite:///data/app.db"
+  set_env TZ "$TZ_VAL"
+  set_env PUID "1000"
+  set_env PGID "1000"
+  _docker_gid="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
+  set_env DOCKER_GID "${_docker_gid:-998}"
+  set_env LIBRARY_HOST_ROOT "$TARGET"
+  set_env AUDIOBOOK_DIR "/audiobooks"
+  set_env EBOOK_DIR "/ebooks"
+  set_env AUDIOBOOK_STAGING_DIRNAME ".unorganized"
+  set_env AUDIOBOOK_STAGING_LEGACY_DIRNAME "_unorganized"
+  set_env EBOOK_STAGING_DIRNAME "unorganized"
+  set_env_if_empty ANDROID_APK_GITHUB_REPO "${LIBRARY_APK_REPO:-brutaliccus/Library}"
+  set_env_if_empty ANDROID_MIN_VERSION_CODE "59"
+  set_env_if_empty ANDROID_FORCE_UPDATES "true"
+  set_env ABB_RSS_ONLY "true"
+  set_env ABB_AUTHOR_CRAWL_ENABLED "false"
+  set_env ABB_DEEP_SEARCH_ENABLED "false"
+  set_env ABB_LIVE_SEARCH_ENABLED "false"
+  set_env_if_empty OPENROUTER_ENABLED "false"
+  set_env LIBRAFORGE_PIPELINE_ENABLED "true"
+  set_env EBOOK_PIPELINE_ENABLED "true"
+  set_env_if_empty LIBRAFORGE_M4B_JOBS "1"
+
+  AUDIO_HOST="${LIBRARY_AUDIO_HOST:-$TARGET/media/audiobooks}"
+  EBOOK_HOST="${LIBRARY_EBOOK_HOST:-$TARGET/media/ebooks}"
+  OL_HOST="${LIBRARY_OL_HOST:-$TARGET/media/openlibrary}"
+  for p in "$AUDIO_HOST" "$EBOOK_HOST" "$OL_HOST"; do
+    mkdir -p "$p" 2>/dev/null || sudo mkdir -p "$p"
+  done
+  mkdir -p "$AUDIO_HOST/.unorganized" "$EBOOK_HOST/unorganized" 2>/dev/null || true
+  touch "$AUDIO_HOST/.unorganized/.ignore" 2>/dev/null || true
+  set_env AUDIOBOOK_HOST_DIR "$AUDIO_HOST"
+  set_env EBOOK_HOST_DIR "$EBOOK_HOST"
+  set_env OPENLIBRARY_HOST_DIR "$OL_HOST"
+
+  USE_BUNDLED=true
+  if [[ "${LIBRARY_SKIP_BUNDLED_MEDIA:-0}" == "1" ]]; then
+    USE_BUNDLED=false
+    c_yellow "LIBRARY_SKIP_BUNDLED_MEDIA=1 — bundled media off"
+  else
+    ensure_libraforge_clone || true
+    set_env ABS_URL "http://audiobookshelf:80"
+    set_env KAVITA_URL "http://kavita:5000"
+    set_env LIBRAFORGE_URL "http://127.0.0.1:5056"
+    set_env LIBRAFORGE_INTERNAL_URL "http://libraforge:5056"
+  fi
+
+  USE_BUNDLED_JACKETT=true
+  USE_BUNDLED_PROWLARR=true
+  [[ "${LIBRARY_SKIP_JACKETT:-0}" == "1" ]] && USE_BUNDLED_JACKETT=false
+  [[ "${LIBRARY_SKIP_PROWLARR:-0}" == "1" ]] && USE_BUNDLED_PROWLARR=false
+  if $USE_BUNDLED_JACKETT; then
+    set_env JACKETT_URL "http://jackett:9117"
+  fi
+  if $USE_BUNDLED_PROWLARR; then
+    set_env PROWLARR_URL "http://prowlarr:9696"
+  fi
+
+  USE_NPM=false
+  if [[ "${LIBRARY_SKIP_NPM:-0}" == "1" ]]; then
+    c_yellow "LIBRARY_SKIP_NPM=1 — NPM profile off"
+  elif port_listening 80 || port_listening 443; then
+    c_yellow "Port 80/443 busy — COMPOSE_PROFILES without npm (use :8085 or configure proxy later)"
+  else
+    USE_NPM=true
+    EXISTING_NPM_PASS="$(get_env NPM_ADMIN_PASSWORD)"
+    if [[ -z "$EXISTING_NPM_PASS" || "$EXISTING_NPM_PASS" == "changeme" ]]; then
+      EXISTING_NPM_PASS="$(openssl rand -hex 12 2>/dev/null || echo "library-npm-$(date +%s)")"
+    fi
+    set_env_if_empty NPM_ADMIN_EMAIL "${LIBRARY_NPM_ADMIN_EMAIL:-admin@example.com}"
+    set_env NPM_ADMIN_PASSWORD "${LIBRARY_NPM_ADMIN_PASSWORD:-$EXISTING_NPM_PASS}"
+    set_env NPM_DISABLE_IPV6 "true"
+  fi
+
+  PROFILE_PARTS=()
+  $USE_BUNDLED && PROFILE_PARTS+=("bundled-media")
+  $USE_NPM && PROFILE_PARTS+=("npm")
+  COMPOSE_PROFILES_VAL="$(join_compose_profiles "${PROFILE_PARTS[@]+"${PROFILE_PARTS[@]}"}")"
+  set_env COMPOSE_PROFILES "$COMPOSE_PROFILES_VAL"
+  export COMPOSE_PROFILES="$COMPOSE_PROFILES_VAL"
+  COMPOSE_PROFILE_ARGS=()
+  for _p in "${PROFILE_PARTS[@]+"${PROFILE_PARTS[@]}"}"; do
+    [[ -n "$_p" ]] && COMPOSE_PROFILE_ARGS+=(--profile "$_p")
+  done
+  c_green "COMPOSE_PROFILES=${COMPOSE_PROFILES_VAL:-"(core only)"}"
+
+  mkdir -p data prowlarr-config jackett-config \
+    audiobookshelf-config audiobookshelf-metadata kavita-config \
+    libraforge-auth libraforge-config libraforge-reports \
+    npm-data npm-letsencrypt \
+    media/audiobooks media/ebooks media/openlibrary
+
+  ensure_indexer_seed
+  step "Start Docker stack (browser bootstrap)"
+  if [[ "${LIBRARY_SKIP_BUILD:-0}" == "1" ]]; then
+    $DOCKER compose "${COMPOSE_PROFILE_ARGS[@]+"${COMPOSE_PROFILE_ARGS[@]}"}" up -d
+  else
+    $DOCKER compose "${COMPOSE_PROFILE_ARGS[@]+"${COMPOSE_PROFILE_ARGS[@]}"}" up -d --build
+  fi
+  if $USE_NPM; then
+    $DOCKER compose --profile npm up -d nginx-proxy-manager || true
+  fi
+
+  step "Wait for app health"
+  APP_OK=false
+  for i in $(seq 1 90); do
+    code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:8085/api/health" 2>/dev/null || echo 000)"
+    if [[ "$code" =~ ^2 ]]; then
+      APP_OK=true
+      c_green "App healthy (HTTP $code)"
+      break
+    fi
+    sleep 2
+  done
+  if ! $APP_OK; then
+    c_yellow "App health not ready yet — continue; check: $DOCKER compose logs -f app"
+  fi
+
+  wait_indexer_http() {
+    local name="$1" url="$2" tries="${3:-60}"
+    local code="" i
+    for i in $(seq 1 "$tries"); do
+      code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+      if [[ "$code" =~ ^[2345] ]]; then
+        c_green "$name is up ($url → HTTP $code)"
+        return 0
+      fi
+      sleep 2
+    done
+    c_yellow "$name not ready at $url after ${tries} tries (last HTTP ${code:-000})"
+    return 1
+  }
+  run_with_retries() {
+    local label="$1"
+    shift
+    local attempt
+    for attempt in 1 2 3; do
+      c_cyan "$label (attempt $attempt/3)"
+      if "$@"; then
+        return 0
+      fi
+      c_yellow "$label failed — retrying in 5s ..."
+      sleep 5
+    done
+    return 1
+  }
+
+  INDEXER_CFG_FAIL=0
+  if $USE_BUNDLED_JACKETT; then
+    wait_indexer_http "jackett" "http://127.0.0.1:9117/" 90 || true
+    if [[ -f scripts/configure_jackett.sh ]]; then
+      run_with_retries "Preconfiguring Jackett" bash scripts/configure_jackett.sh --force-bundled || INDEXER_CFG_FAIL=1
+    fi
+  fi
+  if $USE_BUNDLED_PROWLARR; then
+    wait_indexer_http "prowlarr" "http://127.0.0.1:9696/ping" 90 || true
+    if [[ -f scripts/configure_prowlarr.sh ]]; then
+      run_with_retries "Preconfiguring Prowlarr" bash scripts/configure_prowlarr.sh --force-bundled || INDEXER_CFG_FAIL=1
+    fi
+  fi
+  if $USE_BUNDLED; then
+    [[ -f scripts/sync_abs_env.sh ]] && bash scripts/sync_abs_env.sh || true
+    [[ -f scripts/sync_kavita_env.sh ]] && bash scripts/sync_kavita_env.sh || true
+    [[ -f scripts/sync_libraforge_env.sh ]] && bash scripts/sync_libraforge_env.sh || true
+  fi
+  if [[ -f scripts/apply_indexer_keys.sh ]]; then
+    if ! bash scripts/apply_indexer_keys.sh; then
+      c_red "apply_indexer_keys.sh failed — repair with configure_jackett/prowlarr + apply_indexer_keys"
+      INDEXER_CFG_FAIL=1
+    fi
+  fi
+
+  write_install_revision_file
+
+  c_green ""
+  c_green "Minimal install complete (browser setup mode)."
+  echo ""
+  echo "Next steps:"
+  echo "  1. Open ${APP_URL%/}/login  (or http://$(detect_lan_ip):8085/login)"
+  echo "  2. Create the admin account"
+  echo "  3. Create library + offline PIN"
+  echo "  4. Continue guided setup at ${APP_URL%/}/admin/setup"
+  echo "     (debrid, Hardcover, NPM domains, VAPID, Audible, catalog APIs, …)"
+  echo ""
+  echo "Stack dir: $TARGET"
+  echo "LIBRARY_HOST_ROOT=$(get_env LIBRARY_HOST_ROOT)"
+  echo "Media:     $AUDIO_HOST | $EBOOK_HOST"
+  echo "Profiles:  ${COMPOSE_PROFILES_VAL:-none}"
+  if [[ "${INDEXER_CFG_FAIL:-0}" -eq 1 ]]; then
+    c_yellow "Indexer bootstrap had errors — re-run from /admin/setup or scripts/configure_*.sh"
+  fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 step "Core app settings [REQUIRED]"
 explain "APP_URL — public URL friends open (invite links, CORS, push). Use LAN IP for now; change later for HTTPS."
 explain "SECRET_KEY — JWT signing secret (random). DATABASE_URL defaults to SQLite under ./data."
@@ -405,7 +724,7 @@ TZ_VAL=""
 prompt APP_URL "Public site URL [REQUIRED]" "$DEFAULT_APP_URL"
 prompt SECRET_KEY "Secret key [REQUIRED]" "$EXISTING_SECRET"
 prompt TZ_VAL "Timezone (TZ)" "${LIBRARY_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
-APP_URL="${APP_URL:-$DEFAULT_APP_URL}"
+APP_URL="$(normalize_app_url "${APP_URL:-$DEFAULT_APP_URL}")"
 SECRET_KEY="${SECRET_KEY:-$EXISTING_SECRET}"
 TZ_VAL="${TZ_VAL:-UTC}"
 set_env APP_URL "$APP_URL"
@@ -419,7 +738,8 @@ set_env PGID "1000"
 _docker_gid="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
 set_env DOCKER_GID "${_docker_gid:-998}"
 # Admin Health → Server stack update (sidecar bind + compose --project-directory).
-set_env_if_empty LIBRARY_HOST_ROOT "$TARGET"
+# Always pin to install target so Admin Update works on fresh /opt/library installs.
+set_env LIBRARY_HOST_ROOT "$TARGET"
 set_env AUDIOBOOK_DIR "/audiobooks"
 set_env EBOOK_DIR "/ebooks"
 set_env AUDIOBOOK_STAGING_DIRNAME ".unorganized"
@@ -433,12 +753,12 @@ explain "Use absolute paths for real libraries (e.g. /mnt/Audiobooks). Defaults 
 AUDIO_HOST=""
 EBOOK_HOST=""
 OL_HOST=""
-prompt AUDIO_HOST "Host audiobooks path [REQUIRED]" "${LIBRARY_AUDIO_HOST:-./media/audiobooks}"
-prompt EBOOK_HOST "Host ebooks path [REQUIRED]" "${LIBRARY_EBOOK_HOST:-./media/ebooks}"
-prompt OL_HOST "Host Open Library dumps path [OPTIONAL]" "${LIBRARY_OL_HOST:-./media/openlibrary}"
-AUDIO_HOST="${AUDIO_HOST:-./media/audiobooks}"
-EBOOK_HOST="${EBOOK_HOST:-./media/ebooks}"
-OL_HOST="${OL_HOST:-./media/openlibrary}"
+prompt AUDIO_HOST "Host audiobooks path [REQUIRED]" "${LIBRARY_AUDIO_HOST:-$TARGET/media/audiobooks}"
+prompt EBOOK_HOST "Host ebooks path [REQUIRED]" "${LIBRARY_EBOOK_HOST:-$TARGET/media/ebooks}"
+prompt OL_HOST "Host Open Library dumps path [OPTIONAL]" "${LIBRARY_OL_HOST:-$TARGET/media/openlibrary}"
+AUDIO_HOST="${AUDIO_HOST:-$TARGET/media/audiobooks}"
+EBOOK_HOST="${EBOOK_HOST:-$TARGET/media/ebooks}"
+OL_HOST="${OL_HOST:-$TARGET/media/openlibrary}"
 for p in "$AUDIO_HOST" "$EBOOK_HOST"; do
   if [[ ! -d "$p" ]]; then
     c_yellow "Creating $p"
@@ -787,13 +1107,13 @@ if $USE_NPM; then
   set_env NPM_DISABLE_IPV6 "true"
   if [[ -n "$NPM_DOMAIN" ]]; then
     if [[ -n "$NPM_LE_EMAIL" ]]; then
-      set_env APP_URL "https://${NPM_DOMAIN}"
-      APP_URL="https://${NPM_DOMAIN}"
-      c_green "APP_URL → https://${NPM_DOMAIN} (Let's Encrypt after DNS points here)"
+      APP_URL="$(normalize_app_url "https://${NPM_DOMAIN}")"
+      set_env APP_URL "$APP_URL"
+      c_green "APP_URL → ${APP_URL} (Let's Encrypt after DNS points here)"
     else
-      set_env APP_URL "http://${NPM_DOMAIN}"
-      APP_URL="http://${NPM_DOMAIN}"
-      c_green "APP_URL → http://${NPM_DOMAIN} (HTTP; add LE email later for HTTPS)"
+      APP_URL="$(normalize_app_url "http://${NPM_DOMAIN}")"
+      set_env APP_URL "$APP_URL"
+      c_green "APP_URL → ${APP_URL} (HTTP; add LE email later for HTTPS)"
     fi
   else
     c_yellow "No domain — NPM still starts; admin on :81 + LAN HTTP proxy on :80."
@@ -1101,44 +1421,8 @@ fi
 
 # Seed Admin Health version compare before the first manual update.
 step "Admin update metadata"
-mkdir -p data
-if [[ -d .git ]] && command -v git >/dev/null 2>&1; then
-  _rev_sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-  _rev_short="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  _rev_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
-  _rev_msg="$(git log -1 --pretty=format:%s 2>/dev/null || echo "")"
-  _rev_when="$(git log -1 --pretty=format:%cI 2>/dev/null || echo "")"
-  _rev_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
-  if command -v python3 >/dev/null 2>&1; then
-    SHA="$_rev_sha" SHORT="$_rev_short" BRANCH_V="$_rev_branch" MSG="$_rev_msg" \
-      COMMITTED="$_rev_when" TRACKING="origin/${BRANCH:-main}" UPDATED="$_rev_ts" \
-      python3 - <<'PY'
-import json, os
-from pathlib import Path
-Path("data/install_revision.json").write_text(
-    json.dumps(
-        {
-            "sha": os.environ.get("SHA", ""),
-            "shortSha": os.environ.get("SHORT", ""),
-            "branch": os.environ.get("BRANCH_V", ""),
-            "message": os.environ.get("MSG", ""),
-            "committedAt": os.environ.get("COMMITTED", ""),
-            "tracking": os.environ.get("TRACKING", ""),
-            "updatedAt": os.environ.get("UPDATED", ""),
-            "source": "install_library.sh",
-        },
-        indent=2,
-    )
-    + "\n",
-    encoding="utf-8",
-)
-PY
-  else
-    printf '{\n  "sha": "%s",\n  "shortSha": "%s",\n  "branch": "%s",\n  "tracking": "origin/%s",\n  "updatedAt": "%s",\n  "source": "install_library.sh"\n}\n' \
-      "$_rev_sha" "$_rev_short" "$_rev_branch" "${BRANCH:-main}" "$_rev_ts" > data/install_revision.json
-  fi
-  c_green "Wrote data/install_revision.json ($_rev_short)"
-fi
+write_install_revision_file
+
 
 # ---------------------------------------------------------------------------
 step "Web Push (VAPID) keys [OPTIONAL]"

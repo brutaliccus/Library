@@ -239,6 +239,14 @@ Unattended smoke test:
 LIBRARY_NONINTERACTIVE=1 LIBRARY_SKIP_NPM=1 ./scripts/install_library.sh /opt/library --non-interactive
 ```
 
+Minimal bootstrap + browser wizard (non-interactive):
+
+```bash
+LIBRARY_NONINTERACTIVE=1 LIBRARY_SETUP_MODE=browser ./scripts/install_library.sh /opt/library --non-interactive
+```
+
+Interactive installs ask **Full CLI** vs **Minimal + browser setup** first. Both paths set `LIBRARY_HOST_ROOT` to the install target (required for **Admin → Health → Update**), default media under `$TARGET/media/{audiobooks,ebooks,openlibrary}`, write `data/install_revision.json`, and configure Jackett/Prowlarr when bundled.
+
 With NPM + domain (DNS must point here for Let's Encrypt):
 
 ```bash

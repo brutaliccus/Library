@@ -875,6 +875,11 @@ async def update_config(updates: dict[str, str | None]) -> dict[str, Any]:
                         f"{key} must be a single folder name (no slashes), got: {value!r}"
                     )
 
+        if key == "config.app_url" and value:
+            from app.utils.app_url import normalize_app_url
+
+            value = normalize_app_url(value)
+
         await app_settings.set_setting(key, value)
         invalidate_cache(key)
 
@@ -949,6 +954,9 @@ async def setup_status() -> dict[str, Any]:
     apk_repo = await get_effective("config.android_apk_github_repo")
     abb_rss = await get_effective_bool("scraper.abb_rss_only", True)
     knaben_rss = await get_effective_bool("scraper.knaben_rss_only", True)
+    app_url = await get_effective("config.app_url")
+    vapid_pub = await get_effective("config.vapid_public_key")
+    vapid_priv = await get_effective("config.vapid_private_key")
 
     stack_done = bool(abs_url and abs_key) or bool(kav_url and kav_key)
     bundled_media = (
@@ -977,6 +985,18 @@ async def setup_status() -> dict[str, Any]:
             audible_reachable = False
 
     steps = [
+        {
+            "id": "site",
+            "label": "Public URL & notifications",
+            "done": bool(app_url) and "example.com" not in (app_url or "").lower(),
+            "required": True,
+            "help": (
+                "App URL is the address friends open (invite links, CORS, push). "
+                "Use your LAN http://IP:8085 for now, or https://your.domain after NPM. "
+                "Duplicated schemes (https://https://…) are normalized on save. "
+                "Optional: generate Web Push VAPID keys if browser notifications matter."
+            ),
+        },
         {
             "id": "stack",
             "label": "Library stack (ABS / Kavita / LibraForge)",
@@ -1033,7 +1053,10 @@ async def setup_status() -> dict[str, Any]:
             "help": (
                 "Confirm media staging + optional clients. Pipelines create staging roots under "
                 "AUDIOBOOK_DIR / EBOOK_DIR automatically (defaults `/audiobooks/.unorganized` and "
-                "`/ebooks/unorganized`). Override names in Admin → Config → Storage / Paths."
+                "`/ebooks/unorganized`). Host media defaults to "
+                "`$LIBRARY_HOST_ROOT/media/{audiobooks,ebooks,openlibrary}` from install "
+                "(override AUDIOBOOK_HOST_DIR / EBOOK_HOST_DIR in .env). "
+                "Staging folder names are editable under Admin → Config → Storage / Paths."
             ),
         },
         {
@@ -1087,6 +1110,9 @@ async def setup_status() -> dict[str, Any]:
         },
     ]
     required_done = all(s["done"] for s in steps if s["required"])
+    from app.services import setup_bootstrap
+
+    media_hints = await setup_bootstrap.media_path_hints()
     return {
         "complete": required_done,
         "steps": steps,
@@ -1099,6 +1125,19 @@ async def setup_status() -> dict[str, Any]:
             "ebookPipelineEnabled": True,
         },
         "presets": SETUP_STACK_PRESETS,
+        "site": {
+            "appUrl": app_url or "",
+            "vapidConfigured": bool(vapid_pub and vapid_priv),
+        },
+        "media": media_hints,
+        "links": {
+            "realDebrid": "https://real-debrid.com/apitoken",
+            "torbox": "https://torbox.app/settings",
+            "hardcover": "https://hardcover.app/account/api",
+            "openrouter": "https://openrouter.ai/keys",
+            "nyt": "https://developer.nytimes.com/",
+            "isbndb": "https://isbndb.com/isbn-database",
+        },
         "stack": {
             "absConfigured": bool(abs_url and abs_key),
             "kavitaConfigured": bool(kav_url and kav_key),

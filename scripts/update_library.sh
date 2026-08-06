@@ -2,6 +2,7 @@
 # Update an existing Library install from origin/main and rebuild the app.
 #
 # Run on the host (not inside the app container), from the install root:
+# Ensure .env has LIBRARY_HOST_ROOT=/opt/library (or your install path) for Admin Update.
 #   cd /opt/library
 #   bash scripts/update_library.sh
 #

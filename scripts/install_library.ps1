@@ -37,7 +37,9 @@ param(
     [string]$NpmAdminEmail = "admin@example.com",
     [string]$NpmAdminPassword = "",
     [switch]$NonInteractive,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [ValidateSet("", "cli", "browser")]
+    [string]$SetupMode = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -337,10 +339,42 @@ else {
     Write-Warn ".env already exists - will update selected keys only"
 }
 
+function Normalize-AppUrl([string]$Raw) {
+    $u = ($Raw -as [string]).Trim()
+    if (-not $u) { return "" }
+    while ($u -match '^(?i)https?://https?://') {
+        $u = $u -replace '^(?i)https?://', ''
+    }
+    if ($u -notmatch '^(?i)https?://') { $u = "https://$($u.TrimStart('/'))" }
+    return $u.TrimEnd('/')
+}
+
+# Setup mode: full CLI vs minimal + browser wizard (LIBRARY_SETUP_MODE / -SetupMode).
+if (-not $SetupMode) {
+    $envMode = ($env:LIBRARY_SETUP_MODE -as [string])
+    if ($envMode) { $SetupMode = $envMode.Trim().ToLowerInvariant() }
+}
+if (-not $SetupMode) {
+    if ($NonInteractive) { $SetupMode = "cli" }
+    else {
+        Write-Step "==> Setup mode (CLI vs browser)"
+        Write-Host "  1) Full CLI guided setup" -ForegroundColor DarkGray
+        Write-Host "  2) Minimal bootstrap + browser /admin/setup" -ForegroundColor DarkGray
+        $choice = Read-Default "Setup mode [1=cli, 2=browser]" "2"
+        if ($choice -match '^(2|b|browser|minimal|m)$') { $SetupMode = "browser" } else { $SetupMode = "cli" }
+    }
+}
+$SetupMode = $SetupMode.Trim().ToLowerInvariant()
+if ($SetupMode -notin @("cli", "browser")) { $SetupMode = "cli" }
+Write-Ok "LIBRARY_SETUP_MODE=$SetupMode"
+if ($SetupMode -eq "browser") {
+    Write-Warn "Browser mode on Windows still runs the guided installer prompts below (use Linux install_library.sh for the short bootstrap path). Finish optional keys in /admin/setup."
+}
+
 Write-Step "==> Core settings [REQUIRED]"
 Write-Host "    APP_URL = public URL friends open (invite links / CORS / push)." -ForegroundColor DarkGray
 Write-Host "    SECRET_KEY = JWT signing secret. DATABASE_URL defaults to SQLite under ./data." -ForegroundColor DarkGray
-$APP_URL = Read-Default "Public site URL [REQUIRED]" $AppUrl
+$APP_URL = Normalize-AppUrl (Read-Default "Public site URL [REQUIRED]" $AppUrl)
 if (-not $SecretKey) { $SecretKey = New-SecretKey }
 $SECRET_KEY = if ($NonInteractive) { $SecretKey } else { Read-Default "Secret key [REQUIRED]" $SecretKey }
 Set-EnvKey $envPath "APP_URL" $APP_URL
@@ -349,6 +383,7 @@ Set-EnvKey $envPath "DATABASE_URL" "sqlite+aiosqlite:///data/app.db"
 Set-EnvKey $envPath "TZ" "UTC"
 Set-EnvKey $envPath "PUID" "1000"
 Set-EnvKey $envPath "PGID" "1000"
+Set-EnvKey $envPath "LIBRARY_HOST_ROOT" $TARGET
 Set-EnvKey $envPath "AUDIOBOOK_DIR" "/audiobooks"
 Set-EnvKey $envPath "EBOOK_DIR" "/ebooks"
 Set-EnvKey $envPath "AUDIOBOOK_STAGING_DIRNAME" ".unorganized"

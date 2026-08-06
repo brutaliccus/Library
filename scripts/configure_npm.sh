@@ -422,14 +422,20 @@ if domain:
     print(f"Suggested APP_URL={app_url}")
 PY
 
-# Update APP_URL when a Library domain was configured.
+# Update APP_URL when a Library domain was configured (normalize scheme / trailing slash).
 if [[ -n "$DOMAIN" ]]; then
   if [[ -n "$LE_EMAIL" ]]; then
-    set_env APP_URL "https://${DOMAIN}"
+    _npm_app_url="https://${DOMAIN}"
   else
-    set_env APP_URL "http://${DOMAIN}"
+    _npm_app_url="http://${DOMAIN}"
   fi
-  echo "APP_URL updated for NPM domain"
+  # Collapse accidental duplicated schemes and strip trailing slash.
+  while [[ "$_npm_app_url" =~ ^[Hh][Tt][Tt][Pp][Ss]?://[Hh][Tt][Tt][Pp][Ss]?:// ]]; do
+    _npm_app_url="$(printf '%s' "$_npm_app_url" | sed -E 's|^[Hh][Tt][Tt][Pp][Ss]?://||')"
+  done
+  _npm_app_url="${_npm_app_url%/}"
+  set_env APP_URL "$_npm_app_url"
+  echo "APP_URL updated for NPM domain ($_npm_app_url)"
 fi
 
 echo "NPM configure complete"

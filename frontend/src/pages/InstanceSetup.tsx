@@ -40,6 +40,17 @@ interface SetupStatus {
     ebookPipelineEnabled?: boolean;
   };
   presets?: Record<string, Record<string, string>>;
+  site?: {
+    appUrl?: string;
+    vapidConfigured?: boolean;
+  };
+  media?: {
+    audiobookHostDir?: string;
+    ebookHostDir?: string;
+    openlibraryHostDir?: string;
+    libraryHostRoot?: string;
+  };
+  links?: Record<string, string>;
   stack?: {
     absConfigured?: boolean;
     kavitaConfigured?: boolean;
@@ -86,6 +97,7 @@ interface OlCatalogStatus {
 }
 
 const STEP_GROUPS: Record<string, string[]> = {
+  site: ["core", "notifications"],
   stack: ["libraries", "pipeline"],
   audible: [],
   indexers: ["indexers"],
@@ -96,6 +108,15 @@ const STEP_GROUPS: Record<string, string[]> = {
   scraper: ["scraper"],
   mobile: ["mobile"],
 };
+
+const API_KEY_LINKS: Array<{ keyPrefix: string; label: string; href: string }> = [
+  { keyPrefix: "config.real_debrid", label: "Real-Debrid API token", href: "https://real-debrid.com/apitoken" },
+  { keyPrefix: "config.torbox", label: "TorBox API key", href: "https://torbox.app/settings" },
+  { keyPrefix: "integrations.hardcover", label: "Hardcover API key", href: "https://hardcover.app/account/api" },
+  { keyPrefix: "integrations.openrouter", label: "OpenRouter API key", href: "https://openrouter.ai/keys" },
+  { keyPrefix: "integrations.nyt", label: "NYT Books API key", href: "https://developer.nytimes.com/" },
+  { keyPrefix: "integrations.isbndb", label: "ISBNdb API key", href: "https://isbndb.com/isbn-database" },
+];
 
 /** Stack fields shown first; remaining pipeline knobs stay editable below. */
 const STACK_PRIMARY_KEYS = [
@@ -202,6 +223,10 @@ export default function InstanceSetup() {
   const [scheduleLocal, setScheduleLocal] = useState(defaultScheduleLocalValue);
   const [showStackAdvanced, setShowStackAdvanced] = useState(false);
   const [liveProbes, setLiveProbes] = useState<SetupValidateResult["probes"] | null>(null);
+  const [npmDomain, setNpmDomain] = useState("");
+  const [npmLeEmail, setNpmLeEmail] = useState("");
+  const [npmAdminEmail, setNpmAdminEmail] = useState("");
+  const [actionLog, setActionLog] = useState("");
 
   const { data: status, refetch: refetchStatus } = useQuery({
     queryKey: ["admin-setup-status"],
@@ -233,7 +258,21 @@ export default function InstanceSetup() {
   const groupIds = step ? STEP_GROUPS[step.id] || [] : [];
   const fields = useMemo(() => {
     const all = config?.settings || [];
-    const filtered = all.filter((s) => groupIds.includes(s.group) && s.key !== "config.scraper_enabled");
+    const filtered = all.filter(
+      (s) =>
+        groupIds.includes(s.group) &&
+        s.key !== "config.scraper_enabled" &&
+        s.key !== "config.secret_key" &&
+        s.key !== "config.vapid_private_key",
+    );
+    if (step?.id === "site") {
+      const rank = (key: string) => {
+        if (key === "config.app_url") return 0;
+        if (key === "config.vapid_public_key") return 1;
+        return 100;
+      };
+      return [...filtered].sort((a, b) => rank(a.key) - rank(b.key));
+    }
     if (step?.id !== "stack") return filtered;
     const rank = (key: string) => {
       const i = STACK_PRIMARY_KEYS.indexOf(key);
@@ -319,6 +358,67 @@ export default function InstanceSetup() {
     onSuccess: async () => {
       await refetchStatus();
       toast("RSS-only defaults applied", "success");
+    },
+  });
+
+  const bootstrapIndexers = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post("/admin/setup/bootstrap-indexers");
+      return data as { ok?: boolean; error?: string; log?: string };
+    },
+    onSuccess: async (data) => {
+      setActionLog(data.log || "");
+      await refetchStatus();
+      void qc.invalidateQueries({ queryKey: ["admin-config"] });
+      toast(data.ok ? "Indexer bootstrap finished" : data.error || "Indexer bootstrap failed", data.ok ? "success" : "error");
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Indexer bootstrap failed";
+      toast(String(msg), "error");
+    },
+  });
+
+  const configureNpm = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post("/admin/setup/configure-npm", {
+        domain: npmDomain,
+        letsencrypt_email: npmLeEmail,
+        admin_email: npmAdminEmail,
+      });
+      return data as { ok?: boolean; error?: string; log?: string };
+    },
+    onSuccess: async (data) => {
+      setActionLog(data.log || "");
+      await refetchStatus();
+      void qc.invalidateQueries({ queryKey: ["admin-config"] });
+      toast(data.ok ? "NPM configure finished" : data.error || "NPM configure failed", data.ok ? "success" : "error");
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "NPM configure failed";
+      toast(String(msg), "error");
+    },
+  });
+
+  const generateVapid = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post("/admin/setup/generate-vapid");
+      return data as { ok?: boolean; error?: string; log?: string };
+    },
+    onSuccess: async (data) => {
+      setActionLog(data.log || "");
+      await refetchStatus();
+      void qc.invalidateQueries({ queryKey: ["admin-config"] });
+      toast(data.ok ? "VAPID keys generated (app recreated)" : data.error || "VAPID generate failed", data.ok ? "success" : "error");
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "VAPID generate failed";
+      toast(String(msg), "error");
     },
   });
 
@@ -460,13 +560,39 @@ export default function InstanceSetup() {
     return "";
   };
 
+  const linkForField = (key: string) => {
+    const fromStatus = status?.links || {};
+    if (key.includes("real_debrid") && fromStatus.realDebrid) return fromStatus.realDebrid;
+    if (key.includes("torbox") && fromStatus.torbox) return fromStatus.torbox;
+    if (key.includes("hardcover") && fromStatus.hardcover) return fromStatus.hardcover;
+    if (key.includes("openrouter") && fromStatus.openrouter) return fromStatus.openrouter;
+    if (key.includes("nyt") && fromStatus.nyt) return fromStatus.nyt;
+    if (key.includes("isbndb") && fromStatus.isbndb) return fromStatus.isbndb;
+    const hit = API_KEY_LINKS.find((l) => key.startsWith(l.keyPrefix) || key.includes(l.keyPrefix.split(".").pop() || ""));
+    return hit?.href;
+  };
+
   const renderFields = () => (
     <div className="space-y-3">
       {fields.map((f) => {
         const isBool = f.valueType === "bool";
+        const deepLink = linkForField(f.key);
         return (
           <label key={f.key} className="block space-y-1">
-            <span className="text-sm text-gray-200">{f.label}</span>
+            <span className="text-sm text-gray-200 inline-flex items-center gap-2 flex-wrap">
+              {f.label}
+              {deepLink && (
+                <a
+                  href={deepLink}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[11px] text-brand-400 hover:text-brand-300 underline-offset-2 hover:underline"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  Get API key
+                </a>
+              )}
+            </span>
             {f.help && <span className="block text-xs text-gray-500">{f.help}</span>}
             {isBool ? (
               <span className="inline-flex items-center gap-2 text-sm text-gray-300">
@@ -498,6 +624,77 @@ export default function InstanceSetup() {
       })}
       {fields.length === 0 && (
         <p className="text-sm text-gray-500">No settings for this step — continue when ready.</p>
+      )}
+    </div>
+  );
+
+  const renderSite = () => (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400 space-y-1">
+        <p>
+          Set <strong className="text-gray-300">App URL</strong> to the address friends open. Pasting{" "}
+          <code className="text-gray-300">https://https://…</code> is auto-fixed on save.
+        </p>
+        <p>
+          Host media defaults (from install):{" "}
+          <code className="text-gray-300">{status?.media?.audiobookHostDir || "$LIBRARY_HOST_ROOT/media/audiobooks"}</code>
+          {" · "}
+          <code className="text-gray-300">{status?.media?.ebookHostDir || "$LIBRARY_HOST_ROOT/media/ebooks"}</code>
+        </p>
+      </div>
+      {renderFields()}
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => generateVapid.mutate()}
+          disabled={generateVapid.isPending || !!status?.site?.vapidConfigured}
+          className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-700 text-sm text-gray-200 hover:border-brand-500 disabled:opacity-40"
+        >
+          {generateVapid.isPending && <Loader2 size={14} className="animate-spin" />}
+          {status?.site?.vapidConfigured ? "VAPID keys present" : "Generate VAPID keys"}
+        </button>
+      </div>
+      <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3 space-y-2">
+        <p className="text-xs font-medium text-gray-300">Nginx Proxy Manager (optional)</p>
+        <p className="text-[11px] text-gray-500">
+          Requires docker.sock + NPM profile. Writes domain/email into .env then runs the fixed{" "}
+          <code className="text-gray-400">configure_npm.sh</code> pipeline.
+        </p>
+        <input
+          type="text"
+          placeholder="library.example.com"
+          value={npmDomain}
+          onChange={(e) => setNpmDomain(e.target.value)}
+          className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-700 text-sm text-gray-100"
+        />
+        <input
+          type="email"
+          placeholder="Let's Encrypt email (optional)"
+          value={npmLeEmail}
+          onChange={(e) => setNpmLeEmail(e.target.value)}
+          className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-700 text-sm text-gray-100"
+        />
+        <input
+          type="email"
+          placeholder="NPM admin email (optional)"
+          value={npmAdminEmail}
+          onChange={(e) => setNpmAdminEmail(e.target.value)}
+          className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-700 text-sm text-gray-100"
+        />
+        <button
+          type="button"
+          onClick={() => configureNpm.mutate()}
+          disabled={configureNpm.isPending || !npmDomain.trim()}
+          className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm text-gray-100 hover:border-brand-500 disabled:opacity-40"
+        >
+          {configureNpm.isPending && <Loader2 size={14} className="animate-spin" />}
+          Configure NPM
+        </button>
+      </div>
+      {actionLog && (
+        <pre className="text-[10px] text-gray-500 max-h-32 overflow-auto whitespace-pre-wrap border border-gray-800 rounded-lg p-2 bg-black/30">
+          {actionLog}
+        </pre>
       )}
     </div>
   );
@@ -727,10 +924,10 @@ export default function InstanceSetup() {
           Instance setup
         </h1>
         <p className="text-sm text-gray-500 mt-2">
-          Guided first-launch checklist: library stack (ABS / Kavita / LibraForge), Audible,
-          indexers, debrid, staging, catalog APIs (Hardcover / OpenRouter), Android, and scraper
-          mode. Required steps are marked; everything else can wait. Change anything later in
-          Admin → Settings / Integrations.
+          Guided walkthrough after a minimal install: public App URL, bundled stack, Audible,
+          indexers (with re-bootstrap), debrid, staging paths, catalog APIs (deep links for keys),
+          Android, and scraper mode. Optional NPM / VAPID live on the first step. Change anything
+          later in Admin → Settings / Integrations.
         </p>
       </div>
 
@@ -765,7 +962,9 @@ export default function InstanceSetup() {
             <p className="text-sm text-gray-500 mt-1">{step.help}</p>
           </div>
 
-          {step.id === "stack" ? (
+          {step.id === "site" ? (
+            renderSite()
+          ) : step.id === "stack" ? (
             renderStack()
           ) : step.id === "audible" ? (
             <AudibleAuthPanel
@@ -840,17 +1039,37 @@ export default function InstanceSetup() {
               </label>
             </div>
           ) : step.id === "folders" ? (
-            <ul className="space-y-3">
-              {FOLDER_CHECKS.map((item) => (
-                <li
-                  key={item.title}
-                  className="rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2.5"
-                >
-                  <p className="text-sm font-medium text-gray-100">{item.title}</p>
-                  <p className="text-xs text-gray-500 mt-1">{item.detail}</p>
-                </li>
-              ))}
-            </ul>
+            <div className="space-y-3">
+              <div className="rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2.5 text-xs text-gray-400 space-y-1">
+                <p className="text-sm font-medium text-gray-100">Host media paths</p>
+                <p>
+                  Install default:{" "}
+                  <code className="text-gray-300">
+                    {(status?.media?.libraryHostRoot || "/opt/library") + "/media/{audiobooks,ebooks,openlibrary}"}
+                  </code>
+                </p>
+                <p>
+                  Current:{" "}
+                  <code className="text-gray-300">{status?.media?.audiobookHostDir || "—"}</code>
+                  {" / "}
+                  <code className="text-gray-300">{status?.media?.ebookHostDir || "—"}</code>
+                </p>
+                <p className="text-[11px] text-gray-500">
+                  Paths come from .env bind mounts — change AUDIOBOOK_HOST_DIR / EBOOK_HOST_DIR on the host, not here.
+                </p>
+              </div>
+              <ul className="space-y-3">
+                {FOLDER_CHECKS.map((item) => (
+                  <li
+                    key={item.title}
+                    className="rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2.5"
+                  >
+                    <p className="text-sm font-medium text-gray-100">{item.title}</p>
+                    <p className="text-xs text-gray-500 mt-1">{item.detail}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ) : step.id === "catalog" ? (
             <div className="space-y-4">
               <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400 space-y-1">
@@ -880,7 +1099,24 @@ export default function InstanceSetup() {
                   Docker socket {liveProbes?.docker?.connected ? "OK" : "—"}
                 </li>
               </ul>
+              <button
+                type="button"
+                onClick={() => bootstrapIndexers.mutate()}
+                disabled={bootstrapIndexers.isPending}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-emerald-800/60 bg-emerald-950/20 text-sm text-emerald-200 hover:bg-emerald-950/40 disabled:opacity-40"
+              >
+                {bootstrapIndexers.isPending && <Loader2 size={14} className="animate-spin" />}
+                Re-run indexer bootstrap
+              </button>
+              <p className="text-[11px] text-gray-500">
+                Runs configure_jackett + configure_prowlarr + apply_indexer_keys on the host via a fixed Docker sidecar (needs docker.sock + LIBRARY_HOST_ROOT).
+              </p>
               {renderFields()}
+              {actionLog && step.id === "indexers" && (
+                <pre className="text-[10px] text-gray-500 max-h-32 overflow-auto whitespace-pre-wrap border border-gray-800 rounded-lg p-2 bg-black/30">
+                  {actionLog}
+                </pre>
+              )}
             </div>
           ) : (
             renderFields()

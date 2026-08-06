@@ -2462,6 +2462,56 @@ async def post_setup_defaults(_admin: User = Depends(require_admin)):
     return await inst.setup_status()
 
 
+@router.post("/setup/bootstrap-indexers")
+async def post_setup_bootstrap_indexers(_admin: User = Depends(require_admin)):
+    """Re-run Jackett/Prowlarr configure + apply_indexer_keys via a fixed host sidecar."""
+    from app.services import docker_control, setup_bootstrap
+
+    if not docker_control.socket_available():
+        raise HTTPException(status_code=503, detail="Docker socket not available")
+    return await setup_bootstrap.bootstrap_indexers()
+
+
+class SetupConfigureNpmBody(BaseModel):
+    domain: str = ""
+    abs_domain: str = ""
+    kavita_domain: str = ""
+    letsencrypt_email: str = ""
+    admin_email: str = ""
+    admin_password: str = ""
+
+
+@router.post("/setup/configure-npm")
+async def post_setup_configure_npm(
+    body: SetupConfigureNpmBody,
+    _admin: User = Depends(require_admin),
+):
+    """Write whitelisted NPM_* keys and run configure_npm.sh (no arbitrary shell)."""
+    from app.services import docker_control, setup_bootstrap
+
+    if not docker_control.socket_available():
+        raise HTTPException(status_code=503, detail="Docker socket not available")
+    settings = {
+        "NPM_DOMAIN": (body.domain or "").strip(),
+        "NPM_ABS_DOMAIN": (body.abs_domain or "").strip(),
+        "NPM_KAVITA_DOMAIN": (body.kavita_domain or "").strip(),
+        "NPM_LETSENCRYPT_EMAIL": (body.letsencrypt_email or "").strip(),
+        "NPM_ADMIN_EMAIL": (body.admin_email or "").strip(),
+        "NPM_ADMIN_PASSWORD": (body.admin_password or "").strip(),
+    }
+    return await setup_bootstrap.configure_npm(settings)
+
+
+@router.post("/setup/generate-vapid")
+async def post_setup_generate_vapid(_admin: User = Depends(require_admin)):
+    """Generate Web Push VAPID keys into host .env and recreate the app container."""
+    from app.services import docker_control, setup_bootstrap
+
+    if not docker_control.socket_available():
+        raise HTTPException(status_code=503, detail="Docker socket not available")
+    return await setup_bootstrap.generate_vapid_keys()
+
+
 @router.get("/ol-catalog")
 async def get_ol_catalog_status(
     check: bool = False,

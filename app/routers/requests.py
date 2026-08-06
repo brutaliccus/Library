@@ -120,7 +120,10 @@ async def create_request(
         cover_url=cover_url,
     )
     db.add(dl_request)
-    await db.flush()
+    # Commit before scheduling background work so the worker session can see the row
+    # (same pattern as retry_request). Flush-only races leave process_* looking up a
+    # missing request id.
+    await db.commit()
     await db.refresh(dl_request)
 
     if is_aa:

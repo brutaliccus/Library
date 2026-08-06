@@ -186,7 +186,7 @@ flowchart TB
 
 **Bundled media is the default for new installs.** Profile `bundled-media` starts Audiobookshelf, Kavita, and LibraForge on the same Docker network, wires internal URLs into `.env`, and bootstraps API keys (same idea as Jackett/Prowlarr sync). Existing Pi hosts that already use external ABS/Kavita/LF keep those URLs — leave the profile off. Expect ~1–2 GB extra RAM for the media sidecars. FlareSolverr is resource-capped in `docker-compose.yml` (768m / 1.5 CPU / 200 pids).
 
-**Nginx Proxy Manager is included by default** (compose profile `npm`, container `library-npm`). The installer asks *“Enable Nginx Proxy Manager? (Already have a reverse proxy? Skip NPM)”* — answer No if ports 80/443 are already taken. When enabled it bootstraps the admin user and proxy hosts via the NPM API (`scripts/configure_npm.sh` / `.ps1`) — no UI click-path required. Provide a domain + Let's Encrypt email for HTTPS; leave domain blank for LAN and configure later.
+**Nginx Proxy Manager is included by default** (compose profile `npm`, container `library-npm`). The installer asks *“Enable Nginx Proxy Manager (publishes 80/443 + admin :81)?”* (default Yes) — answer No only if ports 80/443 are already taken. If Yes, install fails loudly when `:81` never comes up. When enabled it bootstraps the admin user and proxy hosts via the NPM API (`scripts/configure_npm.sh` / `.ps1`) — no UI click-path required. Provide a domain + Let's Encrypt email for HTTPS; leave domain blank for LAN and configure later.
 
 ---
 

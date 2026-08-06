@@ -592,20 +592,29 @@ if (-not (Get-EnvKeyValue $envPath "OL_DUMPS_DIR")) {
 }
 Write-Ok "Open Library mode: $OlMode"
 
-# Nginx Proxy Manager — default on; skip if you already reverse-proxy.
+# Nginx Proxy Manager — default on; skip only if you already reverse-proxy on 80/443.
 Write-Step "==> Nginx Proxy Manager (reverse proxy) [RECOMMENDED]"
-Write-Host "Remote HTTPS needs a reverse proxy. Fresh installs include NPM (compose profile npm)." -ForegroundColor DarkGray
-Write-Host "Already have NPM / Caddy / Traefik / nginx? Skip — install continues without it." -ForegroundColor DarkGray
+Write-Host "Remote HTTPS needs a reverse proxy. Fresh installs start NPM (compose profile npm)." -ForegroundColor DarkGray
+Write-Host "Answer No only if you already run NPM / Caddy / Traefik / nginx on ports 80/443." -ForegroundColor DarkGray
+$existingProfiles = Get-EnvKeyValue $envPath "COMPOSE_PROFILES"
+$npmDefault = $true
+if ($existingProfiles -match '(^|,)\s*npm\s*(,|$)') { $npmDefault = $true }
 $useNpm = -not [bool]$SkipNpm
-if (-not $NonInteractive) {
-    $useNpm = Read-YesNo "Enable Nginx Proxy Manager? (Already have a reverse proxy? Skip NPM)" $true
-}
-elseif ($SkipNpm) {
+if ($SkipNpm) {
     $useNpm = $false
     Write-Warn "SkipNpm - Nginx Proxy Manager off"
 }
+elseif (-not $NonInteractive) {
+    $useNpm = Read-YesNo "Enable Nginx Proxy Manager (publishes 80/443 + admin :81)?" $npmDefault
+}
 if ($useNpm) {
     Write-Host "Ports 80 + 443 (public) and 81 (NPM admin). Container: library-npm." -ForegroundColor DarkGray
+    if (-not $NpmDomain) { $NpmDomain = Get-EnvKeyValue $envPath "NPM_DOMAIN" }
+    if (-not $NpmAbsDomain) { $NpmAbsDomain = Get-EnvKeyValue $envPath "NPM_ABS_DOMAIN" }
+    if (-not $NpmKavitaDomain) { $NpmKavitaDomain = Get-EnvKeyValue $envPath "NPM_KAVITA_DOMAIN" }
+    if (-not $NpmLetsEncryptEmail) { $NpmLetsEncryptEmail = Get-EnvKeyValue $envPath "NPM_LETSENCRYPT_EMAIL" }
+    $existingAdminEmail = Get-EnvKeyValue $envPath "NPM_ADMIN_EMAIL"
+    if ($NpmAdminEmail -eq "admin@example.com" -and $existingAdminEmail) { $NpmAdminEmail = $existingAdminEmail }
     $NpmDomain = Read-Default "Library public domain (blank = LAN / configure hosts later)" $NpmDomain
     if ($useBundled) {
         $NpmAbsDomain = Read-Default "Audiobookshelf domain (optional)" $NpmAbsDomain
@@ -643,8 +652,8 @@ if ($useNpm) {
         }
     }
     else {
-        Write-Warn "No domain - NPM admin on :81; use LAN APP_URL until DNS is ready."
-        Write-Warn "Next: set NPM_DOMAIN in .env, then .\scripts\configure_npm.ps1"
+        Write-Warn "No domain - NPM still starts; admin on :81 + LAN HTTP proxy on :80."
+        Write-Warn "Later: set NPM_DOMAIN in .env, then .\scripts\configure_npm.ps1"
     }
 }
 else {
@@ -656,6 +665,15 @@ else {
 $vpn = [bool]$EnableVpn
 if (-not $NonInteractive) {
     $vpn = Read-YesNo "Enable Mullvad VPN sidecar (gluetun) now? Optional - not required. Needs WireGuard keys." $false
+}
+# Rebuild known profiles; preserve any other COMPOSE_PROFILES entries.
+$known = @("bundled-media", "npm", "vpn")
+$otherProfiles = @()
+if ($existingProfiles) {
+    foreach ($piece in ($existingProfiles -split ',')) {
+        $t = $piece.Trim()
+        if ($t -and ($known -notcontains $t)) { $otherProfiles += $t }
+    }
 }
 $profileParts = @()
 if ($useBundled) { $profileParts += "bundled-media" }
@@ -672,13 +690,24 @@ else {
     Set-EnvKey $envPath "WIREGUARD_ADDRESSES" ""
     Write-Ok "VPN profile off - stack starts without gluetun. Configure Mullvad later in Admin."
 }
+$profileParts += $otherProfiles
 $mergedProfiles = Merge-ComposeProfiles $profileParts
 Set-EnvKey $envPath "COMPOSE_PROFILES" $mergedProfiles
+$env:COMPOSE_PROFILES = $mergedProfiles
+$composeProfileArgs = @()
+foreach ($p in ($mergedProfiles -split ',')) {
+    $t = $p.Trim()
+    if ($t) { $composeProfileArgs += @("--profile", $t) }
+}
 $profileNote = @()
 if ($useBundled) { $profileNote += "bundled-media" }
 if ($useNpm) { $profileNote += "npm" }
-if ($profileNote.Count -gt 0) {
+if ($vpn) { $profileNote += "vpn" }
+if ($mergedProfiles) {
     Write-Ok "COMPOSE_PROFILES=$mergedProfiles ($($profileNote -join ', '))"
+}
+else {
+    Write-Warn "COMPOSE_PROFILES empty - core stack only (no bundled-media / npm / vpn)"
 }
 
 foreach ($d in @(
@@ -749,15 +778,19 @@ if ($useBundled) {
 else {
     Write-Host "After create-admin / create-library / offline PIN, /admin/setup configures ABS, Kavita, and LibraForge."
 }
-if ($SkipBuild) {
-    $upCode = Invoke-Compose @("compose", "up", "-d")
+if ($useNpm) {
+    Write-Warn "Starting Nginx Proxy Manager (library-npm) on 80/443/81 - required when Enable NPM = Yes."
 }
-else {
-    $upCode = Invoke-Compose @("compose", "up", "-d", "--build")
-}
+$upArgs = @("compose") + $composeProfileArgs + @("up", "-d")
+if (-not $SkipBuild) { $upArgs += "--build" }
+$upCode = Invoke-Compose $upArgs
 if ($upCode -ne 0) {
     Write-Err "docker compose up failed - check: docker compose logs"
     exit 1
+}
+if ($useNpm) {
+    Write-Host "Ensuring library-npm is up (compose profile npm) ..."
+    [void](Invoke-Compose @("compose", "--profile", "npm", "up", "-d", "nginx-proxy-manager"))
 }
 if (-not $useBundledJackett) {
     Write-Warn "Stopping bundled Jackett (using external JACKETT_URL)"
@@ -841,10 +874,44 @@ if ($useBundled) {
 }
 
 if ($useNpm) {
+    Write-Step "==> Verify Nginx Proxy Manager is listening on :81"
+    $npmOk = $false
+    for ($i = 1; $i -le 60; $i++) {
+        try {
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:81/" -UseBasicParsing -TimeoutSec 3
+            if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 600) {
+                $npmOk = $true
+                Write-Ok "NPM admin port :81 is listening (HTTP $($r.StatusCode))"
+                break
+            }
+        }
+        catch {
+            $resp = $_.Exception.Response
+            if ($resp -and [int]$resp.StatusCode -ge 200) {
+                $npmOk = $true
+                Write-Ok "NPM admin port :81 is listening (HTTP $([int]$resp.StatusCode))"
+                break
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $npmOk) {
+        Write-Err "FATAL: Nginx Proxy Manager was enabled but http://127.0.0.1:81 is not listening."
+        Write-Err "library-npm did not publish ports 80/443/81 - remote HTTPS cannot work."
+        Write-Warn "Debug: docker compose --profile npm ps nginx-proxy-manager"
+        Write-Warn "       docker compose --profile npm logs --tail=80 nginx-proxy-manager"
+        Write-Warn "       grep COMPOSE_PROFILES= .env / Get-Content .env | Select-String COMPOSE_PROFILES"
+        Write-Warn "Fix port conflicts, then: docker compose --profile npm up -d nginx-proxy-manager"
+        Write-Warn "Or skip with -SkipNpm / LIBRARY_SKIP_NPM=1"
+        exit 1
+    }
     $npmCfg = Join-Path $TARGET "scripts\configure_npm.ps1"
     if (Test-Path $npmCfg) {
-        Write-Step "==> Configuring Nginx Proxy Manager (admin + proxy hosts via API)"
+        Write-Step "==> Configuring Nginx Proxy Manager (admin + proxy hosts via API - no GUI required)"
         & powershell -ExecutionPolicy Bypass -File $npmCfg -RepoRoot $TARGET
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "configure_npm.ps1 reported errors - NPM is up; re-run .\scripts\configure_npm.ps1"
+        }
         $updatedUrl = Get-EnvKeyValue $envPath "APP_URL"
         if ($updatedUrl) { $APP_URL = $updatedUrl }
     }

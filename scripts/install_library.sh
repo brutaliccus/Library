@@ -306,6 +306,40 @@ get_env() {
   grep -E "^${key}=" .env 2>/dev/null | head -1 | cut -d= -f2- || true
 }
 
+# Split COMPOSE_PROFILES into words (comma/space). Empty → no output.
+compose_profiles_list() {
+  local raw="${1-}"
+  raw="${raw//,/ }"
+  # shellcheck disable=SC2086
+  printf '%s\n' $raw
+}
+
+# Join unique non-empty profile names with commas (stable order).
+join_compose_profiles() {
+  local out="" seen="|" p
+  for p in "$@"; do
+    [[ -z "$p" ]] && continue
+    [[ "$seen" == *"|$p|"* ]] && continue
+    seen="${seen}${p}|"
+    if [[ -z "$out" ]]; then
+      out="$p"
+    else
+      out="${out},${p}"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# True if comma-separated profiles contain name $1.
+compose_profile_has() {
+  local needle="$1" raw="${2-}"
+  local p
+  while IFS= read -r p; do
+    [[ "$p" == "$needle" ]] && return 0
+  done < <(compose_profiles_list "$raw")
+  return 1
+}
+
 looks_external_media_url() {
   local url="$1"
   [[ -z "$url" ]] && return 1
@@ -677,12 +711,20 @@ mkdir -p data prowlarr-config jackett-config \
 
 # ---------------------------------------------------------------------------
 step "Nginx Proxy Manager (reverse proxy) [RECOMMENDED]"
-explain "Remote HTTPS needs a reverse proxy. Fresh installs include NPM (compose profile npm)."
-explain "Already have NPM / Caddy / Traefik / nginx? Skip — install continues without it."
+explain "Remote HTTPS needs a reverse proxy. Fresh installs start NPM (compose profile npm)."
+explain "Answer No only if you already run NPM / Caddy / Traefik / nginx on ports 80/443."
+_EXISTING_PROFILES="$(get_env COMPOSE_PROFILES)"
+_NPM_DEF="y"
+# Re-runs: keep NPM on by default when .env already enabled it.
+if compose_profile_has "npm" "$_EXISTING_PROFILES"; then
+  _NPM_DEF="y"
+elif [[ -n "$(get_env NPM_ADMIN_PASSWORD)" && "$(get_env NPM_ADMIN_PASSWORD)" != "changeme" ]]; then
+  _NPM_DEF="y"
+fi
 USE_NPM=false
 if [[ "${LIBRARY_SKIP_NPM:-0}" == "1" ]]; then
   c_yellow "LIBRARY_SKIP_NPM=1 — Nginx Proxy Manager off"
-elif yes_no "Enable Nginx Proxy Manager? (Already have a reverse proxy? Skip NPM)" "y"; then
+elif yes_no "Enable Nginx Proxy Manager (publishes 80/443 + admin :81)?" "$_NPM_DEF"; then
   USE_NPM=true
 else
   c_yellow "Skipped NPM. For remote HTTPS later, point your reverse proxy at http://127.0.0.1:8085"
@@ -697,22 +739,28 @@ NPM_ADMIN_EMAIL=""
 NPM_ADMIN_PASSWORD=""
 if $USE_NPM; then
   explain "Ports 80 + 443 (public) and 81 (NPM admin UI). Container name: library-npm."
-  # Soft conflict check — do not fail install; user may free ports before compose up.
+  # Soft conflict check — do not fail install yet; hard-fail after compose if :81 never listens.
   if command -v ss >/dev/null 2>&1; then
     if ss -tln 2>/dev/null | grep -qE ':80\s'; then
-      c_yellow "Port 80 looks busy — NPM may fail to bind. Skip NPM or free the port."
+      c_yellow "Port 80 looks busy — NPM may fail to bind. Free the port or answer No to skip NPM."
     fi
     if ss -tln 2>/dev/null | grep -qE ':443\s'; then
       c_yellow "Port 443 looks busy — NPM may fail to bind HTTPS."
     fi
   fi
-  prompt NPM_DOMAIN "Library public domain (blank = LAN / configure hosts later)" "${LIBRARY_NPM_DOMAIN:-}"
+  _def_npm_domain="${LIBRARY_NPM_DOMAIN:-$(get_env NPM_DOMAIN)}"
+  _def_npm_abs="${LIBRARY_NPM_ABS_DOMAIN:-$(get_env NPM_ABS_DOMAIN)}"
+  _def_npm_kavita="${LIBRARY_NPM_KAVITA_DOMAIN:-$(get_env NPM_KAVITA_DOMAIN)}"
+  _def_npm_le="${LIBRARY_NPM_LE_EMAIL:-$(get_env NPM_LETSENCRYPT_EMAIL)}"
+  _def_npm_admin="$(get_env NPM_ADMIN_EMAIL)"
+  _def_npm_admin="${LIBRARY_NPM_ADMIN_EMAIL:-${_def_npm_admin:-admin@example.com}}"
+  prompt NPM_DOMAIN "Library public domain (blank = LAN / configure hosts later)" "$_def_npm_domain"
   if $USE_BUNDLED; then
-    prompt NPM_ABS_DOMAIN "Audiobookshelf domain (optional)" "${LIBRARY_NPM_ABS_DOMAIN:-}"
-    prompt NPM_KAVITA_DOMAIN "Kavita domain (optional)" "${LIBRARY_NPM_KAVITA_DOMAIN:-}"
+    prompt NPM_ABS_DOMAIN "Audiobookshelf domain (optional)" "$_def_npm_abs"
+    prompt NPM_KAVITA_DOMAIN "Kavita domain (optional)" "$_def_npm_kavita"
   fi
-  prompt NPM_LE_EMAIL "Let's Encrypt email (blank = HTTP only, no SSL yet)" "${LIBRARY_NPM_LE_EMAIL:-}"
-  prompt NPM_ADMIN_EMAIL "NPM admin email" "${LIBRARY_NPM_ADMIN_EMAIL:-admin@example.com}"
+  prompt NPM_LE_EMAIL "Let's Encrypt email (blank = HTTP only, no SSL yet)" "$_def_npm_le"
+  prompt NPM_ADMIN_EMAIL "NPM admin email" "$_def_npm_admin"
   EXISTING_NPM_PASS="$(get_env NPM_ADMIN_PASSWORD)"
   if [[ -z "$EXISTING_NPM_PASS" || "$EXISTING_NPM_PASS" == "changeme" ]]; then
     EXISTING_NPM_PASS="$(openssl rand -hex 12 2>/dev/null || echo "library-npm-$(date +%s)")"
@@ -738,8 +786,8 @@ if $USE_NPM; then
       c_green "APP_URL → http://${NPM_DOMAIN} (HTTP; add LE email later for HTTPS)"
     fi
   else
-    c_yellow "No domain — NPM admin on :81; use LAN APP_URL (${APP_URL}) until DNS is ready."
-    c_yellow "Next: set NPM_DOMAIN (+ NPM_LETSENCRYPT_EMAIL) in .env, then: bash scripts/configure_npm.sh"
+    c_yellow "No domain — NPM still starts; admin on :81 + LAN HTTP proxy on :80."
+    c_yellow "Later: set NPM_DOMAIN (+ NPM_LETSENCRYPT_EMAIL) in .env, then: bash scripts/configure_npm.sh"
   fi
 fi
 
@@ -750,7 +798,15 @@ _has_wg=false
 if grep -qE '^WIREGUARD_PRIVATE_KEY=.+' .env 2>/dev/null && grep -qE '^WIREGUARD_ADDRESSES=.+' .env 2>/dev/null; then
   _has_wg=true
 fi
+# Rebuild known profiles from prompts; preserve any other COMPOSE_PROFILES entries.
 PROFILE_PARTS=()
+_OTHER_PROFILES=()
+while IFS= read -r _p; do
+  case "$_p" in
+    ""|bundled-media|npm|vpn) ;;
+    *) _OTHER_PROFILES+=("$_p") ;;
+  esac
+done < <(compose_profiles_list "$_EXISTING_PROFILES")
 if $USE_BUNDLED; then
   PROFILE_PARTS+=("bundled-media")
 fi
@@ -758,9 +814,11 @@ if $USE_NPM; then
   PROFILE_PARTS+=("npm")
 fi
 _enable_vpn=false
+_vpn_def="n"
+compose_profile_has "vpn" "$_EXISTING_PROFILES" && _has_wg && _vpn_def="y"
 if [[ "${LIBRARY_ENABLE_VPN:-0}" == "1" ]]; then
   _enable_vpn=true
-elif $_has_wg || yes_no "Enable Mullvad VPN sidecar (gluetun) now? Optional — not required." "n"; then
+elif $_has_wg || yes_no "Enable Mullvad VPN sidecar (gluetun) now? Optional — not required." "$_vpn_def"; then
   _enable_vpn=true
 fi
 if $_enable_vpn; then
@@ -780,21 +838,26 @@ else
   fi
   c_green "VPN profile off — stack starts without gluetun (configure Mullvad later)."
 fi
-COMPOSE_PROFILES_VAL=""
-for p in "${PROFILE_PARTS[@]+"${PROFILE_PARTS[@]}"}"; do
-  if [[ -z "$COMPOSE_PROFILES_VAL" ]]; then
-    COMPOSE_PROFILES_VAL="$p"
-  else
-    COMPOSE_PROFILES_VAL="${COMPOSE_PROFILES_VAL},${p}"
-  fi
-done
+# Append preserved unknown profiles last (never wipe custom entries).
+PROFILE_PARTS+=("${_OTHER_PROFILES[@]+"${_OTHER_PROFILES[@]}"}")
+COMPOSE_PROFILES_VAL="$(join_compose_profiles "${PROFILE_PARTS[@]+"${PROFILE_PARTS[@]}"}")"
 set_env COMPOSE_PROFILES "$COMPOSE_PROFILES_VAL"
+# Also export so this shell's compose invocations honor profiles even if .env load fails.
+export COMPOSE_PROFILES="$COMPOSE_PROFILES_VAL"
 _profile_note=""
 $USE_BUNDLED && _profile_note="${_profile_note}bundled-media "
 $USE_NPM && _profile_note="${_profile_note}npm "
-if [[ -n "$_profile_note" ]]; then
-  c_green "COMPOSE_PROFILES=${COMPOSE_PROFILES_VAL} (${_profile_note})"
+$_enable_vpn && _profile_note="${_profile_note}vpn "
+if [[ -n "$COMPOSE_PROFILES_VAL" ]]; then
+  c_green "COMPOSE_PROFILES=${COMPOSE_PROFILES_VAL}${_profile_note:+ (${_profile_note})}"
+else
+  c_yellow "COMPOSE_PROFILES empty — core stack only (no bundled-media / npm / vpn)"
 fi
+# Build --profile args for explicit compose up (belt + suspenders with COMPOSE_PROFILES).
+COMPOSE_PROFILE_ARGS=()
+for _p in "${PROFILE_PARTS[@]+"${PROFILE_PARTS[@]}"}"; do
+  [[ -n "$_p" ]] && COMPOSE_PROFILE_ARGS+=(--profile "$_p")
+done
 
 # ---------------------------------------------------------------------------
 step "Indexer cache seed"
@@ -831,10 +894,21 @@ if $USE_BUNDLED; then
 else
   c_yellow "After create-admin / create-library / offline PIN, /admin/setup configures ABS, Kavita, and LibraForge."
 fi
+if $USE_NPM; then
+  c_yellow "Starting Nginx Proxy Manager (library-npm) on 80/443/81 — required when Enable NPM = Yes."
+fi
+# Explicit --profile flags + COMPOSE_PROFILES in .env / environment (resume-safe).
 if [[ "${LIBRARY_SKIP_BUILD:-0}" == "1" ]]; then
-  $DOCKER compose up -d
+  $DOCKER compose "${COMPOSE_PROFILE_ARGS[@]+"${COMPOSE_PROFILE_ARGS[@]}"}" up -d
 else
-  $DOCKER compose up -d --build
+  $DOCKER compose "${COMPOSE_PROFILE_ARGS[@]+"${COMPOSE_PROFILE_ARGS[@]}"}" up -d --build
+fi
+
+# Resume / harden: if npm was requested, force the profile service up even when a prior
+# compose run left COMPOSE_PROFILES incomplete or the container was never created.
+if $USE_NPM; then
+  c_cyan "Ensuring library-npm is up (compose profile npm) ..."
+  $DOCKER compose --profile npm up -d nginx-proxy-manager
 fi
 
 # When operators connected external Jackett/Prowlarr, stop the unused local containers
@@ -908,9 +982,37 @@ if $USE_BUNDLED; then
   fi
 fi
 if $USE_NPM; then
+  step "Verify Nginx Proxy Manager is listening on :81"
+  NPM_OK=false
+  for i in $(seq 1 60); do
+    code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:81/" 2>/dev/null || echo 000)"
+    # Any HTTP response means the admin port is bound (NPM may return 200/401/404 while booting).
+    if [[ "$code" =~ ^[2345] ]]; then
+      NPM_OK=true
+      c_green "NPM admin port :81 is listening (HTTP ${code})"
+      break
+    fi
+    sleep 2
+  done
+  if ! $NPM_OK; then
+    c_red "FATAL: Nginx Proxy Manager was enabled but http://127.0.0.1:81 is not listening."
+    c_red "library-npm did not publish ports 80/443/81 — remote HTTPS cannot work."
+    c_yellow "Debug:"
+    echo "  $DOCKER compose --profile npm ps nginx-proxy-manager"
+    echo "  $DOCKER compose --profile npm logs --tail=80 nginx-proxy-manager"
+    echo "  ss -tln | grep -E ':80|:443|:81'"
+    echo "  grep '^COMPOSE_PROFILES=' .env"
+    c_yellow "Fix port conflicts (80/443), then re-run this installer or:"
+    echo "  cd $TARGET && $DOCKER compose --profile npm up -d nginx-proxy-manager"
+    echo "  bash scripts/configure_npm.sh"
+    c_yellow "Or skip NPM permanently: LIBRARY_SKIP_NPM=1 (proxy :8085 yourself)."
+    exit 1
+  fi
   if [[ -f scripts/configure_npm.sh ]]; then
-    c_cyan "Configuring Nginx Proxy Manager (admin + proxy hosts via API)"
-    bash scripts/configure_npm.sh || true
+    c_cyan "Configuring Nginx Proxy Manager (admin + proxy hosts via API — no GUI required)"
+    if ! bash scripts/configure_npm.sh; then
+      c_yellow "configure_npm.sh reported errors — NPM is up; re-run: bash scripts/configure_npm.sh"
+    fi
     # Reload APP_URL if configure_npm updated it.
     APP_URL="$(get_env APP_URL)"
     APP_URL="${APP_URL:-$DEFAULT_APP_URL}"
@@ -1105,7 +1207,7 @@ fi
 echo ""
 echo "Notes:"
 echo "  - Profile bundled-media = ABS (:13378) + Kavita (:5000) + LibraForge (:5056)"
-echo "  - Profile npm = Nginx Proxy Manager (library-npm) on 80/443/81 — skip if you already proxy"
+echo "  - Profile npm = Nginx Proxy Manager (library-npm) on 80/443/81 — default Yes; No only if 80/443 already taken"
 echo "  - Jackett/Prowlarr/Flare are core sidecars; external URL skip paths stop the local container"
 echo "  - FlareSolverr resource limits are in docker-compose.yml (safe defaults for Pi/laptop)"
 echo "  - Re-run this script anytime — it updates selected .env keys without wiping secrets"

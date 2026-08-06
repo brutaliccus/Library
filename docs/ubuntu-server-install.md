@@ -73,12 +73,13 @@ The script walks you through:
 13. **Start stack** → configure Jackett/Prowlarr → sync ABS/Kavita/LF → NPM API → optional VAPID → health report
 
 Re-runs are safe: existing `.env` secrets are kept when you press Enter on a prompt. NPM proxy hosts are upserted by domain (no duplicates).
+If NPM is enabled, the installer writes `npm` into `COMPOSE_PROFILES`, starts `library-npm` with `--profile npm`, and **fails the install** if `:81` never listens (so a silent skip cannot happen).
 
 ### Nginx Proxy Manager prompts
 
 | Prompt | Notes |
 |--------|--------|
-| Enable NPM? (Already have a reverse proxy? Skip NPM) | Default **Yes**. Answer **n** if something else already owns 80/443. |
+| Enable Nginx Proxy Manager (publishes 80/443 + admin :81)? | Default **Yes**. Answer **n** only if something else already owns 80/443. |
 | Library public domain | e.g. `library.example.com`. Blank = LAN-only; use `:8085` until DNS is ready. |
 | ABS / Kavita domains | Optional when bundled-media is on |
 | Let's Encrypt email | Blank = HTTP-only proxy hosts; add later and re-run `bash scripts/configure_npm.sh` |

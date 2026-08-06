@@ -18,6 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($env:LIBRARY_UPDATE_YES -eq '1' -or $env:LIBRARY_UPDATE_YES -eq 'true') { $Force = $true }
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 
@@ -112,6 +113,24 @@ if ($SkipKeys) {
 }
 
 Write-Host ""
+# Persist revision for Admin Health (./data mounted into the app container).
+try {
+  New-Item -ItemType Directory -Force -Path (Join-Path $Root "data") | Out-Null
+  $rev = [ordered]@{
+    sha         = (git rev-parse HEAD).Trim()
+    shortSha    = (git rev-parse --short HEAD).Trim()
+    branch      = (git rev-parse --abbrev-ref HEAD).Trim()
+    message     = (git log -1 --pretty=format:%s)
+    committedAt = (git log -1 --pretty=format:%cI)
+    tracking    = "$Remote/$Branch"
+    updatedAt   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    source      = "update_library.ps1"
+  }
+  $rev | ConvertTo-Json | Set-Content -Path (Join-Path $Root "data\install_revision.json") -Encoding utf8
+} catch {
+  Write-Warn "Could not write data/install_revision.json"
+}
+
 Write-Ok "Update complete."
 Write-Host "  commit:  $after"
 Write-Host "  message: $afterMsg"

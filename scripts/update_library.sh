@@ -6,8 +6,9 @@
 #   bash scripts/update_library.sh
 #
 # Options:
-#   --force          Allow a dirty working tree (git reset --hard). Local
+#   --force, --yes   Allow a dirty working tree (git reset --hard). Local
 #                    tracked changes are discarded; .env / media / data stay.
+#                    LIBRARY_UPDATE_YES=1 has the same effect (Admin UI / CI).
 #   --skip-build     Fetch/reset only (no docker compose build/up).
 #   --skip-keys      Skip apply_indexer_keys.sh after restart.
 #   --branch NAME    Track a different remote branch (default: main).
@@ -23,6 +24,11 @@ SKIP_KEYS=0
 BRANCH="main"
 REMOTE="origin"
 
+# Non-interactive Admin / CI: LIBRARY_UPDATE_YES=1 implies --force.
+if [[ "${LIBRARY_UPDATE_YES:-0}" == "1" || "${LIBRARY_UPDATE_YES:-}" == "true" ]]; then
+  FORCE=1
+fi
+
 c_green() { printf '\033[32m%s\033[0m\n' "$*"; }
 c_yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 c_red() { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -34,7 +40,7 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --force) FORCE=1; shift ;;
+    --force|--yes) FORCE=1; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-keys) SKIP_KEYS=1; shift ;;
     --branch)
@@ -165,6 +171,48 @@ elif [[ -f scripts/apply_indexer_keys.sh ]]; then
 else
   c_yellow "[4/4] No scripts/apply_indexer_keys.sh — skipped"
 fi
+
+# Persist revision for Admin Health (visible inside the app container via ./data).
+write_install_revision() {
+  mkdir -p data
+  local sha short_sha branch msg committed tracking updated
+  sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  short_sha="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$BRANCH")"
+  msg="$(git log -1 --pretty=format:%s 2>/dev/null || echo "")"
+  committed="$(git log -1 --pretty=format:%cI 2>/dev/null || echo "")"
+  tracking="${REMOTE}/${BRANCH}"
+  updated="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+  if command -v python3 >/dev/null 2>&1; then
+    SHA="$sha" SHORT="$short_sha" BRANCH_V="$branch" MSG="$msg" COMMITTED="$committed" TRACKING="$tracking" UPDATED="$updated" \
+      python3 - <<'PY'
+import json, os
+from pathlib import Path
+Path("data/install_revision.json").write_text(
+    json.dumps(
+        {
+            "sha": os.environ.get("SHA", ""),
+            "shortSha": os.environ.get("SHORT", ""),
+            "branch": os.environ.get("BRANCH_V", ""),
+            "message": os.environ.get("MSG", ""),
+            "committedAt": os.environ.get("COMMITTED", ""),
+            "tracking": os.environ.get("TRACKING", ""),
+            "updatedAt": os.environ.get("UPDATED", ""),
+            "source": "update_library.sh",
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+  else
+    printf '{\n  "sha": "%s",\n  "shortSha": "%s",\n  "branch": "%s",\n  "tracking": "%s",\n  "updatedAt": "%s",\n  "source": "update_library.sh"\n}\n' \
+      "$sha" "$short_sha" "$branch" "$tracking" "$updated" > data/install_revision.json
+  fi
+}
+
+write_install_revision
 
 echo ""
 c_green "Update complete."

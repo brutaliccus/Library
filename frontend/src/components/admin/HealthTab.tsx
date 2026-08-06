@@ -1,10 +1,10 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   Activity,
   ClipboardList,
-  Copy,
+  Download,
   ExternalLink,
   GitBranch,
   Play,
@@ -265,6 +265,333 @@ function statusMeta(probe: Record<string, unknown> | undefined, docker?: DockerS
   return { label: "—", className: "bg-gray-900 text-gray-500 border-gray-700" };
 }
 
+
+type ServerUpdateLocal = {
+  sha?: string | null;
+  shortSha?: string | null;
+  branch?: string | null;
+  message?: string | null;
+  committedAt?: string | null;
+  source?: string | null;
+};
+
+type ServerUpdateRemote = {
+  sha?: string | null;
+  shortSha?: string | null;
+  branch?: string | null;
+  message?: string | null;
+  committedAt?: string | null;
+  htmlUrl?: string | null;
+};
+
+type ServerUpdateJob = {
+  phase?: string;
+  running?: boolean;
+  ok?: boolean | null;
+  error?: string | null;
+  logTail?: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+};
+
+type ServerUpdateStatus = {
+  local?: ServerUpdateLocal | null;
+  remote?: ServerUpdateRemote | null;
+  state?: string;
+  branch?: string;
+  repo?: string;
+  compare?: { commitsBehind?: number; aheadBy?: number; status?: string } | null;
+  applyAvailable?: boolean;
+  applyUnavailableReason?: string | null;
+  hostRoot?: string | null;
+  manualCommand?: string;
+  job?: ServerUpdateJob | null;
+  error?: string | null;
+  checkedAt?: string | null;
+};
+
+function formatCommitWhen(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function ServerUpdateCard() {
+  const { toast } = useToast();
+  const [info, setInfo] = useState<ServerUpdateStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [checking, setChecking] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const { data } = await api.get<ServerUpdateStatus>("/admin/server-update/status");
+      setInfo(data);
+      setError(null);
+    } catch (e: unknown) {
+      const detail =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        (e instanceof Error ? e.message : "Could not load server update status");
+      setError(String(detail));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadStatus();
+  }, [loadStatus]);
+
+  const jobRunning = Boolean(info?.job?.running || info?.job?.phase === "updating");
+
+  useEffect(() => {
+    if (!jobRunning) return;
+    const id = window.setInterval(() => {
+      void (async () => {
+        try {
+          const { data: job } = await api.get<ServerUpdateJob>("/admin/server-update/job");
+          setInfo((prev) => (prev ? { ...prev, job, state: job.running ? "updating" : prev.state } : prev));
+          if (!job.running) {
+            await loadStatus();
+            if (job.ok) toast("Server update finished", "success");
+            else if (job.error) toast(job.error, "error");
+          }
+        } catch {
+          /* app may be restarting mid-update */
+        }
+      })();
+    }, 2500);
+    return () => window.clearInterval(id);
+  }, [jobRunning, loadStatus, toast]);
+
+  const check = async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      const { data } = await api.post<ServerUpdateStatus>("/admin/server-update/check");
+      setInfo(data);
+      if (data.state === "up_to_date") toast("Stack is up to date", "success");
+      else if (data.state === "update_available") toast("Update available", "info");
+      else if (data.state === "check_failed") toast(data.error || "Check failed", "error");
+    } catch (e: unknown) {
+      const detail =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        (e instanceof Error ? e.message : "Update check failed");
+      setError(String(detail));
+      toast(String(detail), "error");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const apply = async () => {
+    setConfirmOpen(false);
+    setError(null);
+    try {
+      const { data } = await api.post<{ message?: string; job?: ServerUpdateJob }>(
+        "/admin/server-update/apply",
+        null,
+        { timeout: 60_000 },
+      );
+      setInfo((prev) => ({
+        ...(prev || {}),
+        state: "updating",
+        job: data.job || { phase: "updating", running: true, logTail: "" },
+      }));
+      toast(data.message || "Server update started", "info");
+    } catch (e: unknown) {
+      const detail =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        (e instanceof Error ? e.message : "Could not start update");
+      setError(String(detail));
+      toast(String(detail), "error");
+    }
+  };
+
+  const local = info?.local;
+  const remote = info?.remote;
+  const state = jobRunning ? "updating" : info?.state || "unknown";
+  const behind =
+    info?.compare?.commitsBehind ??
+    info?.compare?.aheadBy ??
+    null;
+  const updateReady = state === "update_available";
+  const githubUrl = `https://github.com/${info?.repo || "brutaliccus/Library"}`;
+
+  let statusLine: ReactNode = null;
+  if (state === "updating") {
+    statusLine = <p className="text-xs text-amber-300">Updating entire stack… app may restart briefly</p>;
+  } else if (state === "update_available") {
+    statusLine = (
+      <p className="text-xs text-emerald-300">
+        Update available
+        {behind != null && behind > 0 ? ` — ${behind} commit${behind === 1 ? "" : "s"} behind` : ""}
+      </p>
+    );
+  } else if (state === "up_to_date") {
+    statusLine = <p className="text-xs text-gray-500">This server has the latest {info?.branch || "main"}</p>;
+  } else if (state === "check_failed") {
+    statusLine = <p className="text-xs text-amber-300/90">{info?.error || error || "Check failed"}</p>;
+  } else if (!loading) {
+    statusLine = (
+      <p className="text-xs text-gray-500">Check for updates to compare with origin/{info?.branch || "main"}</p>
+    );
+  }
+
+  return (
+    <>
+      <div className="rounded-xl border border-gray-800 bg-gray-900/40 overflow-hidden">
+        <div className="px-3 py-2 border-b border-gray-800 flex items-start gap-2">
+          <GitBranch size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold text-gray-100">Server stack update</h3>
+            <p className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
+              Compare this install to origin/{info?.branch || "main"} and update the entire Docker stack
+              (same as <code className="text-gray-400">scripts/update_library.sh</code>).
+            </p>
+          </div>
+        </div>
+        <div className="px-3 py-3 space-y-3">
+          <dl className="text-xs space-y-1.5">
+            <div className="flex justify-between gap-3">
+              <dt className="text-gray-500">Installed</dt>
+              <dd className="text-gray-200 text-right min-w-0">
+                {loading ? (
+                  "…"
+                ) : local?.shortSha || local?.sha ? (
+                  <>
+                    <span className="font-mono">{local.shortSha || local.sha?.slice(0, 7)}</span>
+                    {local.branch ? <span className="text-gray-500"> · {local.branch}</span> : null}
+                    {local.committedAt ? (
+                      <span className="block text-gray-500 font-normal">{formatCommitWhen(local.committedAt)}</span>
+                    ) : null}
+                    {local.message ? (
+                      <span className="block text-gray-500 truncate max-w-[16rem] ml-auto">{local.message}</span>
+                    ) : null}
+                  </>
+                ) : (
+                  <span className="text-gray-500">Unknown — run an update once to record revision</span>
+                )}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-gray-500">On GitHub</dt>
+              <dd className="text-gray-200 text-right min-w-0">
+                {remote?.shortSha || remote?.sha ? (
+                  <>
+                    <span className="font-mono">{remote.shortSha || remote.sha?.slice(0, 7)}</span>
+                    {remote.branch ? <span className="text-gray-500"> · {remote.branch}</span> : null}
+                    {remote.committedAt ? (
+                      <span className="block text-gray-500 font-normal">{formatCommitWhen(remote.committedAt)}</span>
+                    ) : null}
+                    {remote.message ? (
+                      <span className="block text-gray-500 truncate max-w-[16rem] ml-auto">{remote.message}</span>
+                    ) : (
+                      <span className="block text-gray-600">Check for updates to load</span>
+                    )}
+                  </>
+                ) : (
+                  "—"
+                )}
+              </dd>
+            </div>
+          </dl>
+
+          {statusLine}
+          {error && state !== "check_failed" && (
+            <p className="text-xs text-amber-300/90">{error}</p>
+          )}
+          {!info?.applyAvailable && info?.applyUnavailableReason && (
+            <p className="text-[11px] text-gray-500">
+              Apply unavailable: {info.applyUnavailableReason}. You can still update over SSH with{" "}
+              <code className="text-gray-400">{info.manualCommand || "bash scripts/update_library.sh"}</code>.
+            </p>
+          )}
+
+          {(jobRunning || info?.job?.logTail) && (
+            <pre className="text-[10px] text-gray-400 bg-gray-950/60 border border-gray-800 rounded-lg px-2 py-2 max-h-36 overflow-auto whitespace-pre-wrap break-all">
+              {info?.job?.logTail || "Waiting for update logs…"}
+            </pre>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void check()}
+              disabled={loading || checking || jobRunning}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800 text-gray-200 text-sm font-medium hover:bg-gray-700 disabled:opacity-50 border border-gray-700"
+            >
+              <RefreshCw size={14} className={checking ? "animate-spin" : ""} />
+              Check for updates
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmOpen(true)}
+              disabled={!updateReady || jobRunning || !info?.applyAvailable || checking}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-700/80 text-white text-sm font-medium hover:bg-emerald-600 disabled:opacity-50"
+            >
+              <Download size={14} />
+              {jobRunning ? "Updating…" : "Update"}
+            </button>
+            <a
+              href={githubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-teal-300/90 hover:text-teal-200"
+            >
+              <ExternalLink size={14} /> GitHub
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <Modal
+        title="Update entire stack?"
+        show={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+      >
+        <p className="text-sm text-gray-400 mb-4">
+          This runs <code className="text-gray-300">git reset --hard origin/{info?.branch || "main"}</code> on
+          the host install
+          {info?.hostRoot ? (
+            <>
+              {" "}
+              (<code className="text-gray-300">{info.hostRoot}</code>)
+            </>
+          ) : null}
+          , then rebuilds and recreates containers. Local <strong className="text-gray-300 font-medium">tracked</strong>{" "}
+          file edits are discarded. <code className="text-gray-300">.env</code>, media, data, and NPM config are kept.
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(false)}
+            className="px-3 py-1.5 text-sm rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => void apply()}
+            className="px-3 py-1.5 text-sm rounded-lg bg-emerald-700/80 text-white hover:bg-emerald-600"
+          >
+            Update stack
+          </button>
+        </div>
+      </Modal>
+    </>
+  );
+}
+
+
 export default function HealthTab() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -441,6 +768,8 @@ export default function HealthTab() {
 
       <PendingActionsSection items={pendingItems} total={pendingTotal} loading={!pending} />
 
+      <ServerUpdateCard />
+
       <div className="space-y-4">
         {SERVICE_GROUPS.map((group) => (
           <ServiceGroupTable
@@ -454,51 +783,7 @@ export default function HealthTab() {
         ))}
       </div>
 
-            <div className="rounded-xl border border-gray-800 bg-gray-900/40 overflow-hidden">
-        <div className="px-3 py-2 border-b border-gray-800 flex items-center gap-2">
-          <GitBranch size={14} className="text-gray-500 shrink-0" />
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-gray-100">Update from Git</h3>
-            <p className="text-[11px] text-gray-500 mt-0.5">
-              Run on the host install root (SSH). Keeps .env, media, and NPM; rebuilds the app from origin/main.
-            </p>
-          </div>
-        </div>
-        <div className="px-3 py-3 space-y-2">
-          <pre className="text-[11px] text-gray-300 bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all">
-{`cd /opt/library && bash scripts/update_library.sh`}
-          </pre>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                const cmd = "cd /opt/library && bash scripts/update_library.sh";
-                void navigator.clipboard.writeText(cmd).then(
-                  () => toast("Copied update command", "success"),
-                  () => toast("Could not copy — select the command manually", "error"),
-                );
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-gray-300 text-sm rounded-lg hover:bg-gray-700 border border-gray-700"
-            >
-              <Copy size={14} /> Copy command
-            </button>
-            <a
-              href="https://github.com/brutaliccus/Library/blob/main/docs/ubuntu-server-install.md#updating"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-teal-300/90 hover:text-teal-200"
-            >
-              <ExternalLink size={14} /> Docs
-            </a>
-          </div>
-          <p className="text-[11px] text-gray-600">
-            Dirty tree? Use <code className="text-gray-400">--force</code> only when you intend to discard local tracked edits.
-            Windows: <code className="text-gray-400">.\scripts\update_library.ps1</code>
-          </p>
-        </div>
-      </div>
-
-<div className="border border-gray-800 rounded-xl bg-gray-900/40">
+      <div className="border border-gray-800 rounded-xl bg-gray-900/40">
         <button
           type="button"
           onClick={() => setShowKavitaDebug((v) => !v)}

@@ -33,6 +33,9 @@ services:
       - PROWLARR_URL=${PROWLARR_URL:-http://audiobook-prowlarr:9696}
       - PROWLARR_API_KEY=${PROWLARR_API_KEY:-}
       - PYTHONUNBUFFERED=1
+      # Host install root for Admin → Health server update apply (e.g. /opt/library).
+      # Optional: compose project working_dir label is used when unset.
+      - LIBRARY_HOST_ROOT=${LIBRARY_HOST_ROOT:-}
     dns:
       - 1.1.1.1
       - 8.8.8.8

@@ -1728,6 +1728,44 @@ async def docker_service_action(
         raise HTTPException(status_code=502, detail=str(e)[:240]) from e
 
 
+
+# --- Server stack update (host git + compose via docker.sock bridge) ---
+
+@router.get("/server-update/status")
+async def server_update_status(_admin: User = Depends(require_admin)):
+    """Current installed revision + whether host apply is available."""
+    from app.services import server_update
+
+    return await server_update.get_status()
+
+
+@router.post("/server-update/check")
+async def server_update_check(_admin: User = Depends(require_admin)):
+    """Compare local install SHA to origin/main (GitHub) without applying."""
+    from app.services import server_update
+
+    return await server_update.check_for_updates()
+
+
+@router.post("/server-update/apply")
+async def server_update_apply(_admin: User = Depends(require_admin)):
+    """Start async full-stack update (same as scripts/update_library.sh --force)."""
+    from app.services import server_update
+
+    try:
+        return await server_update.start_apply()
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@router.get("/server-update/job")
+async def server_update_job(_admin: User = Depends(require_admin)):
+    """Poll apply job phase + log tail (persisted under data/)."""
+    from app.services import server_update
+
+    return server_update.get_job()
+
+
 @router.get("/libraforge")
 async def libraforge_status(_admin: User = Depends(require_admin)):
     """Admin deep-link status for sibling LibraForge (no proxy)."""

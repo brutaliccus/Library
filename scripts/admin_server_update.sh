@@ -79,6 +79,14 @@ set -o pipefail
     echo "[admin_server_update] WARNING: LIBRARY_HOST_ROOT_BIND unset — bind mounts may resolve incorrectly" >&2
   else
     export LIBRARY_HOST_ROOT_BIND
+    # Compose --project-directory is a host path (e.g. /opt/library). Inside the sidecar
+    # that path usually does not exist (checkout is mounted at /library). Symlink so the
+    # CLI can read .env / compose files at the same path the daemon uses for binds.
+    if [[ ! -e "$LIBRARY_HOST_ROOT_BIND" ]]; then
+      mkdir -p "$(dirname "$LIBRARY_HOST_ROOT_BIND")"
+      ln -sfn "$ROOT" "$LIBRARY_HOST_ROOT_BIND"
+      echo "[admin_server_update] linked $LIBRARY_HOST_ROOT_BIND -> $ROOT"
+    fi
   fi
   bash scripts/update_library.sh --force --yes
 } 2>&1 | tee -a "$JOB_LOG"

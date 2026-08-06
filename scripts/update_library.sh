@@ -113,10 +113,23 @@ fi
 # server_update.py sets LIBRARY_HOST_ROOT_BIND to the real host path.
 COMPOSE_PROJECT_DIR="${LIBRARY_HOST_ROOT_BIND:-$ROOT}"
 
+# When running in the Admin sidecar, ensure the host project path exists in this
+# mount namespace so compose can load .env from --project-directory.
+if [[ -n "${LIBRARY_HOST_ROOT_BIND:-}" && ! -e "$LIBRARY_HOST_ROOT_BIND" && -d "$ROOT" ]]; then
+  mkdir -p "$(dirname "$LIBRARY_HOST_ROOT_BIND")"
+  ln -sfn "$ROOT" "$LIBRARY_HOST_ROOT_BIND"
+fi
+
 compose() {
   # shellcheck disable=SC2086
   if [[ -n "${LIBRARY_HOST_ROOT_BIND:-}" && -n "$COMPOSE_FILE_PATH" ]]; then
-    $DOCKER compose -f "$COMPOSE_FILE_PATH" --project-directory "$COMPOSE_PROJECT_DIR" "$@"
+    local env_args=()
+    if [[ -f "$ROOT/.env" ]]; then
+      env_args+=(--env-file "$ROOT/.env")
+    elif [[ -f "$COMPOSE_PROJECT_DIR/.env" ]]; then
+      env_args+=(--env-file "$COMPOSE_PROJECT_DIR/.env")
+    fi
+    $DOCKER compose "${env_args[@]}" -f "$COMPOSE_FILE_PATH" --project-directory "$COMPOSE_PROJECT_DIR" "$@"
   else
     $DOCKER compose "$@"
   fi

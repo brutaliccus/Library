@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Update an existing Library install from origin/main and rebuild the app.
+#
+# Run on the host (not inside the app container), from the install root:
+#   cd /opt/library
+#   bash scripts/update_library.sh
+#
+# Options:
+#   --force          Allow a dirty working tree (git reset --hard). Local
+#                    tracked changes are discarded; .env / media / data stay.
+#   --skip-build     Fetch/reset only (no docker compose build/up).
+#   --skip-keys      Skip apply_indexer_keys.sh after restart.
+#   --branch NAME    Track a different remote branch (default: main).
+#
+# Safe by default: refuses dirty trees unless --force. Does not touch NPM
+# proxy config, media paths, or .env secrets. Honors COMPOSE_PROFILES from .env.
+
+set -euo pipefail
+
+FORCE=0
+SKIP_BUILD=0
+SKIP_KEYS=0
+BRANCH="main"
+REMOTE="origin"
+
+c_green() { printf '\033[32m%s\033[0m\n' "$*"; }
+c_yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+c_red() { printf '\033[31m%s\033[0m\n' "$*"; }
+
+usage() {
+  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force) FORCE=1; shift ;;
+    --skip-build) SKIP_BUILD=1; shift ;;
+    --skip-keys) SKIP_KEYS=1; shift ;;
+    --branch)
+      BRANCH="${2:-}"
+      [[ -n "$BRANCH" ]] || { c_red "error: --branch needs a name"; exit 1; }
+      shift 2
+      ;;
+    -h|--help) usage 0 ;;
+    *)
+      c_red "error: unknown option: $1"
+      usage 1
+      ;;
+  esac
+done
+
+# Resolve install root (script lives in <root>/scripts/).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT"
+
+if [[ ! -f docker-compose.yml && ! -f compose.yml ]]; then
+  c_red "error: no docker-compose.yml in $ROOT — run from the Library install root."
+  exit 1
+fi
+
+if [[ ! -d .git ]]; then
+  c_red "error: $ROOT is not a git checkout. Clone the repo or re-run install_library.sh."
+  exit 1
+fi
+
+DOCKER="${DOCKER:-docker}"
+if ! command -v "$DOCKER" >/dev/null 2>&1; then
+  c_red "error: docker not found on PATH"
+  exit 1
+fi
+if ! "$DOCKER" compose version >/dev/null 2>&1; then
+  c_red "error: Docker Compose plugin required (docker compose)."
+  exit 1
+fi
+
+# Prefer non-sudo when the user can talk to the daemon (docker group).
+if ! "$DOCKER" info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n "$DOCKER" info >/dev/null 2>&1; then
+    DOCKER="sudo -n $DOCKER"
+    c_yellow "Using passwordless sudo for docker."
+  else
+    c_red "error: cannot talk to Docker daemon. Add your user to the docker group or fix permissions."
+    exit 1
+  fi
+fi
+
+echo "Library update"
+echo "  root:   $ROOT"
+echo "  remote: $REMOTE/$BRANCH"
+echo ""
+
+# --- git update ---
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  c_red "error: not inside a git work tree"
+  exit 1
+fi
+
+# Detect dirty tree (tracked changes only; untracked media/data are fine).
+DIRTY=0
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  DIRTY=1
+fi
+
+if [[ "$DIRTY" -eq 1 && "$FORCE" -ne 1 ]]; then
+  c_red "Refusing to update: working tree has local modifications to tracked files."
+  echo ""
+  git status --short --untracked-files=no | head -n 40
+  echo ""
+  c_yellow "Commit/stash those changes, or re-run with --force to discard them"
+  c_yellow "(git reset --hard $REMOTE/$BRANCH). .env, data/, and media mounts are not in git."
+  exit 2
+fi
+
+BEFORE="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+c_green "[1/4] Fetching $REMOTE/$BRANCH ..."
+# Shallow clones: deepen/fetch the tip without requiring a full history.
+if git rev-parse --is-shallow-repository >/dev/null 2>&1 && \
+   [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+  git fetch --depth 1 "$REMOTE" "$BRANCH"
+else
+  git fetch "$REMOTE" "$BRANCH"
+fi
+
+if ! git rev-parse --verify --quiet "$REMOTE/$BRANCH" >/dev/null; then
+  c_red "error: missing $REMOTE/$BRANCH after fetch"
+  exit 1
+fi
+
+if [[ "$DIRTY" -eq 1 && "$FORCE" -eq 1 ]]; then
+  c_yellow "Discarding local tracked changes (--force) ..."
+fi
+
+# Align to remote tip. Handles diverged shallow clones better than plain pull.
+git checkout -q "$BRANCH" 2>/dev/null || git checkout -q -B "$BRANCH" "$REMOTE/$BRANCH"
+git reset --hard "$REMOTE/$BRANCH"
+
+AFTER="$(git rev-parse --short HEAD)"
+AFTER_MSG="$(git log -1 --pretty=format:'%s')"
+c_green "  HEAD: $BEFORE → $AFTER  ($AFTER_MSG)"
+
+if [[ "$SKIP_BUILD" -eq 1 ]]; then
+  c_yellow "[2/4] Skipping docker build (--skip-build)"
+  c_yellow "[3/4] Skipping docker up (--skip-build)"
+else
+  c_green "[2/4] Building app image ..."
+  # shellcheck disable=SC2086
+  $DOCKER compose build app
+
+  c_green "[3/4] Recreating containers (honors COMPOSE_PROFILES from .env) ..."
+  # shellcheck disable=SC2086
+  $DOCKER compose up -d
+fi
+
+if [[ "$SKIP_KEYS" -eq 1 ]]; then
+  c_yellow "[4/4] Skipping indexer key apply (--skip-keys)"
+elif [[ -f scripts/apply_indexer_keys.sh ]]; then
+  c_green "[4/4] Re-applying Jackett/Prowlarr keys (idempotent) ..."
+  if ! bash scripts/apply_indexer_keys.sh; then
+    c_yellow "apply_indexer_keys.sh reported a problem — Admin Overview may show Not configured."
+    c_yellow "Repair: bash scripts/configure_jackett.sh --force-bundled && bash scripts/configure_prowlarr.sh --force-bundled && bash scripts/apply_indexer_keys.sh"
+  fi
+else
+  c_yellow "[4/4] No scripts/apply_indexer_keys.sh — skipped"
+fi
+
+echo ""
+c_green "Update complete."
+echo "  commit:  $AFTER"
+echo "  message: $AFTER_MSG"
+echo ""
+
+# Soft health summary (best-effort).
+echo "Health:"
+# shellcheck disable=SC2086
+if $DOCKER compose ps --format 'table {{.Name}}\t{{.Status}}' 2>/dev/null | head -n 20; then
+  :
+else
+  # shellcheck disable=SC2086
+  $DOCKER compose ps 2>/dev/null | head -n 20 || true
+fi
+
+APP_URL="$(grep -E '^APP_URL=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
+APP_URL="${APP_URL:-http://127.0.0.1:8085}"
+echo ""
+echo "Next steps:"
+echo "  - Open ${APP_URL%/}/admin  → Health"
+echo "  - Logs:  cd \"$ROOT\" && $DOCKER compose logs -f app"
+echo "  - Cron:  see docs/ubuntu-server-install.md#updating (optional systemd timer)"
+echo ""

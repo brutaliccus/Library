@@ -150,6 +150,62 @@ Bundled LibraForge sets `LIBRAFORGE_URL=http://<lan-ip>:5056` (not `127.0.0.1`) 
 
 Prebuilt OL catalog assets live on the GitHub Release tag [`data-seed`](https://github.com/brutaliccus/Library/releases/tag/data-seed). Maintainers package with `scripts/export_ol_catalog_seed.py`.
 
+## Updating
+
+Admins should update from the **host** install root (not inside the app container). The durable path is:
+
+`ash
+cd /opt/library   # or your install dir
+bash scripts/update_library.sh
+`
+
+What it does:
+
+1. git fetch of origin/main (shallow-clone friendly)
+2. git reset --hard origin/main when the tree is clean (refuses dirty tracked files unless --force)
+3. docker compose build app && docker compose up -d (honors COMPOSE_PROFILES from .env)
+4. Re-runs scripts/apply_indexer_keys.sh when present (idempotent)
+
+Preserved: .env secrets, media mounts, data/, NPM / reverse-proxy config. Does **not** run cutover or change proxy hosts.
+
+Useful flags: --force (discard local tracked changes), --skip-build, --skip-keys, --branch NAME.
+
+Admin UI (**Admin → Health**) shows the same one-liner with a copy button. Host git cannot safely run from inside the container without mounting .git and docker CLI on the host.
+
+### Optional: weekly systemd timer
+
+`ash
+sudo tee /etc/systemd/system/library-update.service >/dev/null <<'EOF'
+[Unit]
+Description=Update Library from origin/main
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=joey
+WorkingDirectory=/opt/library
+ExecStart=/bin/bash /opt/library/scripts/update_library.sh
+EOF
+
+sudo tee /etc/systemd/system/library-update.timer >/dev/null <<'EOF'
+[Unit]
+Description=Weekly Library git update
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now library-update.timer
+`
+
+Adjust User= / WorkingDirectory= to match the install. Prefer manual updates if you want to review changelogs first.
+
 ## Do not touch the Pi
 
 Production remains on the Pi (`pihole@192.168.68.76` / existing mounts). This laptop install uses its own `/opt/library` and local or separately mounted media unless you deliberately point host paths at shared storage. Do **not** enable the `npm` profile on the Pi if it already runs a reverse proxy on 80/443.

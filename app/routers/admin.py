@@ -1755,8 +1755,13 @@ async def kavita_opds_status(_admin: User = Depends(require_admin)):
 
 @router.get("/kavita-debug")
 async def kavita_debug(_admin: User = Depends(require_admin)):
-    """Diagnostic endpoint for Kavita ebook loading. Returns raw API response and errors."""
+    """Diagnostic endpoint for Kavita ebook loading.
+
+    ``ebook_count`` is the shelf card total (volume/file expansion) — same unit as
+    My Library after refresh. ``ebook_series_count`` is EPUB/PDF series rows.
+    """
     from app.config import get_settings
+    from app.routers.library import kavita_ebook_inventory
     import httpx
 
     settings = get_settings()
@@ -1767,6 +1772,7 @@ async def kavita_debug(_admin: User = Depends(require_admin)):
         "health_ok": False,
         "series_api_ok": False,
         "series_count": 0,
+        "ebook_series_count": 0,
         "ebook_count": 0,
         "error": None,
         "raw_sample": None,
@@ -1785,25 +1791,18 @@ async def kavita_debug(_admin: User = Depends(require_admin)):
         result["error"] = "KAVITA_API_KEY not set in .env"
         return result
 
-    # Series all-v2 (requires auth)
+    # Inventory via the same series + volume expansion as the library shelf.
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{settings.kavita_url}/api/Series/all-v2",
-                headers={"x-api-key": settings.kavita_api_key, "Content-Type": "application/json"},
-                json={},
-                params={"PageSize": 0},
-                timeout=30,
-            )
-            result["series_api_ok"] = r.status_code == 200
-            if r.status_code != 200:
-                result["error"] = f"Series API returned {r.status_code}: {r.text[:500]}"
-                return result
-            data = r.json()
-            items = data if isinstance(data, list) else (data.get("items", []) if isinstance(data, dict) else [])
-            result["series_count"] = len(items)
-            result["ebook_count"] = sum(1 for s in items if s.get("format") in (3, 4))
-            result["raw_sample"] = items[:2] if items else None
+        inv = await kavita_ebook_inventory(force_refresh=True)
+        result["series_api_ok"] = True
+        result["series_count"] = inv["series_count"]
+        result["ebook_series_count"] = inv["ebook_series_count"]
+        result["ebook_count"] = inv["ebook_count"]
+        # Small raw sample for debugging (ebook-format series only).
+        ebook_series = await kavita.get_all_series(
+            formats=kavita.EBOOK_FORMATS, force_refresh=False
+        )
+        result["raw_sample"] = ebook_series[:2] if ebook_series else None
     except Exception as e:
         result["error"] = str(e)
     return result

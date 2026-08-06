@@ -4,7 +4,9 @@ import { Link } from "react-router-dom";
 import {
   Activity,
   ClipboardList,
+  Copy,
   ExternalLink,
+  GitBranch,
   Play,
   RefreshCw,
   RotateCcw,
@@ -452,7 +454,51 @@ export default function HealthTab() {
         ))}
       </div>
 
-      <div className="border border-gray-800 rounded-xl bg-gray-900/40">
+            <div className="rounded-xl border border-gray-800 bg-gray-900/40 overflow-hidden">
+        <div className="px-3 py-2 border-b border-gray-800 flex items-center gap-2">
+          <GitBranch size={14} className="text-gray-500 shrink-0" />
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-gray-100">Update from Git</h3>
+            <p className="text-[11px] text-gray-500 mt-0.5">
+              Run on the host install root (SSH). Keeps .env, media, and NPM; rebuilds the app from origin/main.
+            </p>
+          </div>
+        </div>
+        <div className="px-3 py-3 space-y-2">
+          <pre className="text-[11px] text-gray-300 bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all">
+{`cd /opt/library && bash scripts/update_library.sh`}
+          </pre>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const cmd = "cd /opt/library && bash scripts/update_library.sh";
+                void navigator.clipboard.writeText(cmd).then(
+                  () => toast("Copied update command", "success"),
+                  () => toast("Could not copy — select the command manually", "error"),
+                );
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-gray-300 text-sm rounded-lg hover:bg-gray-700 border border-gray-700"
+            >
+              <Copy size={14} /> Copy command
+            </button>
+            <a
+              href="https://github.com/brutaliccus/Library/blob/main/docs/ubuntu-server-install.md#updating"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-teal-300/90 hover:text-teal-200"
+            >
+              <ExternalLink size={14} /> Docs
+            </a>
+          </div>
+          <p className="text-[11px] text-gray-600">
+            Dirty tree? Use <code className="text-gray-400">--force</code> only when you intend to discard local tracked edits.
+            Windows: <code className="text-gray-400">.\scripts\update_library.ps1</code>
+          </p>
+        </div>
+      </div>
+
+<div className="border border-gray-800 rounded-xl bg-gray-900/40">
         <button
           type="button"
           onClick={() => setShowKavitaDebug((v) => !v)}
@@ -572,6 +618,12 @@ function ServiceGroupTable({
   busyId: string | null;
   onDockerAction: (svc: DockerServiceInfo, action: DockerAction) => void;
 }) {
+  // CPU/RAM only for Docker-backed rows. External APIs / Disk / Knaben omit the columns.
+  const showResources = group.rows.some((r) => !!r.dockerId);
+  const gridCols = showResources
+    ? "md:grid-cols-[minmax(0,1.4fr)_4.5rem_4.5rem_5.5rem_minmax(0,1fr)_auto]"
+    : "md:grid-cols-[minmax(0,1.4fr)_5.5rem_minmax(0,1fr)_auto]";
+
   return (
     <section className="rounded-xl border border-gray-700 bg-gray-800/60 overflow-hidden">
       <div className="px-3 py-2 border-b border-gray-700/80">
@@ -580,10 +632,14 @@ function ServiceGroupTable({
         </h3>
       </div>
       {/* Desktop header */}
-      <div className="hidden md:grid md:grid-cols-[minmax(0,1.4fr)_4.5rem_4.5rem_5.5rem_minmax(0,1fr)_auto] gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-600 border-b border-gray-800">
+      <div className={`hidden md:grid ${gridCols} gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-600 border-b border-gray-800`}>
         <span>Service</span>
-        <span className="text-right">CPU</span>
-        <span className="text-right">RAM</span>
+        {showResources && (
+          <>
+            <span className="text-right">CPU</span>
+            <span className="text-right">RAM</span>
+          </>
+        )}
         <span>Status</span>
         <span>Detail</span>
         <span className="text-right">Actions</span>
@@ -594,14 +650,19 @@ function ServiceGroupTable({
           const docker = row.dockerId ? dockerById.get(row.dockerId) : undefined;
           const status = statusMeta(probe, docker);
           const stats = docker?.stats;
+          const rowHasResources = showResources && !!row.dockerId;
           const cpu =
-            stats?.cpuPercent != null && Number.isFinite(stats.cpuPercent)
+            rowHasResources && stats?.cpuPercent != null && Number.isFinite(stats.cpuPercent)
               ? `${stats.cpuPercent}%`
-              : "—";
+              : rowHasResources
+                ? "—"
+                : "";
           const ram =
-            stats?.memoryUsageBytes != null
+            rowHasResources && stats?.memoryUsageBytes != null
               ? formatBytes(stats.memoryUsageBytes)
-              : "—";
+              : rowHasResources
+                ? "—"
+                : "";
           const detail = probe && row.detail ? row.detail(probe) : null;
           const openUrl = resolveOpenUrl(
             docker?.openUrl || (probe?.openUrl as string | undefined) || row.fallbackOpenUrl,
@@ -612,31 +673,37 @@ function ServiceGroupTable({
           return (
             <li
               key={row.id}
-              className="px-3 py-2 md:grid md:grid-cols-[minmax(0,1.4fr)_4.5rem_4.5rem_5.5rem_minmax(0,1fr)_auto] md:gap-2 md:items-center"
+              className={`px-3 py-2 md:grid ${gridCols} md:gap-2 md:items-center`}
             >
               <div className="min-w-0 flex items-center gap-2">
                 <span className="text-sm text-gray-100 font-medium truncate">{row.title}</span>
                 {uptimeExtra}
               </div>
-              <div className="hidden md:block text-right text-xs text-gray-300 tabular-nums">
-                {cpu}
-              </div>
-              <div className="hidden md:block text-right text-xs text-gray-300 tabular-nums" title={
-                stats?.memoryLimitBytes
-                  ? `${formatBytes(stats.memoryUsageBytes)} / ${formatBytes(stats.memoryLimitBytes)}`
-                  : undefined
-              }>
-                {ram}
-              </div>
+              {showResources && (
+                <>
+                  <div className="hidden md:block text-right text-xs text-gray-300 tabular-nums">
+                    {cpu}
+                  </div>
+                  <div className="hidden md:block text-right text-xs text-gray-300 tabular-nums" title={
+                    rowHasResources && stats?.memoryLimitBytes
+                      ? `${formatBytes(stats.memoryUsageBytes)} / ${formatBytes(stats.memoryLimitBytes)}`
+                      : undefined
+                  }>
+                    {ram}
+                  </div>
+                </>
+              )}
               <div className="mt-1 md:mt-0">
                 <span className={`inline-flex text-[11px] px-1.5 py-0.5 rounded border ${status.className}`}>
                   {status.label}
                 </span>
               </div>
               <div className="mt-1 md:mt-0 text-[11px] text-gray-500 truncate min-w-0" title={detail || undefined}>
-                <span className="md:hidden text-gray-600 mr-2">
-                  CPU {cpu} · RAM {ram}
-                </span>
+                {rowHasResources && (
+                  <span className="md:hidden text-gray-600 mr-2">
+                    CPU {cpu} · RAM {ram}
+                  </span>
+                )}
                 {detail || (docker?.state?.status && docker.state.status !== "unknown"
                   ? docker.state.status.replace(/_/g, " ")
                   : "")}
@@ -778,6 +845,7 @@ function KavitaEbookDebug() {
         api_key_set?: boolean;
         series_api_ok?: boolean;
         series_count?: number;
+        ebook_series_count?: number;
         ebook_count?: number;
         error?: string | null;
       };
@@ -802,10 +870,18 @@ function KavitaEbookDebug() {
         </span>
       </div>
       <div className="flex justify-between gap-3">
-        <span className="text-gray-500">Series / ebooks</span>
-        <span className="text-gray-300">
-          {debug.series_count ?? "—"} / {debug.ebook_count ?? "—"}
+        <span className="text-gray-500">Ebook series</span>
+        <span className="text-gray-300">{debug.ebook_series_count ?? "—"}</span>
+      </div>
+      <div className="flex justify-between gap-3">
+        <span className="text-gray-500">Shelf ebooks</span>
+        <span className="text-gray-300" title="Same volume/file expansion as My Library after refresh">
+          {debug.ebook_count ?? "—"}
         </span>
+      </div>
+      <div className="flex justify-between gap-3">
+        <span className="text-gray-500">All series</span>
+        <span className="text-gray-300">{debug.series_count ?? "—"}</span>
       </div>
       {debug.error && (
         <p className="text-red-400 text-[11px] mt-1 p-2 bg-red-900/20 rounded">{debug.error}</p>
@@ -818,5 +894,6 @@ function KavitaEbookDebug() {
         <RefreshCw size={11} /> Refresh diagnostic
       </button>
     </div>
+
   );
 }

@@ -252,6 +252,24 @@ LIBRARY_NONINTERACTIVE=1 \
 
 The installers write `.env` (core secrets, media mounts, indexer URLs, pipeline/sweep defaults, optional debrid/catalog/LLM keys, VAPID, NPM vars), create media/staging directories, ensure `seed/indexer_cache.db.gz` is present (repo / Git LFS / `data-seed` release download), **preconfigure Jackett (AudioBookBay + FlareSolverr) and Prowlarr (Knaben + ABB Torznab)** via CLI (or connect existing URL/API keys), default **skip** for optional Open Library multi-GB catalog (indexers are day-one), apply **RSS-only** scraper defaults (unless you opt into deep crawls), set `COMPOSE_PROFILES=bundled-media,npm` for new installs (clone LibraForge into gitignored `./libraforge`), build the stack, wait for `/api/health`, sync ABS/Kavita/LibraForge into `.env`, configure NPM proxy hosts via API (LAN hostname/IP on :80 when no domain), then print a soft health report (app / Jackett / Prowlarr / Flare / OL cache / ABS / Kavita / npm / docker.sock). **Mullvad is optional**; **NPM / Jackett / Prowlarr are default but skippable**. After create-admin → create-library → offline PIN, open **`/admin/setup`** — the Stack step should show **Using bundled stack** with green probes (Continue without pasting API keys). Soft warnings only if you opt out of the bundled profile. On Linux they can also install nightly DB backup / OL catalog cron; on Windows use Task Scheduler or **Admin → Catalog** schedule instead. Full Ubuntu checklist: [docs/ubuntu-server-install.md](docs/ubuntu-server-install.md).
 
+### Updating
+
+On an existing host install (Linux / Ubuntu / Pi):
+
+`ash
+cd /opt/library
+bash scripts/update_library.sh
+`
+
+Windows + Docker Desktop:
+
+`powershell
+cd C:\dev\Library
+.\scripts\update_library.ps1
+`
+
+Fetches origin/main, resets a clean tree to the remote tip (use --force / -Force only when you intend to discard local tracked edits), rebuilds the pp image, recreates containers (keeps .env, media, NPM), and re-applies indexer keys. Details and an optional systemd timer: [docs/ubuntu-server-install.md#updating](docs/ubuntu-server-install.md#updating). **Admin → Health** also shows the host one-liner.
+
 ### Indexer cache seed
 
 | | |

@@ -214,7 +214,7 @@ def _state_from_inspect(info: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _cpu_percent(stats: dict[str, Any]) -> float | None:
-    """Docker CLI-compatible CPU percentage from a one-shot stats payload."""
+    """Docker CLI-compatible CPU percentage from a stats payload with precpu samples."""
     try:
         cpu = stats.get("cpu_stats") or {}
         precpu = stats.get("precpu_stats") or {}
@@ -247,20 +247,25 @@ def _memory_stats(stats: dict[str, Any]) -> dict[str, Any]:
     used = max(0, usage - cache) if cache and usage >= cache else usage
     percent = round((used / limit) * 100.0, 1) if limit > 0 else None
     return {
-        "usageBytes": used or None,
+        "usageBytes": used if usage or used else None,
         "limitBytes": limit or None,
         "percent": percent,
     }
 
 
 async def _container_stats(container: str) -> dict[str, Any] | None:
-    """One-shot Docker stats (CPU / memory). Returns None if unavailable."""
+    """Docker stats (CPU / memory). Returns None if unavailable.
+
+    Uses ``stream=false`` *without* ``one-shot`` so the Engine waits ~1s and
+    returns a populated ``precpu_stats`` sample. ``one-shot=true`` often yields
+    empty precpu counters, which made Admin Health CPU readouts blank.
+    """
     try:
         async with _client() as client:
             resp = await client.get(
                 f"{API_PREFIX}/containers/{container}/stats",
-                params={"stream": "false", "one-shot": "true"},
-                timeout=8.0,
+                params={"stream": "false"},
+                timeout=12.0,
             )
             if resp.status_code != 200:
                 return None

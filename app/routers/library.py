@@ -1276,6 +1276,33 @@ def _kavita_collection_items_from_series(
     return items
 
 
+async def kavita_ebook_inventory(*, force_refresh: bool = False) -> dict[str, int]:
+    """Series + shelf ebook counts using the same expansion as /library/kavita/collection.
+
+    Admin Health previously reported ebook *series* while My Library reports expanded
+    volume/file shelf cards — this helper keeps those scopes explicit and aligned.
+    """
+    all_series = await kavita.get_all_series(force_refresh=force_refresh)
+    ebook_series = [s for s in all_series if s.get("format") in kavita.EBOOK_FORMATS]
+    sem = asyncio.Semaphore(3)
+
+    async def _shelf_len(s: dict) -> int:
+        sid = s.get("id", 0)
+        async with sem:
+            volumes = await kavita.get_series_volumes(sid)
+        return len(
+            _kavita_collection_items_from_series(s, volumes, {}, hidden_titles=set())
+        )
+
+    shelf_lens = await asyncio.gather(*[_shelf_len(s) for s in ebook_series]) if ebook_series else []
+    return {
+        "series_count": len(all_series),
+        "ebook_series_count": len(ebook_series),
+        # Same unit as My Library `totalItems` after library refresh.
+        "ebook_count": int(sum(shelf_lens)),
+    }
+
+
 @router.get("/kavita/collection")
 async def kavita_collection(
     user: User = Depends(get_current_user),

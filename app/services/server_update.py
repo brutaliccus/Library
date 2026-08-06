@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import httpx
@@ -184,42 +184,70 @@ def _configured_host_root() -> str | None:
     return None
 
 
-async def discover_host_root() -> dict[str, Any]:
-    """Locate the compose project directory on the Docker host."""
+def looks_like_host_abs_path(path: str) -> bool:
+    """True for absolute host paths (Unix ``/…`` or Windows ``C:\\…``)."""
+    p = (path or "").strip()
+    if not p or p in (".", ".."):
+        return False
+    if p.startswith("/") and len(p) >= 2:
+        return True
+    if len(p) >= 3 and p[0].isalpha() and p[1] == ":" and p[2] in ("\\", "/"):
+        return True
+    return False
+
+
+def host_root_from_app_data_mount(source: str) -> str:
+    """``/opt/library/data`` (host) → ``/opt/library``; never use container paths.
+
+    Uses POSIX path rules for ``/…`` sources so Windows-hosted unit tests match
+    the Linux Docker host paths the runtime sees.
+    """
+    src = (source or "").strip().rstrip("/\\")
+    if not src:
+        return ""
+    if src.startswith("/"):
+        return str(PurePosixPath(src).parent)
+    return str(PureWindowsPath(src).parent)
+
+
+def _dedupe_candidates(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for source, path in items:
+        key = path.rstrip("/\\")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((source, path))
+    return out
+
+
+async def _collect_host_root_candidates() -> tuple[list[tuple[str, str]], list[str]]:
+    """Return (ordered candidates, rejection notes) without probing the host FS."""
+    candidates: list[tuple[str, str]] = []
+    rejected: list[str] = []
+
     configured = _configured_host_root()
     if configured:
-        return {
-            "hostRoot": configured,
-            "containerRoot": str(HOST_MOUNT) if HOST_MOUNT.is_dir() else None,
-            "source": "env",
-            "error": None,
-        }
+        if looks_like_host_abs_path(configured):
+            candidates.append(("env", configured))
+        else:
+            rejected.append(f"env:{configured!r} (not an absolute host path)")
 
     if not docker_control.socket_available():
-        return {
-            "hostRoot": None,
-            "containerRoot": None,
-            "source": None,
-            "error": "docker.sock not available",
-        }
+        if not candidates:
+            rejected.append("docker.sock not available")
+        return _dedupe_candidates(candidates), rejected
 
     try:
         info = await docker_control._inspect(SELF_CONTAINER)  # noqa: SLF001 — shared sock helper
     except Exception as e:
-        return {
-            "hostRoot": None,
-            "containerRoot": None,
-            "source": None,
-            "error": f"inspect failed: {e}",
-        }
+        rejected.append(f"inspect failed: {e}")
+        return _dedupe_candidates(candidates), rejected
 
     if not info:
-        return {
-            "hostRoot": None,
-            "containerRoot": None,
-            "source": None,
-            "error": f"container {SELF_CONTAINER} not found",
-        }
+        rejected.append(f"container {SELF_CONTAINER} not found")
+        return _dedupe_candidates(candidates), rejected
 
     labels = (info.get("Config") or {}).get("Labels") or {}
     working = (
@@ -228,32 +256,154 @@ async def discover_host_root() -> dict[str, Any]:
         or ""
     ).strip()
     if working:
-        return {
-            "hostRoot": working,
-            "containerRoot": None,
-            "source": "compose_label",
-            "error": None,
-        }
+        if looks_like_host_abs_path(working):
+            candidates.append(("compose_label", working))
+        else:
+            rejected.append(f"compose_label:{working!r} (not an absolute host path)")
 
     for mount in info.get("Mounts") or []:
         if not isinstance(mount, dict):
             continue
         dest = str(mount.get("Destination") or "")
-        src = str(mount.get("Source") or "")
-        if dest in ("/app/data", "/library-host") and src:
-            root = str(Path(src).parent) if dest == "/app/data" else src
+        src = str(mount.get("Source") or "").strip()
+        if not src:
+            continue
+        if dest == "/app/data":
+            root = host_root_from_app_data_mount(src)
+            if looks_like_host_abs_path(root):
+                candidates.append(("mount_app_data", root))
+            else:
+                rejected.append(f"mount_app_data:{src!r}→{root!r} (not an absolute host path)")
+        elif dest == "/library-host":
+            if looks_like_host_abs_path(src):
+                candidates.append(("mount_library_host", src))
+            else:
+                rejected.append(f"mount_library_host:{src!r} (not an absolute host path)")
+
+    return _dedupe_candidates(candidates), rejected
+
+
+async def _probe_host_root(host_root: str) -> tuple[bool, str]:
+    """Bind-mount ``host_root`` briefly and require ``.git`` or ``scripts/update_library.sh``."""
+    if not looks_like_host_abs_path(host_root):
+        return False, "not an absolute host path"
+    if not docker_control.socket_available():
+        return False, "docker.sock not available"
+
+    await _ensure_image(UPDATE_IMAGE)
+    body = {
+        "Image": UPDATE_IMAGE,
+        "Cmd": [
+            "sh",
+            "-c",
+            "test -e /probe/.git || test -e /probe/scripts/update_library.sh",
+        ],
+        "HostConfig": {
+            "Binds": [f"{host_root}:/probe:ro"],
+            "AutoRemove": False,
+            "NetworkMode": "none",
+        },
+    }
+    cid: str | None = None
+    try:
+        async with _docker_client() as client:
+            create = await client.post(
+                f"{docker_control.API_PREFIX}/containers/create",
+                json=body,
+            )
+            if create.status_code >= 400:
+                return False, f"probe create failed: HTTP {create.status_code}"
+            cid = str((create.json() or {}).get("Id") or "")
+            if not cid:
+                return False, "probe create returned no id"
+            start = await client.post(f"{docker_control.API_PREFIX}/containers/{cid}/start")
+            if start.status_code >= 400:
+                return False, f"probe start failed: HTTP {start.status_code}"
+            wait = await client.post(
+                f"{docker_control.API_PREFIX}/containers/{cid}/wait",
+                timeout=60.0,
+            )
+            if wait.status_code >= 400:
+                return False, f"probe wait failed: HTTP {wait.status_code}"
+            code = int((wait.json() or {}).get("StatusCode") or 1)
+            if code == 0:
+                return True, "ok"
+            return False, "missing .git and scripts/update_library.sh"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if cid:
+            await _cleanup_container(cid)
+
+
+async def resolve_validated_host_root() -> dict[str, Any]:
+    """Pick the first candidate that probes as a real install root on the host."""
+    candidates, rejected = await _collect_host_root_candidates()
+    tried: list[str] = list(rejected)
+    if not candidates:
+        return {
+            "hostRoot": None,
+            "containerRoot": str(HOST_MOUNT) if HOST_MOUNT.is_dir() else None,
+            "source": None,
+            "candidates": [],
+            "tried": tried,
+            "error": "could not resolve compose project directory; tried: "
+            + (", ".join(tried) if tried else "(none)"),
+        }
+
+    for source, path in candidates:
+        ok, detail = await _probe_host_root(path)
+        label = f"{source}:{path}"
+        if ok:
             return {
-                "hostRoot": root,
-                "containerRoot": "/library-host" if dest == "/library-host" else None,
-                "source": "mount",
+                "hostRoot": path,
+                "containerRoot": str(HOST_MOUNT) if HOST_MOUNT.is_dir() else None,
+                "source": source,
+                "candidates": [{"source": s, "path": p} for s, p in candidates],
+                "tried": tried,
                 "error": None,
             }
+        tried.append(f"{label} ({detail})")
 
+    return {
+        "hostRoot": None,
+        "containerRoot": str(HOST_MOUNT) if HOST_MOUNT.is_dir() else None,
+        "source": None,
+        "candidates": [{"source": s, "path": p} for s, p in candidates],
+        "tried": tried,
+        "error": "no valid host install root (need .git or scripts/update_library.sh); tried: "
+        + ", ".join(tried),
+    }
+
+
+async def discover_host_root() -> dict[str, Any]:
+    """Locate the compose project directory on the Docker host (best candidate, no probe).
+
+    Preference order:
+      1. ``LIBRARY_HOST_ROOT`` (absolute host path)
+      2. Compose project ``working_dir`` label on the app container
+      3. Parent of the host path mounted at ``/app/data`` (e.g. ``/opt/library/data`` → ``/opt/library``)
+      4. Host path mounted at ``/library-host``
+    """
+    candidates, rejected = await _collect_host_root_candidates()
+    if candidates:
+        source, path = candidates[0]
+        return {
+            "hostRoot": path,
+            "containerRoot": str(HOST_MOUNT) if HOST_MOUNT.is_dir() else None,
+            "source": source,
+            "candidates": [{"source": s, "path": p} for s, p in candidates],
+            "tried": rejected,
+            "error": None,
+        }
     return {
         "hostRoot": None,
         "containerRoot": None,
         "source": None,
-        "error": "could not resolve compose project directory from container labels/mounts",
+        "candidates": [],
+        "tried": rejected,
+        "error": "could not resolve compose project directory; tried: "
+        + (", ".join(rejected) if rejected else "(none)"),
     }
 
 
@@ -480,8 +630,12 @@ async def _ensure_image(image: str) -> None:
 async def _start_update_container(host_root: str) -> str:
     await _ensure_image(UPDATE_IMAGE)
     sock = docker_control.DOCKER_SOCK
+    # Sidecar runs as root; host checkout is often uid 1000 → git "dubious ownership"
+    # unless safe.directory is set. Container path is always /library (bind target).
     cmd = (
         "apk add --no-cache git bash >/dev/null && "
+        "git config --global --add safe.directory /library && "
+        "git config --global --add safe.directory '*' && "
         "bash /library/scripts/admin_server_update.sh"
     )
     body = {
@@ -491,6 +645,7 @@ async def _start_update_container(host_root: str) -> str:
         "Env": [
             "LIBRARY_UPDATE_YES=1",
             "GIT_TERMINAL_PROMPT=0",
+            f"LIBRARY_HOST_ROOT_BIND={host_root}",
         ],
         "Labels": {
             "com.library.server-update": "1",
@@ -580,7 +735,8 @@ async def _run_apply_job(host_root: str) -> None:
             },
         )
         JOB_LOG.write_text(
-            f"[server_update] starting sidecar image={UPDATE_IMAGE} root={host_root}\n",
+            f"[server_update] starting sidecar image={UPDATE_IMAGE} "
+            f"hostRoot={host_root} (bind → /library)\n",
             encoding="utf-8",
         )
         cid = await _start_update_container(host_root)
@@ -643,12 +799,13 @@ async def start_apply() -> dict[str, Any]:
             "job": _job_snapshot(),
         }
 
-    root = await discover_host_root()
+    if not docker_control.socket_available():
+        raise RuntimeError("docker.sock not available — mount it into the app container")
+
+    root = await resolve_validated_host_root()
     host_root = root.get("hostRoot")
     if not host_root:
         raise RuntimeError(root.get("error") or "Host project directory unavailable")
-    if not docker_control.socket_available():
-        raise RuntimeError("docker.sock not available — mount it into the app container")
 
     _write_json(
         JOB_FILE,
@@ -661,6 +818,7 @@ async def start_apply() -> dict[str, Any]:
             "finishedAt": None,
             "updatedAt": _now_iso(),
             "hostRoot": host_root,
+            "hostRootSource": root.get("source"),
         },
     )
     _task = asyncio.create_task(_run_apply_job(str(host_root)))
@@ -673,6 +831,8 @@ async def start_apply() -> dict[str, Any]:
             "the stack. The app may restart mid-update; keep this page open."
         ),
         "job": _job_snapshot(),
+        "hostRoot": host_root,
+        "hostRootSource": root.get("source"),
     }
 
 

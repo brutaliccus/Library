@@ -61,6 +61,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
+# Admin update sidecar (and some CI) run as root against a non-root checkout.
+if command -v git >/dev/null 2>&1; then
+  git config --global --add safe.directory "$ROOT" >/dev/null 2>&1 || true
+  git config --global --add safe.directory '*' >/dev/null 2>&1 || true
+fi
+
 if [[ ! -f docker-compose.yml && ! -f compose.yml ]]; then
   c_red "error: no docker-compose.yml in $ROOT — run from the Library install root."
   exit 1
@@ -98,8 +104,9 @@ echo "  remote: $REMOTE/$BRANCH"
 echo ""
 
 # --- git update ---
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if ! git_err=$(git rev-parse --is-inside-work-tree 2>&1); then
   c_red "error: not inside a git work tree"
+  [[ -n "$git_err" ]] && c_red "  $git_err"
   exit 1
 fi
 

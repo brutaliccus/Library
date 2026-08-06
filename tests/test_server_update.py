@@ -187,13 +187,151 @@ def test_start_apply_requires_host_root(monkeypatch: pytest.MonkeyPatch, tmp_pat
     async def _run():
         with (
             patch.object(server_update, "is_apply_running", return_value=False),
+            patch.object(server_update.docker_control, "socket_available", return_value=True),
             patch.object(
                 server_update,
-                "discover_host_root",
+                "resolve_validated_host_root",
                 AsyncMock(return_value={"hostRoot": None, "error": "missing"}),
             ),
             pytest.raises(RuntimeError, match="missing"),
         ):
             await server_update.start_apply()
+
+    asyncio.run(_run())
+
+
+def test_looks_like_host_abs_path():
+    assert server_update.looks_like_host_abs_path("/opt/library")
+    assert server_update.looks_like_host_abs_path("C:\\dev\\Library")
+    assert not server_update.looks_like_host_abs_path("library")
+    assert not server_update.looks_like_host_abs_path("")
+    assert not server_update.looks_like_host_abs_path(".")
+
+
+def test_host_root_from_app_data_mount():
+    assert server_update.host_root_from_app_data_mount("/opt/library/data") == "/opt/library"
+    assert server_update.host_root_from_app_data_mount("/opt/library/data/") == "/opt/library"
+    # Must not invent a bare /library from unrelated mounts
+    assert server_update.host_root_from_app_data_mount("/library/data") == "/library"
+
+
+def test_discover_prefers_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LIBRARY_HOST_ROOT", "/opt/library")
+
+    async def _run():
+        with patch.object(server_update.docker_control, "socket_available", return_value=False):
+            out = await server_update.discover_host_root()
+        assert out["hostRoot"] == "/opt/library"
+        assert out["source"] == "env"
+        assert out["error"] is None
+
+    asyncio.run(_run())
+
+
+def test_discover_rejects_relative_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LIBRARY_HOST_ROOT", "library")
+
+    async def _run():
+        with patch.object(server_update.docker_control, "socket_available", return_value=False):
+            out = await server_update.discover_host_root()
+        assert out["hostRoot"] is None
+        assert "not an absolute host path" in (out.get("error") or "")
+
+    asyncio.run(_run())
+
+
+def test_discover_from_app_data_mount(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LIBRARY_HOST_ROOT", raising=False)
+    info = {
+        "Config": {"Labels": {}},
+        "Mounts": [
+            {"Source": "/opt/library/data", "Destination": "/app/data"},
+            {"Source": "/opt/library/media/audiobooks", "Destination": "/audiobooks"},
+        ],
+    }
+
+    async def _run():
+        with (
+            patch.object(server_update.docker_control, "socket_available", return_value=True),
+            patch.object(server_update.docker_control, "_inspect", AsyncMock(return_value=info)),
+        ):
+            out = await server_update.discover_host_root()
+        assert out["hostRoot"] == "/opt/library"
+        assert out["source"] == "mount_app_data"
+
+    asyncio.run(_run())
+
+
+def test_discover_compose_label_before_mount(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LIBRARY_HOST_ROOT", raising=False)
+    info = {
+        "Config": {
+            "Labels": {"com.docker.compose.project.working_dir": "/opt/library"},
+        },
+        "Mounts": [
+            {"Source": "/library/data", "Destination": "/app/data"},
+        ],
+    }
+
+    async def _run():
+        with (
+            patch.object(server_update.docker_control, "socket_available", return_value=True),
+            patch.object(server_update.docker_control, "_inspect", AsyncMock(return_value=info)),
+        ):
+            out = await server_update.discover_host_root()
+        assert out["hostRoot"] == "/opt/library"
+        assert out["source"] == "compose_label"
+        paths = [c["path"] for c in out["candidates"]]
+        assert "/opt/library" in paths
+        assert "/library" in paths  # mount candidate still listed, not chosen first
+
+    asyncio.run(_run())
+
+
+def test_resolve_validated_rejects_bare_library_without_markers(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LIBRARY_HOST_ROOT", raising=False)
+
+    async def _fake_collect():
+        return [("mount_app_data", "/library")], []
+
+    async def _run():
+        with (
+            patch.object(
+                server_update,
+                "_collect_host_root_candidates",
+                AsyncMock(side_effect=_fake_collect),
+            ),
+            patch.object(
+                server_update,
+                "_probe_host_root",
+                AsyncMock(return_value=(False, "missing .git and scripts/update_library.sh")),
+            ),
+        ):
+            out = await server_update.resolve_validated_host_root()
+        assert out["hostRoot"] is None
+        assert "/library" in (out.get("error") or "")
+        assert "missing .git" in (out.get("error") or "")
+
+    asyncio.run(_run())
+
+
+def test_resolve_validated_accepts_opt_library(monkeypatch: pytest.MonkeyPatch):
+    async def _run():
+        with (
+            patch.object(
+                server_update,
+                "_collect_host_root_candidates",
+                AsyncMock(return_value=([("env", "/opt/library")], [])),
+            ),
+            patch.object(
+                server_update,
+                "_probe_host_root",
+                AsyncMock(return_value=(True, "ok")),
+            ),
+        ):
+            out = await server_update.resolve_validated_host_root()
+        assert out["hostRoot"] == "/opt/library"
+        assert out["source"] == "env"
+        assert out["error"] is None
 
     asyncio.run(_run())

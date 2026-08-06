@@ -8,6 +8,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
+# Sidecar is typically root; host checkout may be uid 1000 (git "dubious ownership").
+if command -v git >/dev/null 2>&1; then
+  git config --global --add safe.directory "$ROOT" >/dev/null 2>&1 || true
+  git config --global --add safe.directory '*' >/dev/null 2>&1 || true
+fi
+
 mkdir -p data
 JOB_JSON="data/server_update_job.json"
 JOB_LOG="data/server_update_job.log"
@@ -65,7 +71,7 @@ write_job "updating"
 set +e
 set -o pipefail
 {
-  echo "[admin_server_update] root=$ROOT"
+  echo "[admin_server_update] containerRoot=$ROOT hostRoot=${LIBRARY_HOST_ROOT_BIND:-unknown}"
   echo "[admin_server_update] started $(ts)"
   export LIBRARY_UPDATE_YES=1
   bash scripts/update_library.sh --force --yes

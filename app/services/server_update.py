@@ -9,6 +9,11 @@ The sidecar is **detached**: the app must not wait on or force-delete it.
 cleaned up the sidecar on cancel previously killed mid-recreate and left the
 stack stopped.
 
+The sidecar bind-mounts the host install at ``/library`` and exports
+``LIBRARY_HOST_ROOT_BIND`` (real host path). Compose must use that path as
+``--project-directory`` so ``./data`` resolves to the host install, not a
+spurious ``/library/data`` on the host.
+
 Version checks prefer GitHub compare against data/install_revision.json when
 live git is unavailable inside the app.
 """
@@ -725,6 +730,7 @@ async def _start_update_container(host_root: str) -> str:
         "Env": [
             "LIBRARY_UPDATE_YES=1",
             "GIT_TERMINAL_PROMPT=0",
+            # Real host path for compose --project-directory (sidecar cwd is /library).
             f"LIBRARY_HOST_ROOT_BIND={host_root}",
         ],
         "Labels": {

@@ -74,6 +74,12 @@ set -o pipefail
   echo "[admin_server_update] containerRoot=$ROOT hostRoot=${LIBRARY_HOST_ROOT_BIND:-unknown}"
   echo "[admin_server_update] started $(ts)"
   export LIBRARY_UPDATE_YES=1
+  # Required so compose resolves ./data to the host install, not the sidecar mount path.
+  if [[ -z "${LIBRARY_HOST_ROOT_BIND:-}" ]]; then
+    echo "[admin_server_update] WARNING: LIBRARY_HOST_ROOT_BIND unset — bind mounts may resolve incorrectly" >&2
+  else
+    export LIBRARY_HOST_ROOT_BIND
+  fi
   bash scripts/update_library.sh --force --yes
 } 2>&1 | tee -a "$JOB_LOG"
 ec=${PIPESTATUS[0]}

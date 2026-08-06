@@ -98,8 +98,55 @@ if ! "$DOCKER" info >/dev/null 2>&1; then
   fi
 fi
 
+# Compose file path as seen by this process (may be a container mount like /library).
+COMPOSE_FILE_PATH=""
+if [[ -f "$ROOT/docker-compose.yml" ]]; then
+  COMPOSE_FILE_PATH="$ROOT/docker-compose.yml"
+elif [[ -f "$ROOT/compose.yml" ]]; then
+  COMPOSE_FILE_PATH="$ROOT/compose.yml"
+fi
+
+# Host path for relative bind-mount resolution. The Admin update sidecar mounts the
+# real install (e.g. /opt/library) at /library. If compose uses cwd=/library without
+# --project-directory, Docker creates host binds under /library/* (empty) instead of
+# /opt/library/* — app then crash-loops with "unable to open database file".
+# server_update.py sets LIBRARY_HOST_ROOT_BIND to the real host path.
+COMPOSE_PROJECT_DIR="${LIBRARY_HOST_ROOT_BIND:-$ROOT}"
+
+compose() {
+  # shellcheck disable=SC2086
+  if [[ -n "${LIBRARY_HOST_ROOT_BIND:-}" && -n "$COMPOSE_FILE_PATH" ]]; then
+    $DOCKER compose -f "$COMPOSE_FILE_PATH" --project-directory "$COMPOSE_PROJECT_DIR" "$@"
+  else
+    $DOCKER compose "$@"
+  fi
+}
+
+verify_app_data_mount() {
+  local expect_root="${LIBRARY_HOST_ROOT_BIND:-$ROOT}"
+  expect_root="${expect_root%/}"
+  local src=""
+  src="$($DOCKER inspect audiobook-request --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+  if [[ -z "$src" ]]; then
+    c_yellow "warn: could not inspect audiobook-request /app/data mount"
+    return 0
+  fi
+  case "$src" in
+    "$expect_root"|"$expect_root"/*)
+      echo "  data mount: $src"
+      return 0
+      ;;
+  esac
+  c_red "error: app /app/data mounted from $src (expected under $expect_root)"
+  c_red "Compose likely used a container path as project directory (sidecar remap bug)."
+  return 1
+}
+
 echo "Library update"
 echo "  root:   $ROOT"
+if [[ -n "${LIBRARY_HOST_ROOT_BIND:-}" ]]; then
+  echo "  hostRoot(bind): $LIBRARY_HOST_ROOT_BIND  (compose --project-directory)"
+fi
 echo "  remote: $REMOTE/$BRANCH"
 echo ""
 
@@ -160,11 +207,12 @@ if [[ "$SKIP_BUILD" -eq 1 ]]; then
 else
   c_green "[2/4] Building app image ..."
   # shellcheck disable=SC2086
-  $DOCKER compose build app
+  compose build app
 
   c_green "[3/4] Recreating containers (honors COMPOSE_PROFILES from .env) ..."
   # shellcheck disable=SC2086
-  $DOCKER compose up -d
+  compose up -d
+  verify_app_data_mount
 fi
 
 if [[ "$SKIP_KEYS" -eq 1 ]]; then
@@ -178,6 +226,8 @@ elif [[ -f scripts/apply_indexer_keys.sh ]]; then
 else
   c_yellow "[4/4] No scripts/apply_indexer_keys.sh — skipped"
 fi
+
+verify_app_data_mount
 
 # Persist revision for Admin Health (visible inside the app container via ./data).
 write_install_revision() {
@@ -230,11 +280,11 @@ echo ""
 # Soft health summary (best-effort).
 echo "Health:"
 # shellcheck disable=SC2086
-if $DOCKER compose ps --format 'table {{.Name}}\t{{.Status}}' 2>/dev/null | head -n 20; then
+if compose ps --format 'table {{.Name}}\t{{.Status}}' 2>/dev/null | head -n 20; then
   :
 else
   # shellcheck disable=SC2086
-  $DOCKER compose ps 2>/dev/null | head -n 20 || true
+  compose ps 2>/dev/null | head -n 20 || true
 fi
 
 APP_URL="$(grep -E '^APP_URL=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
@@ -242,6 +292,6 @@ APP_URL="${APP_URL:-http://127.0.0.1:8085}"
 echo ""
 echo "Next steps:"
 echo "  - Open ${APP_URL%/}/admin  → Health"
-echo "  - Logs:  cd \"$ROOT\" && $DOCKER compose logs -f app"
+echo "  - Logs:  cd \"$ROOT\" && docker compose logs -f app"
 echo "  - Cron:  see docs/ubuntu-server-install.md#updating (optional systemd timer)"
 echo ""

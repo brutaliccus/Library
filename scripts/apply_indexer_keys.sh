@@ -83,15 +83,35 @@ if ! command -v "$DOCKER" >/dev/null 2>&1; then
   exit 1
 fi
 
+COMPOSE_FILE_PATH=""
+if [[ -f "$ROOT/docker-compose.yml" ]]; then
+  COMPOSE_FILE_PATH="$ROOT/docker-compose.yml"
+elif [[ -f "$ROOT/compose.yml" ]]; then
+  COMPOSE_FILE_PATH="$ROOT/compose.yml"
+fi
+COMPOSE_PROJECT_DIR="${LIBRARY_HOST_ROOT_BIND:-$ROOT}"
+
+compose() {
+  # shellcheck disable=SC2086
+  if [[ -n "${LIBRARY_HOST_ROOT_BIND:-}" && -n "$COMPOSE_FILE_PATH" ]]; then
+    $DOCKER compose -f "$COMPOSE_FILE_PATH" --project-directory "$COMPOSE_PROJECT_DIR" "$@"
+  else
+    $DOCKER compose "$@"
+  fi
+}
+
 echo "Recreating app so Admin Overview picks up Jackett/Prowlarr keys from .env ..."
 echo "  JACKETT_URL=$JU"
 echo "  PROWLARR_URL=$PU"
-$DOCKER compose up -d --force-recreate --no-deps app
+if [[ -n "${LIBRARY_HOST_ROOT_BIND:-}" ]]; then
+  echo "  compose project-directory: $COMPOSE_PROJECT_DIR"
+fi
+compose up -d --force-recreate --no-deps app
 
 echo "Seeding config.jackett_* / config.prowlarr_* into app_settings ..."
 ready=0
 for _ in $(seq 1 45); do
-  if $DOCKER compose exec -T app true >/dev/null 2>&1; then
+  if compose exec -T app true >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -102,7 +122,7 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 
-$DOCKER compose exec -T \
+compose exec -T \
   -e JACKETT_URL_SEED="$JU" \
   -e JACKETT_API_KEY_SEED="$JK" \
   -e PROWLARR_URL_SEED="$PU" \

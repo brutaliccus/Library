@@ -268,7 +268,7 @@ cd C:\dev\Library
 .\scripts\update_library.ps1
 `
 
-Fetches origin/main, resets a clean tree to the remote tip (use --force / -Force only when you intend to discard local tracked edits), rebuilds the pp image, recreates containers (keeps .env, media, NPM), and re-applies indexer keys. Details and an optional systemd timer: [docs/ubuntu-server-install.md#updating](docs/ubuntu-server-install.md#updating). **Admin → Health** also shows the host one-liner.
+Fetches origin/main, resets a clean tree to the remote tip (use --force / -Force only when you intend to discard local tracked edits), rebuilds the pp image, recreates containers (keeps .env, media, NPM), and re-applies indexer keys. Details and an optional systemd timer: [docs/ubuntu-server-install.md#updating](docs/ubuntu-server-install.md#updating). **Admin → Health** also shows the host one-liner. The **Update** button runs the same script via a Docker sidecar (set LIBRARY_HOST_ROOT if auto-discovery is wrong).
 
 ### Indexer cache seed
 

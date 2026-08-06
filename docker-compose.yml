@@ -27,6 +27,7 @@ services:
       - ABB_PROXY_URL=${ABB_PROXY_URL:-}
       - FLARESOLVERR_URL=http://flaresolverr:8191
       - JACKETT_URL=http://audiobook-jackett:9117
+      - PROWLARR_URL=${PROWLARR_URL:-http://prowlarr:9696}
       - PYTHONUNBUFFERED=1
     dns:
       - 1.1.1.1

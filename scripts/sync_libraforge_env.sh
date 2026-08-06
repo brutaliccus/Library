@@ -3,9 +3,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="${LIBRARY_ENV_FILE:-$ROOT/.env}"
-PUBLIC_URL="${LIBRAFORGE_BOOTSTRAP_URL:-http://127.0.0.1:5056}"
+_lf_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+PUBLIC_URL="${LIBRAFORGE_BOOTSTRAP_URL:-http://${_lf_ip:-127.0.0.1}:5056}"
 INTERNAL_URL="${LIBRAFORGE_INTERNAL_URL_DEFAULT:-http://libraforge:5056}"
 WAIT_SECONDS="${LIBRAFORGE_WAIT_SECONDS:-180}"
+# Health probe still hits localhost (published port on this host).
+PROBE_URL="${LIBRAFORGE_PROBE_URL:-http://127.0.0.1:5056}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "skip libraforge env (no .env)"
@@ -27,10 +30,10 @@ set_env() {
   fi
 }
 
-echo "Waiting for LibraForge at ${PUBLIC_URL} ..."
+echo "Waiting for LibraForge at ${PROBE_URL} (public URL ${PUBLIC_URL}) ..."
 ready=0
 for _ in $(seq 1 $((WAIT_SECONDS / 3))); do
-  if curl -fsS "${PUBLIC_URL}/health" >/dev/null 2>&1 || curl -fsS -o /dev/null "${PUBLIC_URL}/" >/dev/null 2>&1; then
+  if curl -fsS "${PROBE_URL}/health" >/dev/null 2>&1 || curl -fsS -o /dev/null "${PROBE_URL}/" >/dev/null 2>&1; then
     ready=1
     break
   fi

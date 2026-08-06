@@ -416,7 +416,14 @@ if ($useBundled) {
 if ($useBundled) {
     Set-EnvKey $envPath "ABS_URL" "http://audiobookshelf:80"
     Set-EnvKey $envPath "KAVITA_URL" "http://kavita:5000"
-    Set-EnvKey $envPath "LIBRAFORGE_URL" "http://127.0.0.1:5056"
+    $lfIp = ""
+    try {
+        $lfIp = (Get-NetIPAddress -AddressFamily IPv4 |
+            Where-Object { $_.IPAddress -notlike "127.*" -and $_.PrefixOrigin -ne "WellKnown" } |
+            Select-Object -First 1 -ExpandProperty IPAddress)
+    } catch {}
+    if (-not $lfIp) { $lfIp = "127.0.0.1" }
+    Set-EnvKey $envPath "LIBRAFORGE_URL" ("http://{0}:5056" -f $lfIp)
     Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" "http://libraforge:5056"
     Write-Ok "Bundled-media URLs written (keys sync after containers start)"
 }
@@ -454,7 +461,14 @@ $lfOn = if ($NonInteractive) { -not $DisableLibraForgePipeline } else { Read-Yes
 $ebOn = if ($NonInteractive) { -not $DisableEbookPipeline } else { Read-YesNo "Enable ebook organizer pipeline?" $true }
 if (-not $useBundled) {
     if (-not (Get-EnvKeyValue $envPath "LIBRAFORGE_URL")) {
-        Set-EnvKey $envPath "LIBRAFORGE_URL" "http://127.0.0.1:5056"
+        $lfIp = ""
+    try {
+        $lfIp = (Get-NetIPAddress -AddressFamily IPv4 |
+            Where-Object { $_.IPAddress -notlike "127.*" -and $_.PrefixOrigin -ne "WellKnown" } |
+            Select-Object -First 1 -ExpandProperty IPAddress)
+    } catch {}
+    if (-not $lfIp) { $lfIp = "127.0.0.1" }
+    Set-EnvKey $envPath "LIBRAFORGE_URL" ("http://{0}:5056" -f $lfIp)
     }
     if (-not (Get-EnvKeyValue $envPath "LIBRAFORGE_INTERNAL_URL")) {
         Set-EnvKey $envPath "LIBRAFORGE_INTERNAL_URL" "http://host.docker.internal:5056"
@@ -926,7 +940,20 @@ if ($OlMode -match '^(build|b)$') {
     }
 }
 
-[void](Invoke-Compose @("compose", "up", "-d", "app"))
+# Force-recreate app + seed app_settings so Admin Overview sees Jackett/Prowlarr keys.
+$applyKeys = Join-Path $TARGET "scripts\apply_indexer_keys.ps1"
+if (Test-Path $applyKeys) {
+    Write-Step "==> Applying Jackett/Prowlarr keys into running app"
+    & powershell -ExecutionPolicy Bypass -File $applyKeys -RepoRoot $TARGET
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "FATAL: Jackett/Prowlarr API keys missing from .env / app Settings."
+        Write-Warn "Repair: .\scripts\configure_jackett.ps1 -ForceBundled; .\scripts\configure_prowlarr.ps1 -ForceBundled; .\scripts\apply_indexer_keys.ps1"
+        $script:IndexerCfgFail = $true
+    }
+}
+else {
+    [void](Invoke-Compose @("compose", "up", "-d", "--force-recreate", "--no-deps", "app"))
+}
 
 Write-Step "==> Post-install health report"
 function Probe-Http([string]$Name, [string]$Url) {
@@ -965,10 +992,20 @@ else {
 }
 $jk = Get-EnvKeyValue $envPath "JACKETT_API_KEY"
 $pk = Get-EnvKeyValue $envPath "PROWLARR_API_KEY"
+$keysOk = $true
 if ($jk -and $jk -notmatch 'your-') { Write-Host ("  {0,-16} OK" -f "jackett-key") -ForegroundColor Green }
-else { Write-Host ("  {0,-16} missing" -f "jackett-key") -ForegroundColor Red }
+else { Write-Host ("  {0,-16} missing" -f "jackett-key") -ForegroundColor Red; $keysOk = $false }
 if ($pk -and $pk -notmatch 'your-') { Write-Host ("  {0,-16} OK" -f "prowlarr-key") -ForegroundColor Green }
-else { Write-Host ("  {0,-16} missing" -f "prowlarr-key") -ForegroundColor Red }
+else { Write-Host ("  {0,-16} missing" -f "prowlarr-key") -ForegroundColor Red; $keysOk = $false }
+if (-not $keysOk -or $script:IndexerCfgFail) {
+    Write-Host ""
+    Write-Host "**********************************************************************" -ForegroundColor Red
+    Write-Host "* Jackett/Prowlarr keys missing. Admin Overview = Not configured.   *" -ForegroundColor Red
+    Write-Host "*   .\scripts\configure_jackett.ps1 -ForceBundled                    *" -ForegroundColor Red
+    Write-Host "*   .\scripts\configure_prowlarr.ps1 -ForceBundled                   *" -ForegroundColor Red
+    Write-Host "*   .\scripts\apply_indexer_keys.ps1                                 *" -ForegroundColor Red
+    Write-Host "**********************************************************************" -ForegroundColor Red
+}
 
 $dbPath = Join-Path $TARGET "data\app.db"
 if (Test-Path $dbPath) {
@@ -994,7 +1031,7 @@ Write-Host ""
 Write-Host "Indexers (auto-configured when bundled):"
 Write-Host ("  - Jackett: " + (Get-EnvKeyValue $envPath "JACKETT_URL"))
 Write-Host ("  - Prowlarr: " + (Get-EnvKeyValue $envPath "PROWLARR_URL"))
-Write-Host "  - Re-run: .\scripts\configure_jackett.ps1 ; .\scripts\configure_prowlarr.ps1"
+Write-Host "  - Re-run: .\scripts\configure_jackett.ps1 -ForceBundled; .\scripts\configure_prowlarr.ps1 -ForceBundled; .\scripts\apply_indexer_keys.ps1"
 $olDb = Join-Path $TARGET "data\ol_catalog.db"
 if (Test-Path $olDb) {
     Write-Host "  - Open Library: data\ol_catalog.db present"

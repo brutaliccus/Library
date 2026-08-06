@@ -117,9 +117,13 @@ is_ubuntu_like() {
   [[ "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *debian* || "${ID:-}" == "debian" ]]
 }
 
+detect_lan_ip() {
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+
 detect_lan_url() {
   local ip
-  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  ip="$(detect_lan_ip)"
   if [[ -n "$ip" ]]; then
     echo "http://${ip}:8085"
   else
@@ -484,8 +488,13 @@ fi
 if $USE_BUNDLED; then
   set_env ABS_URL "http://audiobookshelf:80"
   set_env KAVITA_URL "http://kavita:5000"
-  set_env LIBRAFORGE_URL "http://127.0.0.1:5056"
+  # Browser "Open LibraForge" must use a LAN-reachable host, not 127.0.0.1
+  # (127.0.0.1 points at the client machine when Admin is opened from another device).
+  _lf_ip="$(detect_lan_ip)"
+  set_env LIBRAFORGE_URL "http://${_lf_ip:-127.0.0.1}:5056"
   set_env LIBRAFORGE_INTERNAL_URL "http://libraforge:5056"
+  explain "LibraForge UI URL: $(get_env LIBRAFORGE_URL) (LAN IP; internal probe uses libraforge:5056)."
+  explain "If NPM exposes forge.*, install creates access list home-or-vpn (LAN + docker + Tailscale)."
   c_green "Bundled-media URLs written (keys sync after containers start)"
 else
   step "External ABS / Kavita / LibraForge [REQUIRED for libraries]"
@@ -938,12 +947,16 @@ done
 
 # ---------------------------------------------------------------------------
 step "Configure Jackett / Prowlarr / sync keys"
+INDEXER_CFG_FAIL=0
 if $USE_BUNDLED_JACKETT; then
   if [[ -f scripts/configure_jackett.sh ]]; then
     c_cyan "Preconfiguring Jackett (FlareSolverr + AudioBookBay)"
-    bash scripts/configure_jackett.sh --force-bundled || true
+    if ! bash scripts/configure_jackett.sh --force-bundled; then
+      c_red "Jackett configure failed — Admin will show Jackett as Not configured"
+      INDEXER_CFG_FAIL=1
+    fi
   elif [[ -f scripts/sync_jackett_env.sh ]]; then
-    bash scripts/sync_jackett_env.sh || true
+    bash scripts/sync_jackett_env.sh || INDEXER_CFG_FAIL=1
   fi
 else
   if [[ -f scripts/configure_jackett.sh && -n "$(get_env JACKETT_API_KEY)" ]]; then
@@ -955,9 +968,12 @@ fi
 if $USE_BUNDLED_PROWLARR; then
   if [[ -f scripts/configure_prowlarr.sh ]]; then
     c_cyan "Preconfiguring Prowlarr (Knaben + AudioBookBay → Jackett)"
-    bash scripts/configure_prowlarr.sh --force-bundled || true
+    if ! bash scripts/configure_prowlarr.sh --force-bundled; then
+      c_red "Prowlarr configure failed — Admin will show Prowlarr as Not configured"
+      INDEXER_CFG_FAIL=1
+    fi
   elif [[ -f scripts/sync_prowlarr_env.sh ]]; then
-    bash scripts/sync_prowlarr_env.sh || true
+    bash scripts/sync_prowlarr_env.sh || INDEXER_CFG_FAIL=1
   fi
 else
   if [[ -f scripts/configure_prowlarr.sh && -n "$(get_env PROWLARR_API_KEY)" ]]; then
@@ -1026,7 +1042,19 @@ if [[ "$OL_MODE" == "build" || "$OL_MODE" == "b" ]]; then
     c_yellow "Could not start OL build — run later: docker compose exec app python /app/scripts/ol_import_dumps.py"
 fi
 
-$DOCKER compose up -d app || true
+# Force-recreate app + seed app_settings so Admin Overview sees Jackett/Prowlarr keys.
+# Writing .env after first `up` is not enough — the running container keeps empty keys.
+if [[ -f scripts/apply_indexer_keys.sh ]]; then
+  c_cyan "Applying Jackett/Prowlarr keys into running app (.env recreate + app_settings seed)"
+  if ! bash scripts/apply_indexer_keys.sh; then
+    c_red "FATAL: Jackett/Prowlarr API keys are not in .env / app Settings."
+    c_red "Admin Overview will show them as Not configured until this succeeds."
+    c_yellow "Repair: bash scripts/configure_jackett.sh --force-bundled && bash scripts/configure_prowlarr.sh --force-bundled && bash scripts/apply_indexer_keys.sh"
+    INDEXER_CFG_FAIL=1
+  fi
+else
+  $DOCKER compose up -d --force-recreate --no-deps app || true
+fi
 
 # ---------------------------------------------------------------------------
 step "Web Push (VAPID) keys [OPTIONAL]"
@@ -1128,15 +1156,30 @@ else
 fi
 _jk="$(get_env JACKETT_API_KEY)"
 _pk="$(get_env PROWLARR_API_KEY)"
+_keys_ok=1
 if [[ -n "$_jk" && ! "$_jk" =~ your- ]]; then
   printf '  %-16s %s\n' "jackett-key" "$_ok"
 else
   printf '  %-16s %s\n' "jackett-key" "$_bad"
+  _keys_ok=0
 fi
 if [[ -n "$_pk" && ! "$_pk" =~ your- ]]; then
   printf '  %-16s %s\n' "prowlarr-key" "$_ok"
 else
   printf '  %-16s %s\n' "prowlarr-key" "$_bad"
+  _keys_ok=0
+fi
+if [[ "$_keys_ok" -ne 1 || "${INDEXER_CFG_FAIL:-0}" -eq 1 ]]; then
+  c_red ""
+  c_red "**********************************************************************"
+  c_red "* Jackett/Prowlarr keys missing or configure failed.                 *"
+  c_red "* Admin Overview will show them as Not configured.                   *"
+  c_red "* Fix now:                                                           *"
+  c_red "*   bash scripts/configure_jackett.sh --force-bundled                *"
+  c_red "*   bash scripts/configure_prowlarr.sh --force-bundled               *"
+  c_red "*   bash scripts/apply_indexer_keys.sh                               *"
+  c_red "**********************************************************************"
+  c_red ""
 fi
 if [[ -S /var/run/docker.sock ]]; then
   if $DOCKER info >/dev/null 2>&1; then
@@ -1175,7 +1218,7 @@ echo ""
 echo "Indexers (auto-configured when bundled):"
 echo "  - Jackett: AudioBookBay → $(get_env JACKETT_URL)"
 echo "  - Prowlarr: Knaben + AudioBookBay Torznab → $(get_env PROWLARR_URL)"
-echo "  - Re-run anytime: bash scripts/configure_jackett.sh && bash scripts/configure_prowlarr.sh"
+echo "  - Re-run anytime: bash scripts/configure_jackett.sh --force-bundled && bash scripts/configure_prowlarr.sh --force-bundled && bash scripts/apply_indexer_keys.sh"
 if [[ "$OL_MODE" == "build" || "$OL_MODE" == "b" ]]; then
   echo "  - Open Library: local build running in background (docker compose logs -f app)"
 elif [[ -f data/ol_catalog.db ]]; then

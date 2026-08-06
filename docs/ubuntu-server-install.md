@@ -135,7 +135,18 @@ LIBRARY_NONINTERACTIVE=1 \
 | Bundled Prowlarr | Yes | Answer **n**, then paste Prowlarr URL + API key (`LIBRARY_SKIP_PROWLARR=1` / `LIBRARY_PROWLARR_URL`) |
 | Open Library cache | Skip | LIBRARY_OL_MODE=skip|build|download (default skip; multi-GB optional) |build|skip` |
 
-After start, `scripts/configure_jackett.sh` and `scripts/configure_prowlarr.sh` idempotently wire FlareSolverr + AudioBookBay and Knaben (same shape as production on the Pi). Re-run anytime.
+After start, `scripts/configure_jackett.sh` and `scripts/configure_prowlarr.sh` idempotently wire FlareSolverr + AudioBookBay and Knaben (same shape as production on the Pi), then `scripts/apply_indexer_keys.sh` force-recreates the app and seeds `app_settings` so Admin Overview shows Jackett/Prowlarr as **configured**.
+
+If Admin still says **Not configured**, the API keys never reached the running app container (`.env` write alone is not enough). Repair:
+
+```bash
+cd /opt/library   # or your install dir
+bash scripts/configure_jackett.sh --force-bundled
+bash scripts/configure_prowlarr.sh --force-bundled
+bash scripts/apply_indexer_keys.sh
+```
+
+Bundled LibraForge sets `LIBRAFORGE_URL=http://<lan-ip>:5056` (not `127.0.0.1`) so **Open LibraForge** works from other devices. With NPM + a domain, `configure_npm.sh` creates access list `home-or-vpn` (LAN / docker / Tailscale) and a `forge.<domain>` proxy host.
 
 Prebuilt OL catalog assets live on the GitHub Release tag [`data-seed`](https://github.com/brutaliccus/Library/releases/tag/data-seed). Maintainers package with `scripts/export_ol_catalog_seed.py`.
 

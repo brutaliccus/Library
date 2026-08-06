@@ -117,9 +117,15 @@ async def _probe_kavita() -> dict[str, Any]:
 
 
 async def _probe_prowlarr() -> dict[str, Any]:
-    settings = get_settings()
-    url = (settings.prowlarr_url or "").rstrip("/")
-    key = (settings.prowlarr_api_key or "").strip()
+    # Prefer effective settings (DB override -> env) so install/seed + Admin Config match Overview.
+    try:
+        from app.services import instance_settings as inst
+        url = (await inst.get_effective("config.prowlarr_url") or "").rstrip("/")
+        key = (await inst.get_effective("config.prowlarr_api_key") or "").strip()
+    except Exception:
+        settings = get_settings()
+        url = (settings.prowlarr_url or "").rstrip("/")
+        key = (settings.prowlarr_api_key or "").strip()
     if not url or _is_placeholder(key):
         return {
             "configured": False,
@@ -160,9 +166,14 @@ async def _probe_prowlarr() -> dict[str, Any]:
 
 
 async def _probe_jackett() -> dict[str, Any]:
-    settings = get_settings()
-    url = (settings.jackett_url or "").rstrip("/")
-    key = (settings.jackett_api_key or "").strip()
+    try:
+        from app.services import instance_settings as inst
+        url = (await inst.get_effective("config.jackett_url") or "").rstrip("/")
+        key = (await inst.get_effective("config.jackett_api_key") or "").strip()
+    except Exception:
+        settings = get_settings()
+        url = (settings.jackett_url or "").rstrip("/")
+        key = (settings.jackett_api_key or "").strip()
     if not url:
         return {"configured": False, "connected": False, "error": "JACKETT_URL not set"}
     try:

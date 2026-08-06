@@ -246,7 +246,57 @@ def ensure_cert(domain_names):
     return 0
 
 
-def upsert_host(domain_name, forward_host, forward_port, advanced="", want_ssl=False):
+
+def list_access_lists():
+    code, payload = req("GET", "/api/nginx/access-lists", token=token)
+    if code != 200:
+        return []
+    if isinstance(payload, list):
+        return payload
+    return payload.get("data") or []
+
+
+def ensure_home_or_vpn_access_list():
+    """LAN + docker + Tailscale allowlist used for LibraForge (no built-in auth)."""
+    name = "home-or-vpn"
+    clients = [
+        {"address": "192.168.0.0/16", "directive": "allow"},
+        {"address": "10.0.0.0/8", "directive": "allow"},
+        {"address": "172.16.0.0/12", "directive": "allow"},
+        {"address": "100.64.0.0/10", "directive": "allow"},
+        {"address": "127.0.0.1/32", "directive": "allow"},
+    ]
+    existing = None
+    for item in list_access_lists():
+        if str(item.get("name") or "").lower() == name:
+            existing = item
+            break
+    body = {
+        "name": name,
+        "satisfy_any": True,
+        "pass_auth": False,
+        "clients": clients,
+        "items": [],
+    }
+    if existing and existing.get("id"):
+        code, payload = req(
+            "PUT",
+            f"/api/nginx/access-lists/{existing['id']}",
+            body,
+            token=token,
+        )
+        action = "updated"
+    else:
+        code, payload = req("POST", "/api/nginx/access-lists", body, token=token)
+        action = "created"
+    if code in (200, 201) and payload.get("id"):
+        print(f"Access list {action}: {name} (id={payload.get('id')})")
+        return payload.get("id")
+    print(f"warn: access list {name} failed (HTTP {code}): {payload}")
+    return (existing or {}).get("id") or 0
+
+
+def upsert_host(domain_name, forward_host, forward_port, advanced="", want_ssl=False, access_list_id=0):
     if not domain_name:
         return
     hosts = list_hosts()
@@ -267,7 +317,7 @@ def upsert_host(domain_name, forward_host, forward_port, advanced="", want_ssl=F
         "block_exploits": True,
         "caching_enabled": False,
         "allow_websocket_upgrade": True,
-        "access_list_id": 0,
+        "access_list_id": int(access_list_id or 0),
         "advanced_config": advanced or "",
         "enabled": True,
         "meta": {
@@ -325,20 +375,45 @@ if not domain and not abs_domain and not kavita_domain:
     if lan_names:
         primary = lan_names[0]
         print(f"No NPM_DOMAIN — creating LAN HTTP proxy host(s): {', '.join(lan_names)}")
+        forge_access_id = ensure_home_or_vpn_access_list()
         for name in lan_names:
             upsert_host(name, "app", 8080, advanced=library_advanced, want_ssl=False)
+            # Optional forge host on same LAN name is awkward (one host per name).
+            # Publish LibraForge directly on :5056; access list is ready for a forge.* domain later.
+        print(
+            f"LibraForge LAN: open http://<lan-ip>:5056 "
+            f"(access list home-or-vpn id={forge_access_id} ready for NPM_FORGE_DOMAIN)"
+        )
         print(f"LAN Library URL via NPM: http://{primary}/  (also http://<host>:8085)")
         print(f"  Admin UI: {base}")
         sys.exit(0)
-    print("NPM ready (no domains set — LAN / HTTP-only).")
+    print("NPM ready (no domains set - LAN / HTTP-only).")
     print(f"  Admin UI: {base}")
     print("  Set NPM_DOMAIN (+ optional NPM_LETSENCRYPT_EMAIL) and re-run this script to create hosts.")
     sys.exit(0)
 
 # Upstream service names on the compose network (internal ports).
+forge_access_id = ensure_home_or_vpn_access_list()
 upsert_host(domain, "app", 8080, advanced=library_advanced, want_ssl=want_ssl)
 upsert_host(abs_domain, "audiobookshelf", 80, want_ssl=want_ssl)
 upsert_host(kavita_domain, "kavita", 5000, want_ssl=want_ssl)
+forge_domain = (os.environ.get("NPM_FORGE_DOMAIN") or "").strip()
+if not forge_domain and domain:
+    # forge.<library-domain> when operator did not set NPM_FORGE_DOMAIN
+    parts = domain.split(".")
+    forge_domain = ("forge." + domain) if len(parts) >= 2 else ""
+if forge_domain:
+    upsert_host(
+        forge_domain,
+        "libraforge",
+        5056,
+        want_ssl=want_ssl,
+        access_list_id=forge_access_id,
+    )
+    print(
+        f"LibraForge proxy {forge_domain} -> libraforge:5056 "
+        f"(access list home-or-vpn id={forge_access_id})"
+    )
 
 if domain:
     scheme = "https" if (want_ssl and le_email) else "http"

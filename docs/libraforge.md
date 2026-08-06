@@ -72,6 +72,22 @@ Cloudflare A record for `forge.library.freiverse.com` -> `74.135.86.77` (same as
 From an allowed LAN/VPN IP, `https://forge.library.freiverse.com` should load; from the public Internet expect **403** (`home-or-vpn`).
 
 Do **not** leave the forge host on Public / without an access list. It can rewrite tags and move files.
+
+### Bundled-media installs (laptop / new server)
+
+Library Site compose publishes LibraForge on `0.0.0.0:5056`. The installer sets:
+
+| Variable | Value |
+|----------|-------|
+| `LIBRAFORGE_URL` | `http://<host-lan-ip>:5056` (so Admin **Open LibraForge** works off-box) |
+| `LIBRAFORGE_INTERNAL_URL` | `http://libraforge:5056` (Docker DNS from the Library app) |
+
+When the `npm` profile is enabled and `NPM_DOMAIN` is set, `scripts/configure_npm.sh` also:
+
+1. Creates/updates NPM access list **`home-or-vpn`** — allow `192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`, `100.64.0.0/10`, `127.0.0.1/32` (Satisfy Any)
+2. Creates proxy host **`forge.<NPM_DOMAIN>`** (or `NPM_FORGE_DOMAIN`) → `libraforge:5056` with that access list
+
+LAN-only (no domain): open `http://<lan-ip>:5056` directly; the access list is still created for when you add a forge hostname later.
 ## Audible authentication
 
 Metadata Forge needs an **unencrypted** Audible auth JSON at `/auth/audible-metadata.json`.

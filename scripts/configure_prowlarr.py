@@ -348,8 +348,8 @@ def configure_bundled() -> int:
     print("Waiting for Prowlarr API ...")
     key = _wait_api()
     if not key:
-        print("skip prowlarr configure (API key not ready)")
-        return 0
+        print("error: prowlarr configure failed (API key not ready)", file=sys.stderr)
+        return 1
     _set_env("PROWLARR_URL", BUNDLED_URL)
     _set_env("PROWLARR_API_KEY", key)
     print("PROWLARR_URL / PROWLARR_API_KEY written to .env")

@@ -199,8 +199,8 @@ def _probe_host(api_key: str, timeout: int = 90) -> bool:
 def configure_bundled() -> int:
     print("Waiting for Jackett ServerConfig.json ...")
     if not _wait_config():
-        print("skip jackett configure (config not ready)")
-        return 0
+        print("error: jackett configure failed (config not ready)", file=sys.stderr)
+        return 1
     key = _patch_server_config()
     changed = _ensure_abb_indexer()
     if changed:
@@ -211,9 +211,9 @@ def configure_bundled() -> int:
         _set_env("JACKETT_API_KEY", key)
         print("JACKETT_URL / JACKETT_API_KEY written to .env")
         _probe_host(key)
-    else:
-        print("warn: Jackett API key empty after configure")
-    return 0
+        return 0
+    print("error: Jackett API key empty after configure", file=sys.stderr)
+    return 1
 
 
 def configure_external(url: str, api_key: str) -> int:

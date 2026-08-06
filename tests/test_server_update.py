@@ -335,3 +335,113 @@ def test_resolve_validated_accepts_opt_library(monkeypatch: pytest.MonkeyPatch):
         assert out["error"] is None
 
     asyncio.run(_run())
+
+
+def test_docker_status_code_treats_zero_as_success():
+    """Regression: ``StatusCode: 0`` must not become 1 via ``x or 1``."""
+    assert server_update._docker_status_code({"StatusCode": 0}) == 0
+    assert server_update._docker_status_code({"StatusCode": 1}) == 1
+    assert server_update._docker_status_code({}) == 1
+    assert server_update._docker_status_code(None) == 1
+
+
+def test_probe_accepts_env_host_root_when_docker_wait_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Host path need not exist in the app container; Docker wait 0 is enough."""
+    monkeypatch.setenv("LIBRARY_HOST_ROOT", "/opt/library")
+    server_update._probe_ok_cache.clear()
+
+    class _Resp:
+        def __init__(self, status_code: int, payload: dict | None = None, content: bytes = b"{}"):
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.content = content
+            self.text = content.decode("utf-8", "replace")
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url: str, **kwargs):
+            if url.endswith("/containers/create"):
+                return _Resp(201, {"Id": "abc123"}, b'{"Id":"abc123"}')
+            if url.endswith("/start"):
+                return _Resp(204, {}, b"")
+            if url.endswith("/wait"):
+                # Critical: StatusCode 0 must count as success
+                return _Resp(200, {"StatusCode": 0}, b'{"StatusCode":0}')
+            return _Resp(404, {}, b"")
+
+        async def get(self, url: str, **kwargs):
+            return _Resp(200, {}, b"{}")
+
+        async def delete(self, url: str, **kwargs):
+            return _Resp(204, {}, b"")
+
+    async def _run():
+        with (
+            patch.object(server_update.docker_control, "socket_available", return_value=True),
+            patch.object(server_update, "_ensure_image", AsyncMock()),
+            patch.object(server_update, "_docker_client", return_value=_Client()),
+            patch.object(server_update, "_cleanup_container", AsyncMock()),
+        ):
+            # Local Path must not gate acceptance
+            assert not (tmp_path / "opt" / "library").exists()
+            ok, detail = await server_update._probe_host_root("/opt/library")
+            assert ok is True
+            assert detail == "ok"
+            out = await server_update.resolve_validated_host_root()
+            assert out["hostRoot"] == "/opt/library"
+            assert out["source"] == "env"
+            assert out["error"] is None
+
+    asyncio.run(_run())
+
+
+def test_start_apply_clears_stale_job_log_on_validation_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setattr(server_update, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_update, "JOB_FILE", tmp_path / "job.json")
+    monkeypatch.setattr(server_update, "JOB_LOG", tmp_path / "job.log")
+    (tmp_path / "job.log").write_text(
+        "[admin_server_update] started 2026-08-06T17:12:32Z\nold failure\n",
+        encoding="utf-8",
+    )
+    _write = tmp_path / "job.json"
+    _write.write_text(
+        json.dumps(
+            {
+                "phase": "failed",
+                "running": False,
+                "error": "old",
+                "startedAt": "2026-08-06T17:12:32Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def _run():
+        with (
+            patch.object(server_update, "is_apply_running", return_value=False),
+            patch.object(server_update.docker_control, "socket_available", return_value=True),
+            patch.object(
+                server_update,
+                "resolve_validated_host_root",
+                AsyncMock(return_value={"hostRoot": None, "error": "no valid host"}),
+            ),
+            pytest.raises(RuntimeError, match="no valid host"),
+        ):
+            await server_update.start_apply()
+        job = server_update.get_job()
+        assert job["phase"] == "failed"
+        assert "no valid host" in (job.get("error") or "")
+        assert "17:12:32" not in (job.get("logTail") or "")
+        assert "no valid host" in (job.get("logTail") or "")
+
+    asyncio.run(_run())

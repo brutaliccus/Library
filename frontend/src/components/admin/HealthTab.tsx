@@ -413,6 +413,8 @@ function ServerUpdateCard() {
         (e instanceof Error ? e.message : "Could not start update");
       setError(String(detail));
       toast(String(detail), "error");
+      // Replace stale job/log from a previous failure with the latest apply attempt.
+      await loadStatus();
     }
   };
 

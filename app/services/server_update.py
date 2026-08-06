@@ -36,6 +36,9 @@ SELF_CONTAINER = "audiobook-request"
 UPDATE_IMAGE = os.environ.get("LIBRARY_UPDATE_SIDECAR_IMAGE", "docker:27-cli")
 HOST_ROOT_ENV = "LIBRARY_HOST_ROOT"
 HOST_MOUNT = Path("/library-host")
+# Positive host-root probe cache (host path → (ok_until_monotonic, detail)).
+_PROBE_OK_TTL_SEC = 60.0
+_probe_ok_cache: dict[str, tuple[float, str]] = {}
 
 _task: asyncio.Task | None = None
 
@@ -283,21 +286,39 @@ async def _collect_host_root_candidates() -> tuple[list[tuple[str, str]], list[s
     return _dedupe_candidates(candidates), rejected
 
 
+def _docker_status_code(payload: dict[str, Any] | None, *, default: int = 1) -> int:
+    """Read Docker wait StatusCode. Must not use ``or`` — exit 0 is success and falsy."""
+    if not payload:
+        return default
+    if "StatusCode" not in payload:
+        return default
+    try:
+        return int(payload["StatusCode"])
+    except (TypeError, ValueError):
+        return default
+
+
 async def _probe_host_root(host_root: str) -> tuple[bool, str]:
-    """Bind-mount ``host_root`` briefly and require ``.git`` or ``scripts/update_library.sh``."""
+    """Bind-mount ``host_root`` on the Docker *host* and require install markers.
+
+    ``LIBRARY_HOST_ROOT`` is a host path and usually does **not** exist inside the
+    app container — never validate with ``Path(host_root).exists()``.
+    """
     if not looks_like_host_abs_path(host_root):
         return False, "not an absolute host path"
     if not docker_control.socket_available():
         return False, "docker.sock not available"
 
+    cached = _probe_ok_cache.get(host_root)
+    if cached and cached[0] > time.monotonic():
+        return True, cached[1]
+
     await _ensure_image(UPDATE_IMAGE)
+    # Clear image ENTRYPOINT (docker-entrypoint.sh) so we run a plain shell test.
     body = {
         "Image": UPDATE_IMAGE,
-        "Cmd": [
-            "sh",
-            "-c",
-            "test -e /probe/.git || test -e /probe/scripts/update_library.sh",
-        ],
+        "Entrypoint": ["sh", "-c"],
+        "Cmd": ["test -e /probe/.git || test -e /probe/scripts/update_library.sh"],
         "HostConfig": {
             "Binds": [f"{host_root}:/probe:ro"],
             "AutoRemove": False,
@@ -325,8 +346,9 @@ async def _probe_host_root(host_root: str) -> tuple[bool, str]:
             )
             if wait.status_code >= 400:
                 return False, f"probe wait failed: HTTP {wait.status_code}"
-            code = int((wait.json() or {}).get("StatusCode") or 1)
+            code = _docker_status_code(wait.json() if wait.content else None, default=1)
             if code == 0:
+                _probe_ok_cache[host_root] = (time.monotonic() + _PROBE_OK_TTL_SEC, "ok")
                 return True, "ok"
             return False, "missing .git and scripts/update_library.sh"
     except Exception as e:
@@ -473,7 +495,17 @@ async def get_status() -> dict[str, Any]:
     local = await get_local_version()
     root = await discover_host_root()
     job = _job_snapshot()
-    apply_ready = bool(root.get("hostRoot")) and docker_control.socket_available()
+    sock_ok = docker_control.socket_available()
+    apply_ready = bool(root.get("hostRoot")) and sock_ok
+    if apply_ready:
+        reason = None
+    elif not sock_ok:
+        reason = (
+            "docker.sock not available in the app container — mount "
+            "/var/run/docker.sock (check still works via GitHub)"
+        )
+    else:
+        reason = root.get("error") or "Host project directory unavailable"
     return {
         "local": local,
         "remote": None,
@@ -484,10 +516,8 @@ async def get_status() -> dict[str, Any]:
         "hostRoot": root.get("hostRoot"),
         "hostRootSource": root.get("source"),
         "applyAvailable": apply_ready,
-        "applyUnavailableReason": None
-        if apply_ready
-        else (root.get("error") or "Host project directory or docker.sock unavailable"),
-        "dockerSocket": docker_control.socket_available(),
+        "applyUnavailableReason": reason,
+        "dockerSocket": sock_ok,
         "job": job,
         "manualCommand": "cd /opt/library && bash scripts/update_library.sh",
     }
@@ -696,7 +726,7 @@ async def _await_container(cid: str) -> int:
         if resp.status_code >= 400:
             return 1
         data = resp.json() or {}
-        return int(data.get("StatusCode") or 0)
+        return _docker_status_code(data, default=1)
 
 
 async def _cleanup_container(cid: str) -> None:
@@ -787,6 +817,37 @@ async def _run_apply_job(host_root: str) -> None:
             await _cleanup_container(cid)
 
 
+def _reset_job_state(
+    *,
+    phase: str,
+    running: bool,
+    error: str | None = None,
+    ok: bool | None = None,
+    host_root: str | None = None,
+    host_root_source: str | None = None,
+    log_line: str | None = None,
+) -> None:
+    """Replace job JSON + log so the UI never keeps a previous failure alongside a new attempt."""
+    started = _now_iso()
+    payload: dict[str, Any] = {
+        "phase": phase,
+        "running": running,
+        "ok": ok,
+        "error": error,
+        "startedAt": started,
+        "finishedAt": None if running else started,
+        "updatedAt": started,
+        "containerId": None,
+    }
+    if host_root is not None:
+        payload["hostRoot"] = host_root
+    if host_root_source is not None:
+        payload["hostRootSource"] = host_root_source
+    _write_json(JOB_FILE, payload)
+    JOB_LOG.parent.mkdir(parents=True, exist_ok=True)
+    JOB_LOG.write_text(log_line or "", encoding="utf-8")
+
+
 async def start_apply() -> dict[str, Any]:
     """Kick async host update. Returns immediately for polling."""
     global _task
@@ -799,27 +860,40 @@ async def start_apply() -> dict[str, Any]:
             "job": _job_snapshot(),
         }
 
+    # Clear stale job/log immediately so the UI shows this attempt, not an old failure.
+    _reset_job_state(
+        phase="validating",
+        running=True,
+        log_line=f"[server_update] validating host install root {_now_iso()}\n",
+    )
+
     if not docker_control.socket_available():
-        raise RuntimeError("docker.sock not available — mount it into the app container")
+        msg = "docker.sock not available — mount it into the app container"
+        _reset_job_state(phase="failed", running=False, ok=False, error=msg, log_line=f"[server_update] {msg}\n")
+        raise RuntimeError(msg)
 
     root = await resolve_validated_host_root()
     host_root = root.get("hostRoot")
     if not host_root:
-        raise RuntimeError(root.get("error") or "Host project directory unavailable")
+        msg = str(root.get("error") or "Host project directory unavailable")
+        _reset_job_state(
+            phase="failed",
+            running=False,
+            ok=False,
+            error=msg,
+            log_line=f"[server_update] {msg}\n",
+        )
+        raise RuntimeError(msg)
 
-    _write_json(
-        JOB_FILE,
-        {
-            "phase": "updating",
-            "running": True,
-            "ok": None,
-            "error": None,
-            "startedAt": _now_iso(),
-            "finishedAt": None,
-            "updatedAt": _now_iso(),
-            "hostRoot": host_root,
-            "hostRootSource": root.get("source"),
-        },
+    _reset_job_state(
+        phase="updating",
+        running=True,
+        host_root=str(host_root),
+        host_root_source=root.get("source"),
+        log_line=(
+            f"[server_update] starting sidecar image={UPDATE_IMAGE} "
+            f"hostRoot={host_root} (bind → /library)\n"
+        ),
     )
     _task = asyncio.create_task(_run_apply_job(str(host_root)))
     return {

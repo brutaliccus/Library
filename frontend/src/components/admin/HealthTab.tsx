@@ -904,10 +904,13 @@ function ServiceGroupTable({
   onDockerAction: (svc: DockerServiceInfo, action: DockerAction) => void;
 }) {
   // CPU/RAM only for Docker-backed rows. External APIs / Disk / Knaben omit the columns.
+  // Shared template on header + rows. Actions is fixed (not auto): each row is its
+  // own grid, so auto would size from local content and shift the other columns.
   const showResources = group.rows.some((r) => !!r.dockerId);
-  const gridCols = showResources
-    ? "md:grid-cols-[minmax(0,1.4fr)_4.5rem_4.5rem_5.5rem_minmax(0,1fr)_auto]"
-    : "md:grid-cols-[minmax(0,1.4fr)_5.5rem_minmax(0,1fr)_auto]";
+  const gridTemplateColumns = showResources
+    ? "minmax(0,1.2fr) 4.5rem 4.5rem 5.5rem minmax(0,1.4fr) 15.5rem"
+    : "minmax(0,1.2fr) 5.5rem minmax(0,1.4fr) 15.5rem";
+  const gridStyle = { gridTemplateColumns } as const;
 
   return (
     <section className="rounded-xl border border-gray-700 bg-gray-800/60 overflow-hidden">
@@ -917,7 +920,10 @@ function ServiceGroupTable({
         </h3>
       </div>
       {/* Desktop header */}
-      <div className={`hidden md:grid ${gridCols} gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-600 border-b border-gray-800`}>
+      <div
+        className="hidden md:grid gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-600 border-b border-gray-800"
+        style={gridStyle}
+      >
         <span>Service</span>
         {showResources && (
           <>
@@ -958,7 +964,8 @@ function ServiceGroupTable({
           return (
             <li
               key={row.id}
-              className={`px-3 py-2 md:grid ${gridCols} md:gap-2 md:items-center`}
+              className="px-3 py-2 md:grid md:gap-2 md:items-center"
+              style={gridStyle}
             >
               <div className="min-w-0 flex items-center gap-2">
                 <span className="text-sm text-gray-100 font-medium truncate">{row.title}</span>

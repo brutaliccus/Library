@@ -547,8 +547,39 @@ export default function InstanceSetup() {
       if (step?.id === "openlibrary") {
         await handleOpenLibraryContinue();
       }
-      if (stepIdx < steps.length - 1) setStepIdx((i) => i + 1);
-      else navigate("/libraries");
+      if (stepIdx < steps.length - 1) {
+        setStepIdx((i) => i + 1);
+        return;
+      }
+      // Last step: only leave when required checklist items are truly done.
+      // Previously Finish always navigated to /libraries even when stack/indexers
+      // were incomplete — then picking a library bounced admins back here via onboarding.
+      const { data: latest } = await refetchStatus();
+      const done = latest?.complete === true;
+      if (!done) {
+        const missing = (latest?.steps || [])
+          .filter((s) => s.required && !s.done)
+          .map((s) => s.label);
+        toast(
+          missing.length
+            ? `Finish required steps first: ${missing.join(", ")}`
+            : "Required setup steps are still incomplete",
+          "error",
+        );
+        const firstMissing = (latest?.steps || []).findIndex((s) => s.required && !s.done);
+        if (firstMissing >= 0) setStepIdx(firstMissing);
+        return;
+      }
+      try {
+        const { data: me } = await api.get("/libraries/me");
+        if (me?.library) {
+          navigate("/my-library", { replace: true });
+          return;
+        }
+      } catch {
+        /* fall through to onboarding */
+      }
+      navigate("/onboarding?mode=create", { replace: true });
     } finally {
       setValidating(false);
     }

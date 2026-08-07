@@ -91,6 +91,11 @@ export default function Onboarding() {
               navigate("/admin/setup", { replace: true });
               return;
             }
+            const me = await api.get("/libraries/me");
+            if (me.data?.library) {
+              navigate("/my-library", { replace: true });
+              return;
+            }
           } catch {
             /* fall through */
           }
@@ -158,6 +163,13 @@ export default function Onboarding() {
         const { data } = await api.get("/admin/setup-status");
         if (data && data.complete === false) {
           navigate("/admin/setup", { replace: true });
+          return;
+        }
+        // Setup already done — open the library shelf if membership exists,
+        // instead of the origin picker (which re-entered setup for some admins).
+        const me = await api.get("/libraries/me");
+        if (me.data?.library) {
+          navigate("/my-library", { replace: true });
           return;
         }
       } catch {

@@ -50,9 +50,17 @@ async def _run_host_script(host_root: str, cmd: str, *, timeout: float = 600.0) 
         return {"ok": False, "error": "docker.sock not available", "exitCode": None, "log": ""}
 
     await _ensure_image(UPDATE_IMAGE)
+    # Mirror update_library.sh: expose the real host path inside the sidecar so
+    # apply_indexer_keys / compose --project-directory bind ./data to
+    # /opt/library/data, not empty host /library/data.
     full = (
         "apk add --no-cache bash curl python3 >/dev/null 2>&1 || true; "
         "cd /library && "
+        "export LIBRARY_HOST_ROOT_BIND=\"${LIBRARY_HOST_ROOT_BIND:-}\"; "
+        "if [ -n \"$LIBRARY_HOST_ROOT_BIND\" ] && [ ! -e \"$LIBRARY_HOST_ROOT_BIND\" ]; then "
+        "  mkdir -p \"$(dirname \"$LIBRARY_HOST_ROOT_BIND\")\"; "
+        "  ln -sfn /library \"$LIBRARY_HOST_ROOT_BIND\"; "
+        "fi; "
         + cmd
     )
     body = {
@@ -247,7 +255,14 @@ def _vapid_env_write_script() -> str:
         "p.write_text(text, encoding='utf-8')\n"
         "print('ok')\n"
         "PY\n"
-        "docker compose up -d --force-recreate --no-deps app || true\n"
+        # Prefer host project directory when set (sidecar-safe); else plain compose.
+        "if [ -n \"${LIBRARY_HOST_ROOT_BIND:-}\" ] && [ -f /library/docker-compose.yml ]; then\n"
+        "  docker compose --env-file /library/.env -f /library/docker-compose.yml "
+        "--project-directory \"$LIBRARY_HOST_ROOT_BIND\" "
+        "up -d --force-recreate --no-deps app || true\n"
+        "else\n"
+        "  docker compose up -d --force-recreate --no-deps app || true\n"
+        "fi\n"
     )
 
 

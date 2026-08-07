@@ -24,6 +24,7 @@ import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
 import MobileExpandableSearch from "../components/MobileExpandableSearch";
 import { FLOATING_SEARCH_FILTER } from "../components/floatingSearchStyles";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 interface LibrarySearchHit {
   title: string;
@@ -203,17 +204,17 @@ export default function SearchResults({
     ungrouped: AbsShelfItem[];
   };
   const { data: absCollection } = useQuery<AbsCollectionCache>({
-    queryKey: ["abs-collection"],
+    queryKey: libraryQueryKey("abs-collection"),
     queryFn: () => Promise.reject(new Error("abs-collection is owned by MyLibrary")),
     enabled: false,
   });
   const { data: kavitaCollection } = useQuery<{ items: KavitaShelfItem[] }>({
-    queryKey: ["kavita-collection"],
+    queryKey: libraryQueryKey("kavita-collection"),
     queryFn: () => Promise.reject(new Error("kavita-collection is owned by MyLibrary")),
     enabled: false,
   });
   const { data: rdLibrary } = useQuery<{ items: RdShelfItem[] }>({
-    queryKey: ["streaming-library"],
+    queryKey: libraryQueryKey("streaming-library"),
     queryFn: () => Promise.reject(new Error("streaming-library is owned by MyLibrary")),
     enabled: false,
   });

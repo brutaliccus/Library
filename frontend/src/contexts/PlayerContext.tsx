@@ -25,6 +25,7 @@ import {
   setMediaDownloadPaused,
   setMediaDownloadThrottled,
 } from "../utils/mediaStorage";
+import { LIBRARY_ORIGIN_CHANGED_EVENT } from "../utils/shelfQueryCache";
 import {
   getAbsOfflineManifest,
   getOfflineProgress,
@@ -1901,6 +1902,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     },
     { playABS, playRD }
   );
+
+  useEffect(() => {
+    const onOriginChanged = () => {
+      dismissPlayer();
+      clearUpNext();
+    };
+    window.addEventListener(LIBRARY_ORIGIN_CHANGED_EVENT, onOriginChanged);
+    return () => window.removeEventListener(LIBRARY_ORIGIN_CHANGED_EVENT, onOriginChanged);
+  }, [dismissPlayer, clearUpNext]);
 
   const value: PlayerContextType = {
     ...state,

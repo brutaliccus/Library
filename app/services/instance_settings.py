@@ -947,6 +947,35 @@ async def setup_status() -> dict[str, Any]:
     prow_url, prow_key = await get_prowlarr_connection()
     rd = await get_effective("config.real_debrid_api_token")
     torbox = await get_effective("config.torbox_api_token")
+    group_has_debrid = False
+    try:
+        from app.database import async_session
+        from app.models import LibraryGroup
+        from sqlalchemy import or_, select
+
+        async with async_session() as db:
+            row = (
+                await db.execute(
+                    select(LibraryGroup.id).where(
+                        or_(
+                            LibraryGroup.real_debrid_api_token.is_not(None),
+                            LibraryGroup.torbox_api_token.is_not(None),
+                        )
+                    ).limit(50)
+                )
+            ).scalars().all()
+            # Filter empties in Python (SQLite empty string vs NULL).
+            if row:
+                groups = (
+                    await db.execute(select(LibraryGroup).limit(50))
+                ).scalars().all()
+                group_has_debrid = any(
+                    (g.real_debrid_api_token or "").strip() or (g.torbox_api_token or "").strip()
+                    for g in groups
+                )
+    except Exception:
+        group_has_debrid = False
+    hc = await get_effective("integrations.hardcover_api_key")
     hc = await get_effective("integrations.hardcover_api_key")
     lf_url = await get_effective("config.libraforge_url")
     lf_internal = await get_effective("config.libraforge_internal_url")
@@ -1038,7 +1067,7 @@ async def setup_status() -> dict[str, Any]:
         {
             "id": "debrid",
             "label": "Debrid (RD or TorBox)",
-            "done": bool(rd or torbox),
+            "done": bool(rd or torbox or group_has_debrid),
             "required": False,
             "help": (
                 "Server defaults; users can also set keys per library group. TorBox is optional. "
@@ -1128,6 +1157,10 @@ async def setup_status() -> dict[str, Any]:
         "site": {
             "appUrl": app_url or "",
             "vapidConfigured": bool(vapid_pub and vapid_priv),
+        },
+        "debrid": {
+            "serverConfigured": bool(rd or torbox),
+            "libraryConfigured": group_has_debrid,
         },
         "media": media_hints,
         "links": {

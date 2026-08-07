@@ -17,6 +17,7 @@ import {
 } from "../utils/requestProgress";
 import type { WSMessage } from "../hooks/wsClient";
 import { List, Bell, EyeOff, BookOpen, RotateCcw, X } from "lucide-react";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 function formatSize(bytes: number | null): string {
   if (!bytes) return "-";
@@ -114,9 +115,9 @@ export default function RequestsPage() {
           queryClient.invalidateQueries({ queryKey: ["my-requests"] });
           if (msg.status === "completed") {
             // Soft-invalidate shelves so My Library picks up the new book without a purge.
-            void queryClient.invalidateQueries({ queryKey: ["abs-collection"] });
-            void queryClient.invalidateQueries({ queryKey: ["kavita-collection"] });
-            void queryClient.invalidateQueries({ queryKey: ["streaming-library"] });
+            void queryClient.invalidateQueries({ queryKey: libraryQueryKey("abs-collection") });
+            void queryClient.invalidateQueries({ queryKey: libraryQueryKey("kavita-collection") });
+            void queryClient.invalidateQueries({ queryKey: libraryQueryKey("streaming-library") });
           }
         }
       } else {

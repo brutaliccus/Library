@@ -15,6 +15,7 @@ import EbookMetadataMatcher from "../components/admin/EbookMetadataMatcher";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
 import { getProgress } from "../utils/readingProgress";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 interface EbookVolume {
   volumeId: number | null;
@@ -168,7 +169,7 @@ export default function LibraryEbookDetail() {
     setDeleting(true);
     try {
       await api.delete(`/admin/library/ebook/${seriesId}`);
-      queryClient.setQueryData(["kavita-collection"], (prev: unknown) => {
+      queryClient.setQueryData(libraryQueryKey("kavita-collection"), (prev: unknown) => {
         if (!prev || typeof prev !== "object") return prev;
         const data = prev as {
           items?: Array<{ seriesId?: number }>;

@@ -16,6 +16,7 @@
  */
 import type { QueryClient } from "@tanstack/react-query";
 import { currentOrigin } from "../api/libraryRegistry";
+import { libraryQueryKey } from "./libraryQueryKeys";
 
 /** Base prefix; use shelfPersistKey() for the active origin. */
 export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v9:";
@@ -288,6 +289,171 @@ export function markLibraryCollectionCacheBust(ms = 8_000): void {
  * Default is cache-friendly: no refresh=true bust. Pass bustMs only once after a
  * scan is expected to have finished; background polls must use bustMs: 0.
  */
+
+/** Shelf prefixes persisted per library origin (My Library / Home cold start). */
+export const SHELF_PERSIST_PREFIXES = [
+  ...LIBRARY_COLLECTION_PREFIXES,
+  "trending-books",
+  "new-releases",
+  "home-shelves",
+  "category-carousel",
+  "genres",
+  "curated-slugs",
+] as const;
+
+export const LIBRARY_ORIGIN_CHANGED_EVENT = "library:origin-changed";
+
+let _persistPausedUntil = 0;
+
+/** Pause shelf persist briefly so a switch cannot write library A into B's disk key. */
+export function pauseShelfPersist(ms = 2000): void {
+  _persistPausedUntil = Math.max(_persistPausedUntil, Date.now() + ms);
+}
+
+export function isShelfPersistPaused(): boolean {
+  return Date.now() < _persistPausedUntil;
+}
+
+function normalizeOrigin(origin: string | null | undefined): string {
+  return (origin || "").replace(/\/+$/, "") || "default";
+}
+
+/** Origin segment from an origin-scoped query key, or null if unscoped/legacy. */
+export function originFromQueryKey(queryKey: unknown): string | null {
+  if (!Array.isArray(queryKey) || queryKey.length < 2) return null;
+  const second = queryKey[1];
+  if (typeof second !== "string") return null;
+  if (second === "default" || second.startsWith("http") || second.includes("://")) {
+    return normalizeOrigin(second);
+  }
+  return null;
+}
+
+/** Write one origin's in-memory shelf queries to that origin's persist blob. */
+export function flushShelfPersistToOrigin(
+  queryClient: QueryClient,
+  origin: string,
+  prefixes: readonly string[] = SHELF_PERSIST_PREFIXES,
+): void {
+  const o = normalizeOrigin(origin);
+  try {
+    const entries: [unknown, unknown][] = [];
+    for (const q of queryClient.getQueryCache().getAll()) {
+      const first = Array.isArray(q.queryKey) ? String(q.queryKey[0]) : "";
+      if (!(prefixes as readonly string[]).includes(first)) continue;
+      if (q.state.status !== "success" || q.state.data === undefined) continue;
+      const keyOrigin = originFromQueryKey(q.queryKey);
+      // Only this library's rows — never dump every origin into one blob.
+      if (keyOrigin !== o) continue;
+      entries.push([q.queryKey, JSON.parse(JSON.stringify(q.state.data))]);
+    }
+    const key = shelfPersistKey(o);
+    if (entries.length === 0) {
+      // Keep an existing disk blob if memory has nothing for this origin yet
+      // (e.g. switched away before that library's queries remounted).
+      return;
+    }
+    localStorage.setItem(key, JSON.stringify({ t: Date.now(), entries }));
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Persist every origin that currently has shelf data in memory to its own blob.
+ * Prevents multi-library sessions from mixing catalogs into one localStorage key.
+ */
+export function flushAllShelfPersists(
+  queryClient: QueryClient,
+  prefixes: readonly string[] = SHELF_PERSIST_PREFIXES,
+): void {
+  const byOrigin = new Map<string, [unknown, unknown][]>();
+  try {
+    for (const q of queryClient.getQueryCache().getAll()) {
+      const first = Array.isArray(q.queryKey) ? String(q.queryKey[0]) : "";
+      if (!(prefixes as readonly string[]).includes(first)) continue;
+      if (q.state.status !== "success" || q.state.data === undefined) continue;
+      const o = originFromQueryKey(q.queryKey) || normalizeOrigin(currentOrigin());
+      const list = byOrigin.get(o) || [];
+      list.push([q.queryKey, JSON.parse(JSON.stringify(q.state.data))]);
+      byOrigin.set(o, list);
+    }
+    for (const [o, entries] of byOrigin) {
+      if (entries.length === 0) continue;
+      localStorage.setItem(shelfPersistKey(o), JSON.stringify({ t: Date.now(), entries }));
+    }
+  } catch {
+    // ignore
+  }
+}
+
+/** Hydrate React Query from an origin-scoped shelf persist blob (does not clear other libraries). */
+export function hydrateShelfPersistForOrigin(
+  queryClient: QueryClient,
+  origin: string,
+  opts?: { maxAgeMs?: number; onlyIfMissing?: boolean },
+): void {
+  const o = normalizeOrigin(origin);
+  const maxAge = opts?.maxAgeMs ?? 24 * 60 * 60 * 1000;
+  const onlyIfMissing = opts?.onlyIfMissing !== false;
+  const collectionSet = new Set<string>(LIBRARY_COLLECTION_PREFIXES as readonly string[]);
+  try {
+    const raw = localStorage.getItem(shelfPersistKey(o));
+    if (!raw) return;
+    const saved = JSON.parse(raw) as { t: number; entries: [unknown, unknown][] };
+    if (!saved || Date.now() - saved.t >= maxAge || !Array.isArray(saved.entries)) return;
+    for (const [key, data] of saved.entries) {
+      let qk = Array.isArray(key) ? [...(key as unknown[])] : null;
+      if (!qk || typeof qk[0] !== "string") continue;
+      const name = String(qk[0]);
+      const keyOrigin = originFromQueryKey(qk);
+      if (!keyOrigin) {
+        // Legacy unscoped row in this origin's blob → scope to this origin.
+        qk = [name, o, ...qk.slice(1)];
+      } else if (keyOrigin !== o) {
+        // Wrong library leaked into this blob — skip.
+        continue;
+      }
+      if (onlyIfMissing && queryClient.getQueryData(qk as readonly unknown[]) !== undefined) {
+        continue;
+      }
+      const updatedAt =
+        collectionSet.has(name) || name === "trending-books" || name === "new-releases"
+          ? 0
+          : saved.t;
+      queryClient.setQueryData(qk as readonly unknown[], data, { updatedAt });
+    }
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * When switching remembered libraries: flush the previous origin to its disk cache,
+ * hydrate the next origin from its disk cache, keep both in memory (no clears).
+ */
+export function swapLibraryQueryCache(
+  queryClient: QueryClient,
+  prevOrigin: string | null | undefined,
+  nextOrigin: string,
+): void {
+  const prev = normalizeOrigin(prevOrigin);
+  const next = normalizeOrigin(nextOrigin);
+  if (prev && prev === next) return;
+  pauseShelfPersist(1500);
+  if (prev && prev !== "default") {
+    flushShelfPersistToOrigin(queryClient, prev);
+  }
+  hydrateShelfPersistForOrigin(queryClient, next, { onlyIfMissing: true });
+  try {
+    window.dispatchEvent(
+      new CustomEvent(LIBRARY_ORIGIN_CHANGED_EVENT, { detail: { prev, next } }),
+    );
+  } catch {
+    // ignore
+  }
+}
+
 export async function softRefreshLibraryCollectionQueries(
   queryClient: QueryClient,
   opts?: { refetch?: boolean; bustMs?: number },
@@ -297,9 +463,9 @@ export async function softRefreshLibraryCollectionQueries(
   if (opts?.bustMs != null && opts.bustMs > 0) {
     markLibraryCollectionCacheBust(opts.bustMs);
   }
-  const keys = LIBRARY_COLLECTION_PREFIXES.map((p) => [p] as const);
+  const keys = LIBRARY_COLLECTION_PREFIXES.map((p) => libraryQueryKey(p));
   await Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
-  queryClient.invalidateQueries({ queryKey: ["abs-series"] });
+  queryClient.invalidateQueries({ queryKey: libraryQueryKey("abs-series") });
   if (opts?.refetch !== false) {
     await Promise.all(
       keys.map((queryKey) => queryClient.refetchQueries({ queryKey, type: "active" })),
@@ -315,10 +481,10 @@ export async function purgeLibraryCollectionQueries(
   queryClient: QueryClient,
   opts?: { refetch?: boolean },
 ): Promise<void> {
-  const keys = LIBRARY_COLLECTION_PREFIXES.map((p) => [p] as const);
+  const keys = LIBRARY_COLLECTION_PREFIXES.map((p) => libraryQueryKey(p));
   await Promise.all(keys.map((queryKey) => queryClient.removeQueries({ queryKey })));
   // Also drop abs-series if present (not persisted, but can hold stale drilldowns).
-  queryClient.removeQueries({ queryKey: ["abs-series"] });
+  queryClient.removeQueries({ queryKey: libraryQueryKey("abs-series") });
   stripCollectionEntriesFromPersist();
   if (opts?.refetch) {
     await Promise.all(

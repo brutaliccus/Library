@@ -24,6 +24,7 @@ import {
 } from "../utils/offlinePlayback";
 import { clearEbookCache } from "../utils/ebookCache";
 import { clearAaResumeIfMatching } from "../media/aaResumeSnapshot";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 interface InProgressItem {
   itemId: string;
@@ -127,7 +128,7 @@ export default function ContinueShelves() {
           removeAbsOfflineManifest(id);
           clearAaResumeIfMatching({ itemId: id });
           void clearAbsBookCache(id);
-          queryClient.invalidateQueries({ queryKey: ["in-progress"] });
+          queryClient.invalidateQueries({ queryKey: libraryQueryKey("in-progress") });
         } else if (target.kind === "rd") {
           const histId = Number(target.id);
           await api.post(`/stream/rd/history/${histId}/clear-progress`);
@@ -135,7 +136,7 @@ export default function ContinueShelves() {
           removeRdOfflineManifest({ streamHistoryId: histId });
           clearAaResumeIfMatching({ streamHistoryId: histId });
           void clearBookCache("h", histId);
-          queryClient.invalidateQueries({ queryKey: ["rd-in-progress"] });
+          queryClient.invalidateQueries({ queryKey: libraryQueryKey("rd-in-progress") });
         } else {
           const chapterId = Number(target.id);
           clearReadingProgress(chapterId);
@@ -159,10 +160,10 @@ export default function ContinueShelves() {
       try {
         if (target.kind === "abs") {
           await api.post(`/stream/abs/${encodeURIComponent(String(target.id))}/hide`);
-          queryClient.invalidateQueries({ queryKey: ["in-progress"] });
+          queryClient.invalidateQueries({ queryKey: libraryQueryKey("in-progress") });
         } else if (target.kind === "rd") {
           await api.post(`/stream/rd/history/${target.id}/hide`);
-          queryClient.invalidateQueries({ queryKey: ["rd-in-progress"] });
+          queryClient.invalidateQueries({ queryKey: libraryQueryKey("rd-in-progress") });
         } else {
           hideFromContinueReading(Number(target.id));
           setContinueReading(getContinueReading(6));
@@ -186,7 +187,7 @@ export default function ContinueShelves() {
   }, []);
 
   const { data: inProgressData } = useQuery({
-    queryKey: ["in-progress"],
+    queryKey: libraryQueryKey("in-progress"),
     queryFn: async () => {
       const { data } = await api.get("/stream/abs/in-progress");
       return data as { items: InProgressItem[] };
@@ -196,7 +197,7 @@ export default function ContinueShelves() {
   });
 
   const { data: rdInProgressData } = useQuery({
-    queryKey: ["rd-in-progress"],
+    queryKey: libraryQueryKey("rd-in-progress"),
     queryFn: async () => {
       const { data } = await api.get("/stream/rd/history/in-progress");
       return data as { items: RDHistoryItem[] };

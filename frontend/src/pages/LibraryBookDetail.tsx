@@ -2,6 +2,7 @@ import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import api from "../api/client";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 import { resolveShareOrigin } from "../api/inviteLink";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
@@ -214,7 +215,7 @@ export default function LibraryBookDetail() {
     try {
       await api.delete(`/admin/library/abs/${encodeURIComponent(itemId)}`);
       // Optimistic local remove, then soft-refresh (keep shelf visible).
-      queryClient.setQueryData(["abs-collection"], (prev: unknown) => {
+      queryClient.setQueryData(libraryQueryKey("abs-collection"), (prev: unknown) => {
         if (!prev || typeof prev !== "object") return prev;
         const data = prev as {
           genres?: Record<string, Array<{ itemId?: string }>>;

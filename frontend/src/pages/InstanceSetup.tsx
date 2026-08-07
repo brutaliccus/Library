@@ -64,6 +64,10 @@ interface SetupStatus {
     reachable?: boolean;
     activeName?: string;
   };
+  debrid?: {
+    serverConfigured?: boolean;
+    libraryConfigured?: boolean;
+  };
 }
 
 interface ConfigSetting {
@@ -1148,6 +1152,22 @@ export default function InstanceSetup() {
                   {actionLog}
                 </pre>
               )}
+            </div>
+          ) : step.id === "debrid" ? (
+            <div className="space-y-4">
+              {(status?.debrid?.libraryConfigured || status?.debrid?.serverConfigured) && (
+                <div className="rounded-lg border border-emerald-800/50 bg-emerald-950/25 p-3 text-sm text-emerald-200">
+                  Debrid keys already saved
+                  {status?.debrid?.libraryConfigured ? " on your library" : ""}
+                  {status?.debrid?.serverConfigured ? " as server defaults" : ""}
+                  . You can skip this step, or set optional server fallbacks below.
+                </div>
+              )}
+              <p className="text-xs text-gray-400">
+                Keys entered when creating your library are stored on that library. Fields below are
+                optional server defaults (scraper fallback / Admin Config).
+              </p>
+              {renderFields()}
             </div>
           ) : (
             renderFields()

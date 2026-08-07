@@ -15,6 +15,7 @@ import {
   type PresetThemeId,
 } from "../../theme/themes";
 import { upsertRememberedLibrary, currentOrigin, inviteFieldsFromLibraryMe } from "../../api/libraryRegistry";
+import { libraryQueryKey } from "../../utils/libraryQueryKeys";
 
 function keySourceLabel(source: KeySource, name: string): string {
   if (source === "group") return `${name} key saved`;
@@ -46,8 +47,8 @@ function DebridKeysSection() {
   const [torboxToken, setTorboxToken] = useState("");
 
   const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ["library-group"] });
-    queryClient.invalidateQueries({ queryKey: ["user-settings"] });
+    queryClient.invalidateQueries({ queryKey: libraryQueryKey("library-group") });
+    queryClient.invalidateQueries({ queryKey: libraryQueryKey("user-settings") });
   };
 
   const updateKeys = useMutation({
@@ -200,7 +201,7 @@ function LibraryBrandingSection() {
   const [uploadingCover, setUploadingCover] = useState(false);
   const [savingTheme, setSavingTheme] = useState(false);
 
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ["library-group"] });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: libraryQueryKey("library-group") });
 
   useEffect(() => {
     if (lib?.name) setBrandName(lib.name);
@@ -266,7 +267,7 @@ function LibraryBrandingSection() {
       await api.put("/libraries/branding", { default_theme: themeId });
       applyThemeToDocument(themeId);
       await refresh();
-      await queryClient.invalidateQueries({ queryKey: ["user-settings"] });
+      await queryClient.invalidateQueries({ queryKey: libraryQueryKey("user-settings") });
       toast("Library default theme updated", "success");
     } catch (e: any) {
       toast(e.response?.data?.detail || "Failed to update theme", "error");

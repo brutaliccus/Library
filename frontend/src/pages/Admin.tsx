@@ -54,6 +54,7 @@ import {
   hasLiveRequests,
   requestListRefetchInterval,
 } from "../utils/requestProgress";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 /** Canonical Admin sections (URL ?tab=). Legacy aliases remap in resolveTab. */
 type AdminTab =
@@ -1447,7 +1448,7 @@ function IntegrationsPanel() {
     onSuccess: () => {
       setNytKey("");
       queryClient.invalidateQueries({ queryKey: ["admin-integrations"] });
-      queryClient.invalidateQueries({ queryKey: ["trending-books"] });
+      queryClient.invalidateQueries({ queryKey: libraryQueryKey("trending-books") });
       toast("NYT API key saved", "success");
     },
     onError: () => toast("Failed to save NYT key", "error"),

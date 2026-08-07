@@ -12,6 +12,7 @@ import {
   type ThemeId,
 } from "./themes";
 import { setCachedDefaultPlaybackRate } from "../utils/playbackRatePrefs";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 interface UserSettingsTheme {
   theme: string | null;
@@ -33,7 +34,7 @@ export function useThemeSync() {
     !!user && sessionReady && !user.mustChangePassword && !user.mustSetEmail;
   const libraryQuery = useLibraryGroup(needsSettings);
   const settingsQuery = useQuery({
-    queryKey: ["user-settings"],
+    queryKey: libraryQueryKey("user-settings"),
     queryFn: async () => {
       const { data } = await api.get("/auth/settings");
       return data as UserSettingsTheme;

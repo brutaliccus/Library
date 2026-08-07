@@ -11,6 +11,7 @@ import {
 import type { BookDetail as BookDetailType } from "../types/book";
 import { useState, useCallback, useRef, useMemo } from "react";
 import CoverImage from "../components/CoverImage";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 interface ABSMatch {
   title: string;
@@ -276,7 +277,7 @@ export default function BookDetailPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["library-check", volumeId] });
-      queryClient.invalidateQueries({ queryKey: ["streaming-library"] });
+      queryClient.invalidateQueries({ queryKey: libraryQueryKey("streaming-library") });
       toast("Added to My Collection", "success");
     },
     onError: (err: any) => {

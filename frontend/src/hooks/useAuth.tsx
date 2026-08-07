@@ -25,6 +25,8 @@ import {
 } from "../api/libraryRegistry";
 import { hasOfflineUnlock } from "../utils/offlineUnlock";
 import { isAuthReject, isLikelyOffline, isNetworkError } from "../utils/networkStatus";
+import { swapLibraryQueryCache } from "../utils/shelfQueryCache";
+import { queryClient } from "../api/queryClient";
 
 interface AuthUser {
   username: string;
@@ -392,8 +394,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const enterLibrary = useCallback(async (origin: string): Promise<EnterLibraryResult> => {
     const key = origin.replace(/\/+$/, "");
     const existing = getSessionForOrigin(key);
+    const prevOrigin = currentOrigin();
     switchToLibrary(key);
     applyApiBaseUrl();
+    // Keep each library's React Query cache; flush/hydrate per-origin disk blobs.
+    if (prevOrigin.replace(/\/+$/, "") !== key) {
+      swapLibraryQueryCache(queryClient, prevOrigin, key);
+    }
     if (!existing) return "need_login";
 
     if (isLikelyOffline()) {
@@ -456,8 +463,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!existing) return "offline_no_session";
     const email = existing.email || existing.username || "";
     if (!hasOfflineUnlock(key, email)) return "need_offline_setup";
+    const prevOrigin = currentOrigin();
     switchToLibrary(key);
     applyApiBaseUrl();
+    if (prevOrigin.replace(/\/+$/, "") !== key) {
+      swapLibraryQueryCache(queryClient, prevOrigin, key);
+    }
     setUser(userFromSession(existing));
     setOfflineSession(true);
     return "ok";

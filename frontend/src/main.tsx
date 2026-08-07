@@ -1,7 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { queryClient } from "./api/queryClient";
+import { libraryOriginKey } from "./utils/libraryQueryKeys";
 import { AuthProvider } from "./hooks/useAuth";
 import { ToastProvider } from "./contexts/ToastContext";
 import { PlayerProvider } from "./contexts/PlayerContext";
@@ -12,18 +14,14 @@ import { bootstrapThemeFromCache } from "./theme/themes";
 import {
   LIBRARY_COLLECTION_PREFIXES,
   clearLegacyShelfPersist,
+  flushAllShelfPersists,
+  isShelfPersistPaused,
   shelfPersistKey,
 } from "./utils/shelfQueryCache";
 import "./index.css";
 
 // Paint last-chosen theme before React mounts (avoids ocean→real bounce).
 bootstrapThemeFromCache();
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { retry: 1, refetchOnWindowFocus: false },
-  },
-});
 
 // --- Lightweight query-cache persistence -------------------------------------
 // A reopened PWA (killed after idle) starts with an empty cache and re-fetches
@@ -78,7 +76,30 @@ try {
           first === "new-releases"
             ? 0
             : saved.t;
-        queryClient.setQueryData(key as readonly unknown[], data, { updatedAt });
+        let qk = Array.isArray(key) ? [...(key as unknown[])] : key;
+        if (Array.isArray(qk) && typeof qk[0] === "string") {
+          const name = String(qk[0]);
+          const shouldScope =
+            LIBRARY_COLLECTION_SET.has(name) ||
+            name === "trending-books" ||
+            name === "new-releases" ||
+            name === "home-shelves" ||
+            name === "library-group" ||
+            name === "user-settings" ||
+            name === "in-progress" ||
+            name === "rd-in-progress";
+          if (shouldScope) {
+            const second = qk[1];
+            const hasOrigin =
+              typeof second === "string" &&
+              (second === "default" || second.startsWith("http") || second.includes("://"));
+            if (!hasOrigin) {
+              // Legacy persist rows were ["abs-collection"] — rewrite to origin-scoped.
+              qk = [name, libraryOriginKey(), ...qk.slice(1)];
+            }
+          }
+        }
+        queryClient.setQueryData(qk as readonly unknown[], data, { updatedAt });
       }
     }
   }
@@ -91,25 +112,9 @@ queryClient.getQueryCache().subscribe(() => {
   if (_persistTimer !== undefined) return;
   _persistTimer = window.setTimeout(() => {
     _persistTimer = undefined;
-    try {
-      const entries: [unknown, unknown][] = [];
-      for (const q of queryClient.getQueryCache().getAll()) {
-        const first = Array.isArray(q.queryKey) ? String(q.queryKey[0]) : "";
-        if (
-          PERSIST_PREFIXES.includes(first) &&
-          q.state.status === "success" &&
-          q.state.data !== undefined
-        ) {
-          // Store a plain JSON clone so later in-place mutations cannot leak
-          // into localStorage, and restore always gets a full replacement array.
-          entries.push([q.queryKey, JSON.parse(JSON.stringify(q.state.data))]);
-        }
-      }
-      // Always rewrite (including empty) so removeQueries drops orphans from disk.
-      localStorage.setItem(shelfPersistKey(), JSON.stringify({ t: Date.now(), entries }));
-    } catch {
-      // localStorage full/unavailable — skip persistence this round
-    }
+    if (isShelfPersistPaused()) return;
+    // One blob per library origin so switching keeps each catalog warm on disk.
+    flushAllShelfPersists(queryClient, PERSIST_PREFIXES);
   }, 1500);
 });
 

@@ -76,6 +76,7 @@ import {
 } from "../utils/libraryScrollMemory";
 import MobileExpandableSearch from "../components/MobileExpandableSearch";
 import { FLOATING_SEARCH_FILTER } from "../components/floatingSearchStyles";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 interface LibraryItem {
   id: number;
@@ -389,7 +390,7 @@ export default function MyLibrary() {
     isLoading: absLoading,
     isFetching: absFetching,
   } = useQuery({
-    queryKey: ["abs-collection"],
+    queryKey: libraryQueryKey("abs-collection"),
     queryFn: async ({ client }) => {
       const { data } = await api.get("/library/abs/collection", {
         params: shouldBustLibraryCollectionCache() ? { refresh: true } : undefined,
@@ -399,7 +400,7 @@ export default function MyLibrary() {
         ungrouped: ABSItem[];
         totalItems: number;
       };
-      const prev = client.getQueryData<typeof fresh>(["abs-collection"]);
+      const prev = client.getQueryData<typeof fresh>(libraryQueryKey("abs-collection"));
       // Full snapshot: merge-by-id with prune (add/update/drop deleted).
       const merged = mergeAbsCollection(prev, fresh, { pruneMissing: true });
       if (absCollectionHasOrphans(prev, fresh)) {
@@ -417,11 +418,11 @@ export default function MyLibrary() {
   });
 
   const { data: rdLibrary, isLoading: rdLoading, isFetching: rdFetching } = useQuery({
-    queryKey: ["streaming-library"],
+    queryKey: libraryQueryKey("streaming-library"),
     queryFn: async ({ client }) => {
       const { data } = await api.get("/library");
       const fresh = data as { items: LibraryItem[] };
-      const prev = client.getQueryData<typeof fresh>(["streaming-library"]);
+      const prev = client.getQueryData<typeof fresh>(libraryQueryKey("streaming-library"));
       const merged = mergeStreamingLibrary(prev, fresh, { pruneMissing: true });
       return merged ?? fresh;
     },
@@ -439,13 +440,13 @@ export default function MyLibrary() {
     isError: kavitaError,
     refetch: refetchKavita,
   } = useQuery({
-    queryKey: ["kavita-collection"],
+    queryKey: libraryQueryKey("kavita-collection"),
     queryFn: async ({ client }) => {
       const { data } = await api.get("/library/kavita/collection", {
         params: shouldBustLibraryCollectionCache() ? { refresh: true } : undefined,
       });
       const fresh = data as { items: KavitaItem[]; totalItems: number };
-      const prev = client.getQueryData<typeof fresh>(["kavita-collection"]);
+      const prev = client.getQueryData<typeof fresh>(libraryQueryKey("kavita-collection"));
       const merged = mergeKavitaCollection(prev, fresh, { pruneMissing: true });
       return merged ?? fresh;
     },
@@ -457,7 +458,7 @@ export default function MyLibrary() {
   });
 
   const { data: wantAlertsData, isLoading: wantLoading } = useQuery({
-    queryKey: ["availability-alerts"],
+    queryKey: libraryQueryKey("availability-alerts"),
     queryFn: async () => {
       const { data } = await api.get("/books/availability-alerts");
       return data as {
@@ -475,7 +476,7 @@ export default function MyLibrary() {
   });
 
   const { data: streamHistoryFinished } = useQuery({
-    queryKey: ["stream-history-finished"],
+    queryKey: libraryQueryKey("stream-history-finished"),
     queryFn: async () => {
       const { data } = await api.get("/stream/rd/history");
       return data as {
@@ -499,7 +500,7 @@ export default function MyLibrary() {
       await api.delete(`/books/availability-alerts/${encodeURIComponent(volumeId)}`);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["availability-alerts"] });
+      queryClient.invalidateQueries({ queryKey: libraryQueryKey("availability-alerts") });
       toast("Removed from Want list", "info");
     },
     onError: () => toast("Failed to remove alert", "error"),
@@ -699,7 +700,7 @@ export default function MyLibrary() {
   const removeMutation = useMutation({
     mutationFn: (id: number) => api.delete(`/library/${id}`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["streaming-library"] });
+      queryClient.invalidateQueries({ queryKey: libraryQueryKey("streaming-library") });
       toast("Removed from library", "info");
     },
   });
@@ -1033,7 +1034,7 @@ export default function MyLibrary() {
             const { data: status } = await api.get(`/stream/rd/status/${taskId}`);
             if (status.status === "ready" && status.tracks?.length > 0) {
               // The resolve already stored tracks on the library item server-side
-              queryClient.invalidateQueries({ queryKey: ["streaming-library"] });
+              queryClient.invalidateQueries({ queryKey: libraryQueryKey("streaming-library") });
               playRD(
                 status.tracks,
                 item.title,

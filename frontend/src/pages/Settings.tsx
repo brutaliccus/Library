@@ -57,6 +57,7 @@ import {
   hasOfflineUnlock,
   setBiometricEnabled,
 } from "../utils/offlineUnlock";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 interface UserSettings {
   private_mode: boolean;
@@ -92,7 +93,7 @@ function InviteShareSection() {
   const regenInvite = useMutation({
     mutationFn: async () => (await api.post("/libraries/regenerate-invite")).data,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["library-group"] });
+      queryClient.invalidateQueries({ queryKey: libraryQueryKey("library-group") });
       toast("New invite code generated — the old one no longer works", "success");
     },
     onError: (e: any) => toast(e.response?.data?.detail || "Failed to regenerate code", "error"),
@@ -642,7 +643,7 @@ export default function Settings() {
   });
 
   const { data: settings, isLoading } = useQuery({
-    queryKey: ["user-settings"],
+    queryKey: libraryQueryKey("user-settings"),
     queryFn: async () => {
       const { data } = await api.get("/auth/settings");
       return data as UserSettings;
@@ -655,7 +656,7 @@ export default function Settings() {
       return data as UserSettings;
     },
     onSuccess: (data) => {
-      queryClient.setQueryData(["user-settings"], data);
+      queryClient.setQueryData(libraryQueryKey("user-settings"), data);
       if (data.default_playback_rate != null) {
         setCachedDefaultPlaybackRate(data.default_playback_rate);
       }

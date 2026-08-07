@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import api from "../api/client";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 export interface LibraryMember {
   id: number;
@@ -40,7 +41,7 @@ export interface LibraryGroupResponse {
 /** The user's library group; `library: null` means onboarding is required. */
 export function useLibraryGroup(enabled = true) {
   return useQuery({
-    queryKey: ["library-group"],
+    queryKey: libraryQueryKey("library-group"),
     queryFn: async () => {
       const { data } = await api.get("/libraries/me");
       return data as LibraryGroupResponse;

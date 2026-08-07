@@ -5,6 +5,7 @@ import { ArrowLeft, BookOpen, Headphones } from "lucide-react";
 import api from "../api/client";
 import BookGrid from "../components/BookGrid";
 import type { BookSummary } from "../types/book";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 interface SeriesBook {
   id: string;
@@ -52,7 +53,7 @@ export default function SeriesPage() {
   });
 
   const { data: absCollection } = useQuery({
-    queryKey: ["abs-collection"],
+    queryKey: libraryQueryKey("abs-collection"),
     queryFn: async () => {
       const { data } = await api.get("/library/abs/collection");
       return data as { genres: Record<string, ABSItem[]>; ungrouped: ABSItem[] };

@@ -9,6 +9,7 @@ import GenreSidebar from "../components/GenreSidebar";
 import type { Genre } from "../components/GenreSidebar";
 import { Loader2 } from "lucide-react";
 import type { BookSummary } from "../types/book";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 interface HomeShelf {
   slug: string;
@@ -44,7 +45,7 @@ export default function Home({
   useEffect(() => { onActiveCountChange(0); }, [onActiveCountChange]);
 
   const { data: genresData } = useQuery({
-    queryKey: ["genres"],
+    queryKey: libraryQueryKey("genres"),
     queryFn: async () => {
       const { data } = await api.get("/books/genres");
       return data as { genres: Genre[] };
@@ -57,7 +58,7 @@ export default function Home({
   const shelfSentinelRef = useRef<HTMLDivElement>(null);
 
   const { data: settingsData } = useQuery({
-    queryKey: ["user-settings"],
+    queryKey: libraryQueryKey("user-settings"),
     queryFn: async () => {
       const { data } = await api.get("/auth/settings");
       return data as { private_mode?: boolean };
@@ -67,7 +68,7 @@ export default function Home({
   const privateMode = !!settingsData?.private_mode;
 
   const { data: personalizedData, isLoading: personalizedLoading } = useQuery({
-    queryKey: ["personalized-shelves"],
+    queryKey: libraryQueryKey("personalized-shelves"),
     queryFn: async () => {
       try {
         const { data } = await api.get("/books/personalized-shelves");
@@ -83,7 +84,7 @@ export default function Home({
   });
 
   const { data: trendingData, isLoading: trendingLoading } = useQuery({
-    queryKey: ["trending-books"],
+    queryKey: libraryQueryKey("trending-books"),
     queryFn: async () => {
       try {
         const { data } = await api.get("/books/trending");
@@ -100,7 +101,7 @@ export default function Home({
   });
 
   const { data: newReleasesData, isLoading: newReleasesLoading } = useQuery({
-    queryKey: ["new-releases"],
+    queryKey: libraryQueryKey("new-releases"),
     queryFn: async () => {
       try {
         const { data } = await api.get("/books/new-releases");
@@ -123,7 +124,7 @@ export default function Home({
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ["home-shelves", new Date().toISOString().slice(0, 10)],
+    queryKey: libraryQueryKey("home-shelves", new Date().toISOString().slice(0, 10)),
     queryFn: async ({ pageParam }) => {
       try {
         const params = new URLSearchParams({

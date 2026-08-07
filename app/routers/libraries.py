@@ -269,6 +269,20 @@ async def create_group(
     user.library_role = "owner"
     await db.commit()
     await _cleanup_empty_group(old_group_id, db)
+    # Seed empty server defaults so Admin/setup debrid fields match onboarding keys.
+    if rd or tb:
+        try:
+            from app.services import app_settings
+            from app.services.instance_settings import apply_runtime_overrides, invalidate_cache
+
+            if rd and not (await instance_settings.get_effective("config.real_debrid_api_token")).strip():
+                await app_settings.set_setting("config.real_debrid_api_token", rd)
+            if tb and not (await instance_settings.get_effective("config.torbox_api_token")).strip():
+                await app_settings.set_setting("config.torbox_api_token", tb)
+            invalidate_cache()
+            await apply_runtime_overrides()
+        except Exception:
+            logger.exception("libraries/create: failed to seed server debrid defaults")
     return {"library": await _serialize_group(group, user, db)}
 
 

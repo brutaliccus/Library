@@ -29,6 +29,7 @@ import {
   enrollOfflineUnlock,
   hasOfflineUnlock,
 } from "../utils/offlineUnlock";
+import { libraryQueryKey } from "../utils/libraryQueryKeys";
 
 type Mode = "choose" | "create" | "join" | "offline-pin";
 
@@ -181,16 +182,16 @@ export default function Onboarding() {
 
   const goHome = async (lib?: { name?: string; coverUrl?: string | null } | null) => {
     rememberLibrary(lib);
-    await queryClient.invalidateQueries({ queryKey: ["library-group"] });
-    await queryClient.invalidateQueries({ queryKey: ["user-settings"] });
+    await queryClient.invalidateQueries({ queryKey: libraryQueryKey("library-group") });
+    await queryClient.invalidateQueries({ queryKey: libraryQueryKey("user-settings") });
     await leaveOnboarding();
   };
 
   /** After create/join (or invite signup), require offline PIN unless already enrolled. */
   const finish = async (lib?: { name?: string; coverUrl?: string | null } | null) => {
     rememberLibrary(lib);
-    await queryClient.invalidateQueries({ queryKey: ["library-group"] });
-    await queryClient.invalidateQueries({ queryKey: ["user-settings"] });
+    await queryClient.invalidateQueries({ queryKey: libraryQueryKey("library-group") });
+    await queryClient.invalidateQueries({ queryKey: libraryQueryKey("user-settings") });
     const origin = currentOrigin();
     const email = accountEmail();
     if (origin && email && !hasOfflineUnlock(origin, email)) {

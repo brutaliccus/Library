@@ -214,6 +214,43 @@ async def configure_npm(settings: dict[str, str]) -> dict[str, Any]:
     return result
 
 
+def _vapid_env_write_script() -> str:
+    """Bash snippet: expect PRIV/PUB exported; write .env; recreate app.
+
+    Heredoc closer ``PY`` must be alone on its line — never ``PY; …``.
+    """
+    return (
+        "python3 - <<'PY'\n"
+        "import os, pathlib\n"
+        "priv = os.environ['PRIV']\n"
+        "pub = os.environ['PUB']\n"
+        "p = pathlib.Path('/library/.env')\n"
+        "text = p.read_text(encoding='utf-8') if p.exists() else ''\n"
+        "\n"
+        "def setk(t: str, k: str, v: str) -> str:\n"
+        "    lines = t.splitlines()\n"
+        "    out: list[str] = []\n"
+        "    seen = False\n"
+        "    for line in lines:\n"
+        "        if line.startswith(k + '='):\n"
+        "            out.append(f'{k}={v}')\n"
+        "            seen = True\n"
+        "        else:\n"
+        "            out.append(line)\n"
+        "    if not seen:\n"
+        "        out.append(f'{k}={v}')\n"
+        "    return '\\n'.join(out) + ('\\n' if out else '')\n"
+        "\n"
+        "priv_val = priv if priv.startswith('\"') else f'\"{priv}\"'\n"
+        "text = setk(text, 'VAPID_PRIVATE_KEY', priv_val)\n"
+        "text = setk(text, 'VAPID_PUBLIC_KEY', pub)\n"
+        "p.write_text(text, encoding='utf-8')\n"
+        "print('ok')\n"
+        "PY\n"
+        "docker compose up -d --force-recreate --no-deps app || true\n"
+    )
+
+
 async def generate_vapid_keys() -> dict[str, Any]:
     """Generate VAPID keys and write them into the host .env (restart may be required)."""
     resolved = await server_update.resolve_validated_host_root()
@@ -224,36 +261,6 @@ async def generate_vapid_keys() -> dict[str, Any]:
             "error": resolved.get("error") or "LIBRARY_HOST_ROOT not resolved",
             "hostRoot": None,
         }
-    # Prefer in-container generator if the app image has py_vapid; else sidecar python.
-    cmd = (
-        "if docker compose exec -T app python scripts/generate_vapid.py >/tmp/vapid.out 2>/dev/null; then "
-        "  PRIV=$(grep '^VAPID_PRIVATE_KEY=' /tmp/vapid.out | head -1 | sed 's/^VAPID_PRIVATE_KEY=//;s/^\"//;s/\"$//'); "
-        "  PUB=$(grep '^VAPID_PUBLIC_KEY=' /tmp/vapid.out | head -1 | cut -d= -f2-); "
-        "else "
-        "  echo 'app exec failed' >&2; exit 1; "
-        "fi; "
-        "python3 - <<'PY'\n"
-        "import os, pathlib, re\n"
-        "priv=os.environ.get('PRIV','')\n"
-        "pub=os.environ.get('PUB','')\n"
-        "p=pathlib.Path('/library/.env')\n"
-        "text=p.read_text(encoding='utf-8') if p.exists() else ''\n"
-        "def setk(t,k,v):\n"
-        "    lines=t.splitlines(); out=[]; seen=False\n"
-        "    for line in lines:\n"
-        "        if line.startswith(k+'='):\n"
-        "            out.append(f'{k}={v}'); seen=True\n"
-        "        else: out.append(line)\n"
-        "    if not seen: out.append(f'{k}={v}')\n"
-        "    return '\\n'.join(out)+('\\n' if out else '')\n"
-        "priv=os.environ['PRIV']; pub=os.environ['PUB']\n"
-        "text=setk(text,'VAPID_PRIVATE_KEY', f'\\\"{priv}\\\"' if priv and not priv.startswith('\\\"') else priv)\n"
-        "text=setk(text,'VAPID_PUBLIC_KEY', pub)\n"
-        "p.write_text(text, encoding='utf-8')\n"
-        "print('vapid written')\n"
-        "PY"
-    )
-    # Pass keys via env on the sidecar by extracting in the same shell before python.
     wrapped = (
         "set -euo pipefail; "
         "OUT=$(docker compose exec -T app python scripts/generate_vapid.py 2>/dev/null || true); "
@@ -261,26 +268,7 @@ async def generate_vapid_keys() -> dict[str, Any]:
         "PUB=$(printf '%s\\n' \"$OUT\" | grep '^VAPID_PUBLIC_KEY=' | head -1 | cut -d= -f2-); "
         "if [ -z \"$PRIV\" ] || [ -z \"$PUB\" ]; then echo 'VAPID generation failed' >&2; exit 1; fi; "
         "export PRIV PUB; "
-        "python3 - <<'PY'\n"
-        "import os, pathlib\n"
-        "priv=os.environ['PRIV']; pub=os.environ['PUB']\n"
-        "p=pathlib.Path('/library/.env')\n"
-        "text=p.read_text(encoding='utf-8') if p.exists() else ''\n"
-        "def setk(t,k,v):\n"
-        "    lines=t.splitlines(); out=[]; seen=False\n"
-        "    for line in lines:\n"
-        "        if line.startswith(k+'='):\n"
-        "            out.append(f'{k}={v}'); seen=True\n"
-        "        else: out.append(line)\n"
-        "    if not seen: out.append(f'{k}={v}')\n"
-        "    return '\\n'.join(out)+('\\n' if out else '')\n"
-        "esc=priv.replace('\\\\','\\\\\\\\')\n"
-        "text=setk(text,'VAPID_PRIVATE_KEY', f'\\\"{esc}\\\"')\n"
-        "text=setk(text,'VAPID_PUBLIC_KEY', pub)\n"
-        "p.write_text(text, encoding='utf-8')\n"
-        "print('ok')\n"
-        "PY; "
-        "docker compose up -d --force-recreate --no-deps app || true"
+        + _vapid_env_write_script()
     )
     result = await _run_host_script(str(host_root), wrapped, timeout=300.0)
     result["pipeline"] = "generate-vapid"

@@ -42,11 +42,19 @@ interface Props {
   className?: string;
   /** Compact icon+label for cards; default is a normal button. */
   size?: "sm" | "md";
+  /** Icon-only control (title still explains the action). */
+  iconOnly?: boolean;
   /** Guest share token — uses public /api/share/{token}/offline. */
   shareToken?: string;
 }
 
-export default function SaveOfflineButton({ target, className = "", size = "md", shareToken }: Props) {
+export default function SaveOfflineButton({
+  target,
+  className = "",
+  size = "md",
+  iconOnly = false,
+  shareToken,
+}: Props) {
   const { toast } = useToast();
   const online = useOnlineStatus();
   const [state, setState] = useState<OfflineDownloadState>("idle");
@@ -128,8 +136,10 @@ export default function SaveOfflineButton({ target, className = "", size = "md",
     }
   };
 
-  const pad =
-    size === "sm"
+  const iconSize = iconOnly ? 18 : size === "sm" ? 12 : 14;
+  const pad = iconOnly
+    ? "w-11 h-11 justify-center rounded-xl"
+    : size === "sm"
       ? "px-2 py-1 text-[11px] gap-1 rounded-md"
       : "px-3 py-2 text-sm gap-1.5 rounded-lg";
 
@@ -139,11 +149,16 @@ export default function SaveOfflineButton({ target, className = "", size = "md",
         type="button"
         onClick={remove}
         title="Remove from this device"
+        aria-label="Remove from this device"
         className={`inline-flex items-center font-medium bg-gray-800 text-emerald-400 border border-gray-700 hover:border-red-700 hover:text-red-300 transition-colors ${pad} ${className}`}
       >
-        <Check size={size === "sm" ? 12 : 14} />
-        Downloaded
-        <Trash2 size={size === "sm" ? 11 : 13} className="opacity-60" />
+        <Check size={iconSize} />
+        {!iconOnly && (
+          <>
+            Downloaded
+            <Trash2 size={size === "sm" ? 11 : 13} className="opacity-60" />
+          </>
+        )}
       </button>
     );
   }
@@ -153,10 +168,12 @@ export default function SaveOfflineButton({ target, className = "", size = "md",
       <button
         type="button"
         disabled
+        title={progress ? `Saving ${progress}` : "Saving…"}
+        aria-label={progress ? `Saving ${progress}` : "Saving offline"}
         className={`inline-flex items-center font-medium bg-gray-800 text-gray-300 border border-gray-700 ${pad} ${className}`}
       >
-        <Loader2 size={size === "sm" ? 12 : 14} className="animate-spin" />
-        {progress ? `Saving ${progress}` : "Saving…"}
+        <Loader2 size={iconSize} className="animate-spin" />
+        {!iconOnly && (progress ? `Saving ${progress}` : "Saving…")}
       </button>
     );
   }
@@ -167,10 +184,11 @@ export default function SaveOfflineButton({ target, className = "", size = "md",
       onClick={(e) => void startDownload(e)}
       disabled={!online}
       title={online ? "Save offline" : "Connect to save offline"}
+      aria-label={online ? "Save offline" : "Connect to save offline"}
       className={`inline-flex items-center font-medium bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-40 ${pad} ${className}`}
     >
-      <Download size={size === "sm" ? 12 : 14} />
-      Save offline
+      <Download size={iconSize} />
+      {!iconOnly && "Save offline"}
     </button>
   );
 }

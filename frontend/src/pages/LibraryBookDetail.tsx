@@ -1,6 +1,6 @@
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import api from "../api/client";
 import { libraryQueryKey } from "../utils/libraryQueryKeys";
 import { resolveShareOrigin } from "../api/inviteLink";
@@ -8,7 +8,20 @@ import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import {
-  ArrowLeft, BookOpen, Headphones, Loader2, Mic, Clock, Store, Trash2, ListPlus, Share2, Tags,
+  BookOpen,
+  Check,
+  ChevronLeft,
+  Clock,
+  Download,
+  Headphones,
+  HelpCircle,
+  ListPlus,
+  Loader2,
+  Mic,
+  Share2,
+  Store,
+  Tags,
+  Trash2,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
@@ -16,7 +29,6 @@ import Modal from "../components/Modal";
 import QuickReviewWizard from "../components/admin/QuickReviewWizard";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { softRefreshLibraryCollectionQueries } from "../utils/shelfQueryCache";
-import type { AbsChapter } from "../types/player";
 import {
   getOfflineProgress,
   progressKeyForAbs,
@@ -38,6 +50,28 @@ interface ABSItemDetail {
   coverUrl: string;
 }
 
+interface LocalSeriesBook {
+  itemId: string;
+  title: string;
+  author?: string;
+  coverUrl?: string;
+  sequence?: string;
+}
+
+interface StoreSeriesBook {
+  id: string;
+  title: string;
+  subtitle?: string;
+  coverUrl?: string;
+  authors?: string[];
+  sequence?: string;
+  availability?: {
+    inLibrary?: boolean;
+    available?: boolean;
+    catalogOnly?: boolean;
+  };
+}
+
 function formatDuration(secs: number): string {
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
@@ -45,14 +79,14 @@ function formatDuration(secs: number): string {
   return `${m}m`;
 }
 
-function formatChapterTime(s: number): string {
-  if (!s || !isFinite(s)) return "0:00";
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = Math.floor(s % 60);
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+function normTitle(t: string): string {
+  return t.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ");
 }
+
+const iconBtn =
+  "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+const iconBtnPrimary =
+  "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-emerald-600 text-white border border-emerald-500 hover:bg-emerald-500 transition-colors disabled:opacity-50";
 
 export default function LibraryBookDetail() {
   const { itemId: rawItemId } = useParams<{ itemId: string }>();
@@ -81,37 +115,85 @@ export default function LibraryBookDetail() {
     staleTime: 5 * 60 * 1000,
   });
 
-  const { data: chaptersData } = useQuery({
-    queryKey: ["abs-chapters", itemId],
+  const seriesName = item?.series?.find((s) => s.name)?.name?.trim() || "";
+
+  const { data: localSeriesGroups, isLoading: localSeriesLoading } = useQuery({
+    queryKey: libraryQueryKey("abs-series"),
     queryFn: async () => {
-      const { data } = await api.get(`/stream/abs/${encodeURIComponent(itemId!)}/chapters`);
-      return data as { chapters: AbsChapter[] };
+      const { data } = await api.get("/library/abs/series");
+      return data as {
+        series: Array<{
+          id: string;
+          name: string;
+          books: LocalSeriesBook[];
+          bookCount: number;
+        }>;
+      };
     },
-    enabled: !!itemId && online,
+    enabled: !!seriesName,
     staleTime: 10 * 60 * 1000,
+  });
+
+  const localSeries = useMemo(() => {
+    if (!seriesName || !localSeriesGroups?.series?.length) return null;
+    const key = seriesName.toLowerCase();
+    return (
+      localSeriesGroups.series.find((s) => s.name.toLowerCase() === key) ||
+      localSeriesGroups.series.find((s) => s.name.toLowerCase().includes(key) || key.includes(s.name.toLowerCase())) ||
+      null
+    );
+  }, [localSeriesGroups, seriesName]);
+
+  const { data: storeMatch } = useQuery({
+    queryKey: ["lib-detail-store-match", item?.title, item?.author],
+    queryFn: async () => {
+      const q = item!.author
+        ? `intitle:${JSON.stringify(item!.title)} inauthor:${item!.author}`
+        : item!.title;
+      const { data } = await api.get(`/books/search?q=${encodeURIComponent(q)}&pageSize=5`);
+      const books = (data as { books?: { id: string; title: string }[] })?.books || [];
+      if (!books.length) return null;
+      const titleLower = item!.title.toLowerCase();
+      const match =
+        books.find((b) => {
+          const bt = b.title.toLowerCase();
+          return bt === titleLower || bt.includes(titleLower) || titleLower.includes(bt);
+        }) || books[0];
+      return match.id as string;
+    },
+    enabled: !!item?.title && online,
+    staleTime: 30 * 60 * 1000,
     retry: 1,
   });
 
-  const { data: ebookMatch } = useQuery({
-    queryKey: ["ebook-match-lib", item?.title, item?.author],
+  const { data: storeSeries, isLoading: storeSeriesLoading } = useQuery({
+    queryKey: ["book-series", storeMatch],
     queryFn: async () => {
-      const params = new URLSearchParams({ title: item!.title });
-      if (item!.author) params.set("author", item!.author);
-      const s = item!.series?.[0];
-      if (s?.name) params.set("seriesName", s.name);
-      if (s?.sequence) params.set("seriesIndex", s.sequence);
-      const { data } = await api.get(`/library/ebook-match?${params}`);
-      return data as { chapterId: number | null };
+      const { data } = await api.get(`/books/series/${encodeURIComponent(storeMatch!)}`);
+      return data as {
+        seriesName: string | null;
+        books: StoreSeriesBook[];
+        currentBookIndex: number;
+      };
     },
-    enabled: !!item?.title,
-    staleTime: 5 * 60 * 1000,
+    enabled: !!storeMatch && online,
+    staleTime: 30 * 60 * 1000,
+    refetchOnWindowFocus: false,
   });
 
-  const handlePlay = async (startAt?: number) => {
+  const absByTitle = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const b of localSeries?.books || []) {
+      if (b.itemId && b.title) map.set(normTitle(b.title), b.itemId);
+    }
+    return map;
+  }, [localSeries]);
+
+  const handlePlay = async () => {
     if (!item) return;
     setPlayLoading(true);
     try {
-      await playABS(item.itemId, startAt != null ? { startAt } : undefined);
+      await playABS(item.itemId);
     } catch (err) {
       const msg =
         err instanceof Error && err.message.startsWith("Offline")
@@ -122,7 +204,6 @@ export default function LibraryBookDetail() {
       setPlayLoading(false);
     }
   };
-
 
   const canShare = user?.role === "admin" || !!user?.canShareBooks;
   const hasLocalProgress = (() => {
@@ -154,7 +235,6 @@ export default function LibraryBookDetail() {
           toast("Share sheet opened", "success");
           return;
         } catch (err) {
-          // User cancel — fall through to clipboard.
           if ((err as { name?: string })?.name === "AbortError") return;
         }
       }
@@ -184,6 +264,10 @@ export default function LibraryBookDetail() {
 
   const handleViewInStore = async () => {
     if (!item) return;
+    if (storeMatch) {
+      navigate(`/book/${encodeURIComponent(storeMatch)}`);
+      return;
+    }
     setStoreLoading(true);
     try {
       const q = item.author
@@ -214,7 +298,6 @@ export default function LibraryBookDetail() {
     setDeleting(true);
     try {
       await api.delete(`/admin/library/abs/${encodeURIComponent(itemId)}`);
-      // Optimistic local remove, then soft-refresh (keep shelf visible).
       queryClient.setQueryData(libraryQueryKey("abs-collection"), (prev: unknown) => {
         if (!prev || typeof prev !== "object") return prev;
         const data = prev as {
@@ -305,91 +388,268 @@ export default function LibraryBookDetail() {
         type="button"
         onClick={() => void handlePlay()}
         disabled={playLoading}
-        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
+        title={hasLocalProgress ? "Resume" : "Listen"}
+        aria-label={hasLocalProgress ? "Resume" : "Listen"}
+        className={iconBtnPrimary}
       >
-        {playLoading ? <Loader2 size={16} className="animate-spin" /> : <Headphones size={16} />}
-        {hasLocalProgress ? "Resume" : "Listen"}
+        {playLoading ? <Loader2 size={18} className="animate-spin" /> : <Headphones size={18} />}
+      </button>
+      {itemId && <SaveOfflineButton target={{ kind: "abs", itemId }} iconOnly />}
+      <button
+        type="button"
+        onClick={handleAddToUpNext}
+        title="Add to Up Next"
+        aria-label="Add to Up Next"
+        className={iconBtn}
+      >
+        <ListPlus size={18} />
       </button>
       {canShare && (
         <button
           type="button"
           onClick={() => void handleShare()}
           disabled={shareBusy}
-          title="Share listen link"
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
+          title="Share"
+          aria-label="Share"
+          className={iconBtn}
         >
-          {shareBusy ? <Loader2 size={16} className="animate-spin" /> : <Share2 size={16} />}
-          Share
+          {shareBusy ? <Loader2 size={18} className="animate-spin" /> : <Share2 size={18} />}
         </button>
       )}
       <button
         type="button"
-        onClick={handleAddToUpNext}
-        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors"
-      >
-        <ListPlus size={16} />
-        Add to Up Next
-      </button>
-      {ebookMatch?.chapterId ? (
-        <button
-          type="button"
-          onClick={() => navigate(`/read/${ebookMatch.chapterId}`)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-amber-600 text-white hover:bg-amber-500 transition-colors"
-        >
-          <BookOpen size={16} />
-          Read
-        </button>
-      ) : null}
-      {itemId && <SaveOfflineButton target={{ kind: "abs", itemId }} />}
-      <button
-        type="button"
-        onClick={handleViewInStore}
+        onClick={() => void handleViewInStore()}
         disabled={storeLoading || !online}
-        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
+        title="View in Browse"
+        aria-label="View in Browse"
+        className={iconBtn}
       >
-        {storeLoading ? <Loader2 size={16} className="animate-spin" /> : <Store size={16} />}
-        View in Browse
+        {storeLoading ? <Loader2 size={18} className="animate-spin" /> : <Store size={18} />}
       </button>
       {isAdmin && (
         <button
           type="button"
           onClick={() => setShowEditMetadata(true)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors"
+          title="Edit metadata"
+          aria-label="Edit metadata"
+          className={iconBtn}
         >
-          <Tags size={16} />
-          Edit metadata
+          <Tags size={18} />
         </button>
       )}
-      {isAdmin && (
-        <button
-          type="button"
-          onClick={() => setShowDelete(true)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-red-900/40 text-red-300 border border-red-800/60 hover:bg-red-900/60 transition-colors"
+    </>
+  );
+
+  const useStoreSeries =
+    !!storeSeries?.seriesName && (storeSeries.books?.length ?? 0) > 1;
+  const useLocalSeries = !useStoreSeries && !!localSeries && localSeries.books.length > 1;
+  const seriesLoading = (seriesName && localSeriesLoading) || (!!storeMatch && storeSeriesLoading);
+  const displaySeriesName =
+    (useStoreSeries && storeSeries?.seriesName) || localSeries?.name || seriesName;
+
+  const availabilityBadge = (avail?: StoreSeriesBook["availability"], forceInLibrary?: boolean) => {
+    const inLibrary = forceInLibrary || Boolean(avail?.inLibrary);
+    const cached = Boolean(avail?.available);
+    const catalogOnly = Boolean(avail?.catalogOnly) || (!cached && !inLibrary);
+    if (inLibrary) {
+      return (
+        <span
+          className="absolute top-1 right-1 flex items-center gap-0.5 px-1 py-0.5 rounded bg-emerald-900/90 text-emerald-300 text-[8px] font-medium"
+          title="Already in library"
         >
-          <Trash2 size={16} />
-          Delete
-        </button>
+          <Check size={8} strokeWidth={3} />
+        </span>
+      );
+    }
+    if (cached) {
+      return (
+        <span
+          className="absolute top-1 right-1 flex items-center gap-0.5 px-1 py-0.5 rounded bg-emerald-900/90 text-emerald-300 text-[8px] font-medium"
+          title="Cached — available to download"
+        >
+          <Download size={8} />
+        </span>
+      );
+    }
+    if (catalogOnly) {
+      return (
+        <span
+          className="absolute top-1 right-1 flex items-center gap-0.5 px-1 py-0.5 rounded bg-amber-950/90 text-amber-300 text-[8px] font-medium"
+          title="In catalog — not yet cached"
+        >
+          <HelpCircle size={8} />
+        </span>
+      );
+    }
+    return null;
+  };
+
+  const seriesSection = (
+    <>
+      {seriesLoading && (
+        <div className="mt-8">
+          <p className="text-sm text-gray-500">Looking up series…</p>
+        </div>
+      )}
+
+      {!seriesLoading && useStoreSeries && storeSeries && (
+        <div className="mt-8">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <h2 className="text-lg font-semibold text-gray-100">
+              More in {displaySeriesName}
+              <span className="text-sm text-gray-500 font-normal ml-2">
+                ({storeSeries.books.length} books)
+              </span>
+            </h2>
+            {storeMatch && (
+              <button
+                type="button"
+                onClick={() => navigate(`/series/${encodeURIComponent(storeMatch)}`)}
+                className="shrink-0 px-3 py-1.5 rounded-lg bg-brand-900/40 border border-brand-700/50 text-sm font-medium text-brand-300 hover:bg-brand-900/60"
+              >
+                More in this series
+              </button>
+            )}
+          </div>
+          <div className="grid grid-flow-col auto-cols-[20%] sm:auto-cols-[14%] md:auto-cols-[10%] lg:auto-cols-[8%] xl:auto-cols-[6.5%] gap-2 overflow-x-auto pb-2 scroll-smooth scrollbar-hide">
+            {storeSeries.books.map((sb) => {
+              const absId = absByTitle.get(normTitle(sb.title));
+              const isCurrent =
+                absId === itemId ||
+                (!!storeMatch && sb.id === storeMatch) ||
+                normTitle(sb.title) === normTitle(item.title);
+              return (
+                <button
+                  key={sb.id}
+                  type="button"
+                  onClick={() => {
+                    if (isCurrent) return;
+                    if (absId) navigate(`/library/abs/${encodeURIComponent(absId)}`);
+                    else navigate(`/book/${encodeURIComponent(sb.id)}`);
+                  }}
+                  className="group text-left flex flex-col h-full"
+                >
+                  <div
+                    className={`relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-lg border transition-all duration-200 group-hover:-translate-y-0.5 ${
+                      isCurrent
+                        ? "border-brand-500 ring-1 ring-brand-500/30"
+                        : "border-gray-800 group-hover:border-gray-600 group-hover:shadow-lg group-hover:shadow-black/20"
+                    }`}
+                  >
+                    {sb.coverUrl ? (
+                      <CoverImage src={sb.coverUrl} alt={sb.title} className="w-full h-full object-cover" loading="lazy" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-gray-700">
+                        <BookOpen size={16} />
+                      </div>
+                    )}
+                    {sb.sequence && (
+                      <span className="absolute top-0.5 left-0.5 px-1 py-0.5 bg-black/70 text-[8px] text-gray-300 rounded font-mono">
+                        #{sb.sequence}
+                      </span>
+                    )}
+                    {availabilityBadge(sb.availability, !!absId)}
+                  </div>
+                  <div className="pt-1.5 px-0.5 pb-0.5 flex flex-col gap-0.5">
+                    <h3 className="text-[11px] font-bold text-gray-100 line-clamp-2 leading-snug">{sb.title}</h3>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {!seriesLoading && useLocalSeries && localSeries && (
+        <div className="mt-8">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <h2 className="text-lg font-semibold text-gray-100">
+              More in {displaySeriesName}
+              <span className="text-sm text-gray-500 font-normal ml-2">
+                ({localSeries.books.length} books)
+              </span>
+            </h2>
+          </div>
+          <div className="grid grid-flow-col auto-cols-[20%] sm:auto-cols-[14%] md:auto-cols-[10%] lg:auto-cols-[8%] xl:auto-cols-[6.5%] gap-2 overflow-x-auto pb-2 scroll-smooth scrollbar-hide">
+            {[...localSeries.books]
+              .sort((a, b) => {
+                const fa = parseFloat(a.sequence || "999");
+                const fb = parseFloat(b.sequence || "999");
+                if (!Number.isNaN(fa) && !Number.isNaN(fb)) return fa - fb;
+                return String(a.sequence || "").localeCompare(String(b.sequence || ""));
+              })
+              .map((sb) => {
+                const isCurrent = sb.itemId === itemId;
+                return (
+                  <button
+                    key={sb.itemId}
+                    type="button"
+                    onClick={() => {
+                      if (!isCurrent) navigate(`/library/abs/${encodeURIComponent(sb.itemId)}`);
+                    }}
+                    className="group text-left flex flex-col h-full"
+                  >
+                    <div
+                      className={`relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-lg border transition-all duration-200 group-hover:-translate-y-0.5 ${
+                        isCurrent
+                          ? "border-brand-500 ring-1 ring-brand-500/30"
+                          : "border-gray-800 group-hover:border-gray-600 group-hover:shadow-lg group-hover:shadow-black/20"
+                      }`}
+                    >
+                      {sb.coverUrl ? (
+                        <CoverImage src={sb.coverUrl} alt={sb.title} className="w-full h-full object-cover" loading="lazy" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-gray-700">
+                          <Headphones size={16} />
+                        </div>
+                      )}
+                      {sb.sequence && (
+                        <span className="absolute top-0.5 left-0.5 px-1 py-0.5 bg-black/70 text-[8px] text-gray-300 rounded font-mono">
+                          #{sb.sequence}
+                        </span>
+                      )}
+                      {availabilityBadge(undefined, true)}
+                    </div>
+                    <div className="pt-1.5 px-0.5 pb-0.5 flex flex-col gap-0.5">
+                      <h3 className="text-[11px] font-bold text-gray-100 line-clamp-2 leading-snug">{sb.title}</h3>
+                    </div>
+                  </button>
+                );
+              })}
+          </div>
+        </div>
       )}
     </>
   );
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
-      <Link
-        to={-1 as any}
-        className="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-gray-200 transition-colors mb-6"
-        onClick={(e) => {
-          e.preventDefault();
-          window.history.back();
-        }}
-      >
-        <ArrowLeft size={16} />
-        Back
-      </Link>
+      <div className="flex items-center justify-between mb-6">
+        <button
+          type="button"
+          onClick={() => window.history.back()}
+          title="Back"
+          aria-label="Back"
+          className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-gray-800 to-gray-900 text-gray-200 border border-gray-600/80 shadow-md shadow-black/30 hover:from-gray-700 hover:to-gray-800 hover:text-white hover:border-gray-500 transition-all"
+        >
+          <ChevronLeft size={22} strokeWidth={2.5} className="-ml-0.5" />
+        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => setShowDelete(true)}
+            title="Delete"
+            aria-label="Delete"
+            className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-red-950/50 text-red-300 border border-red-800/60 shadow-md shadow-black/20 hover:bg-red-900/60 hover:text-red-200 transition-all"
+          >
+            <Trash2 size={18} />
+          </button>
+        )}
+      </div>
 
       <div className="flex gap-4 mb-5 md:hidden">
         <div className="w-[7.5rem] shrink-0">{cover}</div>
-        <div className="flex flex-col gap-2 flex-1 content-start self-start">{actions}</div>
+        <div className="grid grid-cols-2 gap-2 flex-1 content-start self-start">{actions}</div>
       </div>
 
       <div className="flex flex-col md:flex-row gap-8">
@@ -440,28 +700,7 @@ export default function LibraryBookDetail() {
             </div>
           )}
 
-          {(chaptersData?.chapters?.length ?? 0) > 0 && (
-            <div className="mt-8">
-              <h2 className="text-lg font-semibold text-gray-100 mb-3">Chapters</h2>
-              <ul className="space-y-1 max-h-80 overflow-y-auto pr-1">
-                {chaptersData!.chapters.map((ch) => (
-                  <li key={`${ch.id}-${ch.start}`}>
-                    <button
-                      type="button"
-                      onClick={() => void handlePlay(ch.start)}
-                      disabled={playLoading}
-                      className="w-full text-left flex items-start gap-3 px-3 py-2 rounded-lg text-gray-300 hover:bg-gray-800 hover:text-white transition-colors disabled:opacity-50"
-                    >
-                      <span className="text-xs tabular-nums text-gray-500 shrink-0 pt-0.5">
-                        {formatChapterTime(ch.start)}
-                      </span>
-                      <span className="text-sm flex-1 leading-snug">{ch.title}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          {seriesSection}
         </div>
       </div>
 
@@ -498,7 +737,6 @@ export default function LibraryBookDetail() {
           onClose={() => setShowEditMetadata(false)}
           onApplied={() => {
             void queryClient.invalidateQueries({ queryKey: ["abs-item-detail", itemId] });
-            void queryClient.invalidateQueries({ queryKey: ["abs-chapters", itemId] });
             void softRefreshLibraryCollectionQueries(queryClient);
           }}
         />

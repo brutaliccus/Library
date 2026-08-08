@@ -61,6 +61,7 @@ import {
   mergeAbsCollection,
   mergeKavitaCollection,
   mergeStreamingLibrary,
+  kavitaCollectionLooksIncomplete,
   shouldBustLibraryCollectionCache,
   softRefreshLibraryCollectionQueries,
   stripCollectionEntriesFromPersist,
@@ -445,9 +446,11 @@ export default function MyLibrary() {
       const { data } = await api.get("/library/kavita/collection", {
         params: shouldBustLibraryCollectionCache() ? { refresh: true } : undefined,
       });
-      const fresh = data as { items: KavitaItem[]; totalItems: number };
+      const fresh = data as { items: KavitaItem[]; totalItems: number; scanning?: boolean };
       const prev = client.getQueryData<typeof fresh>(libraryQueryKey("kavita-collection"));
-      const merged = mergeKavitaCollection(prev, fresh, { pruneMissing: true });
+      // Never prune a healthy shelf down to a mid-scan / truncated snapshot.
+      const prune = !kavitaCollectionLooksIncomplete(prev, fresh);
+      const merged = mergeKavitaCollection(prev, fresh, { pruneMissing: prune });
       return merged ?? fresh;
     },
     staleTime: 30 * 60 * 1000,

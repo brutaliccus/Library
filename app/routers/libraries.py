@@ -64,6 +64,10 @@ class MemberRoleRequest(BaseModel):
     library_role: str  # "admin" | "member"
 
 
+class DeleteGroupRequest(BaseModel):
+    password: str
+
+
 async def _get_group(user: User, db: AsyncSession) -> LibraryGroup | None:
     if not user.library_group_id:
         return None
@@ -254,7 +258,6 @@ async def create_group(
     if rd or tb:
         await _validate_tokens(rd, tb)
 
-    old_group_id = user.library_group_id
     theme = normalize_theme(body.default_theme, allow_custom=False) or DEFAULT_THEME
     group = LibraryGroup(
         name=name,
@@ -268,7 +271,6 @@ async def create_group(
     user.library_group_id = group.id
     user.library_role = "owner"
     await db.commit()
-    await _cleanup_empty_group(old_group_id, db)
     # Seed empty server defaults so Admin/setup debrid fields match onboarding keys.
     if rd or tb:
         try:
@@ -306,11 +308,9 @@ async def join_group(
         return {"library": await _serialize_group(group, user, db), "alreadyMember": True}
     await _ensure_can_leave(user, db)
 
-    old_group_id = user.library_group_id
     user.library_group_id = group.id
     user.library_role = "member"
     await db.commit()
-    await _cleanup_empty_group(old_group_id, db)
     return {"library": await _serialize_group(group, user, db), "alreadyMember": False}
 
 
@@ -319,32 +319,61 @@ async def leave_group(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Leave the current library group on this host (does not delete the hub roster entry)."""
+    """Leave the current library group without deleting it.
+
+    Empty libraries (0 members) are kept so the owner can rejoin via invite.
+    Permanent deletion is ``POST /libraries/delete`` (owner + password).
+    """
     if not user.library_group_id:
         return {"status": "ok", "library": None}
     await _ensure_can_leave(user, db)
-    old_group_id = user.library_group_id
     user.library_group_id = None
     user.library_role = "member"
     await db.commit()
-    await _cleanup_empty_group(old_group_id, db)
     return {"status": "ok", "library": None}
 
 
-async def _cleanup_empty_group(group_id: int | None, db: AsyncSession) -> None:
-    """Delete a group that no longer has any members (owner moved away)."""
-    if not group_id:
-        return
-    remaining = (
-        await db.execute(select(User.id).where(User.library_group_id == group_id).limit(1))
-    ).scalar_one_or_none()
-    if remaining is None:
-        group = (
-            await db.execute(select(LibraryGroup).where(LibraryGroup.id == group_id))
-        ).scalar_one_or_none()
-        if group:
-            await db.delete(group)
-            await db.commit()
+@router.post("/delete")
+async def delete_group(
+    body: DeleteGroupRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently delete the current library group (owner + password required)."""
+    from app.utils.auth import verify_password
+
+    _require_owner(user)
+    group = await _get_group(user, db)
+    if not group:
+        raise HTTPException(status_code=404, detail="Not in a library")
+    if group.owner_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Only the library owner can delete it")
+    password = (body.password or "").strip()
+    if not password or not verify_password(password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect password")
+
+    group_id = group.id
+    cover_rel = group.cover_path
+
+    members = (
+        await db.execute(select(User).where(User.library_group_id == group_id))
+    ).scalars().all()
+    for member in members:
+        member.library_group_id = None
+        member.library_role = "member"
+
+    await db.delete(group)
+    await db.commit()
+
+    if cover_rel:
+        try:
+            cover_file = Path(__file__).resolve().parents[2] / "data" / cover_rel
+            if cover_file.is_file():
+                cover_file.unlink()
+        except OSError:
+            logger.warning("libraries/delete: could not remove cover %s", cover_rel)
+
+    return {"status": "ok", "deletedLibraryId": group_id}
 
 
 @router.put("/tokens")

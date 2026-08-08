@@ -203,6 +203,22 @@ export function mergeAbsCollection<T extends AbsCollectionData>(
 }
 
 /**
+ * True when a fresh Kavita snapshot looks mid-scan / truncated vs a healthy cache.
+ * Used to skip pruneMissing so Refresh cannot collapse ~117 cards down to ~6.
+ */
+export function kavitaCollectionLooksIncomplete(
+  cached: KavitaCollectionData | null | undefined,
+  fresh: KavitaCollectionData | null | undefined,
+): boolean {
+  const prev = (cached?.items || []).length || Number(cached?.totalItems) || 0;
+  const next = (fresh?.items || []).length || Number(fresh?.totalItems) || 0;
+  if ((fresh as { scanning?: boolean } | null | undefined)?.scanning) return true;
+  if (prev < 10) return false;
+  if (next <= 0) return true;
+  return next < prev * 0.7;
+}
+
+/**
  * Merge Kavita collection snapshots by volume/chapter identity.
  *
  * Multi-volume series expand to one shelf item per volume (same seriesId).

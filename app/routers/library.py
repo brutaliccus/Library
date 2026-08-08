@@ -884,6 +884,8 @@ async def abs_collection(
             stale = library_collection_cache.get_stale(cache_key)
             if stale is not None:
                 return stale
+            # No prior payload - avoid assembling a mid-scan partial shelf.
+            return {"items": [], "totalItems": 0, "scanning": True}
 
         hidden_titles = await _get_private_titles_for_others(user.id, db)
         raw_items = [

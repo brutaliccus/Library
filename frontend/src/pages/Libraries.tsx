@@ -22,6 +22,7 @@ import {
   listRememberedLibraries,
   loadRegistry,
   removeRememberedLibrary,
+  switchToLibrary,
   upsertRememberedLibrary,
   canShareLibraryInvite,
   inviteFieldsFromLibraryMe,
@@ -79,6 +80,13 @@ export default function LibrariesPage() {
   /** Post-login one-time prompt may be dismissed; intentional setup from Open may not. */
   const [unlockAllowSkip, setUnlockAllowSkip] = useState(false);
   const [removeLib, setRemoveLib] = useState<RememberedLibrary | null>(null);
+  /** confirm → owner-delete? → password (owner permanent delete) */
+  const [removePhase, setRemovePhase] = useState<"confirm" | "owner-delete" | "password">(
+    "confirm",
+  );
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [removeError, setRemoveError] = useState("");
   const [shareBusyOrigin, setShareBusyOrigin] = useState<string | null>(null);
 
   // Refresh invite-share cache for remembered libraries (so the share icon can appear).
@@ -219,27 +227,99 @@ export default function LibrariesPage() {
     }
   };
 
-  const leaveLibrary = async (lib: RememberedLibrary) => {
+  const clearRemoveFlow = () => {
+    setRemoveLib(null);
+    setRemovePhase("confirm");
+    setRemoveBusy(false);
+    setDeletePassword("");
+    setRemoveError("");
+  };
+
+  const finishLocalRemove = (lib: RememberedLibrary, message: string) => {
+    removeRememberedLibrary(lib.origin, lib.email);
+    setTick((t) => t + 1);
+    clearRemoveFlow();
+    toast(message, "success");
+  };
+
+  /** Leave server membership without deleting the library group. */
+  const leaveLibraryOnly = async (lib: RememberedLibrary) => {
+    setRemoveBusy(true);
+    setRemoveError("");
     try {
       try {
-        setInstanceUrl(lib.origin);
-        applyApiBaseUrl();
+        switchToLibrary(lib.origin);
         await api.post("/libraries/leave");
       } catch {
         /* host may be unreachable — still remove locally */
       }
-      removeRememberedLibrary(lib.origin, lib.email);
-      setTick((t) => t + 1);
-      toast("Removed from this device", "success");
+      finishLocalRemove(lib, "Left library — removed from this device");
     } catch {
-      removeRememberedLibrary(lib.origin, lib.email);
-      setTick((t) => t + 1);
+      finishLocalRemove(lib, "Removed from this device");
+    }
+  };
+
+  /** Owner permanently deletes the library group (password already verified server-side). */
+  const deleteLibraryPermanently = async (lib: RememberedLibrary, password: string) => {
+    setRemoveBusy(true);
+    setRemoveError("");
+    try {
+      switchToLibrary(lib.origin);
+      await api.post("/libraries/delete", { password });
+      finishLocalRemove(lib, "Library permanently deleted");
+    } catch (e: any) {
+      setRemoveBusy(false);
+      setRemoveError(e?.response?.data?.detail || "Could not delete library");
+    }
+  };
+
+  const beginRemoveFlow = async (lib: RememberedLibrary) => {
+    setRemoveBusy(true);
+    setRemoveError("");
+    try {
+      const session = switchToLibrary(lib.origin);
+      let isOwner = lib.libraryRole === "owner";
+      if (session?.access_token && online) {
+        try {
+          const { data } = await api.get("/libraries/me");
+          const group = data?.library;
+          if (group) {
+            isOwner = group.role === "owner" || group.isOwner === true;
+            upsertRememberedLibrary({
+              origin: lib.origin,
+              name: group.name || lib.name,
+              coverUrl: group.coverUrl ?? lib.coverUrl,
+              email: lib.email,
+              ...inviteFieldsFromLibraryMe(group),
+            });
+            setTick((t) => t + 1);
+          } else {
+            // Already not a member server-side — just drop the local card.
+            finishLocalRemove(lib, "Removed from this device");
+            return;
+          }
+        } catch {
+          /* use remembered role */
+        }
+      }
+      if (isOwner) {
+        setRemovePhase("owner-delete");
+        setRemoveBusy(false);
+        return;
+      }
+      await leaveLibraryOnly(lib);
+    } catch {
+      setRemoveBusy(false);
+      await leaveLibraryOnly(lib);
     }
   };
 
   const requestLeaveLibrary = (lib: RememberedLibrary, e: React.MouseEvent) => {
     e.stopPropagation();
     setRemoveLib(lib);
+    setRemovePhase("confirm");
+    setDeletePassword("");
+    setRemoveError("");
   };
 
   const startEdit = (lib: RememberedLibrary, e: React.MouseEvent) => {
@@ -753,25 +833,107 @@ export default function LibrariesPage() {
       )}
 
       <ConfirmModal
-        show={removeLib !== null}
+        show={removeLib !== null && removePhase === "confirm"}
         title="Remove library?"
         body={
           removeLib ? (
             <>
-              Remove “{removeLib.name}” from this device? You can add it again later.
+              Remove “{removeLib.name}” from this device? You can add it again later with an
+              invite link or by signing in.
             </>
           ) : null
         }
-        confirmLabel="Remove"
+        confirmLabel="Continue"
         variant="danger"
-        onCancel={() => setRemoveLib(null)}
+        busy={removeBusy}
+        onCancel={clearRemoveFlow}
         onConfirm={() => {
-          if (!removeLib) return;
-          const lib = removeLib;
-          setRemoveLib(null);
-          void leaveLibrary(lib);
+          if (!removeLib || removeBusy) return;
+          void beginRemoveFlow(removeLib);
         }}
       />
+
+      {removeLib && removePhase === "owner-delete" && (
+        <Modal title="Permanently delete this library?" onClose={removeBusy ? () => undefined : clearRemoveFlow}>
+          <p className="text-sm text-gray-400 mb-4">
+            You are the owner of “{removeLib.name}”. Do you want to permanently delete this
+            library? Choosing “Just leave” keeps it on the server (even with no members) so you
+            can rejoin later with the invite code.
+          </p>
+          <div className="flex flex-col-reverse sm:flex-row gap-2 sm:justify-end">
+            <button
+              type="button"
+              disabled={removeBusy}
+              onClick={clearRemoveFlow}
+              className="px-3 py-1.5 text-gray-300 hover:bg-gray-700 rounded-lg disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={removeBusy}
+              onClick={() => void leaveLibraryOnly(removeLib)}
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-600 text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+            >
+              {removeBusy ? <Loader2 size={14} className="animate-spin" /> : null}
+              Just leave
+            </button>
+            <button
+              type="button"
+              disabled={removeBusy}
+              onClick={() => {
+                setDeletePassword("");
+                setRemoveError("");
+                setRemovePhase("password");
+              }}
+              className="px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-500 disabled:opacity-50"
+            >
+              Yes, delete
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {removeLib && removePhase === "password" && (
+        <Modal title="Confirm library deletion" onClose={removeBusy ? () => undefined : clearRemoveFlow}>
+          <p className="text-sm text-gray-400 mb-3">
+            Enter your account password to permanently delete “{removeLib.name}”. This cannot be
+            undone.
+          </p>
+          <input
+            type="password"
+            autoComplete="current-password"
+            value={deletePassword}
+            onChange={(e) => setDeletePassword(e.target.value)}
+            disabled={removeBusy}
+            placeholder="Password"
+            className="w-full mb-2 px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 text-sm text-gray-100"
+          />
+          {removeError && <p className="text-sm text-red-400 mb-2">{removeError}</p>}
+          <div className="flex gap-2 justify-end">
+            <button
+              type="button"
+              disabled={removeBusy}
+              onClick={clearRemoveFlow}
+              className="px-3 py-1.5 text-gray-300 hover:bg-gray-700 rounded-lg disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={removeBusy || !deletePassword.trim()}
+              onClick={() => {
+                if (!removeLib || !deletePassword.trim()) return;
+                void deleteLibraryPermanently(removeLib, deletePassword.trim());
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-500 disabled:opacity-50"
+            >
+              {removeBusy ? <Loader2 size={14} className="animate-spin" /> : null}
+              Delete permanently
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

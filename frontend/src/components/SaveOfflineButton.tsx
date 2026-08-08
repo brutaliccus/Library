@@ -138,7 +138,7 @@ export default function SaveOfflineButton({
 
   const iconSize = iconOnly ? 18 : size === "sm" ? 12 : 14;
   const pad = iconOnly
-    ? "w-11 h-11 justify-center rounded-xl"
+    ? "w-10 h-10 sm:w-11 sm:h-11 justify-center rounded-xl"
     : size === "sm"
       ? "px-2 py-1 text-[11px] gap-1 rounded-md"
       : "px-3 py-2 text-sm gap-1.5 rounded-lg";

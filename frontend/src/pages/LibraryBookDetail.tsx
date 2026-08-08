@@ -83,10 +83,28 @@ function normTitle(t: string): string {
   return t.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ");
 }
 
+function formatSeriesSeq(seq?: string | null): string {
+  if (seq == null) return "";
+  const cleaned = String(seq).replace(/^#+\s*/, "").trim();
+  if (!cleaned) return "";
+  const n = Number(cleaned);
+  if (Number.isFinite(n)) {
+    return Number.isInteger(n) ? String(n) : String(n);
+  }
+  return cleaned;
+}
+
+function seqSortKey(seq?: string | null): number {
+  const n = parseFloat(formatSeriesSeq(seq) || "NaN");
+  return Number.isFinite(n) ? n : 9999;
+}
+
 const iconBtn =
-  "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
-const iconBtnPrimary =
-  "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-emerald-600 text-white border border-emerald-500 hover:bg-emerald-500 transition-colors disabled:opacity-50";
+  "inline-flex items-center justify-center w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+const iconBtnDanger =
+  "inline-flex items-center justify-center w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-red-950/50 text-red-300 border border-red-800/60 hover:bg-red-900/60 hover:text-red-200 transition-colors";
+const seriesStripClass =
+  "grid grid-flow-col auto-cols-[7.5rem] sm:auto-cols-[8rem] md:auto-cols-[8.5rem] lg:auto-cols-[9rem] gap-3 overflow-x-auto pb-2 scroll-smooth scrollbar-hide";
 
 export default function LibraryBookDetail() {
   const { itemId: rawItemId } = useParams<{ itemId: string }>();
@@ -182,9 +200,9 @@ export default function LibraryBookDetail() {
   });
 
   const absByTitle = useMemo(() => {
-    const map = new Map<string, string>();
+    const map = new Map<string, LocalSeriesBook>();
     for (const b of localSeries?.books || []) {
-      if (b.itemId && b.title) map.set(normTitle(b.title), b.itemId);
+      if (b.itemId && b.title) map.set(normTitle(b.title), b);
     }
     return map;
   }, [localSeries]);
@@ -371,7 +389,10 @@ export default function LibraryBookDetail() {
 
   const seriesLine = item.series
     .filter((s) => s.name)
-    .map((s) => (s.sequence ? `${s.name} #${s.sequence}` : s.name))
+    .map((s) => {
+      const seq = formatSeriesSeq(s.sequence);
+      return seq ? `${s.name} #${seq}` : s.name;
+    })
     .join(" · ");
 
   const cover = item.coverUrl ? (
@@ -382,18 +403,9 @@ export default function LibraryBookDetail() {
     </div>
   );
 
-  const actions = (
+  // Icon grid (no Listen): Save Offline | Up Next | Share / View | Edit | Delete
+  const iconActions = (
     <>
-      <button
-        type="button"
-        onClick={() => void handlePlay()}
-        disabled={playLoading}
-        title={hasLocalProgress ? "Resume" : "Listen"}
-        aria-label={hasLocalProgress ? "Resume" : "Listen"}
-        className={iconBtnPrimary}
-      >
-        {playLoading ? <Loader2 size={18} className="animate-spin" /> : <Headphones size={18} />}
-      </button>
       {itemId && <SaveOfflineButton target={{ kind: "abs", itemId }} iconOnly />}
       <button
         type="button"
@@ -437,12 +449,40 @@ export default function LibraryBookDetail() {
           <Tags size={18} />
         </button>
       )}
+      {isAdmin && (
+        <button
+          type="button"
+          onClick={() => setShowDelete(true)}
+          title="Delete"
+          aria-label="Delete"
+          className={iconBtnDanger}
+        >
+          <Trash2 size={18} />
+        </button>
+      )}
     </>
   );
 
+  const desktopActions = (
+    <>
+      <button
+        type="button"
+        onClick={() => void handlePlay()}
+        disabled={playLoading}
+        title={hasLocalProgress ? "Resume" : "Listen"}
+        aria-label={hasLocalProgress ? "Resume" : "Listen"}
+        className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-emerald-600 text-white border border-emerald-500 hover:bg-emerald-500 transition-colors disabled:opacity-50"
+      >
+        {playLoading ? <Loader2 size={18} className="animate-spin" /> : <Headphones size={18} />}
+      </button>
+      {iconActions}
+    </>
+  );
+
+  // Prefer library series (ABS sequence) so badges match shelf numbering.
+  const useLocalSeries = !!localSeries && localSeries.books.length > 1;
   const useStoreSeries =
-    !!storeSeries?.seriesName && (storeSeries.books?.length ?? 0) > 1;
-  const useLocalSeries = !useStoreSeries && !!localSeries && localSeries.books.length > 1;
+    !useLocalSeries && !!storeSeries?.seriesName && (storeSeries.books?.length ?? 0) > 1;
   const seriesLoading = (seriesName && localSeriesLoading) || (!!storeMatch && storeSeriesLoading);
   const displaySeriesName =
     (useStoreSeries && storeSeries?.seriesName) || localSeries?.name || seriesName;
@@ -511,51 +551,58 @@ export default function LibraryBookDetail() {
               </button>
             )}
           </div>
-          <div className="grid grid-flow-col auto-cols-[20%] sm:auto-cols-[14%] md:auto-cols-[10%] lg:auto-cols-[8%] xl:auto-cols-[6.5%] gap-2 overflow-x-auto pb-2 scroll-smooth scrollbar-hide">
-            {storeSeries.books.map((sb) => {
-              const absId = absByTitle.get(normTitle(sb.title));
-              const isCurrent =
-                absId === itemId ||
-                (!!storeMatch && sb.id === storeMatch) ||
-                normTitle(sb.title) === normTitle(item.title);
-              return (
-                <button
-                  key={sb.id}
-                  type="button"
-                  onClick={() => {
-                    if (isCurrent) return;
-                    if (absId) navigate(`/library/abs/${encodeURIComponent(absId)}`);
-                    else navigate(`/book/${encodeURIComponent(sb.id)}`);
-                  }}
-                  className="group text-left flex flex-col h-full"
-                >
-                  <div
-                    className={`relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-lg border transition-all duration-200 group-hover:-translate-y-0.5 ${
-                      isCurrent
-                        ? "border-brand-500 ring-1 ring-brand-500/30"
-                        : "border-gray-800 group-hover:border-gray-600 group-hover:shadow-lg group-hover:shadow-black/20"
-                    }`}
+          <div className={seriesStripClass}>
+            {[...storeSeries.books]
+              .map((sb) => {
+                const local = absByTitle.get(normTitle(sb.title));
+                const seq = formatSeriesSeq(local?.sequence || sb.sequence);
+                return { sb, local, seq };
+              })
+              .sort((a, b) => seqSortKey(a.seq) - seqSortKey(b.seq))
+              .map(({ sb, local, seq }) => {
+                const absId = local?.itemId;
+                const isCurrent =
+                  absId === itemId ||
+                  (!!storeMatch && sb.id === storeMatch) ||
+                  normTitle(sb.title) === normTitle(item.title);
+                return (
+                  <button
+                    key={sb.id}
+                    type="button"
+                    onClick={() => {
+                      if (isCurrent) return;
+                      if (absId) navigate(`/library/abs/${encodeURIComponent(absId)}`);
+                      else navigate(`/book/${encodeURIComponent(sb.id)}`);
+                    }}
+                    className="group text-left flex flex-col h-full"
                   >
-                    {sb.coverUrl ? (
-                      <CoverImage src={sb.coverUrl} alt={sb.title} className="w-full h-full object-cover" loading="lazy" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-gray-700">
-                        <BookOpen size={16} />
-                      </div>
-                    )}
-                    {sb.sequence && (
-                      <span className="absolute top-0.5 left-0.5 px-1 py-0.5 bg-black/70 text-[8px] text-gray-300 rounded font-mono">
-                        #{sb.sequence}
-                      </span>
-                    )}
-                    {availabilityBadge(sb.availability, !!absId)}
-                  </div>
-                  <div className="pt-1.5 px-0.5 pb-0.5 flex flex-col gap-0.5">
-                    <h3 className="text-[11px] font-bold text-gray-100 line-clamp-2 leading-snug">{sb.title}</h3>
-                  </div>
-                </button>
-              );
-            })}
+                    <div
+                      className={`relative aspect-[2/3] bg-gray-900 overflow-hidden rounded-lg border transition-all duration-200 group-hover:-translate-y-0.5 ${
+                        isCurrent
+                          ? "border-brand-500 ring-1 ring-brand-500/30"
+                          : "border-gray-800 group-hover:border-gray-600 group-hover:shadow-lg group-hover:shadow-black/20"
+                      }`}
+                    >
+                      {sb.coverUrl ? (
+                        <CoverImage src={sb.coverUrl} alt={sb.title} className="w-full h-full object-cover" loading="lazy" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-gray-700">
+                          <BookOpen size={16} />
+                        </div>
+                      )}
+                      {seq && (
+                        <span className="absolute top-0.5 left-0.5 px-1 py-0.5 bg-black/70 text-[8px] text-gray-300 rounded font-mono">
+                          #{seq}
+                        </span>
+                      )}
+                      {availabilityBadge(sb.availability, !!absId)}
+                    </div>
+                    <div className="pt-1.5 px-0.5 pb-0.5 flex flex-col gap-0.5">
+                      <h3 className="text-[11px] font-bold text-gray-100 line-clamp-2 leading-snug">{sb.title}</h3>
+                    </div>
+                  </button>
+                );
+              })}
           </div>
         </div>
       )}
@@ -570,16 +617,12 @@ export default function LibraryBookDetail() {
               </span>
             </h2>
           </div>
-          <div className="grid grid-flow-col auto-cols-[20%] sm:auto-cols-[14%] md:auto-cols-[10%] lg:auto-cols-[8%] xl:auto-cols-[6.5%] gap-2 overflow-x-auto pb-2 scroll-smooth scrollbar-hide">
+          <div className={seriesStripClass}>
             {[...localSeries.books]
-              .sort((a, b) => {
-                const fa = parseFloat(a.sequence || "999");
-                const fb = parseFloat(b.sequence || "999");
-                if (!Number.isNaN(fa) && !Number.isNaN(fb)) return fa - fb;
-                return String(a.sequence || "").localeCompare(String(b.sequence || ""));
-              })
+              .sort((a, b) => seqSortKey(a.sequence) - seqSortKey(b.sequence))
               .map((sb) => {
                 const isCurrent = sb.itemId === itemId;
+                const seq = formatSeriesSeq(sb.sequence);
                 return (
                   <button
                     key={sb.itemId}
@@ -603,15 +646,15 @@ export default function LibraryBookDetail() {
                           <Headphones size={16} />
                         </div>
                       )}
-                      {sb.sequence && (
-                        <span className="absolute top-0.5 left-0.5 px-1 py-0.5 bg-black/70 text-[8px] text-gray-300 rounded font-mono">
-                          #{sb.sequence}
+                      {seq && (
+                        <span className="absolute top-0.5 left-0.5 px-1.5 py-0.5 bg-black/70 text-[9px] text-gray-200 rounded font-mono">
+                          #{seq}
                         </span>
                       )}
                       {availabilityBadge(undefined, true)}
                     </div>
                     <div className="pt-1.5 px-0.5 pb-0.5 flex flex-col gap-0.5">
-                      <h3 className="text-[11px] font-bold text-gray-100 line-clamp-2 leading-snug">{sb.title}</h3>
+                      <h3 className="text-xs font-bold text-gray-100 line-clamp-2 leading-snug">{sb.title}</h3>
                     </div>
                   </button>
                 );
@@ -624,7 +667,7 @@ export default function LibraryBookDetail() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
-      <div className="flex items-center justify-between mb-6">
+      <div className="mb-5">
         <button
           type="button"
           onClick={() => window.history.back()}
@@ -634,22 +677,24 @@ export default function LibraryBookDetail() {
         >
           <ChevronLeft size={22} strokeWidth={2.5} className="-ml-0.5" />
         </button>
-        {isAdmin && (
-          <button
-            type="button"
-            onClick={() => setShowDelete(true)}
-            title="Delete"
-            aria-label="Delete"
-            className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-red-950/50 text-red-300 border border-red-800/60 shadow-md shadow-black/20 hover:bg-red-900/60 hover:text-red-200 transition-all"
-          >
-            <Trash2 size={18} />
-          </button>
-        )}
       </div>
 
-      <div className="flex gap-4 mb-5 md:hidden">
-        <div className="w-[7.5rem] shrink-0">{cover}</div>
-        <div className="grid grid-cols-2 gap-2 flex-1 content-start self-start">{actions}</div>
+      <div className="md:hidden mb-5">
+        <div className="flex gap-3 items-start">
+          <div className="w-[15rem] max-w-[48%] shrink-0">{cover}</div>
+          <div className="flex-1 min-w-0 flex justify-end">
+            <div className="grid grid-cols-3 gap-2 justify-items-end">{iconActions}</div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handlePlay()}
+          disabled={playLoading}
+          className="mt-4 w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-base font-semibold rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
+        >
+          {playLoading ? <Loader2 size={20} className="animate-spin" /> : <Headphones size={20} />}
+          {hasLocalProgress ? "Resume" : "Listen"}
+        </button>
       </div>
 
       <div className="flex flex-col md:flex-row gap-8">
@@ -688,7 +733,7 @@ export default function LibraryBookDetail() {
             </div>
           )}
 
-          <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">{actions}</div>
+          <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">{desktopActions}</div>
 
           {item.description && (
             <div className="mt-6">

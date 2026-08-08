@@ -6,7 +6,15 @@ import { resolveShareOrigin } from "../api/inviteLink";
 import { useToast } from "../contexts/ToastContext";
 import { useAuth } from "../hooks/useAuth";
 import {
-  ArrowLeft, BookOpen, Headphones, Loader2, Store, Trash2, Share2, TabletSmartphone, Tags,
+  BookOpen,
+  ChevronLeft,
+  Headphones,
+  Loader2,
+  Share2,
+  Store,
+  TabletSmartphone,
+  Tags,
+  Trash2,
 } from "lucide-react";
 import CoverImage from "../components/CoverImage";
 import SaveOfflineButton from "../components/SaveOfflineButton";
@@ -306,146 +314,197 @@ export default function LibraryEbookDetail() {
     </div>
   );
 
-  const actions = (
+  const iconBtn =
+    "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+  const iconBtnDanger =
+    "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-red-950/50 text-red-300 border border-red-800/60 hover:bg-red-900/60 hover:text-red-200 transition-colors";
+  const mobileIconBtn =
+    "inline-flex items-center justify-center flex-1 min-w-0 h-12 max-w-[4.5rem] rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+  const mobileIconBtnDanger =
+    "inline-flex items-center justify-center flex-1 min-w-0 h-12 max-w-[4.5rem] rounded-xl bg-red-950/50 text-red-300 border border-red-800/60 hover:bg-red-900/60 hover:text-red-200 transition-colors";
+
+  const iconActions = (variant: "desktop" | "mobile") => {
+    const btn = variant === "mobile" ? mobileIconBtn : iconBtn;
+    const danger = variant === "mobile" ? mobileIconBtnDanger : iconBtnDanger;
+    const iconSize = variant === "mobile" ? 20 : 18;
+    const offlineClass =
+      variant === "mobile"
+        ? "!h-12 !w-auto flex-1 min-w-0 max-w-[4.5rem] !rounded-xl"
+        : undefined;
+    return (
+      <>
+        {activeChapterId != null && (
+          <SaveOfflineButton
+            target={{
+              kind: "ebook",
+              chapterId: activeChapterId,
+              title: displayTitle,
+              author: displayAuthor,
+              coverUrl: displayCover,
+            }}
+            iconOnly
+            className={offlineClass}
+          />
+        )}
+        {activeChapterId != null && (
+          <button
+            type="button"
+            onClick={() => void handleSendToEreader()}
+            disabled={ereaderBusy || !online}
+            title="Send to ereader"
+            aria-label="Send to ereader"
+            className={btn}
+          >
+            {ereaderBusy ? <Loader2 size={iconSize} className="animate-spin" /> : <TabletSmartphone size={iconSize} />}
+          </button>
+        )}
+        {canShare && activeChapterId != null && (
+          <button
+            type="button"
+            onClick={() => void handleShare()}
+            disabled={shareBusy}
+            title="Share"
+            aria-label="Share"
+            className={btn}
+          >
+            {shareBusy ? <Loader2 size={iconSize} className="animate-spin" /> : <Share2 size={iconSize} />}
+          </button>
+        )}
+        {item.absItemId && (
+          <button
+            type="button"
+            onClick={() => navigate(`/library/abs/${encodeURIComponent(item.absItemId!)}`)}
+            title="Listen"
+            aria-label="Listen"
+            className={btn}
+          >
+            <Headphones size={iconSize} />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => void handleViewInStore()}
+          disabled={storeLoading || !online}
+          title="View in Browse"
+          aria-label="View in Browse"
+          className={btn}
+        >
+          {storeLoading ? <Loader2 size={iconSize} className="animate-spin" /> : <Store size={iconSize} />}
+        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => setShowEditMetadata(true)}
+            title="Edit metadata"
+            aria-label="Edit metadata"
+            className={btn}
+          >
+            <Tags size={iconSize} />
+          </button>
+        )}
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => setShowDelete(true)}
+            title="Delete"
+            aria-label="Delete"
+            className={danger}
+          >
+            <Trash2 size={iconSize} />
+          </button>
+        )}
+      </>
+    );
+  };
+
+  const metaDetails = () => (
     <>
-      {activeChapterId != null && (
-        <button
-          type="button"
-          onClick={() => navigate(`/read/${activeChapterId}`)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-amber-600 text-white hover:bg-amber-500 transition-colors"
-        >
-          <BookOpen size={16} />
-          {readingProgress ? "Continue" : "Read"}
-        </button>
+      {displayAuthor && (
+        <p className="text-gray-300 mt-1 md:mt-3 text-sm md:text-base">
+          by <span className="text-gray-100 font-medium">{displayAuthor}</span>
+        </p>
       )}
-      {activeChapterId != null && (
-        <button
-          type="button"
-          onClick={() => void handleSendToEreader()}
-          disabled={ereaderBusy || !online}
-          title="Add to OPDS ereader shelf and copy download link"
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
-        >
-          {ereaderBusy ? (
-            <Loader2 size={16} className="animate-spin" />
-          ) : (
-            <TabletSmartphone size={16} />
-          )}
-          Send to ereader
-        </button>
+      {seriesLine && <p className="text-xs md:text-sm text-brand-400 mt-0.5 md:mt-1">{seriesLine}</p>}
+      {!seriesLine && multiVolume && item.title && (
+        <p className="text-xs md:text-sm text-brand-400 mt-0.5 md:mt-1">{item.title}</p>
       )}
-      {canShare && activeChapterId != null && (
-        <button
-          type="button"
-          onClick={() => void handleShare()}
-          disabled={shareBusy}
-          title="Share read link"
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
-        >
-          {shareBusy ? <Loader2 size={16} className="animate-spin" /> : <Share2 size={16} />}
-          Share
-        </button>
+      {progressLabel && (
+        <p className="text-[11px] md:text-xs text-amber-400/90 mt-1.5 md:mt-2">{progressLabel}</p>
       )}
-      {item.absItemId && (
-        <button
-          type="button"
-          onClick={() => navigate(`/library/abs/${encodeURIComponent(item.absItemId!)}`)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
-        >
-          <Headphones size={16} />
-          Listen
-        </button>
-      )}
-      {activeChapterId != null && (
-        <SaveOfflineButton
-          target={{
-            kind: "ebook",
-            chapterId: activeChapterId,
-            title: displayTitle,
-            author: displayAuthor,
-            coverUrl: displayCover,
-          }}
-        />
-      )}
-      <button
-        type="button"
-        onClick={handleViewInStore}
-        disabled={storeLoading || !online}
-        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
-      >
-        {storeLoading ? <Loader2 size={16} className="animate-spin" /> : <Store size={16} />}
-        View in Browse
-      </button>
-      {isAdmin && (
-        <button
-          type="button"
-          onClick={() => setShowEditMetadata(true)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors"
-        >
-          <Tags size={16} />
-          Edit metadata
-        </button>
-      )}
-      {isAdmin && (
-        <button
-          type="button"
-          onClick={() => setShowDelete(true)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-red-900/40 text-red-300 border border-red-800/60 hover:bg-red-900/60 transition-colors"
-        >
-          <Trash2 size={16} />
-          Delete
-        </button>
+      {(item.genres || []).length > 0 && (
+        <div className="flex flex-wrap gap-1 md:gap-1.5 mt-2 md:mt-3">
+          {item.genres.map((g) => (
+            <span
+              key={g}
+              className="px-1.5 md:px-2 py-0.5 text-[9px] md:text-[10px] bg-gray-800 text-gray-300 rounded-full border border-gray-700"
+            >
+              {g}
+            </span>
+          ))}
+        </div>
       )}
     </>
   );
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
-      <Link
-        to={-1 as any}
-        className="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-gray-200 transition-colors mb-6"
-        onClick={(e) => {
-          e.preventDefault();
-          window.history.back();
-        }}
-      >
-        <ArrowLeft size={16} />
-        Back
-      </Link>
+      <div className="mb-5">
+        <button
+          type="button"
+          onClick={() => window.history.back()}
+          title="Back"
+          aria-label="Back"
+          className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-gray-800 to-gray-900 text-gray-200 border border-gray-600/80 shadow-md shadow-black/30 hover:from-gray-700 hover:to-gray-800 hover:text-white hover:border-gray-500 transition-all"
+        >
+          <ChevronLeft size={22} strokeWidth={2.5} className="-ml-0.5" />
+        </button>
+      </div>
 
-      <div className="flex gap-4 mb-5 md:hidden">
-        <div className="w-[7.5rem] shrink-0">{cover}</div>
-        <div className="flex flex-col gap-2 flex-1 content-start self-start">{actions}</div>
+      <div className="md:hidden mb-5">
+        <div className="flex gap-3 items-start">
+          <div className="w-[9.5rem] shrink-0">{cover}</div>
+          <div className="flex-1 min-w-0 pt-0.5">
+            <h1 className="text-lg font-bold text-gray-100 leading-snug line-clamp-3">{displayTitle}</h1>
+            {metaDetails()}
+          </div>
+        </div>
+        {activeChapterId != null && (
+          <button
+            type="button"
+            onClick={() => navigate(`/read/${activeChapterId}`)}
+            className="mt-4 w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-base font-semibold rounded-xl bg-amber-600 text-white hover:bg-amber-500 transition-colors"
+          >
+            <BookOpen size={20} />
+            {readingProgress ? "Continue" : "Read"}
+          </button>
+        )}
+        <div className="mt-3 flex w-full items-center justify-center gap-2">
+          {iconActions("mobile")}
+        </div>
       </div>
 
       <div className="flex flex-col md:flex-row gap-8">
         <div className="hidden md:block w-64 shrink-0">{cover}</div>
         <div className="flex-1 min-w-0">
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{displayTitle}</h1>
-          {displayAuthor && (
-            <p className="text-gray-300 mt-2 sm:mt-3">
-              by <span className="text-gray-100 font-medium">{displayAuthor}</span>
-            </p>
-          )}
-          {seriesLine && <p className="text-sm text-brand-400 mt-1">{seriesLine}</p>}
-          {!seriesLine && multiVolume && item.title && (
-            <p className="text-sm text-brand-400 mt-1">{item.title}</p>
-          )}
-          {progressLabel && (
-            <p className="text-xs text-amber-400/90 mt-2">{progressLabel}</p>
-          )}
+          <div className="hidden md:block">
+            <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{displayTitle}</h1>
+            {metaDetails()}
+          </div>
 
-          {(item.genres || []).length > 0 && (
-            <div className="flex flex-wrap gap-1.5 mt-3">
-              {item.genres.map((g) => (
-                <span key={g} className="px-2 py-0.5 text-[10px] bg-gray-800 text-gray-300 rounded-full border border-gray-700">
-                  {g}
-                </span>
-              ))}
-            </div>
-          )}
-
-          <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">{actions}</div>
+          <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">
+            {activeChapterId != null && (
+              <button
+                type="button"
+                onClick={() => navigate(`/read/${activeChapterId}`)}
+                title={readingProgress ? "Continue" : "Read"}
+                aria-label={readingProgress ? "Continue" : "Read"}
+                className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-amber-600 text-white border border-amber-500 hover:bg-amber-500 transition-colors"
+              >
+                <BookOpen size={18} />
+              </button>
+            )}
+            {iconActions("desktop")}
+          </div>
 
           {multiVolume && (
             <div className="mt-6">

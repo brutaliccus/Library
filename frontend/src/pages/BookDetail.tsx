@@ -6,7 +6,16 @@ import { useToast } from "../contexts/ToastContext";
 import StarRating from "../components/StarRating";
 import DownloadPanel from "../components/DownloadPanel";
 import {
-  BookOpen, ArrowLeft, Headphones, Loader2, Library, Check, Play, Bell, BellOff,
+  Bell,
+  BellOff,
+  BookOpen,
+  Check,
+  ChevronLeft,
+  Download,
+  Headphones,
+  Library,
+  Loader2,
+  Play,
 } from "lucide-react";
 import type { BookDetail as BookDetailType } from "../types/book";
 import { useState, useCallback, useRef, useMemo } from "react";
@@ -78,7 +87,6 @@ export default function BookDetailPage() {
   const [absLoading, setAbsLoading] = useState(false);
   const [smartStreamLoading, setSmartStreamLoading] = useState(false);
   const [smartStreamDetail, setSmartStreamDetail] = useState("");
-  const [showSecondaryActions, setShowSecondaryActions] = useState(false);
   const pollRef = useRef(false);
   const downloadPanelRef = useRef<HTMLDivElement>(null);
 
@@ -435,170 +443,160 @@ export default function BookDetailPage() {
       coverPlaceholder(className)
     );
 
-  const renderActions = (compact: boolean) => {
-    const base = compact
-      ? "inline-flex items-center justify-center gap-1 px-2 py-2.5 text-xs font-medium rounded-lg w-full min-h-[2.75rem]"
-      : "inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg";
-    const secondary = compact
-      ? "inline-flex items-center justify-center gap-1 px-2 py-2 text-xs font-medium rounded-lg w-full min-h-[2.5rem] bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50"
-      : "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+  const iconBtn =
+    "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+  const mobileIconBtn =
+    "inline-flex items-center justify-center flex-1 min-w-0 h-12 max-w-[4.5rem] rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
 
-    const primaryPlay = absMatch ? (
-      <button
-        onClick={() => handleListen(absMatch.itemId)}
-        disabled={absLoading}
-        className={`${base} bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50`}
-      >
-        {absLoading ? <Loader2 size={compact ? 14 : 16} className="animate-spin" /> : <Headphones size={compact ? 14 : 16} />}
-        Listen
-      </button>
-    ) : canRead ? (
-      <button
-        onClick={() => navigate(`/read/${readChapterId}`)}
-        className={`${base} bg-amber-600 text-white hover:bg-amber-500 transition-colors`}
-      >
-        <BookOpen size={compact ? 14 : 16} />
-        Read
-      </button>
-    ) : (
-      <button
-        onClick={focusDownloads}
-        className={`${base} bg-emerald-600 text-white hover:bg-emerald-500 transition-colors`}
-      >
-        <Headphones size={compact ? 14 : 16} />
-        {compact ? "Get audio" : "Get audiobook"}
-      </button>
-    );
+  const primaryCta = (() => {
+    if (absMatch) {
+      return {
+        label: "Listen",
+        icon: absLoading ? (
+          <Loader2 size={20} className="animate-spin" />
+        ) : (
+          <Headphones size={20} />
+        ),
+        onClick: () => handleListen(absMatch.itemId),
+        disabled: absLoading,
+        className: "bg-emerald-600 hover:bg-emerald-500",
+      };
+    }
+    if (canRead) {
+      return {
+        label: "Read",
+        icon: <BookOpen size={20} />,
+        onClick: () => navigate(`/read/${readChapterId}`),
+        disabled: false,
+        className: "bg-amber-600 hover:bg-amber-500",
+      };
+    }
+    return {
+      label: "Get audiobook",
+      icon: <Headphones size={20} />,
+      onClick: focusDownloads,
+      disabled: false,
+      className: "bg-emerald-600 hover:bg-emerald-500",
+    };
+  })();
 
-    const secondaryRow = (
+  const iconActions = (variant: "desktop" | "mobile") => {
+    const btn = variant === "mobile" ? mobileIconBtn : iconBtn;
+    const iconSize = variant === "mobile" ? 20 : 18;
+    return (
       <>
         {absMatch && canRead && (
           <button
+            type="button"
             onClick={() => navigate(`/read/${readChapterId}`)}
-            className={secondary}
+            title="Read"
+            aria-label="Read"
+            className={btn}
           >
-            <BookOpen size={compact ? 14 : 16} />
-            Read
+            <BookOpen size={iconSize} />
           </button>
         )}
         {!absMatch && (
           <button
+            type="button"
             onClick={handleSmartStream}
             disabled={smartStreamLoading}
-            className={secondary}
-            title="Play now while not in your library"
+            title="Stream now"
+            aria-label="Stream now"
+            className={btn}
           >
-            {smartStreamLoading ? <Loader2 size={compact ? 14 : 16} className="animate-spin" /> : <Play size={compact ? 14 : 16} />}
-            Stream
+            {smartStreamLoading ? (
+              <Loader2 size={iconSize} className="animate-spin" />
+            ) : (
+              <Play size={iconSize} />
+            )}
           </button>
         )}
         {libraryCheck?.inLibrary ? (
-          <span className={`${secondary} cursor-default justify-center`}>
-            <Check size={compact ? 14 : 16} className="text-brand-400 shrink-0" />
-            {compact ? "Saved" : "In My Collection"}
+          <span
+            title="In My Collection"
+            aria-label="In My Collection"
+            className={`${btn} cursor-default text-brand-300`}
+          >
+            <Check size={iconSize} strokeWidth={2.5} />
           </span>
         ) : (
           <button
+            type="button"
             onClick={() => addToLibMutation.mutate()}
             disabled={addToLibMutation.isPending}
-            className={secondary}
+            title="Add to My Collection"
+            aria-label="Add to My Collection"
+            className={btn}
           >
             {addToLibMutation.isPending ? (
-              <Loader2 size={compact ? 14 : 16} className="animate-spin" />
+              <Loader2 size={iconSize} className="animate-spin" />
             ) : (
-              <Library size={compact ? 14 : 16} />
+              <Library size={iconSize} />
             )}
-            {compact ? "Add" : "+ to My Collection"}
           </button>
         )}
         {availability?.available === false && (
           <button
+            type="button"
             onClick={() => notifyMutation.mutate(!alertStatus?.watching)}
             disabled={notifyMutation.isPending}
-            className={`${secondary} ${
-              alertStatus?.watching
-                ? "bg-amber-900/40 text-amber-200 border-amber-700/50"
-                : ""
+            title={alertStatus?.watching ? "Remove from Want" : "Add to Want"}
+            aria-label={alertStatus?.watching ? "Remove from Want" : "Add to Want"}
+            className={`${btn} ${
+              alertStatus?.watching ? "bg-amber-900/40 text-amber-200 border-amber-700/50" : ""
             }`}
           >
             {notifyMutation.isPending ? (
-              <Loader2 size={compact ? 14 : 16} className="animate-spin" />
+              <Loader2 size={iconSize} className="animate-spin" />
             ) : alertStatus?.watching ? (
-              <BellOff size={compact ? 14 : 16} />
+              <BellOff size={iconSize} />
             ) : (
-              <Bell size={compact ? 14 : 16} />
+              <Bell size={iconSize} />
             )}
-            {compact
-              ? alertStatus?.watching
-                ? "Wanted"
-                : "Want"
-              : alertStatus?.watching
-                ? "Remove from Want"
-                : "Add to Want"}
           </button>
         )}
         {absMatch && (
-          <button onClick={focusDownloads} className={secondary}>
-            Get audiobook
+          <button
+            type="button"
+            onClick={focusDownloads}
+            title="Get audiobook"
+            aria-label="Get audiobook"
+            className={btn}
+          >
+            <Download size={iconSize} />
           </button>
-        )}
-      </>
-    );
-
-    return (
-      <>
-        {primaryPlay}
-        {!absMatch && !canRead && (
-          <p className={`${compact ? "col-span-2 text-[10px]" : "w-full text-xs"} text-gray-500`}>
-            Or stream now while waiting for a full library copy
-          </p>
-        )}
-        {compact ? (
-          <>
-            <button
-              type="button"
-              onClick={() => setShowSecondaryActions((v) => !v)}
-              className={`${base} bg-gray-800 text-gray-300 border border-gray-700`}
-            >
-              More
-            </button>
-            {showSecondaryActions && secondaryRow}
-          </>
-        ) : (
-          <div className="flex flex-wrap items-center gap-2 w-full mt-1">
-            {secondaryRow}
-          </div>
         )}
       </>
     );
   };
 
-  const titleBlock = (
+  const metaDetails = () => (
     <>
-      <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">
-        {book.title}
-      </h1>
-      {book.subtitle && (
-        <p className="text-base sm:text-lg text-gray-400 mt-1">{book.subtitle}</p>
-      )}
       {authorStr && (
-        <p className="text-gray-300 mt-2 sm:mt-3">
+        <p className="text-gray-300 mt-1 md:mt-3 text-sm md:text-base">
           by <span className="text-gray-100 font-medium">{authorStr}</span>
         </p>
       )}
-      <div className="mt-2 sm:mt-3 flex flex-col gap-1">
+      {(catalogSeriesName || seriesIndex) && (
+        <p className="text-xs md:text-sm text-brand-400 mt-0.5 md:mt-1">
+          {catalogSeriesName}
+          {seriesIndex ? ` #${seriesIndex}` : ""}
+        </p>
+      )}
+      <div className="mt-2 md:mt-3 flex flex-col gap-1">
         {grRating && grRating.goodreadsRating > 0 ? (
           <div className="flex items-center gap-2">
-            <StarRating rating={grRating.goodreadsRating} count={grRating.goodreadsCount} size={16} />
-            <span className="text-[11px] text-gray-500 font-medium">
+            <StarRating rating={grRating.goodreadsRating} count={grRating.goodreadsCount} size={14} />
+            <span className="text-[10px] md:text-[11px] text-gray-500 font-medium">
               {grRating.source === "goodreads" ? "Goodreads" : "Hardcover"}
             </span>
           </div>
         ) : book.averageRating > 0 ? (
-          <StarRating rating={book.averageRating} count={book.ratingsCount} size={16} />
+          <StarRating rating={book.averageRating} count={book.ratingsCount} size={14} />
         ) : null}
         {grRating && grRating.goodreadsReviewCount > 0 && (
-          <p className="text-[11px] text-gray-500">
+          <p className="text-[10px] md:text-[11px] text-gray-500">
             {grRating.goodreadsReviewCount.toLocaleString()} reviews
             {grRating.source === "goodreads" ? " on Goodreads" : " on Hardcover"}
           </p>
@@ -636,26 +634,48 @@ export default function BookDetailPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
-      <Link
-        to={-1 as any}
-        className="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-gray-200 transition-colors mb-6"
-        onClick={(e) => {
-          e.preventDefault();
-          window.history.back();
-        }}
-      >
-        <ArrowLeft size={16} />
-        Back
-      </Link>
+      <div className="mb-5">
+        <button
+          type="button"
+          onClick={() => window.history.back()}
+          title="Back"
+          aria-label="Back"
+          className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-gray-800 to-gray-900 text-gray-200 border border-gray-600/80 shadow-md shadow-black/30 hover:from-gray-700 hover:to-gray-800 hover:text-white hover:border-gray-500 transition-all"
+        >
+          <ChevronLeft size={22} strokeWidth={2.5} className="-ml-0.5" />
+        </button>
+      </div>
 
-      {/* Mobile: cover left, actions 2×2 right */}
-      <div className="flex gap-4 mb-5 md:hidden">
-        <div className="w-[7.5rem] shrink-0">
-          {renderCover("w-full rounded-xl shadow-lg shadow-black/30")}
+      <div className="md:hidden mb-5">
+        <div className="flex gap-3 items-start">
+          <div className="w-[9.5rem] shrink-0">
+            {renderCover("w-full rounded-xl shadow-lg shadow-black/30")}
+          </div>
+          <div className="flex-1 min-w-0 pt-0.5">
+            <h1 className="text-lg font-bold text-gray-100 leading-snug line-clamp-3">{book.title}</h1>
+            {book.subtitle && (
+              <p className="text-sm text-gray-400 mt-0.5 line-clamp-2">{book.subtitle}</p>
+            )}
+            {metaDetails()}
+          </div>
         </div>
-        <div className="grid grid-cols-2 gap-2 flex-1 content-start self-start">
-          {renderActions(true)}
+        <button
+          type="button"
+          onClick={primaryCta.onClick}
+          disabled={primaryCta.disabled}
+          className={`mt-4 w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-base font-semibold rounded-xl text-white transition-colors disabled:opacity-50 ${primaryCta.className}`}
+        >
+          {primaryCta.icon}
+          {primaryCta.label}
+        </button>
+        <div className="mt-3 flex w-full items-center justify-center gap-2">
+          {iconActions("mobile")}
         </div>
+        {!absMatch && !canRead && (
+          <p className="mt-2 text-center text-[11px] text-gray-500">
+            Or stream now while waiting for a full library copy
+          </p>
+        )}
       </div>
 
       <div className="flex flex-col md:flex-row gap-8">
@@ -664,11 +684,42 @@ export default function BookDetailPage() {
         </div>
 
         <div className="flex-1 min-w-0">
-          <div className="md:block">{titleBlock}</div>
+          <div className="hidden md:block">
+            <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{book.title}</h1>
+            {book.subtitle && (
+              <p className="text-base sm:text-lg text-gray-400 mt-1">{book.subtitle}</p>
+            )}
+            {metaDetails()}
+          </div>
 
           <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">
-            {renderActions(false)}
+            <button
+              type="button"
+              onClick={primaryCta.onClick}
+              disabled={primaryCta.disabled}
+              title={primaryCta.label}
+              aria-label={primaryCta.label}
+              className={`inline-flex items-center justify-center w-11 h-11 rounded-xl text-white border transition-colors disabled:opacity-50 ${
+                absMatch || !canRead
+                  ? "bg-emerald-600 border-emerald-500 hover:bg-emerald-500"
+                  : "bg-amber-600 border-amber-500 hover:bg-amber-500"
+              }`}
+            >
+              {absMatch ? (
+                absLoading ? <Loader2 size={18} className="animate-spin" /> : <Headphones size={18} />
+              ) : canRead ? (
+                <BookOpen size={18} />
+              ) : (
+                <Headphones size={18} />
+              )}
+            </button>
+            {iconActions("desktop")}
           </div>
+          {!absMatch && !canRead && (
+            <p className="hidden md:block mt-2 text-xs text-gray-500">
+              Or stream now while waiting for a full library copy
+            </p>
+          )}
 
           {noticesBlock}
 
@@ -728,7 +779,7 @@ export default function BookDetailPage() {
               More in this series
             </button>
           </div>
-          <div className="grid grid-flow-col auto-cols-[20%] sm:auto-cols-[14%] md:auto-cols-[10%] lg:auto-cols-[8%] xl:auto-cols-[6.5%] gap-2 overflow-x-auto pb-2 scroll-smooth scrollbar-hide">
+          <div className="grid grid-flow-col auto-cols-[7.5rem] sm:auto-cols-[8rem] md:auto-cols-[8.5rem] lg:auto-cols-[9rem] gap-3 overflow-x-auto pb-2 scroll-smooth scrollbar-hide">
             {seriesData.books.map((sb) => (
               <button
                 key={sb.id}

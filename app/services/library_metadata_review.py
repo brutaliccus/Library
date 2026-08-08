@@ -175,7 +175,7 @@ async def load_abs_metadata_review(item_id: str) -> dict[str, Any]:
         "queries": [query] if query else [],
         "clues": {
             "query": query,
-            "title": search_title,
+            "title": title,
             "author": author,
             "series": series,
             "sequence": sequence,

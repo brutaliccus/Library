@@ -100,9 +100,13 @@ function seqSortKey(seq?: string | null): number {
 }
 
 const iconBtn =
-  "inline-flex items-center justify-center w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+  "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
 const iconBtnDanger =
-  "inline-flex items-center justify-center w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-red-950/50 text-red-300 border border-red-800/60 hover:bg-red-900/60 hover:text-red-200 transition-colors";
+  "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-red-950/50 text-red-300 border border-red-800/60 hover:bg-red-900/60 hover:text-red-200 transition-colors";
+const mobileIconBtn =
+  "inline-flex items-center justify-center flex-1 min-w-0 h-12 max-w-[4.5rem] rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+const mobileIconBtnDanger =
+  "inline-flex items-center justify-center flex-1 min-w-0 h-12 max-w-[4.5rem] rounded-xl bg-red-950/50 text-red-300 border border-red-800/60 hover:bg-red-900/60 hover:text-red-200 transition-colors";
 const seriesStripClass =
   "grid grid-flow-col auto-cols-[7.5rem] sm:auto-cols-[8rem] md:auto-cols-[8.5rem] lg:auto-cols-[9rem] gap-3 overflow-x-auto pb-2 scroll-smooth scrollbar-hide";
 
@@ -403,65 +407,80 @@ export default function LibraryBookDetail() {
     </div>
   );
 
-  // Icon grid (no Listen): Save Offline | Up Next | Share / View | Edit | Delete
-  const iconActions = (
-    <>
-      {itemId && <SaveOfflineButton target={{ kind: "abs", itemId }} iconOnly />}
-      <button
-        type="button"
-        onClick={handleAddToUpNext}
-        title="Add to Up Next"
-        aria-label="Add to Up Next"
-        className={iconBtn}
-      >
-        <ListPlus size={18} />
-      </button>
-      {canShare && (
+  // Icon actions (no Listen): Save Offline | Up Next | Share | View | Edit | Delete
+  const iconActions = (variant: "desktop" | "mobile") => {
+    const btn = variant === "mobile" ? mobileIconBtn : iconBtn;
+    const danger = variant === "mobile" ? mobileIconBtnDanger : iconBtnDanger;
+    const iconSize = variant === "mobile" ? 20 : 18;
+    const offlineClass =
+      variant === "mobile"
+        ? "!h-12 !w-auto flex-1 min-w-0 max-w-[4.5rem] !rounded-xl"
+        : undefined;
+    return (
+      <>
+        {itemId && (
+          <SaveOfflineButton
+            target={{ kind: "abs", itemId }}
+            iconOnly
+            className={offlineClass}
+          />
+        )}
         <button
           type="button"
-          onClick={() => void handleShare()}
-          disabled={shareBusy}
-          title="Share"
-          aria-label="Share"
-          className={iconBtn}
+          onClick={handleAddToUpNext}
+          title="Add to Up Next"
+          aria-label="Add to Up Next"
+          className={btn}
         >
-          {shareBusy ? <Loader2 size={18} className="animate-spin" /> : <Share2 size={18} />}
+          <ListPlus size={iconSize} />
         </button>
-      )}
-      <button
-        type="button"
-        onClick={() => void handleViewInStore()}
-        disabled={storeLoading || !online}
-        title="View in Browse"
-        aria-label="View in Browse"
-        className={iconBtn}
-      >
-        {storeLoading ? <Loader2 size={18} className="animate-spin" /> : <Store size={18} />}
-      </button>
-      {isAdmin && (
+        {canShare && (
+          <button
+            type="button"
+            onClick={() => void handleShare()}
+            disabled={shareBusy}
+            title="Share"
+            aria-label="Share"
+            className={btn}
+          >
+            {shareBusy ? <Loader2 size={iconSize} className="animate-spin" /> : <Share2 size={iconSize} />}
+          </button>
+        )}
         <button
           type="button"
-          onClick={() => setShowEditMetadata(true)}
-          title="Edit metadata"
-          aria-label="Edit metadata"
-          className={iconBtn}
+          onClick={() => void handleViewInStore()}
+          disabled={storeLoading || !online}
+          title="View in Browse"
+          aria-label="View in Browse"
+          className={btn}
         >
-          <Tags size={18} />
+          {storeLoading ? <Loader2 size={iconSize} className="animate-spin" /> : <Store size={iconSize} />}
         </button>
-      )}
-      {isAdmin && (
-        <button
-          type="button"
-          onClick={() => setShowDelete(true)}
-          title="Delete"
-          aria-label="Delete"
-          className={iconBtnDanger}
-        >
-          <Trash2 size={18} />
-        </button>
-      )}
-    </>
-  );
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => setShowEditMetadata(true)}
+            title="Edit metadata"
+            aria-label="Edit metadata"
+            className={btn}
+          >
+            <Tags size={iconSize} />
+          </button>
+        )}
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => setShowDelete(true)}
+            title="Delete"
+            aria-label="Delete"
+            className={danger}
+          >
+            <Trash2 size={iconSize} />
+          </button>
+        )}
+      </>
+    );
+  };
 
   const desktopActions = (
     <>
@@ -475,7 +494,45 @@ export default function LibraryBookDetail() {
       >
         {playLoading ? <Loader2 size={18} className="animate-spin" /> : <Headphones size={18} />}
       </button>
-      {iconActions}
+      {iconActions("desktop")}
+    </>
+  );
+
+  const metaDetails = () => (
+    <>
+      {item.author && (
+        <p className="text-gray-300 mt-1 md:mt-3 text-sm md:text-base">
+          by <span className="text-gray-100 font-medium">{item.author}</span>
+        </p>
+      )}
+      {seriesLine && <p className="text-xs md:text-sm text-brand-400 mt-0.5 md:mt-1">{seriesLine}</p>}
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 md:mt-3 text-[11px] md:text-xs text-gray-400">
+        {item.narrator && (
+          <span className="inline-flex items-center gap-1">
+            <Mic size={12} /> {item.narrator}
+          </span>
+        )}
+        {item.duration > 0 && (
+          <span className="inline-flex items-center gap-1">
+            <Clock size={12} /> {formatDuration(item.duration)}
+          </span>
+        )}
+        {item.publishedYear && <span>{item.publishedYear}</span>}
+      </div>
+
+      {item.genres.length > 0 && (
+        <div className="flex flex-wrap gap-1 md:gap-1.5 mt-2 md:mt-3">
+          {item.genres.map((g) => (
+            <span
+              key={g}
+              className="px-1.5 md:px-2 py-0.5 text-[9px] md:text-[10px] bg-gray-800 text-gray-300 rounded-full border border-gray-700"
+            >
+              {g}
+            </span>
+          ))}
+        </div>
+      )}
     </>
   );
 
@@ -681,9 +738,13 @@ export default function LibraryBookDetail() {
 
       <div className="md:hidden mb-5">
         <div className="flex gap-3 items-start">
-          <div className="w-[15rem] max-w-[48%] shrink-0">{cover}</div>
-          <div className="flex-1 min-w-0 flex justify-end">
-            <div className="grid grid-cols-3 gap-2 justify-items-end">{iconActions}</div>
+          <div className="w-[9.5rem] shrink-0">{cover}</div>
+          <div className="flex-1 min-w-0 pt-0.5">
+            <h1 className="text-lg font-bold text-gray-100 leading-snug line-clamp-3">{item.title}</h1>
+            {item.subtitle && (
+              <p className="text-sm text-gray-400 mt-0.5 line-clamp-2">{item.subtitle}</p>
+            )}
+            {metaDetails()}
           </div>
         </div>
         <button
@@ -695,43 +756,19 @@ export default function LibraryBookDetail() {
           {playLoading ? <Loader2 size={20} className="animate-spin" /> : <Headphones size={20} />}
           {hasLocalProgress ? "Resume" : "Listen"}
         </button>
+        <div className="mt-3 flex w-full items-center justify-center gap-2">
+          {iconActions("mobile")}
+        </div>
       </div>
 
       <div className="flex flex-col md:flex-row gap-8">
         <div className="hidden md:block w-64 shrink-0">{cover}</div>
         <div className="flex-1 min-w-0">
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{item.title}</h1>
-          {item.subtitle && <p className="text-base sm:text-lg text-gray-400 mt-1">{item.subtitle}</p>}
-          {item.author && (
-            <p className="text-gray-300 mt-2 sm:mt-3">
-              by <span className="text-gray-100 font-medium">{item.author}</span>
-            </p>
-          )}
-          {seriesLine && <p className="text-sm text-brand-400 mt-1">{seriesLine}</p>}
-
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-xs text-gray-400">
-            {item.narrator && (
-              <span className="inline-flex items-center gap-1">
-                <Mic size={12} /> {item.narrator}
-              </span>
-            )}
-            {item.duration > 0 && (
-              <span className="inline-flex items-center gap-1">
-                <Clock size={12} /> {formatDuration(item.duration)}
-              </span>
-            )}
-            {item.publishedYear && <span>{item.publishedYear}</span>}
+          <div className="hidden md:block">
+            <h1 className="text-2xl sm:text-3xl font-bold text-gray-100 leading-tight">{item.title}</h1>
+            {item.subtitle && <p className="text-base sm:text-lg text-gray-400 mt-1">{item.subtitle}</p>}
+            {metaDetails()}
           </div>
-
-          {item.genres.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 mt-3">
-              {item.genres.map((g) => (
-                <span key={g} className="px-2 py-0.5 text-[10px] bg-gray-800 text-gray-300 rounded-full border border-gray-700">
-                  {g}
-                </span>
-              ))}
-            </div>
-          )}
 
           <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">{desktopActions}</div>
 

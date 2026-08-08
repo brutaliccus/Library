@@ -87,9 +87,12 @@ function formatSeriesSeq(seq?: string | null): string {
   if (seq == null) return "";
   const cleaned = String(seq).replace(/^#+\s*/, "").trim();
   if (!cleaned) return "";
-  const n = Number(cleaned);
-  if (Number.isFinite(n)) {
-    return Number.isInteger(n) ? String(n) : String(n);
+  // Keep decimal sequences (2.1, 3.2) intact — do not coerce via Number/int.
+  if (/^\d+\.\d+$/.test(cleaned)) {
+    return cleaned.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+  }
+  if (/^\d+$/.test(cleaned)) {
+    return String(parseInt(cleaned, 10));
   }
   return cleaned;
 }
@@ -210,6 +213,15 @@ export default function LibraryBookDetail() {
     }
     return map;
   }, [localSeries]);
+
+  const storeSeqByTitle = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const b of storeSeries?.books || []) {
+      const seq = formatSeriesSeq(b.sequence);
+      if (seq && b.title) map.set(normTitle(b.title), seq);
+    }
+    return map;
+  }, [storeSeries]);
 
   const handlePlay = async () => {
     if (!item) return;
@@ -394,7 +406,7 @@ export default function LibraryBookDetail() {
   const seriesLine = item.series
     .filter((s) => s.name)
     .map((s) => {
-      const seq = formatSeriesSeq(s.sequence);
+      const seq = formatSeriesSeq(storeSeqByTitle.get(normTitle(item.title)) || s.sequence);
       return seq ? `${s.name} #${seq}` : s.name;
     })
     .join(" · ");
@@ -536,11 +548,14 @@ export default function LibraryBookDetail() {
     </>
   );
 
-  // Prefer library series (ABS sequence) so badges match shelf numbering.
-  const useLocalSeries = !!localSeries && localSeries.books.length > 1;
+  // Prefer store series numbering (Hardcover keeps novella decimals like 2.1).
+  // ABS/local metadata often stores only whole numbers for those entries.
   const useStoreSeries =
-    !useLocalSeries && !!storeSeries?.seriesName && (storeSeries.books?.length ?? 0) > 1;
-  const seriesLoading = (seriesName && localSeriesLoading) || (!!storeMatch && storeSeriesLoading);
+    !!storeSeries?.seriesName && (storeSeries.books?.length ?? 0) > 1;
+  const useLocalSeries = !useStoreSeries && !!localSeries && localSeries.books.length > 1;
+  const seriesLoading =
+    (!!storeMatch && storeSeriesLoading) ||
+    (!useStoreSeries && !!seriesName && localSeriesLoading);
   const displaySeriesName =
     (useStoreSeries && storeSeries?.seriesName) || localSeries?.name || seriesName;
 
@@ -612,7 +627,8 @@ export default function LibraryBookDetail() {
             {[...storeSeries.books]
               .map((sb) => {
                 const local = absByTitle.get(normTitle(sb.title));
-                const seq = formatSeriesSeq(local?.sequence || sb.sequence);
+                // Store/Hardcover sequence wins — local ABS often drops novella decimals.
+                const seq = formatSeriesSeq(sb.sequence || local?.sequence);
                 return { sb, local, seq };
               })
               .sort((a, b) => seqSortKey(a.seq) - seqSortKey(b.seq))
@@ -676,10 +692,13 @@ export default function LibraryBookDetail() {
           </div>
           <div className={seriesStripClass}>
             {[...localSeries.books]
-              .sort((a, b) => seqSortKey(a.sequence) - seqSortKey(b.sequence))
-              .map((sb) => {
+              .map((sb) => ({
+                sb,
+                seq: formatSeriesSeq(storeSeqByTitle.get(normTitle(sb.title)) || sb.sequence),
+              }))
+              .sort((a, b) => seqSortKey(a.seq) - seqSortKey(b.seq))
+              .map(({ sb, seq }) => {
                 const isCurrent = sb.itemId === itemId;
-                const seq = formatSeriesSeq(sb.sequence);
                 return (
                   <button
                     key={sb.itemId}

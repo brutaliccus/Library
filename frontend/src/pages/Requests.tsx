@@ -58,6 +58,7 @@ export default function RequestsPage() {
     },
     // Quarantined is non-terminal: admin may continue → m4b/folder/finalize.
     // Keep a short poll while any request can still change; stop when all done.
+    staleTime: 15_000,
     refetchInterval: (query) => requestListRefetchInterval(query.state.data),
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,

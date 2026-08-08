@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from app.config import get_settings
-from app.database import get_db
+from app.database import async_session, get_db
 from app.models import User, DownloadRequest
 from app.utils.auth import get_current_user
 from app.utils.websocket import ws_manager
@@ -34,6 +34,9 @@ _ACTIVE_STATUSES = frozenset({
 })
 _RETRYABLE_STATUSES = frozenset({"failed", "cancelled", "admin_rejected", "skipped"})
 _COVER_BACKFILL_LIMIT = 24
+# Persisted when a lookup found nothing — avoids retrying the same rows on every list.
+_COVER_NONE_SENTINEL = "-"
+_cover_backfill_tasks: set[asyncio.Task] = set()
 
 
 class CreateDownloadRequest(BaseModel):
@@ -145,9 +148,8 @@ async def list_my_requests(
         .order_by(DownloadRequest.created_at.desc())
     )
     rows = list(result.scalars().all())
-    # Rows created before cover_url existed (or without a client-sent cover)
-    # get a one-time lookup so My Requests cards show real artwork.
-    await _backfill_request_covers(rows)
+    # Never block the list on external cover APIs — fill in the background.
+    _schedule_cover_backfill([r.id for r in rows if _needs_cover_backfill(r)])
     return [_to_response(r) for r in rows]
 
 
@@ -321,27 +323,57 @@ async def _get_user_request(request_id: int, user_id: int, db: AsyncSession) -> 
     return req
 
 
-async def _backfill_request_covers(rows: list[DownloadRequest]) -> bool:
-    """Fill empty cover_url on request rows; returns True if any were updated."""
-    need = [r for r in rows if not (getattr(r, "cover_url", None) or "").strip()]
-    if not need:
-        return False
+def _needs_cover_backfill(req: DownloadRequest) -> bool:
+    cover = (getattr(req, "cover_url", None) or "").strip()
+    return not cover
 
-    dirty = False
 
-    async def _fill(req: DownloadRequest) -> None:
-        nonlocal dirty
-        cover = await google_books.lookup_cover_url(
-            getattr(req, "google_volume_id", None),
-            req.title or "",
-            req.author or "",
-        )
-        if cover:
-            req.cover_url = cover[:1024]
-            dirty = True
+def _schedule_cover_backfill(request_ids: list[int]) -> None:
+    ids = [i for i in request_ids if i][:_COVER_BACKFILL_LIMIT]
+    if not ids:
+        return
+    task = asyncio.create_task(_backfill_request_covers_bg(ids))
+    _cover_backfill_tasks.add(task)
+    task.add_done_callback(_cover_backfill_tasks.discard)
 
-    await asyncio.gather(*[_fill(r) for r in need[:_COVER_BACKFILL_LIMIT]])
-    return dirty
+
+async def _backfill_request_covers_bg(request_ids: list[int]) -> None:
+    """Best-effort cover fill in a fresh DB session (does not block list endpoints)."""
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(DownloadRequest).where(DownloadRequest.id.in_(request_ids))
+            )
+            rows = [r for r in result.scalars().all() if _needs_cover_backfill(r)]
+            if not rows:
+                return
+
+            async def _fill(req: DownloadRequest) -> None:
+                try:
+                    cover = await asyncio.wait_for(
+                        google_books.lookup_cover_url(
+                            getattr(req, "google_volume_id", None),
+                            req.title or "",
+                            req.author or "",
+                        ),
+                        timeout=8.0,
+                    )
+                except Exception:
+                    cover = ""
+                # Sentinel stops infinite retries when every provider returns empty.
+                req.cover_url = (cover or _COVER_NONE_SENTINEL)[:1024]
+
+            await asyncio.gather(*[_fill(r) for r in rows])
+            await db.commit()
+    except Exception:
+        logger.debug("Background request cover backfill failed", exc_info=True)
+
+
+def _response_cover_url(req: DownloadRequest) -> str | None:
+    cover = (getattr(req, "cover_url", None) or "").strip()
+    if not cover or cover == _COVER_NONE_SENTINEL:
+        return None
+    return cover
 
 
 def _to_response(req: DownloadRequest) -> DownloadRequestResponse:
@@ -362,7 +394,7 @@ def _to_response(req: DownloadRequest) -> DownloadRequestResponse:
         indexer=req.indexer,
         is_private=bool(req.is_private),
         google_volume_id=getattr(req, "google_volume_id", None),
-        cover_url=getattr(req, "cover_url", None),
+        cover_url=_response_cover_url(req),
         created_at=req.created_at.isoformat() if req.created_at else "",
         completed_at=req.completed_at.isoformat() if req.completed_at else None,
         progress_percent=req.progress_percent,

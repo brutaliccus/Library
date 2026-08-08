@@ -650,7 +650,12 @@ async def list_all_downloads(
             username=username,
             is_private=bool(req.is_private),
             google_volume_id=getattr(req, "google_volume_id", None),
-            cover_url=getattr(req, "cover_url", None),
+            cover_url=(
+                None
+                if not (getattr(req, "cover_url", None) or "").strip()
+                or (getattr(req, "cover_url", None) or "").strip() == "-"
+                else getattr(req, "cover_url", None)
+            ),
             size_bytes=req.size_bytes,
             indexer=req.indexer,
             source=getattr(req, "source", None),
@@ -1671,10 +1676,13 @@ async def delete_ebook_library_media(
 # --- System Health ---
 
 @router.get("/health")
-async def system_health(_admin: User = Depends(require_admin)):
+async def system_health(
+    force: bool = False,
+    _admin: User = Depends(require_admin),
+):
     from app.services.health_checks import collect_system_health
 
-    return await collect_system_health()
+    return await collect_system_health(force=force)
 
 
 @router.get("/health/pending-actions")
@@ -1686,11 +1694,14 @@ async def health_pending_actions(_admin: User = Depends(require_admin)):
 
 
 @router.get("/docker/services")
-async def docker_services(_admin: User = Depends(require_admin)):
+async def docker_services(
+    force: bool = False,
+    _admin: User = Depends(require_admin),
+):
     """List Docker-managed stack services and live container state (admin only)."""
     from app.services import docker_control
 
-    return await docker_control.list_services()
+    return await docker_control.list_services(force=force)
 
 
 @router.post("/docker/services/{service_id}/{action}")

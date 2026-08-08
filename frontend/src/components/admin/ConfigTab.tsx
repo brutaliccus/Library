@@ -136,6 +136,7 @@ export default function ConfigTab({
       const { data } = await api.get("/admin/config");
       return data as ConfigResponse;
     },
+    staleTime: 60_000,
   });
 
   const olQuery = useQuery({
@@ -145,6 +146,7 @@ export default function ConfigTab({
       const { data } = await api.get("/admin/ol-catalog", { params: { check: true } });
       return data as OlCatalogStatus;
     },
+    staleTime: 60_000,
     refetchInterval: (q) => {
       if (q.state.data?.status === "running") return 5000;
       if (q.state.data?.scheduled_build_at) return 30000;

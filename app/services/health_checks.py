@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,11 @@ import httpx
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Health fans out to many external probes; cache so tab remounts / 30s polls
+# do not re-pay Mullvad/NYT/etc. timeouts every time.
+_HEALTH_CACHE_TTL = 30.0
+_health_cache: tuple[float, dict[str, Any]] | None = None
 
 _PLACEHOLDER_TOKENS = frozenset({
     "your-prowlarr-api-key",
@@ -245,7 +251,7 @@ async def _probe_mullvad_proxy() -> dict[str, Any]:
             "error": "ABB_PROXY_URL not set",
         }
     try:
-        async with httpx.AsyncClient(proxy=proxy, timeout=12.0) as client:
+        async with httpx.AsyncClient(proxy=proxy, timeout=4.0) as client:
             resp = await client.get("https://am.i.mullvad.net/json")
             if resp.status_code != 200:
                 return {
@@ -317,27 +323,23 @@ async def _probe_ol_catalog() -> dict[str, Any]:
             "error": "Database not built yet",
         }
     try:
-        import aiosqlite
+        # Prefer sqlite_stat1 approximate counts (instant) over COUNT(*).
+        from app.services import ol_catalog_build
 
-        async with aiosqlite.connect(str(path)) as conn:
-            async with conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='works'"
-            ) as cur:
-                row = await cur.fetchone()
-            if not row:
-                return {
-                    "configured": True,
-                    "connected": False,
-                    "path": str(path),
-                    "error": "works table missing",
-                }
-            async with conn.execute("SELECT COUNT(*) FROM works") as cur:
-                count = (await cur.fetchone())[0]
+        catalog = await asyncio.to_thread(ol_catalog_build._catalog_stats)
+        works = catalog.get("works")
+        if not catalog.get("ready"):
+            return {
+                "configured": True,
+                "connected": False,
+                "path": str(path),
+                "error": str(catalog.get("error") or "Catalog not ready")[:160],
+            }
         return {
             "configured": True,
             "connected": True,
             "path": str(path),
-            "works": int(count or 0),
+            "works": int(works or 0),
         }
     except Exception as e:
         return {
@@ -355,7 +357,7 @@ async def _probe_nyt() -> dict[str, Any]:
     if not key:
         return {"configured": False, "connected": False, "error": "No API key"}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=4.0) as client:
             resp = await client.get(
                 f"{nyt_books.NYT_BASE}/overview.json",
                 params={"api-key": key},
@@ -509,8 +511,16 @@ def _enrich_open_urls(health: dict[str, Any]) -> None:
         probe["openUrl"] = _browser_open_url(url, fallback_host_port=port)
 
 
-async def collect_system_health() -> dict[str, Any]:
+async def collect_system_health(*, force: bool = False) -> dict[str, Any]:
     """Run all connection probes in parallel (short timeouts)."""
+    global _health_cache
+    if (
+        not force
+        and _health_cache
+        and time.monotonic() - _health_cache[0] < _HEALTH_CACHE_TTL
+    ):
+        return _health_cache[1]
+
     from app.services.debrid_tokens import apply_server_debrid_tokens
 
     try:
@@ -556,4 +566,5 @@ async def collect_system_health() -> dict[str, Any]:
         else:
             out[name] = result
     _enrich_open_urls(out)
+    _health_cache = (time.monotonic(), out)
     return out

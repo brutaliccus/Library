@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -21,6 +22,8 @@ Action = Literal["start", "stop", "restart"]
 DOCKER_SOCK = os.environ.get("DOCKER_SOCK", "/var/run/docker.sock")
 API_PREFIX = "/v1.41"
 SELF_RESTART_DELAY_SEC = 2.0
+_SERVICES_CACHE_TTL = 12.0
+_services_cache: tuple[float, dict[str, Any]] | None = None
 
 # Alternate container_name values seen across installs (Pi external stack vs bundled compose).
 CONTAINER_ALIASES: dict[str, tuple[str, ...]] = {
@@ -425,8 +428,16 @@ def _open_url_for_service(
     return f"http://127.0.0.1:{host_port}"
 
 
-async def list_services() -> dict[str, Any]:
+async def list_services(*, force: bool = False) -> dict[str, Any]:
     """Return managed services and live Docker state (best-effort)."""
+    global _services_cache
+    if (
+        not force
+        and _services_cache
+        and time.monotonic() - _services_cache[0] < _SERVICES_CACHE_TTL
+    ):
+        return _services_cache[1]
+
     available = socket_available()
     services: list[dict[str, Any]] = []
     socket_error: str | None = None
@@ -485,7 +496,7 @@ async def list_services() -> dict[str, Any]:
 
     services = list(await asyncio.gather(*[_one(svc) for svc in MANAGED_SERVICES.values()]))
 
-    return {
+    payload = {
         "available": available and socket_error is None,
         "socket": DOCKER_SOCK,
         "error": socket_error,
@@ -493,6 +504,8 @@ async def list_services() -> dict[str, Any]:
         "byHealthKey": {k: v for k, v in HEALTH_KEY_TO_SERVICE.items()},
         "appServiceId": "app",
     }
+    _services_cache = (time.monotonic(), payload)
+    return payload
 
 
 def _service_payload(

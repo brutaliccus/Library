@@ -636,8 +636,10 @@ async def _scraper_loop() -> None:
 
 # Aggregate stats are ~10 queries; the admin panel polls every 3–15s, which
 # adds up on a Pi. Cache them briefly.
-_STATS_TTL_SECONDS = 10
+_STATS_TTL_SECONDS = 60
 _stats_cache: tuple[float, dict] | None = None
+_STATUS_CACHE_TTL = 12.0
+_status_cache: tuple[float, dict] | None = None
 
 
 async def _collect_stats() -> dict:
@@ -831,6 +833,10 @@ async def _collect_stats() -> dict:
 
 
 async def get_status() -> dict:
+    global _status_cache
+    if _status_cache and time.monotonic() - _status_cache[0] < _STATUS_CACHE_TTL:
+        return _status_cache[1]
+
     try:
         cfg = await scraper_settings.get_scraper_config()
         state = await _get_or_create_state()
@@ -839,10 +845,24 @@ async def get_status() -> dict:
         idx = state.last_query_index % len(queries) if queries else 0
         current_query = queries[idx] if queries else ""
         queue_progress = round((idx / len(queries)) * 100, 1) if queries else 0
-        stats = await _collect_stats()
-        configured = await prowlarr.get_trusted_indexer_info()
         from app.services import audiobookbay
-        abb_health = await audiobookbay.infra_status()
+
+        # DB stats + external probes in parallel (was a sequential waterfall).
+        stats_r, configured_r, abb_r = await asyncio.gather(
+            _collect_stats(),
+            prowlarr.get_trusted_indexer_info(),
+            audiobookbay.infra_status(),
+            return_exceptions=True,
+        )
+        if isinstance(stats_r, Exception):
+            raise stats_r
+        stats = stats_r
+        configured = configured_r if not isinstance(configured_r, Exception) else []
+        if isinstance(configured_r, Exception):
+            logger.debug("prowlarr indexer info failed: %s", configured_r)
+        abb_health = abb_r if not isinstance(abb_r, Exception) else {"ok": False, "error": str(abb_r)[:200]}
+        if isinstance(abb_r, Exception):
+            logger.debug("audiobookbay infra_status failed: %s", abb_r)
     except Exception as e:
         logger.exception("scraper get_status failed: %s", e)
         return {
@@ -893,7 +913,7 @@ async def get_status() -> dict:
     per_job = max(1, cfg.queries_per_job)
     queries_per_hour = round(3600 / interval * per_job, 1)
 
-    return {
+    payload = {
         "enabled": state.enabled and settings.scraper_enabled,
         "configEnabled": settings.scraper_enabled,
         "dbEnabled": state.enabled,
@@ -951,6 +971,8 @@ async def get_status() -> dict:
         "debridRescan": await get_debrid_rescan_progress_for_status(),
         "catalogRelink": await get_catalog_relink_progress_for_status(),
     }
+    _status_cache = (time.monotonic(), payload)
+    return payload
 
 
 async def clear_error() -> None:

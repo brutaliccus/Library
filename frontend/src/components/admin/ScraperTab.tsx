@@ -240,6 +240,7 @@ function ScraperTuningCard() {
       const { data: res } = await api.get("/admin/scraper-settings");
       return res as ScraperSettingsPayload;
     },
+    staleTime: 60_000,
   });
 
   useEffect(() => {
@@ -418,6 +419,7 @@ export default function ScraperTab() {
       const { data: res } = await api.get("/admin/scraper-status");
       return res as ScraperStatus;
     },
+    staleTime: 10_000,
     refetchInterval: (query) => {
       const s = query.state.data?.status;
       const rescan = query.state.data?.debridRescan?.running;

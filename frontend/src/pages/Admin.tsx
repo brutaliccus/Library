@@ -174,13 +174,23 @@ export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<AdminTab>(() =>
     resolveTab(searchParams.get("tab"))
   );
+  const [visitedTabs, setVisitedTabs] = useState<Set<AdminTab>>(
+    () => new Set([resolveTab(searchParams.get("tab"))])
+  );
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const settingsSection = searchParams.get("section") || undefined;
   const { state: pushState, error: pushError, subscribe: enablePush, unsubscribe: disablePush } =
     usePushNotifications();
 
   useEffect(() => {
-    setActiveTab(resolveTab(searchParams.get("tab")));
+    const tab = resolveTab(searchParams.get("tab"));
+    setActiveTab(tab);
+    setVisitedTabs((prev) => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
   }, [searchParams]);
 
   useEffect(() => {
@@ -349,31 +359,54 @@ export default function AdminPage() {
         </aside>
 
         <div className="flex-1 min-w-0">
-          {activeTab === "overview" && <HealthTab />}
-          {activeTab === "requests" && <AllRequestsTab />}
-          {activeTab === "users" && <UsersTab />}
-          {activeTab === "backups" && <BackupsTab />}
-          {activeTab === "activity" && <ActivityTab />}
-          {activeTab === "shared" && <SharedTab />}
-          {activeTab === "discovery" && <ScraperTab />}
-          {activeTab === "catalog" && (
-            <ConfigTab
-              lockedGroup="catalog"
-              title="Catalog"
-              description="Catalog API keys (Hardcover, NYT, ISBNdb, OpenRouter, Google Books) plus the local Open Library catalog build, update, and schedule controls."
-            />
+          {/* Keep visited tabs mounted so switching back is instant (React Query cache + no remount). */}
+          {visitedTabs.has("overview") && (
+            <div className={activeTab === "overview" ? "" : "hidden"}><HealthTab /></div>
           )}
-          {activeTab === "library-sweep" && <LibrarySweepTab />}
-          {activeTab === "pipelines" && (
-            <ConfigTab
-              lockedGroup="pipeline"
-              title="Pipelines"
-              description="LibraForge and ebook pipeline toggles, scores, and M4B-related settings. Monitor LibraForge status under Health; review quarantines under Requests."
-            />
+          {visitedTabs.has("requests") && (
+            <div className={activeTab === "requests" ? "" : "hidden"}><AllRequestsTab /></div>
           )}
-          {activeTab === "integrations" && <IntegrationsPanel />}
-          {activeTab === "settings" && (
-            <div className="space-y-2 min-w-0">
+          {visitedTabs.has("users") && (
+            <div className={activeTab === "users" ? "" : "hidden"}><UsersTab /></div>
+          )}
+          {visitedTabs.has("backups") && (
+            <div className={activeTab === "backups" ? "" : "hidden"}><BackupsTab /></div>
+          )}
+          {visitedTabs.has("activity") && (
+            <div className={activeTab === "activity" ? "" : "hidden"}><ActivityTab /></div>
+          )}
+          {visitedTabs.has("shared") && (
+            <div className={activeTab === "shared" ? "" : "hidden"}><SharedTab /></div>
+          )}
+          {visitedTabs.has("discovery") && (
+            <div className={activeTab === "discovery" ? "" : "hidden"}><ScraperTab /></div>
+          )}
+          {visitedTabs.has("catalog") && (
+            <div className={activeTab === "catalog" ? "" : "hidden"}>
+              <ConfigTab
+                lockedGroup="catalog"
+                title="Catalog"
+                description="Catalog API keys (Hardcover, NYT, ISBNdb, OpenRouter, Google Books) plus the local Open Library catalog build, update, and schedule controls."
+              />
+            </div>
+          )}
+          {visitedTabs.has("library-sweep") && (
+            <div className={activeTab === "library-sweep" ? "" : "hidden"}><LibrarySweepTab /></div>
+          )}
+          {visitedTabs.has("pipelines") && (
+            <div className={activeTab === "pipelines" ? "" : "hidden"}>
+              <ConfigTab
+                lockedGroup="pipeline"
+                title="Pipelines"
+                description="LibraForge and ebook pipeline toggles, scores, and M4B-related settings. Monitor LibraForge status under Health; review quarantines under Requests."
+              />
+            </div>
+          )}
+          {visitedTabs.has("integrations") && (
+            <div className={activeTab === "integrations" ? "" : "hidden"}><IntegrationsPanel /></div>
+          )}
+          {visitedTabs.has("settings") && (
+            <div className={activeTab === "settings" ? "space-y-2 min-w-0" : "hidden"}>
               <LibraryAdminSettings />
               <ConfigTab
                 omitGroups={["pipeline", "catalog"]}
@@ -403,6 +436,7 @@ function UsersTab() {
       const { data } = await api.get("/admin/users");
       return data as AdminUser[];
     },
+    staleTime: 60_000,
     refetchInterval: 60_000,
     refetchOnWindowFocus: true,
   });
@@ -817,6 +851,7 @@ function AllRequestsTab() {
       return data as any[];
     },
     // Include quarantined: admin continue → forge steps must stay live.
+    staleTime: 15_000,
     refetchInterval: (query) =>
       requestListRefetchInterval(query.state.data as Array<{ status: string }> | undefined),
     refetchOnWindowFocus: true,
@@ -1113,6 +1148,7 @@ function BackupsTab() {
       const response = await api.get("/admin/backups");
       return response.data as any;
     },
+    staleTime: 30_000,
     refetchInterval: 30_000,
   });
   const targets = Array.isArray(data) ? data : data?.targets || data?.backups || [];
@@ -1171,6 +1207,7 @@ function ActivityTab() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["admin-activity"],
     queryFn: async () => (await api.get("/admin/activity")).data as any,
+    staleTime: 30_000,
     refetchInterval: 30_000,
   });
   const events = Array.isArray(data) ? data : data?.events || data?.activity || [];
@@ -1216,6 +1253,7 @@ function SharedTab() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["admin-shares"],
     queryFn: async () => (await api.get("/admin/shares")).data as any,
+    staleTime: 60_000,
   });
   const shares = Array.isArray(data) ? data : data?.shares || [];
   const revoke = useMutation({
@@ -1438,6 +1476,7 @@ function IntegrationsPanel() {
       const { data } = await api.get("/admin/integrations");
       return data as IntegrationsResponse;
     },
+    staleTime: 60_000,
   });
 
   const saveNyt = useMutation({

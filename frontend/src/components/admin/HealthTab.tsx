@@ -606,6 +606,7 @@ export default function HealthTab() {
       const { data } = await api.get("/admin/health");
       return data as Record<string, Record<string, unknown>>;
     },
+    staleTime: 25_000,
     refetchInterval: 30_000,
   });
 
@@ -615,6 +616,7 @@ export default function HealthTab() {
       const { data } = await api.get("/admin/health/pending-actions");
       return data as PendingActionsResponse;
     },
+    staleTime: 15_000,
     refetchInterval: 20_000,
   });
 
@@ -625,6 +627,7 @@ export default function HealthTab() {
       return data as DockerServicesResponse;
     },
     retry: 1,
+    staleTime: 12_000,
     refetchInterval: 15_000,
   });
 
@@ -635,7 +638,15 @@ export default function HealthTab() {
   }, [dockerInfo]);
 
   const refreshHealth = async () => {
-    await Promise.all([refetch(), refetchDocker(), refetchPending()]);
+    // force=true bypasses short server-side caches used for fast tab loads
+    const [{ data: healthData }, { data: dockerData }, { data: pendingData }] = await Promise.all([
+      api.get("/admin/health", { params: { force: true } }),
+      api.get("/admin/docker/services", { params: { force: true } }),
+      api.get("/admin/health/pending-actions"),
+    ]);
+    queryClient.setQueryData(["admin-health"], healthData);
+    queryClient.setQueryData(["admin-docker-services"], dockerData);
+    queryClient.setQueryData(["admin-health-pending"], pendingData);
   };
 
   const dockerAction = useMutation({

@@ -68,21 +68,11 @@ def _abs_meta_fields(item: dict[str, Any]) -> dict[str, Any]:
         genre = str(genre_raw or "").strip()
     summary = str(meta.get("description") or meta.get("summary") or "").strip()
 
-    series = ""
-    sequence = ""
-    series_list = meta.get("series") or []
-    if isinstance(series_list, dict):
-        series_list = [series_list]
-    if isinstance(series_list, list) and series_list:
-        first = series_list[0] if isinstance(series_list[0], dict) else {}
-        series = str(first.get("name") or "").strip()
-        sequence = str(first.get("sequence") or "").strip()
-    if not series:
-        from app.utils.book_series import parse_abs_series_label
-
-        series, sequence = parse_abs_series_label(meta.get("seriesName"))
-        series = series or ""
-        sequence = sequence or ""
+    # Match collection normalizer so stale seriesName hashes don't win over
+    # an applied series[].sequence (novella indices like 2.1).
+    normalized = audiobookshelf._normalize_abs_item(item)
+    series = str(normalized.get("seriesName") or "").strip()
+    sequence = str(normalized.get("sequence") or "").strip()
 
     return {
         "title": title,
@@ -318,6 +308,8 @@ def _abs_payload_from_selected(
         if sequence:
             entry["sequence"] = sequence
         payload["series"] = [entry]
+        # Pin seriesName so ABS does not keep a stale "Series #1" label after apply.
+        payload["seriesName"] = f"{series} #{sequence}" if sequence else series
     return payload, cover
 
 
@@ -391,9 +383,11 @@ async def apply_abs_metadata_review(
         )
     seed_asin = str((preview or {}).get("asin") or payload.get("asin") or "").strip()
     seed_series = ""
+    seed_sequence = ""
     series_raw = payload.get("series")
     if isinstance(series_raw, list) and series_raw and isinstance(series_raw[0], dict):
         seed_series = str(series_raw[0].get("name") or "").strip()
+        seed_sequence = str(series_raw[0].get("sequence") or "").strip()
 
     try:
         seed_staging_metadata_hints(
@@ -402,6 +396,7 @@ async def apply_abs_metadata_review(
             author=seed_author or None,
             asin=seed_asin or None,
             series=seed_series or None,
+            sequence=seed_sequence or None,
             force=True,
         )
     except Exception as e:
@@ -430,6 +425,7 @@ async def apply_abs_metadata_review(
             "author": seed_author,
             "asin": seed_asin,
             "series": seed_series,
+            "sequence": seed_sequence,
             "cover_url": cover,
         },
         "cover_url": cover,

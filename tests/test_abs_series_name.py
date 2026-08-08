@@ -70,6 +70,27 @@ def test_normalize_abs_item_prefers_series_name_over_array():
     assert out["series"][0]["name"] == "The Vampire Chronicles"
 
 
+def test_normalize_abs_item_prefers_matching_series_array_sequence():
+    """Same series name: series[].sequence wins over a stale seriesName hash."""
+    raw = {
+        "id": "li_sunreach",
+        "addedAt": 1,
+        "media": {
+            "duration": 10,
+            "metadata": {
+                "title": "Sunreach",
+                "authorName": "Brandon Sanderson",
+                "series": [{"id": "s1", "name": "Skyward", "sequence": "2.1"}],
+                "seriesName": "Skyward #1",
+            },
+        },
+    }
+    out = _normalize_abs_item(raw)
+    assert out["seriesName"] == "Skyward"
+    assert out["sequence"] == "2.1"
+    assert out["series"] == [{"id": "s1", "name": "Skyward", "sequence": "2.1"}]
+
+
 def test_normalize_abs_item_falls_back_to_series_array():
     raw = {
         "id": "li_x",

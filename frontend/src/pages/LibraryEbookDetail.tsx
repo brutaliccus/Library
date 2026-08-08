@@ -491,19 +491,20 @@ export default function LibraryEbookDetail() {
             {metaDetails()}
           </div>
 
-          <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">
+          <div className="hidden md:block mt-4">
             {activeChapterId != null && (
               <button
                 type="button"
                 onClick={() => navigate(`/read/${activeChapterId}`)}
-                title={readingProgress ? "Continue" : "Read"}
-                aria-label={readingProgress ? "Continue" : "Read"}
-                className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-amber-600 text-white border border-amber-500 hover:bg-amber-500 transition-colors"
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-base font-semibold rounded-xl bg-amber-600 text-white hover:bg-amber-500 transition-colors"
               >
-                <BookOpen size={18} />
+                <BookOpen size={20} />
+                {readingProgress ? "Continue" : "Read"}
               </button>
             )}
-            {iconActions("desktop")}
+            <div className={`flex w-full flex-wrap items-center justify-center gap-2 ${activeChapterId != null ? "mt-3" : ""}`}>
+              {iconActions("desktop")}
+            </div>
           </div>
 
           {multiVolume && (

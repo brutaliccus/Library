@@ -110,8 +110,8 @@ const mobileIconBtn =
   "inline-flex items-center justify-center flex-1 min-w-0 h-12 max-w-[4.5rem] rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
 const mobileIconBtnDanger =
   "inline-flex items-center justify-center flex-1 min-w-0 h-12 max-w-[4.5rem] rounded-xl bg-red-950/50 text-red-300 border border-red-800/60 hover:bg-red-900/60 hover:text-red-200 transition-colors";
-const seriesStripClass =
-  "grid grid-flow-col auto-cols-[7.5rem] sm:auto-cols-[8rem] md:auto-cols-[8.5rem] lg:auto-cols-[9rem] gap-3 overflow-x-auto pb-2 scroll-smooth scrollbar-hide";
+const seriesGridClass =
+  "grid grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))] sm:grid-cols-[repeat(auto-fill,minmax(8rem,1fr))] md:grid-cols-[repeat(auto-fill,minmax(8.5rem,1fr))] lg:grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-3";
 
 export default function LibraryBookDetail() {
   const { itemId: rawItemId } = useParams<{ itemId: string }>();
@@ -494,22 +494,6 @@ export default function LibraryBookDetail() {
     );
   };
 
-  const desktopActions = (
-    <>
-      <button
-        type="button"
-        onClick={() => void handlePlay()}
-        disabled={playLoading}
-        title={hasLocalProgress ? "Resume" : "Listen"}
-        aria-label={hasLocalProgress ? "Resume" : "Listen"}
-        className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-emerald-600 text-white border border-emerald-500 hover:bg-emerald-500 transition-colors disabled:opacity-50"
-      >
-        {playLoading ? <Loader2 size={18} className="animate-spin" /> : <Headphones size={18} />}
-      </button>
-      {iconActions("desktop")}
-    </>
-  );
-
   const metaDetails = () => (
     <>
       {item.author && (
@@ -623,7 +607,7 @@ export default function LibraryBookDetail() {
               </button>
             )}
           </div>
-          <div className={seriesStripClass}>
+          <div className={seriesGridClass}>
             {[...storeSeries.books]
               .map((sb) => {
                 const local = absByTitle.get(normTitle(sb.title));
@@ -690,7 +674,7 @@ export default function LibraryBookDetail() {
               </span>
             </h2>
           </div>
-          <div className={seriesStripClass}>
+          <div className={seriesGridClass}>
             {[...localSeries.books]
               .map((sb) => ({
                 sb,
@@ -789,7 +773,20 @@ export default function LibraryBookDetail() {
             {metaDetails()}
           </div>
 
-          <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">{desktopActions}</div>
+          <div className="hidden md:block mt-4">
+            <button
+              type="button"
+              onClick={() => void handlePlay()}
+              disabled={playLoading}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-base font-semibold rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
+            >
+              {playLoading ? <Loader2 size={20} className="animate-spin" /> : <Headphones size={20} />}
+              {hasLocalProgress ? "Resume" : "Listen"}
+            </button>
+            <div className="mt-3 flex w-full flex-wrap items-center justify-center gap-2">
+              {iconActions("desktop")}
+            </div>
+          </div>
 
           {item.description && (
             <div className="mt-6">

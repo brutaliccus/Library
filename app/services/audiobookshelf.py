@@ -883,7 +883,11 @@ def _normalize_abs_item(lib_item: dict, progress_map: dict | None = None) -> dic
             "name": name,
             "sequence": seq,
         })
-    # Prefer embedded/LibraForge seriesName over ABS series[] relations.
+    # Prefer embedded/LibraForge seriesName for the *series title* over ABS
+    # series[] relations (ABS can link Anne Rice books to the wrong shared
+    # graph). For *sequence*, prefer a matching series[] value when present —
+    # manual metadata apply updates series[] but historically left a stale
+    # seriesName hash (e.g. "Skyward #1" while series[].sequence is "2.1").
     series_name, sequence = parse_abs_series_label(meta.get("seriesName"))
     if series_name:
         # Keep ABS series id when the relation name matches the file label.
@@ -891,7 +895,9 @@ def _normalize_abs_item(lib_item: dict, progress_map: dict | None = None) -> dic
         for s in series_info:
             if (s.get("name") or "").strip().lower() == series_name.lower():
                 matched_id = s.get("id") or ""
-                sequence = sequence or str(s.get("sequence") or "").strip()
+                rel_seq = str(s.get("sequence") or "").strip()
+                if rel_seq:
+                    sequence = rel_seq
                 break
         series_info = [{"id": matched_id, "name": series_name, "sequence": sequence}]
     elif series_info:
@@ -1442,6 +1448,13 @@ def _metadata_payload_from_book_dir(book_dir: Path) -> tuple[dict[str, Any], str
                 series_out.append(entry)
     if series_out:
         payload["series"] = series_out
+        # Keep seriesName in sync — ABS UI/normalize often reads this string,
+        # and a stale "Series #1" hash would otherwise survive series[] updates.
+        first = series_out[0]
+        sn = str(first.get("name") or "").strip()
+        sq = str(first.get("sequence") or "").strip()
+        if sn:
+            payload["seriesName"] = f"{sn} #{sq}" if sq else sn
 
     genres = meta.get("genres")
     if isinstance(genres, list):

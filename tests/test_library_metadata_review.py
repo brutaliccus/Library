@@ -35,6 +35,7 @@ def test_abs_payload_from_selected_maps_core_fields():
     assert payload["publishedYear"] == "1999"
     assert payload["description"] == "A blurb"
     assert payload["series"] == [{"name": "Standalone", "sequence": "1"}]
+    assert payload["seriesName"] == "Standalone #1"
     assert cover == "https://example.com/c.jpg"
 
 

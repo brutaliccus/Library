@@ -242,6 +242,7 @@ def seed_staging_metadata_hints(
     author: str | None,
     asin: str | None = None,
     series: str | None = None,
+    sequence: str | None = None,
     force: bool = False,
 ) -> None:
     """Write ABS-style metadata.json hints for single-book staging folders.
@@ -269,6 +270,10 @@ def seed_staging_metadata_hints(
     hint_author = (author or "").strip()
     hint_asin = normalize_asin(asin) if asin else ""
     hint_series = (series or "").strip()
+    hint_sequence = str(sequence or "").strip()
+    # Store as "Series #N" so ABS/LibraForge keep the index across syncs.
+    if hint_series and hint_sequence and "#" not in hint_series:
+        hint_series = f"{hint_series} #{hint_sequence}"
     if not hint_title and not hint_author and not hint_asin:
         return
 

@@ -692,34 +692,25 @@ export default function BookDetailPage() {
             {metaDetails()}
           </div>
 
-          <div className="hidden md:flex flex-wrap items-center gap-2 mt-4">
+          <div className="hidden md:block mt-4">
             <button
               type="button"
               onClick={primaryCta.onClick}
               disabled={primaryCta.disabled}
-              title={primaryCta.label}
-              aria-label={primaryCta.label}
-              className={`inline-flex items-center justify-center w-11 h-11 rounded-xl text-white border transition-colors disabled:opacity-50 ${
-                absMatch || !canRead
-                  ? "bg-emerald-600 border-emerald-500 hover:bg-emerald-500"
-                  : "bg-amber-600 border-amber-500 hover:bg-amber-500"
-              }`}
+              className={`w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-base font-semibold rounded-xl text-white transition-colors disabled:opacity-50 ${primaryCta.className}`}
             >
-              {absMatch ? (
-                absLoading ? <Loader2 size={18} className="animate-spin" /> : <Headphones size={18} />
-              ) : canRead ? (
-                <BookOpen size={18} />
-              ) : (
-                <Headphones size={18} />
-              )}
+              {primaryCta.icon}
+              {primaryCta.label}
             </button>
-            {iconActions("desktop")}
+            <div className="mt-3 flex w-full flex-wrap items-center justify-center gap-2">
+              {iconActions("desktop")}
+            </div>
+            {!absMatch && !canRead && (
+              <p className="mt-2 text-center text-xs text-gray-500">
+                Or stream now while waiting for a full library copy
+              </p>
+            )}
           </div>
-          {!absMatch && !canRead && (
-            <p className="hidden md:block mt-2 text-xs text-gray-500">
-              Or stream now while waiting for a full library copy
-            </p>
-          )}
 
           {noticesBlock}
 
@@ -779,7 +770,7 @@ export default function BookDetailPage() {
               More in this series
             </button>
           </div>
-          <div className="grid grid-flow-col auto-cols-[7.5rem] sm:auto-cols-[8rem] md:auto-cols-[8.5rem] lg:auto-cols-[9rem] gap-3 overflow-x-auto pb-2 scroll-smooth scrollbar-hide">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))] sm:grid-cols-[repeat(auto-fill,minmax(8rem,1fr))] md:grid-cols-[repeat(auto-fill,minmax(8.5rem,1fr))] lg:grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-3">
             {seriesData.books.map((sb) => (
               <button
                 key={sb.id}

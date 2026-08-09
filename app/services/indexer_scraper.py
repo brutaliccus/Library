@@ -380,7 +380,9 @@ async def _run_scrape_job() -> None:
     if not state.enabled or not settings.scraper_enabled:
         return
 
-    queries = await _build_query_queue(cfg)
+    # Pure RSS maintenance: no keyword / author / full-crawl passes.
+    rss_only = bool(cfg.abb_rss_only and cfg.knaben_rss_only)
+    queries = [] if rss_only else await _build_query_queue(cfg)
 
     per_job = max(1, min(cfg.queries_per_job, 50)) if queries else 0
     start_idx = 0
@@ -435,18 +437,23 @@ async def _run_scrape_job() -> None:
             tasks.append(asyncio.create_task(run_one(query)))
         if tasks:
             await asyncio.gather(*tasks)
+        elif rss_only:
+            logger.info("Indexer scraper: RSS-only mode — keyword/author/full-crawl skipped")
         elif not queries:
             logger.info("Indexer scraper: no keyword queue — author/Knaben/RSS passes only")
 
-        crawl_hits, crawl_upserted = await _run_knaben_crawl_pass(cfg)
-        job_knaben += crawl_hits
-        total_upserted += crawl_upserted
+        if not rss_only:
+            crawl_hits, crawl_upserted = await _run_knaben_crawl_pass(cfg)
+            job_knaben += crawl_hits
+            total_upserted += crawl_upserted
 
-        abb_hits, abb_upserted = await _run_abb_author_pass(cfg)
-        job_abb += abb_hits
-        total_upserted += abb_upserted
+            abb_hits, abb_upserted = await _run_abb_author_pass(cfg)
+            job_abb += abb_hits
+            total_upserted += abb_upserted
 
         # Recent-releases feed every Nth job (0 = disabled).
+        # In dual RSS-only mode, always poll feeds each job (cadence still applies
+        # to the shared ABB Flare+VPN recent pull inside _run_rss_job).
         if cfg.rss_every_n_jobs > 0:
             _jobs_since_rss += 1
             if _jobs_since_rss >= cfg.rss_every_n_jobs:

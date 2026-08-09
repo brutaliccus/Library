@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from app.services.quick_review import (
+    _build_query,
     _enrich_selected_for_apply,
     _folder_title_hint,
     _looks_like_junk_title,
@@ -30,6 +31,22 @@ def test_looks_like_junk_title_tape_and_chapter():
 def test_folder_title_hint_strips_req_prefix():
     assert _folder_title_hint(Path("/audiobooks/.unorganized/req_9_Timeline")) == "Timeline"
     assert "Dark" in _folder_title_hint(Path("/x/req_12_The_Dark_Tower"))
+    assert _folder_title_hint(
+        Path("/audiobooks/.unorganized/req_17_Shadows of Self (Mistborn, #5) graphic audio")
+    ) == "Shadows of Self"
+
+
+def test_build_query_is_title_only():
+    assert _build_query(
+        title="The Well of Ascension",
+        author="Brandon Sanderson",
+        series="Mistborn",
+        sequence="2",
+    ) == "Well of Ascension"
+    assert _build_query(
+        title="Shadows of Self (Mistborn, #5) graphic audio",
+        author="Brandon Sanderson",
+    ) == "Shadows of Self"
 
 
 def test_merge_prefers_catalog_over_tape1_filename():
@@ -54,8 +71,8 @@ def test_merge_prefers_catalog_over_tape1_filename():
     )
     assert merged["clues"]["title"] == "Timeline"
     assert merged["clues"]["author"] == "Michael Crichton"
-    assert merged["clues"]["query"].lower().startswith("timeline")
-    assert "michael crichton" in merged["clues"]["query"].lower()
+    assert merged["clues"]["query"].lower() == "timeline"
+    assert "michael crichton" not in merged["clues"]["query"].lower()
     assert not merged["clues"]["query"].lower().startswith("tape1")
 
 
@@ -98,7 +115,9 @@ def test_merge_prefers_catalog_author_when_tag_is_narrator():
     )
     assert merged["clues"]["author"] == "Michael Crichton"
     assert merged["clues"]["narrator"] == "Scott Brick"
-    assert "michael crichton" in merged["clues"]["query"].lower()
+    assert merged["clues"]["query"].lower() == "jurassic park"
+    assert "scott brick" not in merged["clues"]["query"].lower()
+    assert "michael crichton" not in merged["clues"]["query"].lower()
 
 
 def test_list_staging_targets_and_resolve(tmp_path):

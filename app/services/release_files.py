@@ -170,14 +170,11 @@ def _flat_book_key(filename: str) -> str:
 def _title_from_group_key(key: str) -> str:
     if re.fullmatch(r"[A-Z]+\d{2}", key or "", re.I):
         return key.upper()
+    from app.services.forge_pipeline import clean_catalog_title
+
     title = key
     title = re.sub(r"^\d+\s+", "", title)
-    title = re.sub(
-        r"\s*\[(?:Graphic\s*Audio|GraphicAudio)[^\]]*\]\s*",
-        " ",
-        title,
-        flags=re.I,
-    )
+    title = clean_catalog_title(title) or title
     title = re.sub(r"\s+", " ", title).strip(" -_")
     return title or key
 

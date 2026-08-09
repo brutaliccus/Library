@@ -30,6 +30,10 @@ interface SetupStatus {
     audibleConfigured?: boolean;
     audibleReachable?: boolean;
     audibleName?: string;
+    vpnReady?: boolean;
+    vpnProxy?: string;
+    mullvadConfigured?: boolean;
+    wireguardReady?: boolean;
   }>;
   defaults: {
     abbRssOnly: boolean;
@@ -105,6 +109,7 @@ const STEP_GROUPS: Record<string, string[]> = {
   stack: ["libraries", "pipeline"],
   audible: [],
   indexers: ["indexers"],
+  vpn: ["vpn"],
   debrid: ["debrid"],
   folders: ["storage"],
   openlibrary: [],
@@ -231,6 +236,7 @@ export default function InstanceSetup() {
   const [npmLeEmail, setNpmLeEmail] = useState("");
   const [npmAdminEmail, setNpmAdminEmail] = useState("");
   const [actionLog, setActionLog] = useState("");
+  const [mullvadAcct, setMullvadAcct] = useState("");
 
   const { data: status, refetch: refetchStatus } = useQuery({
     queryKey: ["admin-setup-status"],
@@ -426,6 +432,36 @@ export default function InstanceSetup() {
     },
   });
 
+  const enableVpn = useMutation({
+    mutationFn: async (account: string) => {
+      const { data } = await api.post(
+        "/admin/setup/enable-vpn",
+        { account: account.trim() },
+        { timeout: 420_000 },
+      );
+      return data as { ok?: boolean; error?: string; log?: string };
+    },
+    onSuccess: async (data) => {
+      setActionLog(data.log || "");
+      setMullvadAcct("");
+      await refetchStatus();
+      void qc.invalidateQueries({ queryKey: ["admin-config"] });
+      void qc.invalidateQueries({ queryKey: ["admin-integrations"] });
+      void qc.invalidateQueries({ queryKey: ["admin-docker-services"] });
+      void qc.invalidateQueries({ queryKey: ["admin-health"] });
+      toast(
+        data.ok ? "Mullvad VPN enabled (gluetun up)" : data.error || "VPN enable failed",
+        data.ok ? "success" : "error",
+      );
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "VPN enable failed";
+      toast(String(msg), "error");
+    },
+  });
+
   const olBuild = useMutation({
     mutationFn: async () => {
       const { data } = await api.post("/admin/ol-catalog/build", {
@@ -490,7 +526,12 @@ export default function InstanceSetup() {
       await save.mutateAsync(updates);
       return;
     }
-    if (step?.id === "folders" || step?.id === "openlibrary" || step?.id === "audible") {
+    if (
+      step?.id === "folders" ||
+      step?.id === "openlibrary" ||
+      step?.id === "audible" ||
+      step?.id === "vpn"
+    ) {
       return;
     }
     const updates: Record<string, string> = {};
@@ -965,9 +1006,9 @@ export default function InstanceSetup() {
         </h1>
         <p className="text-sm text-gray-500 mt-2">
           Guided walkthrough after a minimal install: public App URL, bundled stack, Audible,
-          indexers (with re-bootstrap), debrid, staging paths, catalog APIs (deep links for keys),
-          Android, and scraper mode. Optional NPM / VAPID live on the first step. Change anything
-          later in Admin → Settings / Integrations.
+          indexers (with re-bootstrap), optional Mullvad VPN (gluetun), debrid, staging paths,
+          catalog APIs (deep links for keys), Android, and scraper mode. Optional NPM / VAPID live
+          on the first step. Change anything later in Admin → Settings / Integrations / Health.
         </p>
       </div>
 
@@ -1153,6 +1194,71 @@ export default function InstanceSetup() {
               </p>
               {renderFields()}
               {actionLog && step.id === "indexers" && (
+                <pre className="text-[10px] text-gray-500 max-h-32 overflow-auto whitespace-pre-wrap border border-gray-800 rounded-lg p-2 bg-black/30">
+                  {actionLog}
+                </pre>
+              )}
+            </div>
+          ) : step.id === "vpn" ? (
+            <div className="space-y-4">
+              {step.vpnReady ? (
+                <div className="rounded-lg border border-emerald-800/50 bg-emerald-950/25 p-3 text-sm text-emerald-200">
+                  Mullvad WireGuard keys saved and ABB proxy set
+                  {step.vpnProxy ? (
+                    <>
+                      {" "}
+                      (<code className="text-emerald-100/90">{step.vpnProxy}</code>)
+                    </>
+                  ) : null}
+                  . You can skip, or re-run enable to recreate gluetun.
+                </div>
+              ) : (
+                <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400 space-y-1">
+                  <p>
+                    <strong className="text-gray-300">Optional.</strong> Without Mullvad, ABB
+                    Flare/RSS uses your home IP (fine for light use). VPN is only for ABB egress.
+                  </p>
+                  <p>
+                    Needs Docker socket + <code className="text-gray-300">LIBRARY_HOST_ROOT</code>{" "}
+                    so the wizard can add the compose <code className="text-gray-300">vpn</code>{" "}
+                    profile and start <code className="text-gray-300">audiobook-gluetun</code>.
+                  </p>
+                </div>
+              )}
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="password"
+                  value={mullvadAcct}
+                  onChange={(e) => setMullvadAcct(e.target.value)}
+                  placeholder="16-digit Mullvad account number"
+                  autoComplete="off"
+                  className="flex-1 min-w-0 px-3 py-2 bg-gray-950 border border-gray-700 rounded-lg text-gray-100 text-sm focus:outline-none focus:border-gray-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => enableVpn.mutate(mullvadAcct.trim())}
+                  disabled={enableVpn.isPending || mullvadAcct.replace(/\D/g, "").length !== 16}
+                  className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-emerald-800/60 bg-emerald-950/20 text-sm text-emerald-200 hover:bg-emerald-950/40 disabled:opacity-40"
+                >
+                  {enableVpn.isPending && <Loader2 size={14} className="animate-spin" />}
+                  {enableVpn.isPending ? "Enabling…" : "Enable VPN"}
+                </button>
+              </div>
+              {step.wireguardReady && (
+                <button
+                  type="button"
+                  onClick={() => enableVpn.mutate("")}
+                  disabled={enableVpn.isPending}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-700 bg-gray-900/40 text-sm text-gray-300 hover:bg-gray-900 disabled:opacity-40"
+                >
+                  {enableVpn.isPending && <Loader2 size={14} className="animate-spin" />}
+                  Start gluetun with saved keys
+                </button>
+              )}
+              <p className="text-[11px] text-gray-500">
+                Skip anytime — re-enable later under Admin → Integrations or Health → Mullvad.
+              </p>
+              {actionLog && (
                 <pre className="text-[10px] text-gray-500 max-h-32 overflow-auto whitespace-pre-wrap border border-gray-800 rounded-lg p-2 bg-black/30">
                   {actionLog}
                 </pre>

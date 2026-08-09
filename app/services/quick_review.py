@@ -18,6 +18,7 @@ from app.services.forge_pipeline import (
     _audio_parent_dirs,
     _collect_audio,
     clean_catalog_title,
+    clean_search_title,
     resolve_staging_dir,
     safe_path_under_staging,
     staging_has_applied_metadata,
@@ -76,21 +77,15 @@ def _provider_hint_from_meta(meta: dict[str, Any]) -> str | None:
     return None
 
 
-def _build_query(*, title: str, author: str, series: str = "", sequence: str = "") -> str:
-    parts: list[str] = []
-    t = (title or "").strip()
-    a = (author or "").strip()
-    s = (series or "").strip()
-    n = (sequence or "").strip()
-    if t and a:
-        parts.append(f"{t} {a}")
-    elif t:
-        parts.append(t)
-    elif a and s:
-        parts.append(f"{a} {s}" + (f" Book {n}" if n else ""))
-    elif a:
-        parts.append(a)
-    return parts[0] if parts else ""
+def _build_query(*, title: str, author: str = "", series: str = "", sequence: str = "") -> str:
+    """Build a metadata search string — title tokens only.
+
+    Author / series / book numbers clutter Audible and abs-agg queries and
+    often tank match quality (folder noise like ``req_15_`` or Graphic Audio
+    tags is stripped via :func:`clean_search_title`).
+    """
+    del author, series, sequence  # kept in signature for call-site compat
+    return clean_search_title(title) or ""
 
 
 def list_staging_targets(staging: Path) -> list[dict[str, Any]]:
@@ -153,20 +148,23 @@ def merge_clues_with_catalog(
     if catalog_author.lower() == "unknown":
         catalog_author = ""
 
-    loaded_title = str(meta.get("title") or meta.get("raw_title") or "").strip()
+    loaded_title_raw = str(meta.get("title") or meta.get("raw_title") or "").strip()
+    loaded_title = clean_catalog_title(loaded_title_raw) or loaded_title_raw
     loaded_author = str(meta.get("author") or "").strip()
+    folder_title = clean_catalog_title(folder_hint) or folder_hint
 
     if loaded_title and not _looks_like_junk_title(loaded_title):
         title = loaded_title
-    elif folder_hint and not _looks_like_junk_title(folder_hint):
-        title = folder_hint
+    elif folder_title and not _looks_like_junk_title(folder_title):
+        title = folder_title
     elif catalog_title:
         title = catalog_title
     else:
-        title = loaded_title or folder_hint or catalog_title
+        title = loaded_title or folder_title or catalog_title
 
     if _looks_like_junk_title(title):
-        title = folder_hint or catalog_title or title
+        title = folder_title or catalog_title or title
+    title = clean_catalog_title(title) or title
 
     narrator = str(meta.get("narrator") or "").strip()
     author = loaded_author or catalog_author
@@ -334,14 +332,14 @@ async def search_quick_review(
         raise QuickReviewError("Quick Review search is audiobook-only")
     resolve_staging_dir(req.staging_path or "")
 
-    q = (query or "").strip()
+    q = clean_search_title(query) if (query or "").strip() else ""
     if not q:
         q = _build_query(title=title, author=author, series=series, sequence=sequence)
     if not q:
         raise QuickReviewError("Search query is required")
 
     metadata = {
-        "title": (title or "").strip(),
+        "title": clean_catalog_title(title) or (title or "").strip(),
         "author": (author or "").strip(),
         "series": (series or "").strip(),
         "sequence": (sequence or "").strip(),

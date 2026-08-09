@@ -248,12 +248,27 @@ def test_m4b_source_dirs_multi_book_parents(tmp_path):
 
 
 def test_clean_catalog_title_strips_pack_noise():
+    from app.services.forge_pipeline import clean_search_title
+
     assert "Harry Potter" in clean_catalog_title(
         "Harry Potter, Complete Series, Chapterized (Full-Cast Edition)"
     )
     assert "Full-Cast" not in clean_catalog_title(
         "Harry Potter, Complete Series, Chapterized (Full-Cast Edition)"
     )
+    assert clean_catalog_title(
+        "Shadows of Self (Mistborn, #5) graphic audio"
+    ) == "Shadows of Self"
+    assert clean_catalog_title(
+        "req_15_Mistborn 4 - The Alloy of Law"
+    ) == "The Alloy of Law"
+    assert clean_catalog_title(
+        "The Alloy of Law (req_15)"
+    ) == "The Alloy of Law"
+    assert clean_search_title("The Well of Ascension") == "Well of Ascension"
+    assert clean_search_title(
+        "Mistborn 6 - The Bands of Mourning graphic audio"
+    ) == "Bands of Mourning"
 
 
 def test_seed_metadata_hints_single_book(tmp_path):

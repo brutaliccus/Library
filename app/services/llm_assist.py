@@ -29,6 +29,7 @@ from app.services.forge_pipeline import (
     _collect_audio,
     _set_quarantine,
     audiobook_staging_dir,
+    clean_catalog_title,
     collect_staging_llm_context,
     delete_staging_entry,
     extract_asin_from_staging,
@@ -330,7 +331,8 @@ async def apply_multi_book_split(
 
     child_ids: list[int] = []
     for idx, book in enumerate(plan.books, start=1):
-        child_title = book.title or f"{parent_title} (book {idx})"
+        raw_child_title = book.title or f"{parent_title} (book {idx})"
+        child_title = clean_catalog_title(raw_child_title) or raw_child_title
         child_author = book.author or parent_author
         async with async_session() as db:
             child = DownloadRequest(

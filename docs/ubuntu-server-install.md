@@ -78,7 +78,7 @@ The script walks you through:
 9. **Catalog / LLM** — Hardcover, OpenRouter, AA, NYT, ISBNdb, Google Books (optional)
 10. **Android APK repo** + scraper RSS-only defaults
 11. **Nginx Proxy Manager** — default Yes; skip if you already reverse-proxy (ports 80/443)
-12. **VPN** — Mullvad/gluetun (optional profile)
+12. **VPN** — Mullvad/gluetun (optional; also available later in `/admin/setup` and Admin → Integrations / Health)
 13. **Start stack** → configure Jackett/Prowlarr → sync ABS/Kavita/LF → NPM API → optional VAPID → health report
 
 Re-runs are safe: existing `.env` secrets are kept when you press Enter on a prompt. NPM proxy hosts are upserted by domain (no duplicates).

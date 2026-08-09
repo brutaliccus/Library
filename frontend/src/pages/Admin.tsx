@@ -1446,6 +1446,9 @@ interface IntegrationsResponse {
     overridden: boolean;
     hint: string;
     note?: string;
+    wireguardReady?: boolean;
+    wireguardHint?: string;
+    vpnEnable?: { ok?: boolean; error?: string; log?: string };
   };
   audible?: {
     configured?: boolean;
@@ -1537,20 +1540,67 @@ function IntegrationsPanel() {
 
   const saveMullvad = useMutation({
     mutationFn: async (value: string) => {
-      const { data } = await api.put("/admin/integrations", {
-        mullvad_account_number: value,
-      });
+      const { data } = await api.put(
+        "/admin/integrations",
+        { mullvad_account_number: value },
+        { timeout: 420_000 },
+      );
       return data as IntegrationsResponse;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
+      queryClient.setQueryData(["admin-integrations"], data);
       setMullvadAcct("");
-      queryClient.invalidateQueries({ queryKey: ["admin-integrations"] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-docker-services"] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-health"] });
+      const vpn = data?.mullvad?.vpnEnable;
+      if (vpn && vpn.ok === false) {
+        toast(
+          vpn.error || "Account saved but gluetun enable failed — try Enable VPN below",
+          "error",
+        );
+      } else if (!data?.mullvad?.configured) {
+        toast("Mullvad account cleared", "success");
+      } else {
+        toast(
+          data?.mullvad?.wireguardReady
+            ? "Mullvad saved — WireGuard registered and gluetun enabled"
+            : "Mullvad account saved",
+          "success",
+        );
+      }
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Failed to save Mullvad account";
+      toast(String(msg), "error");
+    },
+  });
+
+  const enableVpn = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post(
+        "/admin/setup/enable-vpn",
+        { account: "" },
+        { timeout: 420_000 },
+      );
+      return data as { ok?: boolean; error?: string };
+    },
+    onSuccess: async (data) => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-integrations"] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-docker-services"] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-health"] });
       toast(
-        "Mullvad account saved — restart gluetun on the Pi to apply (docker compose restart gluetun jackett)",
-        "success"
+        data.ok ? "gluetun started (vpn profile enabled)" : data.error || "VPN enable failed",
+        data.ok ? "success" : "error",
       );
     },
-    onError: () => toast("Failed to save Mullvad account", "error"),
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "VPN enable failed";
+      toast(String(msg), "error");
+    },
   });
 
   const nyt = data?.nyt;
@@ -1866,10 +1916,25 @@ function IntegrationsPanel() {
               Clear
             </button>
           )}
+          {mullvad?.wireguardReady && (
+            <button
+              type="button"
+              onClick={() => enableVpn.mutate()}
+              disabled={enableVpn.isPending || saveMullvad.isPending}
+              className="px-3 py-1.5 bg-sky-900/40 text-sky-200 text-sm rounded-lg hover:bg-sky-900/60 border border-sky-800/50 disabled:opacity-50"
+            >
+              {enableVpn.isPending ? "Starting…" : "Enable / restart gluetun"}
+            </button>
+          )}
         </div>
+        {mullvad?.wireguardReady && (
+          <p className="text-xs text-emerald-500/90">
+            WireGuard ready{mullvad.wireguardHint ? ` · ${mullvad.wireguardHint}` : ""}
+          </p>
+        )}
         <p className="text-xs text-gray-500">
           {mullvad?.note ||
-            "Only AudioBook Bay Flare/RSS/search egress via Mullvad. The rest of the stack stays on your LAN."}
+            "Only AudioBook Bay Flare/RSS/search egress via Mullvad. The rest of the stack stays on your LAN. Saving an account registers keys and starts gluetun — no CLI."}
         </p>
       </div>
     </div>

@@ -13,7 +13,12 @@ from app.services import docker_control, server_update
 logger = logging.getLogger(__name__)
 
 UPDATE_IMAGE = server_update.UPDATE_IMAGE
-ALLOWED_PIPELINES = frozenset({"bootstrap-indexers", "configure-npm", "generate-vapid"})
+ALLOWED_PIPELINES = frozenset({
+    "bootstrap-indexers",
+    "configure-npm",
+    "generate-vapid",
+    "enable-vpn",
+})
 
 # Whitelist of .env keys the NPM configure endpoint may set before running the script.
 _NPM_ENV_KEYS = frozenset(
@@ -289,6 +294,29 @@ async def generate_vapid_keys() -> dict[str, Any]:
     result["pipeline"] = "generate-vapid"
     result["hostRoot"] = host_root
     result["restartHint"] = "App recreated to load VAPID keys from .env"
+    return result
+
+
+async def enable_vpn(*, skip_register: bool = True) -> dict[str, Any]:
+    """Bring up gluetun (profile vpn) using keys already in data/mullvad.env.
+
+    Prefer ``skip_register=True`` after Admin Integrations has written WireGuard
+    keys. Pass ``skip_register=False`` only when ``MULLVAD_ACCOUNT`` is already
+    present in the host ``.env`` / environment for a fresh registration.
+    """
+    resolved = await server_update.resolve_validated_host_root()
+    host_root = resolved.get("hostRoot")
+    if not host_root:
+        return {
+            "ok": False,
+            "error": resolved.get("error") or "LIBRARY_HOST_ROOT not resolved",
+            "hostRoot": None,
+        }
+    flag = "--skip-register" if skip_register else ""
+    cmd = f"bash scripts/enable_vpn.sh {flag}".rstrip()
+    result = await _run_host_script(str(host_root), cmd, timeout=420.0)
+    result["pipeline"] = "enable-vpn"
+    result["hostRoot"] = host_root
     return result
 
 

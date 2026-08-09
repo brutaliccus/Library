@@ -541,8 +541,9 @@ async def fetch_recent_scraper_releases(
     """Recent-release feeds from trusted scraper indexers, merged by hash.
 
     When ``include_abb_flare`` is True (ABB RSS-only background mode), recent
-    ABB posts are scraped via FlareSolverr + Mullvad proxy — Jackett Torznab
-    ABB is never polled from the home IP for recent feeds.
+    ABB posts are scraped via FlareSolverr (optionally through ``ABB_PROXY_URL``
+    / Mullvad when configured). Jackett Torznab ABB is never polled for recent
+    feeds — that path was the noisy home-IP hammer.
     """
     import asyncio
     from app.services.download_discovery import merge_indexer_results
@@ -557,12 +558,14 @@ async def fetch_recent_scraper_releases(
     batches: list[list[dict[str, Any]]] = []
 
     if include_abb_flare:
-        if proxy or flare:
+        # Flare alone is enough (same as before). VPN proxy is optional and only
+        # used when ABB_PROXY_URL is set — it is not required for RSS mode.
+        if flare or proxy:
             from app.services import audiobookbay
 
+            label = "AudioBookBay(VPN)" if proxy else "AudioBookBay(Flare)"
             try:
                 abb_rows = await audiobookbay.fetch_recent_listings(max_pages=2)
-                # Drop junk before the expensive hash-resolve crawl.
                 abb_rows = [
                     r for r in abb_rows
                     if is_book_related(
@@ -572,18 +575,20 @@ async def fetch_recent_scraper_releases(
                         media_type=r.get("mediaType") or "audiobook",
                         size_bytes=int(r.get("size") or 0),
                     )
-                ]
-                abb_rows = await enrich_audiobookbay_for_cache(abb_rows[:limit_per_indexer])
+                ][:limit_per_indexer]
+                # Do NOT hash-resolve here. Each missing infoHash is another Flare
+                # detail-page hit (~7s); resolving a dozen after every RSS pull is
+                # what burned the home IP. Hashes resolve on download / live search.
                 batches.append(abb_rows)
-                counts["AudioBookBay(VPN)"] = len(abb_rows)
+                counts[label] = len(abb_rows)
             except Exception as e:
-                logger.warning("ABB VPN recent feed failed: %s", e)
-                counts["AudioBookBay(VPN)"] = 0
+                logger.warning("ABB recent feed failed (%s): %s", label, e)
+                counts[label] = 0
         else:
             logger.warning(
-                "ABB RSS ingest skipped — set ABB_PROXY_URL (or FlareSolverr) for Flare+VPN recent listings"
+                "ABB RSS ingest skipped — set FLARESOLVERR_URL (VPN proxy optional)"
             )
-            counts["AudioBookBay(VPN)"] = 0
+            counts["AudioBookBay"] = 0
 
     if indexers:
         async def _one(idx: dict) -> list[dict[str, Any]]:

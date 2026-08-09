@@ -683,6 +683,34 @@ export default function HealthTab() {
     },
   });
 
+  const enableVpn = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post(
+        "/admin/setup/enable-vpn",
+        { account: "" },
+        { timeout: 420_000 },
+      );
+      return data as { ok?: boolean; error?: string };
+    },
+    onSuccess: async (data) => {
+      toast(
+        data.ok ? "gluetun enabled (vpn profile)" : data.error || "VPN enable failed",
+        data.ok ? "success" : "error",
+      );
+      await refreshHealth();
+      void queryClient.invalidateQueries({ queryKey: ["admin-integrations"] });
+    },
+    onError: (err: any) => {
+      const detail = err.response?.data?.detail || "VPN enable failed";
+      toast(
+        String(detail).includes("No WireGuard")
+          ? `${detail} — save a Mullvad account under Integrations first.`
+          : String(detail),
+        "error",
+      );
+    },
+  });
+
   const runDockerAction = (svc: DockerServiceInfo, action: DockerAction) => {
     if (action === "stop") {
       setStopConfirm(svc);
@@ -792,8 +820,10 @@ export default function HealthTab() {
             group={group}
             health={health}
             dockerById={dockerById}
-            busyId={busyId}
+            busyId={busyId || (enableVpn.isPending ? "gluetun" : null)}
             onDockerAction={runDockerAction}
+            onEnableVpn={() => enableVpn.mutate()}
+            enableVpnBusy={enableVpn.isPending}
           />
         ))}
       </div>
@@ -911,12 +941,16 @@ function ServiceGroupTable({
   dockerById,
   busyId,
   onDockerAction,
+  onEnableVpn,
+  enableVpnBusy,
 }: {
   group: ServiceGroup;
   health: Record<string, Record<string, unknown>>;
   dockerById: Map<string, DockerServiceInfo>;
   busyId: string | null;
   onDockerAction: (svc: DockerServiceInfo, action: DockerAction) => void;
+  onEnableVpn?: () => void;
+  enableVpnBusy?: boolean;
 }) {
   // CPU/RAM only for Docker-backed rows. External APIs / Disk / Knaben omit the columns.
   // Shared template on header + rows. Actions is fixed (not auto): each row is its
@@ -1021,6 +1055,8 @@ function ServiceGroupTable({
                   openUrl={openUrl}
                   busy={busyId === docker?.id}
                   onAction={onDockerAction}
+                  onEnableVpn={row.dockerId === "gluetun" ? onEnableVpn : undefined}
+                  enableVpnBusy={row.dockerId === "gluetun" ? enableVpnBusy : undefined}
                 />
               </div>
             </li>
@@ -1052,11 +1088,15 @@ function RowControls({
   openUrl,
   busy,
   onAction,
+  onEnableVpn,
+  enableVpnBusy,
 }: {
   docker?: DockerServiceInfo;
   openUrl: string | null;
   busy?: boolean;
   onAction: (svc: DockerServiceInfo, action: DockerAction) => void;
+  onEnableVpn?: () => void;
+  enableVpnBusy?: boolean;
 }) {
   const btn =
     "inline-flex items-center justify-center gap-0.5 px-1.5 py-1 text-[11px] rounded border disabled:opacity-40 disabled:cursor-not-allowed";
@@ -1070,13 +1110,30 @@ function RowControls({
     const socketOk = docker.available !== false;
     const disabled = busy || !socketOk;
 
+    // gluetun lives behind compose profile vpn — Start fails until the profile
+    // creates the container. Offer Enable VPN (host sidecar) when missing.
+    if (docker.id === "gluetun" && onEnableVpn && !exists) {
+      controls.push(
+        <button
+          key="enable-vpn"
+          type="button"
+          title="Register compose vpn profile and start gluetun (needs Mullvad keys in Integrations)"
+          disabled={!!enableVpnBusy || !socketOk}
+          onClick={() => onEnableVpn()}
+          className={`${btn} bg-sky-950/50 text-sky-200 border-sky-800/50 hover:bg-sky-900/50`}
+        >
+          <Play size={11} /> {enableVpnBusy ? "…" : "Enable VPN"}
+        </button>,
+      );
+    }
+
     if (can("start")) {
       controls.push(
         <button
           key="start"
           type="button"
           title={!socketOk ? docker.error || "Docker unavailable" : "Start"}
-          disabled={disabled || running}
+          disabled={disabled || running || (docker.id === "gluetun" && !exists)}
           onClick={() => onAction(docker, "start")}
           className={`${btn} bg-emerald-950/40 text-emerald-300 border-emerald-800/50 hover:bg-emerald-900/50`}
         >

@@ -2182,10 +2182,10 @@ async def _integrations_payload() -> dict:
             "hint": _mask(mullvad_eff),
             "wireguardReady": bool(wg_key and wg_addr),
             "wireguardHint": _mask(wg_addr) if wg_addr else "",
-            "note": "Only ABB traffic uses Mullvad (FlareSolverr â†’ gluetun:8888). "
+            "note": "Only ABB traffic uses Mullvad (FlareSolverr → gluetun:8888). "
                     "Jackett/Knaben/Prowlarr stay on your LAN. Saving an account "
-                    "auto-registers WireGuard keys into data/mullvad.env â€” then "
-                    "restart: docker compose up -d gluetun",
+                    "registers WireGuard keys and enables the compose vpn profile "
+                    "(starts gluetun) automatically — no CLI required.",
         },
         "audible": await _audible_integrations_slice(),
     }
@@ -2263,6 +2263,7 @@ async def update_integrations(
         await app_settings.set_setting(
             openrouter.CONFIDENCE_SETTING, f"{threshold:.2f}"
         )
+    vpn_enable_result: dict | None = None
     if body.mullvad_account_number is not None:
         digits = _normalize_mullvad_account(body.mullvad_account_number)
         await app_settings.set_setting(MULLVAD_SETTING, digits)
@@ -2275,6 +2276,15 @@ async def update_integrations(
                 await app_settings.set_setting("integrations.mullvad_wg_private_key", priv)
                 await app_settings.set_setting("integrations.mullvad_wg_addresses", addr)
                 _write_mullvad_env_file(digits, private_key=priv, addresses=addr)
+                # Point ABB Flare traffic at gluetun and bring the vpn profile up.
+                await app_settings.set_setting("config.abb_proxy_url", "http://gluetun:8888")
+                try:
+                    from app.services import setup_bootstrap
+
+                    vpn_enable_result = await setup_bootstrap.enable_vpn(skip_register=True)
+                except Exception as e:
+                    logger.warning("enable_vpn after Mullvad register failed: %s", e)
+                    vpn_enable_result = {"ok": False, "error": str(e)[:300]}
             except Exception as e:
                 logger.exception("Mullvad WireGuard registration failed")
                 raise HTTPException(
@@ -2284,6 +2294,7 @@ async def update_integrations(
         else:
             await app_settings.set_setting("integrations.mullvad_wg_private_key", "")
             await app_settings.set_setting("integrations.mullvad_wg_addresses", "")
+            await app_settings.set_setting("config.abb_proxy_url", "")
             _write_mullvad_env_file("")
     try:
         from app.services.instance_settings import apply_runtime_overrides, invalidate_cache
@@ -2292,7 +2303,10 @@ async def update_integrations(
         await apply_runtime_overrides()
     except Exception:
         pass
-    return await _integrations_payload()
+    payload = await _integrations_payload()
+    if vpn_enable_result is not None:
+        payload["mullvad"]["vpnEnable"] = vpn_enable_result
+    return payload
 
 
 class ConfigUpdate(BaseModel):
@@ -2597,6 +2611,88 @@ async def post_setup_generate_vapid(_admin: User = Depends(require_admin)):
     if not docker_control.socket_available():
         raise HTTPException(status_code=503, detail="Docker socket not available")
     return await setup_bootstrap.generate_vapid_keys()
+
+
+class SetupEnableVpnBody(BaseModel):
+    """Enable gluetun (compose profile vpn). Optional account registers WireGuard first."""
+
+    account: str = ""
+
+
+@router.post("/setup/enable-vpn")
+async def post_setup_enable_vpn(
+    body: SetupEnableVpnBody = Body(default_factory=SetupEnableVpnBody),
+    _admin: User = Depends(require_admin),
+):
+    """Register Mullvad WireGuard (optional) and bring up gluetun via host sidecar.
+
+    Prefer this over CLI ``docker compose --profile vpn up``. Needs docker.sock +
+    ``LIBRARY_HOST_ROOT``. When ``account`` is empty, uses keys already in
+    ``data/mullvad.env`` / Integrations.
+    """
+    from app.services import app_settings, docker_control, setup_bootstrap
+    from app.services.instance_settings import apply_runtime_overrides, invalidate_cache
+
+    if not docker_control.socket_available():
+        raise HTTPException(status_code=503, detail="Docker socket not available")
+
+    digits = _normalize_mullvad_account(body.account or "")
+    if digits:
+        import asyncio
+        from app.services import mullvad as mullvad_svc
+
+        try:
+            priv, addr = await asyncio.to_thread(mullvad_svc.register_wireguard, digits)
+        except Exception as e:
+            logger.exception("Mullvad WireGuard registration failed")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Mullvad WireGuard registration failed: {e}",
+            ) from e
+        await app_settings.set_setting(MULLVAD_SETTING, digits)
+        await app_settings.set_setting("integrations.mullvad_wg_private_key", priv)
+        await app_settings.set_setting("integrations.mullvad_wg_addresses", addr)
+        await app_settings.set_setting("config.abb_proxy_url", "http://gluetun:8888")
+        _write_mullvad_env_file(digits, private_key=priv, addresses=addr)
+        invalidate_cache()
+        try:
+            await apply_runtime_overrides()
+        except Exception:
+            pass
+        result = await setup_bootstrap.enable_vpn(skip_register=True)
+    else:
+        wg_key = (
+            await app_settings.get_setting("integrations.mullvad_wg_private_key", default="") or ""
+        ).strip()
+        wg_addr = (
+            await app_settings.get_setting("integrations.mullvad_wg_addresses", default="") or ""
+        ).strip()
+        acct = (
+            await app_settings.get_setting(MULLVAD_SETTING, default="") or ""
+        ).strip()
+        if not (wg_key and wg_addr):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No WireGuard keys yet — paste a 16-digit Mullvad account "
+                    "(or save one under Admin → Integrations first)."
+                ),
+            )
+        await app_settings.set_setting("config.abb_proxy_url", "http://gluetun:8888")
+        _write_mullvad_env_file(acct, private_key=wg_key, addresses=wg_addr)
+        invalidate_cache()
+        try:
+            await apply_runtime_overrides()
+        except Exception:
+            pass
+        result = await setup_bootstrap.enable_vpn(skip_register=True)
+
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail=result.get("error") or "enable-vpn failed",
+        )
+    return result
 
 
 @router.get("/ol-catalog")

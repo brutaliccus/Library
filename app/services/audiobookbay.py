@@ -732,7 +732,7 @@ async def fetch_recent_listings(*, max_pages: int = 2) -> list[dict[str, Any]]:
             if key and key not in seen:
                 seen.add(key)
                 out.append(r)
-    logger.info("ABB recent listings via proxy: %s posts across ≤%s pages", len(out), pages)
+    logger.info("ABB recent listings: %s posts across ≤%s pages", len(out), pages)
     return out
 
 

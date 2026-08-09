@@ -74,9 +74,25 @@ _FORMAT_EXT_RANK = {
 # Torrent / catalog noise that hurts Audible search when used as a title hint.
 _TITLE_JUNK_RE = re.compile(
     r"\s*[\[(](?:complete\s+series|chapterized|full[-\s]?cast(?:\s+edition)?|"
-    r"mp3|m4b|64\s*kbps|128\s*kbps|audiobook)[\])]|\s*[\[(]\d{3,4}p[\])]",
+    r"graphic\s*audio|dramatized(?:\s+adaptation)?|mp3|m4b|64\s*kbps|"
+    r"128\s*kbps|audiobook)[\])]|\s*[\[(]\d{3,4}p[\])]|\s*\(req[_\s-]?\d+\)",
     re.IGNORECASE,
 )
+_REQ_PREFIX_RE = re.compile(r"^req[_\s-]?\d+[_\s-]+", re.IGNORECASE)
+_SERIES_BOOKNUM_PARENS_RE = re.compile(
+    r"\s*[\[(][^)\]]*#\s*\d+(?:\.\d+)?[^)\]]*[\])]",
+    re.IGNORECASE,
+)
+_TRAILING_EDITION_NOISE_RE = re.compile(
+    r"\s*(?:graphic\s*audio|full[-\s]?cast(?:\s+edition)?|dramatized(?:\s+adaptation)?|"
+    r"unabridged|chapterized)\s*$",
+    re.IGNORECASE,
+)
+# "Mistborn 6 - The Bands of Mourning" / "Series 03 - Title" → keep the title part.
+_SERIES_NUMBER_DASH_TITLE_RE = re.compile(
+    r"^.+?\s+\d+(?:\.\d+)?\s*[-–:]\s+(.+)$",
+)
+_LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
 _SERIES_PACK_RE = re.compile(
     r"\b(?:complete\s+series|books?\s*\d+\s*[-–]\s*\d+|omnibus|box\s*set)\b",
     re.IGNORECASE,
@@ -166,20 +182,62 @@ def needs_m4b_conversion(folder: Path) -> bool:
 
 
 def clean_catalog_title(title: str) -> str:
-    """Strip torrent / pack noise so Metadata Forge gets a usable title hint."""
+    """Strip torrent / pack / staging noise so Metadata Forge gets a usable title hint.
+
+    Keeps leading articles (``The``) for display and ABS tags. Prefer
+    :func:`clean_search_title` for Audible/manual-review query strings.
+    """
     t = (title or "").strip()
     if not t:
         return ""
+    t = t.replace("_", " ")
+    t = _REQ_PREFIX_RE.sub("", t)
     t = _TITLE_JUNK_RE.sub("", t)
+    t = _SERIES_BOOKNUM_PARENS_RE.sub("", t)
+    t = _TRAILING_EDITION_NOISE_RE.sub("", t)
     # "Book Title, Complete Series, Chapterized" → "Book Title"
     t = re.sub(
-        r"\s*,\s*(?:complete\s+series|chapterized|full[-\s]?cast(?:\s+edition)?)\b.*$",
+        r"\s*,\s*(?:complete\s+series|chapterized|full[-\s]?cast(?:\s+edition)?|"
+        r"graphic\s*audio)\b.*$",
         "",
         t,
         flags=re.IGNORECASE,
     )
+    # "Mistborn 6 - The Bands of Mourning" → "The Bands of Mourning"
+    m = _SERIES_NUMBER_DASH_TITLE_RE.match(t.strip())
+    if m and len(m.group(1).split()) >= 2:
+        t = m.group(1)
     # "Book Title (The Series I)" — keep for Gunslinger-style; series pack phrases already removed
     t = re.sub(r"\s{2,}", " ", t).strip(" -–_|,")
+    return t
+
+
+def clean_search_title(title: str) -> str:
+    """Minimal title tokens for metadata search (no author / book # / articles)."""
+    t = clean_catalog_title(title)
+    if not t:
+        return ""
+    # Drop leading articles — they clutter Audible/ABS queries.
+    t = _LEADING_ARTICLE_RE.sub("", t).strip()
+    # Subtitles after colon rarely help identity search.
+    if ":" in t:
+        head, tail = t.split(":", 1)
+        if len(head.split()) >= 2:
+            t = head.strip()
+        elif len(tail.split()) >= 2:
+            t = tail.strip()
+    # Trailing bare book numbers ("Title 5") — keep sole "1984".
+    parts = t.split()
+    while len(parts) > 1 and re.fullmatch(r"\d+(?:\.\d+)?", parts[-1] or ""):
+        parts.pop()
+    # "Book N" / "#N" tokens anywhere.
+    parts = [
+        p
+        for p in parts
+        if not re.fullmatch(r"(?:book|#)\d+(?:\.\d+)?", p or "", re.IGNORECASE)
+        and not re.fullmatch(r"#", p or "")
+    ]
+    t = " ".join(parts).strip(" -–_|,.")
     return t
 
 

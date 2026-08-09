@@ -844,6 +844,7 @@ async def update_config(updates: dict[str, str | None]) -> dict[str, Any]:
                     priv, addr = await asyncio.to_thread(mullvad_svc.register_wireguard, digits)
                     await app_settings.set_setting("integrations.mullvad_wg_private_key", priv)
                     await app_settings.set_setting("integrations.mullvad_wg_addresses", addr)
+                    await app_settings.set_setting("config.abb_proxy_url", "http://gluetun:8888")
                     env_path = Path("/app/data/mullvad.env")
                     env_path.parent.mkdir(parents=True, exist_ok=True)
                     mullvad_svc.write_gluetun_env(
@@ -852,9 +853,19 @@ async def update_config(updates: dict[str, str | None]) -> dict[str, Any]:
                         addresses=addr,
                         account=digits,
                     )
+                    try:
+                        from app.services import setup_bootstrap
+
+                        await setup_bootstrap.enable_vpn(skip_register=True)
+                    except Exception as e:
+                        logger.warning("enable_vpn after Mullvad config save failed: %s", e)
                 except Exception as e:
                     logger.exception("Mullvad WireGuard registration failed")
                     raise ValueError(f"Mullvad WireGuard registration failed: {e}") from e
+            else:
+                await app_settings.set_setting("integrations.mullvad_wg_private_key", "")
+                await app_settings.set_setting("integrations.mullvad_wg_addresses", "")
+                await app_settings.set_setting("config.abb_proxy_url", "")
             continue
 
         if key in ("scraper.abb_rss_only", "scraper.knaben_rss_only"):
@@ -987,6 +998,13 @@ async def setup_status() -> dict[str, Any]:
     app_url = await get_effective("config.app_url")
     vapid_pub = await get_effective("config.vapid_public_key")
     vapid_priv = await get_effective("config.vapid_private_key")
+    abb_proxy = (await get_effective("config.abb_proxy_url") or "").strip()
+    mullvad_acct = "".join(
+        c for c in (await get_effective("integrations.mullvad_account_number") or "") if c.isdigit()
+    )
+    wg_key = (await app_settings.get_setting("integrations.mullvad_wg_private_key", default="") or "").strip()
+    wg_addr = (await app_settings.get_setting("integrations.mullvad_wg_addresses", default="") or "").strip()
+    vpn_ready = bool(wg_key and wg_addr and abb_proxy)
 
     stack_done = bool(abs_url and abs_key) or bool(kav_url and kav_key)
     bundled_media = (
@@ -1064,6 +1082,22 @@ async def setup_status() -> dict[str, Any]:
                 "Prowlarr for torrent search + scraper. Jackett/FlareSolverr are compose sidecars "
                 "(ABB RSS + live search). Deep Flare crawls stay opt-in on the Scraper step."
             ),
+        },
+        {
+            "id": "vpn",
+            "label": "Mullvad VPN (gluetun) — optional",
+            "done": True,  # optional — never blocks finishing
+            "required": False,
+            "help": (
+                "Optional. Routes only AudioBook Bay Flare/RSS egress through Mullvad (gluetun:8888). "
+                "Jackett/Knaben/Prowlarr stay on your LAN. Paste your 16-digit account to register "
+                "WireGuard and start gluetun from this wizard — no CLI. Skip if you do not use Mullvad; "
+                "enable later under Admin → Integrations or Health."
+            ),
+            "vpnReady": vpn_ready,
+            "vpnProxy": abb_proxy or "",
+            "mullvadConfigured": bool(mullvad_acct),
+            "wireguardReady": bool(wg_key and wg_addr),
         },
         {
             "id": "debrid",

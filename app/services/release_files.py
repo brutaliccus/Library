@@ -182,6 +182,21 @@ def _title_from_group_key(key: str) -> str:
     return title or key
 
 
+def _norm_name(name: str) -> str:
+    """Normalize basenames for fuzzy match (whitespace / unicode dashes)."""
+    s = (name or "").lower().replace("\\", "/")
+    s = s.rsplit("/", 1)[-1]
+    for a, b in (
+        ("‐", "-"), ("‑", "-"), ("‒", "-"),
+        ("–", "-"), ("—", "-"), ("−", "-"),
+        ("꞉", ":"), ("：", ":"),
+    ):
+        s = s.replace(a, b)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+
 def map_release_groups_to_staging(
     staging: Path,
     groups: list[dict[str, Any]],
@@ -195,15 +210,17 @@ def map_release_groups_to_staging(
             continue
         if "-tmpfiles" in path.parts:
             continue
+        if path.name.endswith(".libraforge.json"):
+            continue
         rel = path.relative_to(staging).as_posix()
-        by_name.setdefault(path.name.lower(), []).append(rel)
+        by_name.setdefault(_norm_name(path.name), []).append(rel)
 
     mapped: list[dict[str, Any]] = []
     used: set[str] = set()
     for group in groups:
         hits: list[str] = []
         for name in group.get("audio_names") or []:
-            for rel in by_name.get(str(name).lower(), []):
+            for rel in by_name.get(_norm_name(str(name)), []):
                 if rel in used:
                     continue
                 hits.append(rel)
@@ -212,7 +229,7 @@ def map_release_groups_to_staging(
             name = str(row.get("name") or "")
             if not name or Path(name).suffix.lower() in _AUDIO_EXT:
                 continue
-            for rel in by_name.get(name.lower(), []):
+            for rel in by_name.get(_norm_name(name), []):
                 if rel in used:
                     continue
                 hits.append(rel)

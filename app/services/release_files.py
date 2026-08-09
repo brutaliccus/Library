@@ -342,10 +342,10 @@ def parse_file_list_text(text: str) -> list[dict[str, Any]]:
             # If still a tiny name like "1.mp3", take a wider trailing window.
             filename = " ".join(tokens[filename_idx:])
             folders = " ".join(tokens[:filename_idx]).strip()
-            if len(Path(filename).stem) <= 2 and filename_idx > 0:
-                # Take from last " - " chunk as filename when possible.
+            if " " not in filename and " - " in body:
+                # Spaced real filename collapsed to last token (e.g. Novel.m4b).
                 m = re.match(r"^(?P<head>.+ - )(?P<name>.+\.[A-Za-z0-9]{2,5})$", body)
-                if m:
+                if m and " " in m.group("name"):
                     folders = m.group("head").rstrip(" -")
                     filename = m.group("name")
             path = f"{folders}/{filename}" if folders else filename

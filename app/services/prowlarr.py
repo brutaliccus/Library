@@ -661,17 +661,18 @@ async def search_audiobookbay_multi(
 ) -> list[dict[str, Any]]:
     """Search ABB for live download UI.
 
-    Jackett Torznab first (~1–3s). Direct Mullvad Flare multi-page scrape is a
-    fallback only — it commonly takes 30–90s and made live search feel hung.
-    ``overall_timeout`` caps the whole Jackett → Flare → Prowlarr chain so one
-    slow path cannot freeze Find Downloads after Knaben already returned.
+    When ``ABB_PROXY_URL`` (gluetun/Mullvad) is set, use FlareSolverr through that
+    proxy only. Jackett/Prowlarr ABB always egress from the host IP and cannot use
+    gluetun — after a home-IP ban they time out and must not be preferred.
+
+    Without a proxy: Jackett Torznab first (fast). Optional Flare fallback is
+    gated by ``allow_flare_fallback`` (live UI usually leaves it off to protect
+    the home IP). ``overall_timeout`` caps the whole chain.
     """
     if not queries:
         return []
     query = queries[0]
     limit = max(25, int(settings.prowlarr_abb_search_limit))
-    # Live UI must fail fast; do not inherit the 180s Jackett/Flare deploy budget.
-    jt = max(8, int(jackett_timeout if jackett_timeout is not None else 18))
     deadline = (
         time.monotonic() + float(overall_timeout)
         if overall_timeout is not None and overall_timeout > 0
@@ -683,6 +684,46 @@ async def search_audiobookbay_multi(
             return None
         return max(0.0, deadline - time.monotonic())
 
+    proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
+
+    # --- Mullvad path: Flare via gluetun (skip Jackett host-IP egress) ---
+    if proxy and allow_flare_fallback:
+        from app.services import audiobookbay
+
+        remaining = _remaining()
+        if remaining is not None and remaining < 8:
+            logger.warning("ABB overall budget exhausted before Mullvad Flare for %r", query[:60])
+            return []
+        # CF warmup + 1–2 listing pages typically 20–70s through Mullvad.
+        flare_timeout = 75.0 if remaining is None else min(75.0, max(15.0, remaining - 1.0))
+        pages = 2 if flare_timeout >= 45 else 1
+        try:
+            deep = await asyncio.wait_for(
+                audiobookbay.search_deep(
+                    query, max_pages=pages, resolve_hashes=False, for_live=True,
+                ),
+                timeout=flare_timeout,
+            )
+            if deep:
+                logger.info(
+                    "ABB via Mullvad Flare: %s results for %r",
+                    len(deep[:limit]),
+                    query[:60],
+                )
+                return await enrich_audiobookbay_for_cache(deep[:limit], timeout=8.0)
+            logger.info("ABB Mullvad Flare returned 0 results for %r", query[:60])
+        except asyncio.TimeoutError:
+            logger.warning(
+                "ABB Mullvad Flare timed out after %.0fs for %r",
+                flare_timeout,
+                query[:60],
+            )
+        except Exception as e:
+            logger.warning("ABB Mullvad Flare failed for %r: %s", query[:60], e)
+        return []
+
+    # --- No VPN: Jackett / Prowlarr (host IP) ---
+    jt = max(8, int(jackett_timeout if jackett_timeout is not None else 18))
     jackett_budget = jt if deadline is None else max(5, min(jt, int(_remaining() or 0)))
     if jackett_budget < 5:
         logger.warning("ABB overall budget exhausted before Jackett for %r", query[:60])
@@ -693,36 +734,6 @@ async def search_audiobookbay_multi(
         logger.info("ABB Jackett direct: %s results for %r", len(jackett_rows), query[:60])
         # Torznab magnets already carry infoHash — skip Flare detail crawls here.
         return await enrich_audiobookbay_for_cache(jackett_rows, limit=0)
-
-    remaining = _remaining()
-    proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
-    # Cap Flare hard — this was the ~85% hang (35s+ after Knaben finished).
-    if allow_flare_fallback and proxy and (remaining is None or remaining >= 6):
-        from app.services import audiobookbay
-
-        flare_timeout = 12.0 if remaining is None else min(12.0, remaining - 1.0)
-        try:
-            deep = await asyncio.wait_for(
-                audiobookbay.search_deep(
-                    query, max_pages=1, resolve_hashes=False, for_live=True,
-                ),
-                timeout=max(5.0, flare_timeout),
-            )
-            if deep:
-                logger.info(
-                    "ABB via Mullvad Flare (fallback): %s results for %r",
-                    len(deep[:limit]),
-                    query[:60],
-                )
-                return await enrich_audiobookbay_for_cache(deep[:limit], timeout=6.0)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "ABB Mullvad Flare fallback timed out after %.0fs for %r",
-                max(5.0, flare_timeout),
-                query[:60],
-            )
-        except Exception as e:
-            logger.warning("ABB Mullvad Flare fallback failed for %r: %s", query[:60], e)
 
     remaining = _remaining()
     if remaining is not None and remaining < 4:

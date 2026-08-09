@@ -375,8 +375,8 @@ async def search_abb_releases(
 ):
     """Live AudioBookBay search for niche titles missing from Open Library.
 
-    Uses a short Jackett-only path (no Flare multi-page crawl) so store search
-    does not hang for minutes. Upserts hits into the indexer cache for detail pages.
+    With Mullvad proxy: FlareSolverr via gluetun. Without: short Jackett-only
+    path so store search does not hang. Upserts hits into the indexer cache.
     """
     from app.services.catalog_match import _clean_release_text
 
@@ -386,12 +386,23 @@ async def search_abb_releases(
 
     rows: list[dict] = []
     timed_out = False
+    abb_proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
     try:
-        # Store fallback must stay snappy — skip Mullvad Flare deep scrape.
-        rows = await asyncio.wait_for(
-            prowlarr.search_jackett_audiobookbay(query, limit=max(limit, 40), timeout=18),
-            timeout=22.0,
-        )
+        if abb_proxy:
+            rows = await asyncio.wait_for(
+                prowlarr.search_audiobookbay_multi(
+                    [query],
+                    allow_flare_fallback=True,
+                    overall_timeout=85.0,
+                ),
+                timeout=90.0,
+            )
+        else:
+            # Store fallback must stay snappy — no home-IP Flare crawl.
+            rows = await asyncio.wait_for(
+                prowlarr.search_jackett_audiobookbay(query, limit=max(limit, 40), timeout=18),
+                timeout=22.0,
+            )
     except asyncio.TimeoutError:
         logger.warning("ABB store fallback timed out for %r", query[:60])
         timed_out = True
@@ -400,8 +411,8 @@ async def search_abb_releases(
         logger.warning("ABB fallback search failed for %r: %s", query[:60], e)
         rows = []
 
-    if not rows and not timed_out:
-        # Brief Prowlarr ABB indexer fallback (still capped).
+    if not rows and not timed_out and not abb_proxy:
+        # Brief Prowlarr ABB indexer fallback (still capped; host IP only).
         try:
             iid = await prowlarr.get_audiobookbay_indexer_id()
             if iid:
@@ -736,19 +747,21 @@ async def search_live_stream(
                     knaben_queries[:2], timeout=15, limit=150,
                 )
             )
-            # Jackett-first ABB with a hard overall budget. Skip Flare on live
-            # refresh — FlareSolverr was freezing progress at ~85% for 30–60s.
+            # With Mullvad (ABB_PROXY_URL): Flare through gluetun only — Jackett
+            # cannot use the VPN and times out on a banned home IP. Without VPN:
+            # keep the fast Jackett-only path (no home-IP Flare).
+            abb_proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
             abb_task = asyncio.create_task(
                 prowlarr.search_audiobookbay_multi(
                     [primary_abb],
                     jackett_timeout=15,
                     prowlarr_timeout=10,
-                    allow_flare_fallback=False,
-                    overall_timeout=22.0,
+                    allow_flare_fallback=bool(abb_proxy),
+                    overall_timeout=90.0 if abb_proxy else 22.0,
                 )
             )
 
-            pending = {knaben_task: "knaben", abb_task: "abb-jackett"}
+            pending = {knaben_task: "knaben", abb_task: "abb"}
             while pending:
                 done, _ = await asyncio.wait(pending.keys(), return_when=asyncio.FIRST_COMPLETED)
                 for task in done:

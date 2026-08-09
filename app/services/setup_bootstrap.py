@@ -142,9 +142,30 @@ async def _run_host_script(host_root: str, cmd: str, *, timeout: float = 600.0) 
             if not parts:
                 parts = [raw]
             log_text = b"".join(parts).decode("utf-8", errors="replace")[-8000:]
+            err: str | None = None
+            if code != 0:
+                err = f"exit {code}"
+                # Prefer a concrete "error: ..." line from the script for the toast.
+                for line in reversed(log_text.splitlines()):
+                    s = line.strip()
+                    # Strip ANSI color codes from docker/script output.
+                    while "\033[" in s:
+                        a = s.find("\033[")
+                        b = s.find("m", a)
+                        if a < 0 or b < 0:
+                            break
+                        s = s[:a] + s[b + 1 :]
+                    low = s.lower()
+                    if low.startswith("error:") or "error:" in low:
+                        err = s[:300]
+                        break
+                else:
+                    tail = [t.strip() for t in log_text.strip().splitlines()[-4:] if t.strip()]
+                    if tail:
+                        err = f"exit {code}: " + " | ".join(tail)[:280]
             return {
                 "ok": code == 0,
-                "error": None if code == 0 else f"exit {code}",
+                "error": err,
                 "exitCode": code,
                 "log": log_text,
             }

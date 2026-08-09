@@ -234,8 +234,9 @@ REGISTRY: list[SettingDef] = [
         env_attr="libraforge_metadata_provider",
         help=(
             "Primary Metadata Forge source: audible, graphicaudio, or soundbooththeater. "
-            "On a miss, LibraForge tries Graphic Audio then Soundbooth Theater. "
-            "Also editable on the Library Sweep tab."
+            "On a miss (with abs-agg configured), LibraForge tries Graphic Audio → "
+            "Soundbooth Theater → Hardcover / LibriVox / Big Finish / Libro.fm / "
+            "StoryGraph / Deezer. Also editable on the Library Sweep tab."
         ),
         placeholder="audible",
     ),
@@ -1225,6 +1226,7 @@ async def validate_setup_connections() -> dict[str, Any]:
 
     from app.services.health_checks import (
         _probe_abs,
+        _probe_abs_agg,
         _probe_flaresolverr,
         _probe_jackett,
         _probe_kavita,
@@ -1232,10 +1234,11 @@ async def validate_setup_connections() -> dict[str, Any]:
         _probe_prowlarr,
     )
 
-    abs_p, kav_p, lf_p, prow_p, jack_p, flare_p, docker_p = await asyncio.gather(
+    abs_p, kav_p, lf_p, agg_p, prow_p, jack_p, flare_p, docker_p = await asyncio.gather(
         _probe_abs(),
         _probe_kavita(),
         _probe_libraforge(),
+        _probe_abs_agg(),
         _probe_prowlarr(),
         _probe_jackett(),
         _probe_flaresolverr(),
@@ -1245,6 +1248,7 @@ async def validate_setup_connections() -> dict[str, Any]:
         "audiobookshelf": abs_p,
         "kavita": kav_p,
         "libraforge": lf_p,
+        "abs_agg": agg_p,
         "prowlarr": prow_p,
         "jackett": jack_p,
         "flaresolverr": flare_p,
@@ -1267,7 +1271,7 @@ async def validate_setup_connections() -> dict[str, Any]:
         if not probe.get("connected"):
             err = probe.get("error") or "unreachable"
             # Soft: bundled installs may still be warming; never hard-block.
-            if bundled_ready and name in ("audiobookshelf", "kavita", "libraforge"):
+            if bundled_ready and name in ("audiobookshelf", "kavita", "libraforge", "abs_agg"):
                 warnings.append(f"{name}: bundled stack still warming ({err})")
             elif name == "docker":
                 warnings.append(

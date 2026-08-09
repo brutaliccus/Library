@@ -183,7 +183,7 @@ class QuickReviewSearchBody(BaseModel):
     sequence: str = ""
     narrator: str = ""
     limit: int = 10
-    # audible (default) | graphicaudio | soundbooththeater
+    # audible (default) | graphicaudio | soundbooththeater | hardcover | librivox | …
     provider: str = "audible"
 
 

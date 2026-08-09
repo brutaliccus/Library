@@ -1159,9 +1159,10 @@ async def _run_metadata_forge_with_provider_fallback(
 ) -> tuple[str, str]:
     """Primary provider, then graphicaudio → soundbooththeater on miss.
 
-    LibraForge (when updated) also chains specialty catalogs inside one run;
-    these extra runs only execute when the prior attempt did not apply, covering
-    older LibraForge builds and forced-provider primary misses.
+    Current LibraForge (with abs-agg) also chains GA → SBT → hardcover / librivox /
+    bigfinish / librofm / storygraph / deezer inside one Metadata Forge run.
+    These Library Site outer retries only execute when the prior attempt did not
+    apply, covering older LibraForge builds and forced-provider primary misses.
     """
     chain = libraforge.metadata_provider_chain()
     last_reason = "Metadata Forge failed"

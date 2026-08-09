@@ -39,6 +39,7 @@ PREFERRED_CONTAINER_PORTS: dict[str, int] = {
     "audiobookshelf": 80,
     "kavita": 5000,
     "libraforge": 5056,
+    "abs-agg": 3000,
 }
 
 # Fallback host ports when inspect has no binding (compose defaults).
@@ -50,6 +51,7 @@ DEFAULT_HOST_PORTS: dict[str, int] = {
     "audiobookshelf": 13378,
     "kavita": 5000,
     "libraforge": 5056,
+    "abs-agg": 3010,
 }
 
 
@@ -128,6 +130,13 @@ MANAGED_SERVICES: dict[str, ManagedService] = {
         container="libraforge",
         compose_service="libraforge",
         health_key="libraforge",
+    ),
+    "abs-agg": ManagedService(
+        id="abs-agg",
+        label="abs-agg",
+        container="abs-agg",
+        compose_service="abs-agg",
+        health_key="abs_agg",
     ),
 }
 
@@ -328,6 +337,7 @@ def _is_browser_reachable_url(url: str | None) -> bool:
         "audiobookshelf-server",
         "kavita",
         "libraforge",
+        "abs-agg",
         "audiobook-prowlarr",
         "prowlarr",
         "audiobook-jackett",

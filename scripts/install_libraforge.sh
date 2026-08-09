@@ -123,6 +123,18 @@ echo "==> Building and starting container (first build can take several minutes 
 cd "${STACK_DIR}"
 docker compose up -d --build
 
+# Specialty metadata (Graphic Audio / Sound Booth Theater / Hardcover / …)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/install_abs_agg.sh" ]]; then
+  echo ""
+  echo "==> Installing abs-agg companion for LibraForge metadata providers"
+  bash "${SCRIPT_DIR}/install_abs_agg.sh" || echo "WARN: abs-agg install failed — Graphic Audio / SBT fallbacks unavailable." >&2
+elif [[ -f "/tmp/install_abs_agg.sh" ]]; then
+  bash /tmp/install_abs_agg.sh || echo "WARN: abs-agg install failed — Graphic Audio / SBT fallbacks unavailable." >&2
+else
+  echo "WARN: install_abs_agg.sh not found next to this script — skip abs-agg." >&2
+fi
+
 echo ""
 echo "LibraForge is running on http://127.0.0.1:5056"
 echo ""
@@ -135,3 +147,4 @@ echo "     Restrict access (VPN / IP allowlist / access list) — LibraForge can
 echo "  3. Set Library Site .env: LIBRAFORGE_URL + LIBRAFORGE_INTERNAL_URL, then redeploy Library."
 echo "  4. In LibraForge UI, set source to /audiobooks/.unorganized and dest to /audiobooks"
 echo "  5. Always dry-run before Apply; then trigger ABS library scan from Library Admin → Health."
+echo "  6. abs-agg (if installed): http://127.0.0.1:3010 — LibraForge config/abs-agg.json"

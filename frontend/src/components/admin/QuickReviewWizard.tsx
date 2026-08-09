@@ -111,14 +111,30 @@ const SEARCH_PROVIDERS = [
   { value: "audible", label: "Audible" },
   { value: "graphicaudio", label: "Graphic Audio" },
   { value: "soundbooththeater", label: "Soundbooth Theater" },
+  { value: "hardcover", label: "Hardcover" },
+  { value: "librivox", label: "LibriVox" },
+  { value: "bigfinish", label: "Big Finish" },
+  { value: "librofm", label: "Libro.fm" },
+  { value: "storygraph", label: "StoryGraph" },
+  { value: "deezer", label: "Deezer" },
 ] as const;
 
 type SearchProvider = (typeof SEARCH_PROVIDERS)[number]["value"];
 
 function normalizeSearchProvider(raw: string | null | undefined): SearchProvider {
   const v = (raw || "").trim().toLowerCase();
-  if (v === "graphicaudio" || v.includes("graphic")) return "graphicaudio";
-  if (v === "soundbooththeater" || v.includes("soundbooth")) return "soundbooththeater";
+  if (v === "graphicaudio" || v.includes("graphic") || v.includes("dramatiz") || v.includes("full cast")) {
+    return "graphicaudio";
+  }
+  if (v === "soundbooththeater" || v.includes("soundbooth") || v.includes("sound booth")) {
+    return "soundbooththeater";
+  }
+  if (v === "hardcover") return "hardcover";
+  if (v === "librivox") return "librivox";
+  if (v === "bigfinish" || v.includes("big finish")) return "bigfinish";
+  if (v === "librofm" || v.includes("libro")) return "librofm";
+  if (v === "storygraph") return "storygraph";
+  if (v === "deezer") return "deezer";
   return "audible";
 }
 

@@ -19,7 +19,7 @@ Guided path for a **fresh** host (e.g. spare laptop). Does **not** migrate or st
 | Docker Engine + Compose plugin | Runs the stack |
 | Git | Clone / update the repo |
 | curl, openssl, python3 | Installer + secrets + NPM API JSON |
-| Free ports | `8085`, `9696`, `8191`, `9117` (+ `13378`, `5000`, `5056` if bundled-media; **`80`/`443`/`81` if NPM**) |
+| Free ports | `8085`, `9696`, `8191`, `9117` (+ `13378`, `5000`, `5056`, `3010` if bundled-media; **`80`/`443`/`81` if NPM**) |
 
 Optional later: Mullvad WireGuard for ABB egress. Remote HTTPS is covered by the bundled Nginx Proxy Manager profile (or your own reverse proxy / Tailscale Funnel).
 
@@ -69,7 +69,7 @@ The script walks you through:
 
 1. **Core** - `APP_URL`, `SECRET_KEY`, `TZ`, `PUID`/`PGID`, `DOCKER_GID`
 2. **Media mounts** - audiobooks / ebooks / Open Library dumps (+ staging folders)
-3. **Bundled media** - ABS + Kavita + LibraForge (default for new servers)
+3. **Bundled media** - ABS + Kavita + LibraForge + abs-agg (default for new servers)
 4. **Jackett** — bundled + AudioBookBay/Flare preconfigure (or connect existing URL + API key)
 5. **Prowlarr** — Knaben + ABB Torznab → Jackett (or connect existing)
 6. **Open Library catalog** — Skip by default (advanced multi-GB option; indexers cover day-one search)

@@ -751,10 +751,11 @@ export default function InstanceSetup() {
             Using bundled stack
           </p>
           <p className="text-xs text-gray-400">
-            Audiobookshelf, Kavita, and LibraForge share this compose network
-            (<code className="text-gray-300"> (profile bundled-media)</code>. API keys were
+            Audiobookshelf, Kavita, LibraForge, and abs-agg share this compose network
+            (<code className="text-gray-300">profile bundled-media</code>). API keys were
             bootstrapped into <code className="text-gray-300">.env</code> — no manual entry needed.
-            Continue when probes look good.
+            Continue when probes look good. abs-agg is optional for specialty metadata
+            (Graphic Audio / Sound Booth Theater).
           </p>
           <ul className="text-xs space-y-1 font-mono">
             <li className={probeTone("audiobookshelf")}>
@@ -768,6 +769,10 @@ export default function InstanceSetup() {
             <li className={probeTone("libraforge")}>
               LibraForge {liveProbes?.libraforge?.connected ? "connected" : liveProbes?.libraforge?.configured ? "warming…" : "—"}
               {" · "}http://libraforge:5056 → host :5056
+            </li>
+            <li className={probeTone("abs_agg")}>
+              abs-agg {liveProbes?.abs_agg?.connected ? "connected" : liveProbes?.abs_agg?.configured ? "warming…" : "—"}
+              {" · "}http://abs-agg:3000 → host :3010
             </li>
             <li className={probeTone("prowlarr")}>
               Prowlarr {liveProbes?.prowlarr?.connected ? "connected" : liveProbes?.prowlarr?.configured ? "warming…" : "—"}

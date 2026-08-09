@@ -199,6 +199,18 @@ def test_metadata_provider_chain_order():
     ]
 
 
+def test_abs_agg_search_providers_order():
+    from app.services import libraforge
+
+    assert libraforge.ABS_AGG_SEARCH_PROVIDERS[0:2] == (
+        "graphicaudio",
+        "soundbooththeater",
+    )
+    assert "hardcover" in libraforge.ABS_AGG_SEARCH_PROVIDERS
+    assert "librivox" in libraforge.ABS_AGG_SEARCH_PROVIDERS
+    assert "bigfinish" in libraforge.ABS_AGG_SEARCH_PROVIDERS
+
+
 def test_abs_scan_every_helper(monkeypatch):
     from app.services import library_sweep
 

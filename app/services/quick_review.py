@@ -35,7 +35,13 @@ _JUNK_TITLE_RE = re.compile(
 _REQ_FOLDER_RE = re.compile(r"^req_\d+_(.+)$", re.IGNORECASE)
 _SPECIAL_PROVIDER_HINTS = (
     ("graphicaudio", "graphicaudio"),
+    ("graphic audio", "graphicaudio"),
+    ("dramatized", "graphicaudio"),
+    ("dramatisation", "graphicaudio"),
+    ("dramatization", "graphicaudio"),
+    ("full cast", "graphicaudio"),
     ("soundbooth", "soundbooththeater"),
+    ("sound booth", "soundbooththeater"),
 )
 
 

@@ -68,6 +68,7 @@ kavita-config/
 libraforge-auth/
 libraforge-config/
 libraforge-reports/
+abs-agg-data/
 # Nginx Proxy Manager (compose profile npm)
 npm-data/
 npm-letsencrypt/

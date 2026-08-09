@@ -371,13 +371,31 @@ async def start_metadata_run(
     return run_id
 
 
-# Specialty catalogs tried after the primary provider misses (Library Site retries
-# when LibraForge is older / does not yet chain these itself).
+# Outer Library Site retries after a Metadata Forge miss (compat with older
+# LibraForge). Current LibraForge also chains GA→SBT→other abs-agg providers
+# inside a single run when abs-agg is configured — we do not re-run those here.
 METADATA_PROVIDER_FALLBACKS: tuple[str, ...] = ("graphicaudio", "soundbooththeater")
+
+# abs-agg providers available via Manual Review / Quick Review search
+# (same order as LibraForge's in-run specialty fallback after Audible).
+ABS_AGG_SEARCH_PROVIDERS: tuple[str, ...] = (
+    "graphicaudio",
+    "soundbooththeater",
+    "hardcover",
+    "librivox",
+    "bigfinish",
+    "librofm",
+    "storygraph",
+    "deezer",
+)
 
 
 def metadata_provider_chain(primary: str | None = None) -> list[str]:
-    """Primary first, then graphicaudio → soundbooththeater (deduped)."""
+    """Primary first, then graphicaudio → soundbooththeater (deduped).
+
+    Full abs-agg rest-of-catalog chaining happens inside LibraForge when
+    abs-agg.json is configured; this list only drives Library Site outer retries.
+    """
     p = (primary or settings.libraforge_metadata_provider or "audible").strip().lower()
     if p not in ("audible", "abs", "graphicaudio", "soundbooththeater"):
         p = "audible"
@@ -447,7 +465,7 @@ async def manual_review_search(
     provider_key = (provider or "audible").strip().lower() or "audible"
     lim = max(1, min(int(limit or 10), 25))
 
-    if provider_key in ("graphicaudio", "soundbooththeater"):
+    if provider_key in ABS_AGG_SEARCH_PROVIDERS:
         # Match LibraForge Manual Review UI: specialty catalogs go through abs-agg.
         q = (query or "").strip() or str(meta.get("title") or "").strip()
         body: dict[str, Any] = {

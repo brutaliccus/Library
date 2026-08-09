@@ -764,11 +764,18 @@ foreach ($d in @(
         "data", "prowlarr-config", "jackett-config",
         "audiobookshelf-config", "audiobookshelf-metadata", "kavita-config",
         "libraforge-auth", "libraforge-config", "libraforge-reports",
+        "abs-agg-data",
         "npm-data", "npm-letsencrypt",
         "media\audiobooks", "media\ebooks", "media\openlibrary"
     )) {
     $p = Join-Path $TARGET $d
     if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+}
+
+$absAggInstall = Join-Path $TARGET "scripts\install_abs_agg.ps1"
+if (Test-Path $absAggInstall) {
+    Write-Step "==> Wiring abs-agg for LibraForge specialty metadata"
+    & powershell -ExecutionPolicy Bypass -File $absAggInstall -RepoRoot $TARGET
 }
 
 function Invoke-Compose {

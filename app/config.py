@@ -96,7 +96,8 @@ class Settings(BaseSettings):
     libraforge_min_score: float = 0.70
     libraforge_naming_template: str = "{author}/{series} [{edition}]/{title}/{filename}"
     # Metadata Forge primary provider (audible | graphicaudio | soundbooththeater).
-    # After a miss, LibraForge tries graphicaudio then soundbooththeater.
+    # After a miss, LibraForge (with abs-agg) tries GA → SBT → hardcover / librivox /
+    # bigfinish / librofm / storygraph / deezer. Library Site also outer-retries GA/SBT.
     libraforge_metadata_provider: str = "audible"
     # Library Sweep: full ABS scan every N completed books (and on stop).
     library_sweep_abs_scan_every: int = 25

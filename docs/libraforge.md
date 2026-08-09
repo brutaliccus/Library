@@ -166,7 +166,7 @@ Encrypted auth files are **not** supported.
 When `LIBRAFORGE_PIPELINE_ENABLED=true` (default), audiobook requests:
 
 1. Land in `/audiobooks/.unorganized/req_{id}_{slug}/` (host: `/mnt/Audiobooks/.unorganized/…`).
-2. **Metadata Forge** (`POST /api/runs`, `apply=true`, `write_mode=overwrite`, `replace_cover=true`, `min_score` from `LIBRAFORGE_MIN_SCORE`). Score only decides whether a match auto-applies vs quarantine. Once applied, LibraForge always **full-replaces** every matched field (title, author, narrator, series, sequence, year, summary, ASIN, genres, cover, …) — never `series_only` / fill-if-empty, and never gated on how high the score was. Continues only when write evidence exists (`write:written` / applied markers); otherwise quarantines.
+2. **Metadata Forge** (`POST /api/runs`, `apply=true`, `write_mode=overwrite`, `replace_cover=true`, `min_score` from `LIBRAFORGE_MIN_SCORE`). Primary search is Audible; on a miss (with abs-agg configured) LibraForge chains Graphic Audio → Sound Booth Theater → Hardcover / LibriVox / Big Finish / Libro.fm / StoryGraph / Deezer so dramatizations are not stuck to a short Audible edition. Score only decides whether a match auto-applies vs quarantine. Once applied, LibraForge always **full-replaces** every matched field (title, author, narrator, series, sequence, year, summary, ASIN, genres, cover, …) — never `series_only` / fill-if-empty, and never gated on how high the score was. Continues only when write evidence exists (`write:written` / applied markers); otherwise quarantines.
 3. **M4B** on Pi (`POST /api/m4b/runs`) if not already a single `.m4b`. Library Site serializes converts with a **global M4B queue (concurrency 1)** so automated forge, Quick Review, and continue-forge never start parallel encodes — waiters show `Waiting in M4B queue…` / badge **Queued for M4B**. Per-run ffmpeg workers use `LIBRAFORGE_M4B_JOBS` (default `1`). LibraForge only merges **immediate** children of `input_path` (or sidecar `chapter_files`), so the pipeline points at the folder that actually holds the parts (e.g. `…/mp3` or `…/AAC`), not an empty staging root. Dual-format torrents (`mp3/` + `AAC/`) convert the preferred encode once; source parts are deleted only after a successful convert. After a successful convert, Metadata Forge is re-applied so covers/tags survive the re-encode.
 4. **Chapter Forge** (`POST /api/chaptering/runs`, `backend=audible-chapters`) when an Audible **ASIN** is present **and** a primary `.m4b` exists (after successful convert, or already a single m4b). Looks up Audible chapters and **embeds** chapter markers into that `.m4b` (ffmpeg stream copy — no re-encode). Sidecar cue/JSON alone is not enough. **No ASIN → skip**. **No `.m4b` yet (multipart mp3s still waiting on convert) → skip** — never rename/restructure source parts as “chapters”. **Audible missing chapters / embed failure → soft-continue** with existing markers (do not fail the whole book).
 5. **Folder Forge** (`POST /api/organizer/runs`) with template  
@@ -247,17 +247,27 @@ Your audiobook files are not deleted by uninstalling the container.
 
 ## abs-agg (specialty metadata)
 
-Optional companion stack: [abs-agg](https://github.com/Vito0912/abs-agg) on the Pi at `/opt/stacks/abs-agg`.
+[abs-agg](https://github.com/Vito0912/abs-agg) is installed automatically with LibraForge (`scripts/install_libraforge.sh` → `scripts/install_abs_agg.sh`). Bundled-media installs start the `abs-agg` compose service and write `libraforge-config/abs-agg.json`.
 
 | Item | Value |
 |------|-------|
-| Host ports | `127.0.0.1:3010` and `192.168.68.76:3010` (container listens on 3000) |
-| Docker network | Joined to `libraforge_default` as hostname `abs-agg` |
+| Host ports | `127.0.0.1:3010` (container listens on 3000); optional LAN bind via `ABS_AGG_LAN_IP` |
+| Docker network | Joined to `libraforge_default` as hostname `abs-agg` (sibling) or compose network (bundled) |
 | Pi LibraForge URL | `http://abs-agg:3000` (`/opt/stacks/libraforge/config/abs-agg.json`) |
-| Windows LibraForge URL | `http://192.168.68.76:3010` (`C:\dev\LibraForge\config\abs-agg.json`) |
-| Secrets | `HARDCOVER_TOKEN` in `/opt/stacks/abs-agg/.env` (copied from Library Site `integrations.hardcover_api_key`). `GOODREADS_API_KEY` not set (Goodreads provider disabled until you add a LazyLibrarian-style key). Do not put these keys in LibraForge. |
+| Bundled LibraForge URL | `http://abs-agg:3000` (`./libraforge-config/abs-agg.json`) |
+| Windows standalone LibraForge | `http://192.168.68.76:3010` or `http://host.docker.internal:3010` |
+| Secrets | `HARDCOVER_TOKEN` in abs-agg `.env` (seeded from Library Site `HARDCOVER_API_KEY`). `GOODREADS_API_KEY` optional. Do not put these keys in LibraForge. |
 
-**UI:** LibraForge → **Settings → GraphicAudio / SoundBooth Theater (abs-agg)** → set URL → **Save and verify**. On Manual Review / Metadata Forge, choose metadata provider **abs-agg** and pick a source (Hardcover, GraphicAudio, LibriVox, etc.). Batch runs also use this URL as an automatic specialty fallback when publishers match.
+**Metadata match order (automated pipeline):** Audible → Graphic Audio → Sound Booth Theater → Hardcover → LibriVox → Big Finish → Libro.fm → StoryGraph → Deezer. Providers that need required path params (Storytel, Audioteka, BookBeat) stay Manual Review only.
 
-Start/stop: `cd /opt/stacks/abs-agg && docker compose up -d` (does not affect M4B or other stacks).
+**UI:** LibraForge → **Settings → GraphicAudio / SoundBooth Theater (abs-agg)** → URL should already be `http://abs-agg:3000`. Admin → Health soft-probes abs-agg; Instance setup shows it under bundled-media (non-blocking).
+
+```bash
+# Standalone / reinstall
+bash scripts/install_abs_agg.sh
+
+# Start/stop sibling stack
+cd /opt/stacks/abs-agg && docker compose up -d
+cd /opt/stacks/abs-agg && docker compose down
+```
 

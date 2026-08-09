@@ -111,6 +111,8 @@ const SERVICE_GROUPS: ServiceGroup[] = [
       { id: "audiobookshelf", title: "Audiobookshelf", healthKey: "audiobookshelf", dockerId: "audiobookshelf" },
       { id: "kavita", title: "Kavita", healthKey: "kavita", dockerId: "kavita" },
       { id: "libraforge", title: "LibraForge", healthKey: "libraforge", dockerId: "libraforge" },
+      { id: "abs_agg", title: "abs-agg", healthKey: "abs_agg", dockerId: "abs-agg" },
+
     ],
   },
   {

@@ -434,6 +434,64 @@ async def _probe_libraforge() -> dict[str, Any]:
         }
 
 
+async def _probe_abs_agg() -> dict[str, Any]:
+    """Probe abs-agg specialty metadata (via LibraForge proxy, then direct). Fail-open."""
+    settings = get_settings()
+    lf = (settings.libraforge_internal_url or settings.libraforge_url or "").strip().rstrip("/")
+    errors: list[str] = []
+    configured = False
+    url_hint = "http://abs-agg:3000"
+
+    async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+        if lf:
+            try:
+                cfg = await client.get(f"{lf}/api/abs-agg/settings")
+                if cfg.status_code < 500:
+                    configured = True
+                    try:
+                        body = cfg.json()
+                        if isinstance(body, dict) and body.get("url"):
+                            url_hint = str(body["url"]).strip() or url_hint
+                    except Exception:
+                        pass
+                prov = await client.get(f"{lf}/api/abs-agg/providers")
+                if prov.status_code < 400:
+                    return {
+                        "configured": True,
+                        "connected": True,
+                        "url": url_hint,
+                        "error": None,
+                    }
+                errors.append(f"LibraForge abs-agg providers HTTP {prov.status_code}")
+            except Exception as e:
+                errors.append(f"LibraForge proxy: {_err(e)}")
+
+        for direct in (
+            "http://abs-agg:3000/providers",
+            "http://host.docker.internal:3010/providers",
+            "http://172.17.0.1:3010/providers",
+            "http://127.0.0.1:3010/providers",
+        ):
+            try:
+                resp = await client.get(direct)
+                if resp.status_code < 400:
+                    return {
+                        "configured": True,
+                        "connected": True,
+                        "url": direct.rsplit("/providers", 1)[0],
+                        "error": None,
+                    }
+            except Exception as e:
+                errors.append(_err(e))
+
+    return {
+        "configured": configured or bool(lf),
+        "connected": False,
+        "url": url_hint,
+        "error": "; ".join(errors[:3]) if errors else "abs-agg unreachable",
+    }
+
+
 def _browser_open_url(url: str | None, *, fallback_host_port: int | None = None) -> str | None:
     """Return a URL the admin browser can open, or a localhost fallback port."""
     from urllib.parse import urlparse
@@ -452,6 +510,7 @@ def _browser_open_url(url: str | None, *, fallback_host_port: int | None = None)
                     "audiobookshelf-server",
                     "kavita",
                     "libraforge",
+                    "abs-agg",
                     "audiobook-prowlarr",
                     "prowlarr",
                     "audiobook-jackett",
@@ -491,6 +550,7 @@ def _enrich_open_urls(health: dict[str, Any]) -> None:
         "jackett": ((health.get("jackett") or {}).get("url"), 9117),
         "flaresolverr": ((health.get("flaresolverr") or {}).get("url"), 8191),
         "libraforge": ((health.get("libraforge") or {}).get("url"), 5056),
+        "abs_agg": ((health.get("abs_agg") or {}).get("url"), 3010),
         "knaben": ((health.get("knaben") or {}).get("url"), None),
         "real_debrid": ("https://real-debrid.com", None),
         "torbox": ("https://torbox.app", None),
@@ -542,6 +602,7 @@ async def collect_system_health(*, force: bool = False) -> dict[str, Any]:
         "nyt",
         "disk",
         "libraforge",
+        "abs_agg",
     ]
     coros = [
         _probe_real_debrid(),
@@ -557,6 +618,7 @@ async def collect_system_health(*, force: bool = False) -> dict[str, Any]:
         _probe_nyt(),
         _probe_disk(),
         _probe_libraforge(),
+        _probe_abs_agg(),
     ]
     results = await asyncio.gather(*coros, return_exceptions=True)
     out: dict[str, Any] = {}

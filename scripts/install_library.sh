@@ -593,8 +593,15 @@ if [[ "$SETUP_MODE" == "browser" ]]; then
   mkdir -p data prowlarr-config jackett-config \
     audiobookshelf-config audiobookshelf-metadata kavita-config \
     libraforge-auth libraforge-config libraforge-reports \
+    abs-agg-data \
     npm-data npm-letsencrypt \
     media/audiobooks media/ebooks media/openlibrary
+  if [[ ! -f libraforge-config/abs-agg.json ]]; then
+    printf '%s\n' '{' '  "url": "http://abs-agg:3000"' '}' >libraforge-config/abs-agg.json
+  fi
+  if [[ -n "$(get_env HARDCOVER_API_KEY)" && -z "$(get_env HARDCOVER_TOKEN)" ]]; then
+    set_env HARDCOVER_TOKEN "$(get_env HARDCOVER_API_KEY)"
+  fi
 
   ensure_indexer_seed
   step "Start Docker stack (browser bootstrap)"
@@ -1036,8 +1043,19 @@ fi
 mkdir -p data prowlarr-config jackett-config \
   audiobookshelf-config audiobookshelf-metadata kavita-config \
   libraforge-auth libraforge-config libraforge-reports \
+  abs-agg-data \
   npm-data npm-letsencrypt \
   media/audiobooks media/ebooks media/openlibrary
+
+# Point LibraForge at bundled abs-agg (compose service hostname).
+if [[ ! -f libraforge-config/abs-agg.json ]]; then
+  printf '%s\n' '{' '  "url": "http://abs-agg:3000"' '}' >libraforge-config/abs-agg.json
+  c_green "Wrote libraforge-config/abs-agg.json → http://abs-agg:3000"
+fi
+# Compose interpolates HARDCOVER_TOKEN; mirror API key when present.
+if [[ -n "$(get_env HARDCOVER_API_KEY)" && -z "$(get_env HARDCOVER_TOKEN)" ]]; then
+  set_env HARDCOVER_TOKEN "$(get_env HARDCOVER_API_KEY)"
+fi
 
 # ---------------------------------------------------------------------------
 step "Nginx Proxy Manager (reverse proxy) [RECOMMENDED]"
@@ -1617,7 +1635,7 @@ else
 fi
 echo ""
 echo "Notes:"
-echo "  - Profile bundled-media = ABS (:13378) + Kavita (:5000) + LibraForge (:5056)"
+echo "  - Profile bundled-media = ABS (:13378) + Kavita (:5000) + LibraForge (:5056) + abs-agg (:3010)"
 echo "  - Profile npm = Nginx Proxy Manager (library-npm) on 80/443/81 — default Yes; No only if 80/443 already taken"
 echo "  - Jackett/Prowlarr/Flare are core sidecars; external URL skip paths stop the local container"
 echo "  - FlareSolverr resource limits are in docker-compose.yml (safe defaults for Pi/laptop)"

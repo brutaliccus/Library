@@ -1,9 +1,10 @@
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { useState, useEffect, useMemo, FormEvent } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, FormEvent } from "react";
 import api from "../api/client";
 import BookGrid from "../components/BookGrid";
 import CacheReleaseCard, { type CacheReleaseCardData } from "../components/CacheReleaseCard";
+import ResultCard from "../components/ResultCard";
 import GenreSidebar from "../components/GenreSidebar";
 import type { Genre } from "../components/GenreSidebar";
 import {
@@ -18,7 +19,7 @@ import {
   SlidersHorizontal,
   Globe,
 } from "lucide-react";
-import type { BookSummary } from "../types/book";
+import type { BookSummary, SearchResult } from "../types/book";
 import CoverImage from "../components/CoverImage";
 import { usePlayer } from "../contexts/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
@@ -161,7 +162,7 @@ export default function SearchResults({
 }: Props) {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { nowPlaying, expanded } = usePlayer();
+  const { nowPlaying, expanded, playRD } = usePlayer();
   const liftForMini = Boolean(nowPlaying && !expanded);
   const [searchParams, setSearchParams] = useSearchParams();
   const q = searchParams.get("q") || "";
@@ -172,6 +173,19 @@ export default function SearchResults({
   const page = parseInt(searchParams.get("page") || "1", 10);
   const pageSize = 20;
   const [requestingAa, setRequestingAa] = useState<string | null>(null);
+  const [requestingAbbIdx, setRequestingAbbIdx] = useState<number | null>(null);
+  const [streamingAbbIdx, setStreamingAbbIdx] = useState<number | null>(null);
+  const [streamProgress, setStreamProgress] = useState<{
+    detail: string;
+    progress: number;
+  } | null>(null);
+  const streamPollRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      streamPollRef.current = false;
+    };
+  }, []);
 
   const activeCategories = categoryParam ? categoryParam.split(",").filter(Boolean) : [];
 
@@ -416,9 +430,11 @@ export default function SearchResults({
     queryKey: ["abb-releases", q],
     queryFn: async () => {
       const params = new URLSearchParams({ q: q.trim(), limit: "24" });
-      const { data } = await api.get(`/search/abb-releases?${params}`);
+      const { data } = await api.get(`/search/abb-releases?${params}`, {
+        timeout: 180_000,
+      });
       return data as {
-        releases: CacheReleaseCardData[];
+        results: SearchResult[];
         count: number;
         source?: string;
         timedOut?: boolean;
@@ -545,9 +561,103 @@ export default function SearchResults({
     }
   };
 
+  const requestAbbHit = async (result: SearchResult, index: number, mediaTypeOverride: string) => {
+    const link = result.magnetUrl || result.downloadUrl;
+    if (!link) return;
+    setRequestingAbbIdx(index);
+    try {
+      const mediaType = mediaTypeOverride || result.mediaType || "audiobook";
+      await api.post("/requests", {
+        title: result.title,
+        author: result.author || undefined,
+        magnet_link: result.magnetUrl || undefined,
+        download_url: result.downloadUrl || undefined,
+        indexer: result.indexer || "AudioBookBay",
+        size_bytes: result.size || 0,
+        media_type: mediaType,
+        source: result.source || "prowlarr",
+      });
+      const dest = mediaType === "ebook" ? "Kavita" : "Audiobookshelf";
+      toast(`Requested "${result.title}". It will be added to ${dest}.`, "success");
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Failed to create request";
+      toast(detail, "error");
+    } finally {
+      setRequestingAbbIdx(null);
+    }
+  };
+
+  const streamAbbHit = useCallback(
+    async (result: SearchResult, index: number) => {
+      const link = result.magnetUrl || result.downloadUrl;
+      if (!link) return;
+      setStreamingAbbIdx(index);
+      setStreamProgress({ detail: "Sending to Real-Debrid...", progress: 0 });
+      try {
+        const { data: startData } = await api.post("/stream/rd/resolve", {
+          magnet_link: result.magnetUrl || undefined,
+          download_url: result.downloadUrl || undefined,
+          title: result.title,
+          author: result.author || "",
+          cover_url: "",
+          indexer: result.indexer || "AudioBookBay",
+        });
+        const taskId = startData.taskId;
+        if (!taskId) {
+          toast("Failed to start stream resolution", "error");
+          return;
+        }
+        streamPollRef.current = true;
+        while (streamPollRef.current) {
+          await new Promise((r) => setTimeout(r, 2000));
+          try {
+            const { data: status } = await api.get(`/stream/rd/status/${taskId}`);
+            if (status.status === "ready") {
+              if (!status.tracks || status.tracks.length === 0) {
+                toast("No audio files found in this torrent", "error");
+              } else {
+                playRD(status.tracks, result.title, result.author || "", "", status.streamHistoryId, {
+                  startAt: status.progressSeconds || 0,
+                  trackIndex: status.currentTrackIndex || 0,
+                  trackPositionSeconds: status.trackPositionSeconds || 0,
+                });
+                toast(`Now streaming "${result.title}" from Real-Debrid`, "success");
+              }
+              break;
+            }
+            if (status.status === "error") {
+              toast(status.error || "Stream resolution failed", "error");
+              break;
+            }
+            setStreamProgress({
+              detail: status.detail || "Processing...",
+              progress: status.progress || 0,
+            });
+          } catch {
+            toast("Lost connection to stream resolver", "error");
+            break;
+          }
+        }
+      } catch (err: unknown) {
+        const detail =
+          (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+          "Failed to start stream";
+        toast(detail, "error");
+      } finally {
+        setStreamingAbbIdx(null);
+        setStreamProgress(null);
+        streamPollRef.current = false;
+      }
+    },
+    [playRD, toast],
+  );
+
   const totalPages = data ? Math.ceil(data.totalItems / pageSize) : 0;
   const heading = buildHeading(q, activeCategories, genres);
   const aaHits = (aaResults?.results || []).slice(0, 12);
+  const abbHits = (abbReleases?.results || []).slice(0, 12);
 
   return (
     <div
@@ -827,7 +937,7 @@ export default function SearchResults({
             </>
           )}
 
-          {/* 3. AudioBook Bay — concurrent */}
+          {/* 3. AudioBook Bay — concurrent (Find Downloads–style release rows) */}
           {showTextSections && (
             <section className="mt-10 mb-4">
               <div className="flex items-center gap-2 mb-3">
@@ -835,14 +945,22 @@ export default function SearchResults({
                 <h2 className="text-lg font-semibold text-gray-100">AudioBook Bay</h2>
               </div>
               <p className="text-sm text-gray-500 mb-4">
-                Live AudioBookBay results for audiobook releases.
+                Live AudioBookBay releases — request or stream like Find Downloads.
               </p>
-              {abbBusy && !(abbReleases?.releases?.length) ? (
+              {abbBusy && abbHits.length === 0 ? (
                 <SectionLoader label="Searching AudioBookBay…" />
-              ) : abbReleases?.releases?.length ? (
-                <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-7 lg:grid-cols-9 xl:grid-cols-11 gap-2">
-                  {abbReleases.releases.map((r) => (
-                    <CacheReleaseCard key={`abb-${r.id}`} release={r} />
+              ) : abbHits.length ? (
+                <div className="space-y-2">
+                  {abbHits.map((r, i) => (
+                    <ResultCard
+                      key={`abb-${r.magnetUrl || r.downloadUrl || r.title}-${i}`}
+                      result={r}
+                      onRequest={(result, mediaType) => void requestAbbHit(result, i, mediaType)}
+                      onStream={(result) => void streamAbbHit(result, i)}
+                      requesting={requestingAbbIdx === i}
+                      streaming={streamingAbbIdx === i}
+                      streamProgress={streamingAbbIdx === i ? streamProgress : null}
+                    />
                   ))}
                 </div>
               ) : abbReleases?.timedOut ? (

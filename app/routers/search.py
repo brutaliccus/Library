@@ -375,27 +375,28 @@ async def search_abb_releases(
 ):
     """Live AudioBookBay search for niche titles missing from Open Library.
 
-    With Mullvad proxy: FlareSolverr via gluetun. Without: short Jackett-only
-    path so store search does not hang. Upserts hits into the indexer cache.
+    Returns Find Downloads–shaped ``results`` (title/size/indexer/magnet/request/
+    stream fields). With Mullvad proxy: Flare via gluetun; without: Jackett-only.
+    Also upserts hits into the indexer cache for later shelf matches.
     """
-    from app.services.catalog_match import _clean_release_text
-
     query = (q or "").strip()
     if len(query) < 2:
-        return {"releases": [], "count": 0, "timedOut": False}
+        return {"results": [], "count": 0, "timedOut": False, "source": "abb"}
 
     rows: list[dict] = []
     timed_out = False
     abb_proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
+    # Deep enough to mirror a direct ABB site search (several listing pages).
+    store_budget = 160.0 if abb_proxy else 22.0
     try:
         if abb_proxy:
             rows = await asyncio.wait_for(
                 prowlarr.search_audiobookbay_multi(
                     [query],
                     allow_flare_fallback=True,
-                    overall_timeout=85.0,
+                    overall_timeout=store_budget,
                 ),
-                timeout=90.0,
+                timeout=store_budget + 10.0,
             )
         else:
             # Store fallback must stay snappy — no home-IP Flare crawl.
@@ -429,49 +430,33 @@ async def search_abb_releases(
             logger.debug("ABB Prowlarr fallback failed: %s", e)
 
     if not rows:
-        return {"releases": [], "count": 0, "timedOut": timed_out, "source": "abb"}
+        return {"results": [], "count": 0, "timedOut": timed_out, "source": "abb"}
 
     try:
         await indexer_cache.upsert_torrents(rows)
     except Exception as e:
         logger.debug("ABB upsert failed: %s", e)
 
-    # Prefer cache-card builder so covers / availability match the shelf UI.
-    cards = await indexer_cache.search_cache_releases(
-        query, limit=limit, unmatched_only=False,
-    )
-    if cards:
-        return {"releases": cards, "count": len(cards), "source": "abb", "timedOut": timed_out}
-
-    # Build minimal cards if FTS didn't pick them up yet.
-    releases = []
-    for item in rows[:limit]:
-        info_hash = (item.get("infoHash") or "").strip().lower()
-        if not info_hash:
-            continue
-        from app.utils.release_title import split_release_title_author
-
-        title_raw = item.get("title") or ""
-        cleaned = _clean_release_text(title_raw) or title_raw
-        display, author = split_release_title_author(
-            cleaned or title_raw,
-            indexer=item.get("indexer") or "AudioBookBay",
+    # Free-text store search: keep ABB's own listing order / breadth. Catalog
+    # relevance filtering (Find Downloads) was hiding releases that the site shows.
+    abs_items, kavita_items = await _enrich_with_library_timeout(query)
+    enriched = _enrich_results(rows, abs_items, kavita_items, "prowlarr")
+    try:
+        enriched = await asyncio.wait_for(
+            _annotate_rd_cached(enriched, live=True),
+            timeout=8.0,
         )
-        if not display:
-            display = cleaned or title_raw
-        releases.append({
-            "id": f"cache:{info_hash}",
-            "volumeId": f"cache:{info_hash}",
-            "title": display[:200],
-            "authors": [author] if author else [],
-            "coverUrl": "",
-            "mediaType": item.get("mediaType") or "audiobook",
-            "rdCached": item.get("rdCached"),
-            "torboxCached": item.get("torboxCached"),
-            "availability": {"available": True},
-            "source": "abb",
-        })
-    return {"releases": releases, "count": len(releases), "source": "abb", "timedOut": timed_out}
+    except asyncio.TimeoutError:
+        enriched = await _annotate_rd_cached(enriched, live=False)
+    shown = enriched[:limit]
+    return {
+        "results": shown,
+        "count": len(shown),
+        "totalFetched": len(enriched),
+        "hiddenCount": max(0, len(enriched) - len(shown)),
+        "timedOut": timed_out,
+        "source": "abb",
+    }
 
 
 @router.get("")
@@ -749,7 +734,8 @@ async def search_live_stream(
             )
             # With Mullvad (ABB_PROXY_URL): Flare through gluetun only — Jackett
             # cannot use the VPN and times out on a banned home IP. Without VPN:
-            # keep the fast Jackett-only path (no home-IP Flare).
+            # keep the fast Jackett-only path (no home-IP Flare). Budget enough
+            # for several ABB listing pages so results match a direct site search.
             abb_proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
             abb_task = asyncio.create_task(
                 prowlarr.search_audiobookbay_multi(
@@ -757,7 +743,7 @@ async def search_live_stream(
                     jackett_timeout=15,
                     prowlarr_timeout=10,
                     allow_flare_fallback=bool(abb_proxy),
-                    overall_timeout=90.0 if abb_proxy else 22.0,
+                    overall_timeout=150.0 if abb_proxy else 22.0,
                 )
             )
 

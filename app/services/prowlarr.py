@@ -694,23 +694,39 @@ async def search_audiobookbay_multi(
         if remaining is not None and remaining < 8:
             logger.warning("ABB overall budget exhausted before Mullvad Flare for %r", query[:60])
             return []
-        # CF warmup + 1–2 listing pages typically 20–70s through Mullvad.
-        flare_timeout = 75.0 if remaining is None else min(75.0, max(15.0, remaining - 1.0))
-        pages = 2 if flare_timeout >= 45 else 1
+        # Match ABB site depth (abb_live_search_pages, default 6). Older code
+        # hard-capped at 1–2 pages so the app looked much thinner than a direct
+        # site search. ~15–20s/page through Mullvad Flare after CF warmup.
+        live_pages = max(
+            1,
+            min(12, int(getattr(settings, "abb_live_search_pages", None) or 6)),
+        )
+        if remaining is not None:
+            # Keep at least one page; fit as many as the budget allows.
+            live_pages = max(1, min(live_pages, int(max(15.0, remaining - 20.0) // 18)))
+        flare_timeout = (
+            float(live_pages) * 20.0 + 40.0
+            if remaining is None
+            else max(20.0, remaining - 1.0)
+        )
         try:
             deep = await asyncio.wait_for(
                 audiobookbay.search_deep(
-                    query, max_pages=pages, resolve_hashes=False, for_live=True,
+                    query, max_pages=live_pages, resolve_hashes=False, for_live=True,
                 ),
                 timeout=flare_timeout,
             )
             if deep:
                 logger.info(
-                    "ABB via Mullvad Flare: %s results for %r",
+                    "ABB via Mullvad Flare: %s results (≤%s pages) for %r",
                     len(deep[:limit]),
+                    live_pages,
                     query[:60],
                 )
-                return await enrich_audiobookbay_for_cache(deep[:limit], timeout=8.0)
+                # Prefer returning the full listing quickly — magnets resolve on
+                # Request/Stream from the ABB detail URL. Brief enrich for a few
+                # hashes helps cache/debrid badges without blocking the UI.
+                return await enrich_audiobookbay_for_cache(deep[:limit], limit=6, timeout=12.0)
             logger.info("ABB Mullvad Flare returned 0 results for %r", query[:60])
         except asyncio.TimeoutError:
             logger.warning(

@@ -946,6 +946,82 @@ async def apply_llm_multi_book_split(
     return {"ok": True, "child_ids": child_ids}
 
 
+class RerunFromStagingBody(BaseModel):
+    release_files: list[dict] | list[str] | None = None
+    release_files_text: str | None = None  # pasted ABB file list lines
+
+
+@router.post("/requests/{request_id}/rerun-from-staging")
+@router.post("/download-requests/{request_id}/rerun-from-staging")
+async def rerun_forge_from_staging(
+    request_id: int,
+    body: RerunFromStagingBody = Body(default_factory=RerunFromStagingBody),
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-run forge / multi-book from existing staging — never re-downloads."""
+    from app.services import llm_assist
+    from app.services.forge_pipeline import (
+        resolve_staging_dir,
+        run_forge_after_download,
+        staging_path_for_libraforge,
+    )
+    from app.services.pipeline import _update_status
+    from app.services.release_files import (
+        dumps_release_files,
+        normalize_release_files,
+        parse_file_list_text,
+    )
+
+    req = await _staging_request_or_404(db, request_id)
+    try:
+        staging = resolve_staging_dir(req.staging_path or "")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    files = []
+    if body.release_files:
+        files = normalize_release_files(body.release_files)
+    elif (body.release_files_text or "").strip():
+        files = parse_file_list_text(body.release_files_text or "")
+    if files:
+        req.release_files_json = dumps_release_files(files)
+        llm_assist.write_assist(staging, {"release_files": files[:500]})
+
+    req.quarantine_reason = None
+    req.completed_at = None
+    req.staging_path = staging_path_for_libraforge(staging)
+    await db.commit()
+    await _update_status(
+        db,
+        request_id,
+        "metadata_forge",
+        "Re-running forge from existing staging (no download)…",
+    )
+    user_id = req.user_id
+    title = req.title
+    author = req.author
+
+    async def _run() -> None:
+        await run_forge_after_download(
+            request_id,
+            staging=staging,
+            user_id=user_id,
+            title=title,
+            author=author,
+            resume_from="metadata",
+        )
+
+    asyncio.create_task(_run())
+    return {
+        "ok": True,
+        "id": request_id,
+        "status": "metadata_forge",
+        "release_files": len(files),
+        "message": "Forge re-queued from staging — download skipped",
+    }
+
+
 @router.get("/requests/{request_id}/llm-assist")
 @router.get("/download-requests/{request_id}/llm-assist")
 async def get_llm_assist(

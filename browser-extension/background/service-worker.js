@@ -17,6 +17,10 @@ import {
   inferMediaType,
   shortTitle,
 } from "../lib/magnet.js";
+import {
+  isAudiobookBayUrl,
+  scrapeAbbFileListFromDocument,
+} from "../lib/abbFiles.js";
 
 const MENU_ROOT = "send-to-library-root";
 const MENU_SINGLE = "send-to-library-single";
@@ -171,7 +175,7 @@ function createMenu(props) {
   });
 }
 
-chrome.contextMenus.onClicked.addListener(async (info) => {
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   try {
     const libraryId = await resolveLibraryId(info.menuItemId);
     if (!libraryId) {
@@ -188,6 +192,21 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
         true
       );
       return;
+    }
+
+    const pageUrl = info.pageUrl || tab?.url || "";
+    if (isAudiobookBayUrl(pageUrl) && tab?.id != null) {
+      try {
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: scrapeAbbFileListFromDocument,
+        });
+        if (Array.isArray(result) && result.length) {
+          payload.release_files = result;
+        }
+      } catch {
+        // Host permission / page access may be missing — request still works without files.
+      }
     }
 
     await handleSend(libraryId, payload);
@@ -306,6 +325,7 @@ async function handleSend(libraryId, payload) {
     source: payload.source || "browser_extension",
     aa_md5: payload.aa_md5 || undefined,
     aa_file_extension: payload.aa_file_extension || undefined,
+    release_files: payload.release_files || undefined,
   };
 
   const result = await createRequest(library, body);

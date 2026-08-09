@@ -163,10 +163,16 @@ def test_maybe_handle_multi_book_quarantines_low_conf(tmp_path: Path, monkeypatc
     )
 
     async def _run():
-        with patch(
-            "app.services.llm_assist._set_quarantine",
-            new=AsyncMock(),
-        ) as q:
+        with (
+            patch(
+                "app.services.llm_assist._set_quarantine",
+                new=AsyncMock(),
+            ) as q,
+            patch(
+                "app.services.llm_assist._load_release_files_for_request",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
             result = await llm_assist.maybe_handle_multi_book(
                 1,
                 staging=staging,

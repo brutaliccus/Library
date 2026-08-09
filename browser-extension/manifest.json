@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "Library Site — Send to Library",
-  "version": "1.1.0",
-  "description": "Right-click magnet links on torrent sites and send them to your Library Site request queue.",
+  "name": "Library Site \u2014 Send to Library",
+  "version": "1.2.0",
+  "description": "Right-click magnet links on torrent sites (incl. AudioBookBay file lists) and send them to your Library Site request queue.",
   "permissions": [
     "contextMenus",
     "storage",
     "notifications",
-    "alarms"
+    "alarms",
+    "scripting"
   ],
   "optional_host_permissions": [
     "http://*/*",

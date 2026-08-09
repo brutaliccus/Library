@@ -64,6 +64,14 @@ _POSTED_RE = re.compile(r"Posted:\s*(\d{1,2}\s+\w{3}\s+\d{4})", re.I)
 _FORMAT_RE = re.compile(r"Format:\s*(.+?)\s*/", re.I)
 _BITRATE_RE = re.compile(r"Bitrate:\s*(.+?)File", re.I)
 _NON_WORD_RE = re.compile(r"[\W]+", re.UNICODE)
+_FILE_SIZE_CELL_RE = re.compile(
+    r"^(?P<size>[\d.]+)\s*(?P<unit>TB|GB|MB|KB)s?$",
+    re.IGNORECASE,
+)
+_FILE_ROW_TRAIL_RE = re.compile(
+    r"^(?P<body>.+?)\s+(?P<size>[\d.]+)\s*(?P<unit>TB|GB|MB|KB)s?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _normalize_query(query: str) -> str:
@@ -78,6 +86,114 @@ def _parse_size(size_text: str) -> int:
     unit = m.group(2).upper()
     mult = {"KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}.get(unit, 1)
     return int(val * mult)
+
+
+def parse_abb_file_list(html: str) -> list[dict[str, Any]]:
+    """Parse the File list table on an ABB details page.
+
+    Rows are usually path cell(s) + size. Multi-column rows become
+    folder/nested/filename paths so packs group by top-level folder.
+    """
+    if not html:
+        return []
+    from app.services.release_files import normalize_release_files
+
+    soup = BeautifulSoup(html, "html.parser")
+    rows_out: list[dict[str, Any]] = []
+
+    def _consume_cells(cells: list[str]) -> None:
+        cells = [c.strip() for c in cells if (c or "").strip()]
+        if len(cells) < 2:
+            return
+        size_bytes = 0
+        path_parts = cells
+        if _FILE_SIZE_CELL_RE.match(cells[-1]):
+            size_bytes = _parse_size(cells[-1])
+            path_parts = cells[:-1]
+        elif len(cells) >= 2 and _FILE_SIZE_CELL_RE.match(f"{cells[-2]} {cells[-1]}"):
+            size_bytes = _parse_size(f"{cells[-2]} {cells[-1]}")
+            path_parts = cells[:-2]
+        if not path_parts:
+            return
+        joined = " ".join(path_parts).lower()
+        if joined.startswith("tracker:") or joined.startswith("announce url"):
+            return
+        if "info hash" in joined or joined.startswith("creation date"):
+            return
+        if len(path_parts) == 1:
+            body = path_parts[0]
+            if "/" in body:
+                path = body
+            else:
+                m = re.search(
+                    r"^(?P<folders>.+?)\s+(?P<name>[^/\\]+\.[A-Za-z0-9]{2,5})$",
+                    body.strip(),
+                )
+                if not m:
+                    return
+                folders = m.group("folders").strip()
+                name = m.group("name").strip()
+                # ABB often flattens "BookFolder NestedFolder" without slashes.
+                split = re.match(
+                    r"^(?P<top>.+?(?:\[\s*Graphic\s*Audio[^\]]*\]|Graphic\s*Audio))\s+(?P<rest>.+)$",
+                    folders,
+                    re.I,
+                )
+                if split:
+                    path = f"{split.group('top').strip()}/{split.group('rest').strip()}/{name}"
+                else:
+                    path = f"{folders}/{name}" if folders else name
+        else:
+            path = "/".join(path_parts)
+        if "." not in path.rsplit("/", 1)[-1]:
+            return
+        rows_out.append({"path": path, "size_bytes": size_bytes})
+
+    tables = list(soup.find_all("table"))
+    preferred: list[Any] = []
+    for table in tables:
+        prev_bits: list[str] = []
+        for sib in list(table.previous_siblings)[:8]:
+            if hasattr(sib, "get_text"):
+                prev_bits.append(sib.get_text(" ", strip=True))
+            else:
+                prev_bits.append(str(sib))
+        blob = " ".join(prev_bits).lower()
+        blob += " " + str(table.get("id") or "").lower()
+        blob += " " + " ".join(table.get("class") or []).lower()
+        if "file list" in blob or "filelist" in blob or "multifile" in blob:
+            preferred.append(table)
+    for table in preferred or tables:
+        for tr in table.find_all("tr"):
+            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+            if cells and cells[0].lower() in {"filename", "file", "name", "files"}:
+                continue
+            _consume_cells(cells)
+
+    files = normalize_release_files(rows_out)
+    if files:
+        logger.info("ABB file list: parsed %s files", len(files))
+    return files
+
+
+def _extract_info_hash_from_html(html: str) -> str | None:
+    if not html:
+        return None
+    m = _HASH_RE.search(html)
+    if m:
+        return m.group(1).lower()
+    soup = BeautifulSoup(html, "html.parser")
+    for td in soup.find_all("td"):
+        label = td.get_text(" ", strip=True).lower()
+        if "info hash" in label:
+            sib = td.find_next_sibling("td")
+            if sib:
+                hm = _HASH_TD_RE.search(sib.get_text(" ", strip=True))
+                if hm:
+                    return hm.group(1).lower()
+    near = re.search(r"Info\s*Hash[\s\S]{0,120}?([a-fA-F0-9]{40})", html, re.I)
+    return near.group(1).lower() if near else None
+
 
 
 def _is_cloudflare(html: str | None) -> bool:
@@ -404,26 +520,31 @@ def _parse_listing_page(html: str, base_url: str) -> list[dict[str, Any]]:
     return out
 
 
-async def _resolve_info_hash(details_url: str) -> str | None:
-    # Serialize hash scrapes too — detail pages often need FlareSolverr.
+async def _fetch_details_html(details_url: str) -> str | None:
+    # Serialize detail scrapes — pages often need FlareSolverr.
     async with _HASH_LOCK:
-        html = await _fetch_html(details_url, timeout=20.0, allow_flare=True)
+        return await _fetch_html(details_url, timeout=20.0, allow_flare=True)
+
+
+async def _resolve_info_hash(details_url: str) -> str | None:
+    html = await _fetch_details_html(details_url)
+    return _extract_info_hash_from_html(html or "")
+
+
+async def resolve_details_from_page(
+    details_url: str,
+    title: str = "",
+) -> tuple[str | None, str | None, list[dict[str, Any]]]:
+    """Resolve (magnet, info_hash, file_list) from an ABB details page."""
+    html = await _fetch_details_html(details_url)
     if not html:
-        return None
-    m = _HASH_RE.search(html)
-    if m:
-        return m.group(1).lower()
-    soup = BeautifulSoup(html, "html.parser")
-    for td in soup.find_all("td"):
-        label = td.get_text(" ", strip=True).lower()
-        if "info hash" in label:
-            sib = td.find_next_sibling("td")
-            if sib:
-                hm = _HASH_TD_RE.search(sib.get_text(" ", strip=True))
-                if hm:
-                    return hm.group(1).lower()
-    near = re.search(r"Info\s*Hash[\s\S]{0,120}?([a-fA-F0-9]{40})", html, re.I)
-    return near.group(1).lower() if near else None
+        return None, None, []
+    info_hash = _extract_info_hash_from_html(html)
+    files = parse_abb_file_list(html)
+    if not info_hash:
+        return None, None, files
+    dn = quote_plus(title or "audiobook")
+    return f"magnet:?xt=urn:btih:{info_hash}&dn={dn}", info_hash, files
 
 
 def _abb_details_url(item: dict[str, Any]) -> str:
@@ -644,11 +765,8 @@ async def resolve_hashes_for_results(
 
 async def resolve_magnet_from_details(details_url: str, title: str = "") -> tuple[str | None, str | None]:
     """Resolve (magnet, info_hash) from an ABB details page. Used by stream/download."""
-    info_hash = await _resolve_info_hash(details_url)
-    if not info_hash:
-        return None, None
-    dn = quote_plus(title or "audiobook")
-    return f"magnet:?xt=urn:btih:{info_hash}&dn={dn}", info_hash
+    magnet, info_hash, _files = await resolve_details_from_page(details_url, title=title)
+    return magnet, info_hash
 
 
 async def infra_status() -> dict[str, Any]:

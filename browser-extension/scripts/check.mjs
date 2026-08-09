@@ -15,6 +15,10 @@ import {
   inferMediaType,
 } from "../lib/magnet.js";
 import { normalizeOrigin } from "../lib/storage.js";
+import {
+  isAudiobookBayUrl,
+  parseAbbFileListCells,
+} from "../lib/abbFiles.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
@@ -61,4 +65,15 @@ assert.equal(normalizeOrigin("library.example.com"), "https://library.example.co
 assert.equal(normalizeOrigin("http://localhost:8000/"), "http://localhost:8000");
 
 // storage.js imports chrome at runtime only via functions — normalizeOrigin is pure.
+assert.equal(isAudiobookBayUrl("https://audiobookbay.lu/abss/foo/"), true);
+assert.equal(isAudiobookBayUrl("https://example.com/"), false);
+const parsed = parseAbbFileListCells([
+  ["1 Mistborn - The Final Empire - Graphic Audio", "Mistborn 1 - The Final Empire (1 of 3)", "MISTBORN0101P01.mp3", "132.67 MBs"],
+  ["Brandon Sanderson - Mistborn 02 - The Well of Ascension [Graphic Audio]", "Brandon Sanderson - Mistborn 02 - The Well of Ascension pt 1.mp3", "857.39 MBs"],
+]);
+assert.equal(parsed.length, 2);
+assert.ok(parsed[0].path.includes("MISTBORN0101P01.mp3"));
+assert.ok(parsed[0].path.includes("/"));
+assert.ok(manifest.permissions.includes("scripting"));
+
 console.log("browser-extension checks passed");

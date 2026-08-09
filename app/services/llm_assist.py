@@ -127,6 +127,43 @@ def _paths_are_clear_folders(staging: Path, plan: openrouter.BookSplitPlan) -> b
     return True
 
 
+def _split_paths_ready(staging: Path, plan: openrouter.BookSplitPlan) -> bool:
+    """True when every book path exists under staging (folders or files)."""
+    if _paths_are_clear_folders(staging, plan):
+        return True
+    for book in plan.books:
+        if not book.paths:
+            return False
+        for rel in book.paths:
+            try:
+                target = safe_path_under_staging(staging, rel)
+            except ValueError:
+                return False
+            if not target.exists():
+                return False
+    return True
+
+
+async def _load_release_files_for_request(
+    request_id: int,
+    staging: Path,
+) -> list[dict[str, Any]]:
+    """Load ABB/debrid file list from DB, then staging assist sidecar."""
+    from app.services.release_files import loads_release_files, normalize_release_files
+
+    async with async_session() as db:
+        result = await db.execute(
+            select(DownloadRequest).where(DownloadRequest.id == request_id)
+        )
+        req = result.scalar_one_or_none()
+        if req and getattr(req, "release_files_json", None):
+            files = loads_release_files(req.release_files_json)
+            if files:
+                return files
+    assist = read_assist(staging)
+    return normalize_release_files(assist.get("release_files"))
+
+
 async def maybe_handle_multi_book(
     request_id: int,
     *,
@@ -136,28 +173,75 @@ async def maybe_handle_multi_book(
     author: str | None,
 ) -> HandleResult:
     """Detect multi-book packs; auto-split or quarantine with plan for Quick Review."""
-    if not detect_likely_multi_book(staging):
-        return "continue"
-    if not await openrouter.is_enabled():
+    from app.services.release_files import (
+        build_split_plan_from_release_files,
+        group_release_files_by_book,
+    )
+
+    release_files = await _load_release_files_for_request(request_id, staging)
+    if release_files:
+        write_assist(staging, {"release_files": release_files[:500]})
+
+    heuristic_raw = build_split_plan_from_release_files(
+        staging,
+        release_files,
+        default_author=author or "",
+    )
+    release_groups = group_release_files_by_book(release_files)
+    likely = detect_likely_multi_book(staging) or len(release_groups) >= 2
+    if not likely:
         return "continue"
 
-    context = {
-        "request_title": title,
-        "request_author": author or "",
-        "audio_parent_dirs": [
-            str(p.relative_to(staging)) if p != staging else "."
-            for p in _audio_parent_dirs(staging)
-        ],
-        **collect_staging_llm_context(staging),
-    }
+    plan: openrouter.BookSplitPlan | None = None
+    if heuristic_raw:
+        plan = openrouter.parse_split_plan(heuristic_raw)
 
-    try:
-        plan = await openrouter.propose_multi_book_split(context)
-    except Exception as e:  # pragma: no cover
-        logger.warning("Multi-book assist error for request %s: %s", request_id, e)
-        return "continue"
+    if plan is None and await openrouter.is_enabled():
+        context = {
+            "request_title": title,
+            "request_author": author or "",
+            "audio_parent_dirs": [
+                str(p.relative_to(staging)) if p != staging else "."
+                for p in _audio_parent_dirs(staging)
+            ],
+            "release_files": [
+                {"path": f.get("path"), "size_bytes": f.get("size_bytes")}
+                for f in release_files[:200]
+            ],
+            "release_groups": [
+                {
+                    "title": g.get("title"),
+                    "key": g.get("key"),
+                    "audio_names": (g.get("audio_names") or [])[:40],
+                }
+                for g in release_groups[:40]
+            ],
+            **collect_staging_llm_context(staging),
+        }
+        try:
+            plan = await openrouter.propose_multi_book_split(context)
+        except Exception as e:  # pragma: no cover
+            logger.warning("Multi-book assist error for request %s: %s", request_id, e)
+            plan = None
 
     if not plan:
+        if len(release_groups) >= 2:
+            reason = (
+                f"Multi-book pack ({len(release_groups)} titles in release file list) "
+                "but files could not be mapped automatically — review in Quick Review"
+            )[:500]
+            write_assist(
+                staging,
+                {
+                    "multi_book_status": "needs_review",
+                    "release_groups": [
+                        {"title": g.get("title"), "key": g.get("key")}
+                        for g in release_groups
+                    ],
+                },
+            )
+            await _set_quarantine(request_id, reason, staging)
+            return "quarantined"
         return "continue"
 
     write_assist(
@@ -165,12 +249,12 @@ async def maybe_handle_multi_book(
         {
             "multi_book_split": plan.to_dict(),
             "multi_book_status": "proposed",
+            "release_files": release_files[:500] if release_files else None,
         },
     )
 
     threshold = await openrouter.get_confidence_threshold()
-    clear_folders = _paths_are_clear_folders(staging, plan)
-    if plan.confidence >= threshold and clear_folders:
+    if plan.confidence >= threshold and _split_paths_ready(staging, plan):
         try:
             child_ids = await apply_multi_book_split(
                 request_id,

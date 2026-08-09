@@ -25,6 +25,16 @@ def sanitize_filename(name: str) -> str:
     return name or "Unknown"
 
 
+def sanitize_rel_path(rel: str) -> str:
+    """Sanitize a torrent-relative path, preserving directory separators."""
+    parts = []
+    for part in (rel or "").replace("\\", "/").split("/"):
+        cleaned = sanitize_filename(part)
+        if cleaned and cleaned not in {".", ".."}:
+            parts.append(cleaned)
+    return "/".join(parts)
+
+
 def _is_archive(path: Path) -> bool:
     name = path.name.lower()
     if name.endswith((".tar.gz", ".tar.bz2")):
@@ -123,7 +133,13 @@ async def download_file(
                 else:
                     filename = sanitize_filename(str(resp.url).split("/")[-1].split("?")[0])
 
-            dest_path = dest_dir / filename
+            # Allow torrent-relative subfolders (multi-book packs).
+            if "/" in filename or "\\" in filename:
+                rel = sanitize_rel_path(filename)
+            else:
+                rel = sanitize_filename(filename)
+            dest_path = dest_dir / Path(rel)
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
             first = True
             bytes_done = 0
             last_report = 0.0

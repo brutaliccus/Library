@@ -31,6 +31,69 @@ _progress_db_throttle: dict[int, float] = {}
 _retry_exclude_providers: dict[int, list[str]] = {}
 
 
+def _persist_release_files(req: DownloadRequest, files: list[dict[str, Any]] | None) -> bool:
+    """Store release file list on the request when newly available. Returns True if saved."""
+    from app.services.release_files import dumps_release_files, loads_release_files, normalize_release_files
+
+    normalized = normalize_release_files(files)
+    if not normalized:
+        return False
+    existing = loads_release_files(getattr(req, "release_files_json", None))
+    # Prefer richer path info (more '/' separators) when merging.
+    def _score(rows: list[dict[str, Any]]) -> tuple[int, int]:
+        return (sum(1 for r in rows if "/" in r.get("path", "")), len(rows))
+
+    if existing and _score(existing) >= _score(normalized):
+        return False
+    req.release_files_json = dumps_release_files(normalized)
+    return True
+
+
+def _staging_has_transfer_payload(dest_dir: Path) -> bool:
+    """True when dest already has enough audio to skip re-download."""
+    if not dest_dir.is_dir():
+        return False
+    audio_n = 0
+    bytes_n = 0
+    for p in dest_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in AUDIO_EXTENSIONS:
+            continue
+        if "-tmpfiles" in p.parts:
+            continue
+        audio_n += 1
+        try:
+            bytes_n += p.stat().st_size
+        except OSError:
+            pass
+        if audio_n >= 2 and bytes_n >= 50 * 1024 * 1024:
+            return True
+    # Single large m4b also counts
+    return audio_n >= 1 and bytes_n >= 80 * 1024 * 1024
+
+
+def _torrent_rel_path_for_link(
+    torrent_info: dict[str, Any] | None,
+    link_index: int,
+    debrid_link: str,
+    resolved_url: str,
+) -> str | None:
+    """Best-effort torrent-relative path for a debrid link (0-based index)."""
+    files = (torrent_info or {}).get("files") or []
+    if 0 <= link_index < len(files):
+        path = (files[link_index] or {}).get("path") or (files[link_index] or {}).get("name")
+        if path:
+            return str(path).lstrip("/")
+    # Fallback: basename only via provider helper
+    try:
+        name = debrid.link_filename(debrid_link, resolved_url)
+    except Exception:
+        name = None
+    return name or None
+
+
+
 def set_retry_exclude_providers(request_id: int, providers: list[str] | None) -> None:
     """Remember which debrid provider(s) already failed so retry can try another."""
     if not providers:
@@ -981,7 +1044,7 @@ async def process_download(request_id: int) -> None:
             if await _is_cancelled(request_id):
                 return
 
-            # ABB detail pages are HTML — scrape the info hash into a magnet first.
+            # ABB detail pages are HTML — scrape info hash + file list into a magnet first.
             if (
                 not torrent_id
                 and not link.startswith("magnet:")
@@ -990,12 +1053,16 @@ async def process_download(request_id: int) -> None:
                 try:
                     from app.services import audiobookbay
 
-                    m, _h = await audiobookbay.resolve_magnet_from_details(
+                    m, _h, abb_files = await audiobookbay.resolve_details_from_page(
                         link, title=title or ""
                     )
+                    if abb_files:
+                        _persist_release_files(req, abb_files)
                     if m:
                         link = m
                         req.magnet_link = m
+                        await db.commit()
+                    elif abb_files:
                         await db.commit()
                 except Exception as e:
                     logger.warning("ABB magnet resolve for request %s failed: %s", request_id, e)
@@ -1118,6 +1185,13 @@ async def process_download(request_id: int) -> None:
                 )
 
             label = debrid.PROVIDER_LABELS.get(active_provider, active_provider)
+            try:
+                from app.services.release_files import release_files_from_torrent_info
+
+                if _persist_release_files(req, release_files_from_torrent_info(torrent_info)):
+                    await db.commit()
+            except Exception as e:
+                logger.debug("Could not persist debrid file list for %s: %s", request_id, e)
             await _update_status(db, request_id, "transferring", "Downloading to library")
 
             if media_type == "ebook":
@@ -1125,8 +1199,49 @@ async def process_download(request_id: int) -> None:
                 dest_dir = ebook_destination_dir(request_id, author, book_title)
                 dest_dir.mkdir(parents=True, exist_ok=True)
             else:
-                dest_dir = audiobook_destination_dir(request_id, author, book_title)
+                # Prefer existing staging folder when retrying a quarantined pack
+                # so we do not invent a second dest and re-download.
+                existing_staging = (getattr(req, "staging_path", None) or "").strip()
+                if existing_staging:
+                    try:
+                        from app.services.forge_pipeline import resolve_staging_dir
+
+                        dest_dir = resolve_staging_dir(existing_staging)
+                    except (FileNotFoundError, ValueError):
+                        dest_dir = audiobook_destination_dir(request_id, author, book_title)
+                else:
+                    dest_dir = audiobook_destination_dir(request_id, author, book_title)
                 dest_dir.mkdir(parents=True, exist_ok=True)
+
+            # Skip CDN transfer when staging already holds the download payload.
+            if media_type == "audiobook" and _staging_has_transfer_payload(dest_dir):
+                logger.info(
+                    "Request %s: staging already has audio at %s — skipping re-download",
+                    request_id,
+                    dest_dir,
+                )
+                await _update_status(
+                    db,
+                    request_id,
+                    "metadata_forge",
+                    "Reusing existing staging files (skip download)…",
+                )
+                if settings.libraforge_pipeline_enabled:
+                    from app.services.forge_pipeline import (
+                        run_forge_after_download,
+                        staging_path_for_libraforge,
+                    )
+
+                    req.staging_path = staging_path_for_libraforge(dest_dir)
+                    await db.commit()
+                    await run_forge_after_download(
+                        request_id,
+                        staging=dest_dir,
+                        user_id=req.user_id,
+                        title=title,
+                        author=author,
+                    )
+                    return
 
             total_links = len(torrent_info.get("links", []))
             for i, debrid_link in enumerate(torrent_info.get("links", []), 1):
@@ -1174,12 +1289,18 @@ async def process_download(request_id: int) -> None:
                     progress_percent=((i - 1) / total_links * 100) if total_links else 0,
                 )
                 direct_url = await client.unrestrict_link(debrid_link)
+                rel_name = _torrent_rel_path_for_link(
+                    torrent_info, i - 1, debrid_link, direct_url
+                )
                 # CDN / proxies occasionally drop mid-body — retry a few times.
                 last_dl_err: Exception | None = None
                 for attempt in range(3):
                     try:
                         await downloader.download_file(
-                            direct_url, dest_dir, on_progress=_on_file_progress
+                            direct_url,
+                            dest_dir,
+                            filename=rel_name,
+                            on_progress=_on_file_progress,
                         )
                         last_dl_err = None
                         break

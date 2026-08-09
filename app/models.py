@@ -123,6 +123,8 @@ class DownloadRequest(Base):
     source_library_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     # Idempotency key for Library Sweep (e.g. abs:{itemId})
     ingest_fingerprint: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+    # ABB / debrid torrent file list (JSON) for multi-book pack splitting
+    release_files_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

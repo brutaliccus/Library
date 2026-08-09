@@ -53,6 +53,8 @@ class CreateDownloadRequest(BaseModel):
     google_volume_id: str | None = None
     catalog_title: str | None = None
     cover_url: str | None = None
+    # Optional ABB / torrent file list for multi-book pack splitting
+    release_files: list[dict] | list[str] | None = None
 
 
 class DownloadRequestResponse(BaseModel):
@@ -108,6 +110,15 @@ async def create_request(
     if cover_url:
         cover_url = cover_url[:1024]
 
+    release_files_json = None
+    if body.release_files:
+        try:
+            from app.services.release_files import dumps_release_files
+
+            release_files_json = dumps_release_files(body.release_files)
+        except Exception:
+            release_files_json = None
+
     dl_request = DownloadRequest(
         user_id=user.id,
         title=stored_title,
@@ -121,6 +132,7 @@ async def create_request(
         is_private=user.private_mode,
         google_volume_id=volume_id,
         cover_url=cover_url,
+        release_files_json=release_files_json,
     )
     db.add(dl_request)
     # Commit before scheduling background work so the worker session can see the row

@@ -671,13 +671,28 @@ def offline_download_info_from_item(lib_item: dict | None) -> dict | None:
     except (TypeError, ValueError):
         total_duration = offset
 
+    # Reuse catalog normalization so offline packages carry the same metadata
+    # the online shelf shows (series, narrator, description, ASIN, genres, …).
+    normalized = _normalize_abs_item(lib_item)
+    year = str(meta.get("publishedYear") or meta.get("year") or "").strip()
+
     return {
         "sessionId": "",
         "tracks": tracks,
         "startOffset": 0.0,
-        "coverUrl": f"/api/stream/abs/proxy/cover/{item_id}",
-        "title": meta.get("title") or lib_item.get("title") or "Audiobook",
-        "author": meta.get("authorName") or "",
+        "coverUrl": normalized.get("coverUrl")
+        or f"/api/stream/abs/proxy/cover/{item_id}",
+        "title": normalized.get("title") or lib_item.get("title") or "Audiobook",
+        "author": normalized.get("author") or "",
+        "narrator": normalized.get("narrator") or "",
+        "subtitle": normalized.get("subtitle") or "",
+        "seriesName": normalized.get("seriesName") or "",
+        "sequence": normalized.get("sequence") or "",
+        "series": normalized.get("series") or [],
+        "description": normalized.get("description") or "",
+        "asin": normalized.get("asin") or "",
+        "genres": normalized.get("genres") or [],
+        "publishedYear": year,
         "duration": total_duration,
         "chapters": chapters_from_library_item(lib_item),
     }

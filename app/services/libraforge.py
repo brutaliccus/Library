@@ -552,9 +552,9 @@ async def start_chaptering_run(
 ) -> str:
     """Start Chapter Forge. Prefer ``audible-chapters`` (ASIN lookup, no ASR).
 
-    ``no_save=True`` fetches/compares Audible chapters without embedding into the
-    ``.m4b`` (preview / dry-run). Embed still requires ``no_save=False`` and a
-    non-empty ``stats.embedded_into`` on success.
+    ``no_save=True`` fetches/compares Audible chapters without writing sidecars
+    (preview / dry-run). With ``no_save=False``, upstream LibraForge saves
+    chapter sidecars; Library Site remuxes markers into the ``.m4b`` afterward.
     """
     body: dict[str, Any] = {
         "source_path": source_path,

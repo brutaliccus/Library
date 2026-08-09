@@ -20,6 +20,7 @@ import {
   isBookCached,
   isTrackFullyCached,
 } from "../utils/audioCache";
+import { cacheCover } from "../utils/coverCache";
 import {
   setAudioPlaybackActive,
   setMediaDownloadPaused,
@@ -894,6 +895,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           coverUrl: data.coverUrl || "",
           tracks: data.tracks,
           totalDuration: data.duration || 0,
+          narrator: data.narrator || undefined,
+          subtitle: data.subtitle || undefined,
+          seriesName: data.seriesName || undefined,
+          sequence: data.sequence || undefined,
+          description: data.description || undefined,
+          asin: data.asin || undefined,
+          genres: Array.isArray(data.genres) ? data.genres : undefined,
+          publishedYear: data.publishedYear || undefined,
           absChapters: Array.isArray(data.chapters)
             ? data.chapters.map((c: unknown, i: number) => {
                 const o = c as Record<string, unknown>;
@@ -907,6 +916,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               })
             : undefined,
         });
+        if (data.coverUrl) void cacheCover(toAbsoluteUrl(data.coverUrl));
         void cacheBookAudio(np.tracks);
         if (Array.isArray(data.chapters) && data.chapters.length) {
           const absChapters = data.chapters.map((c: unknown, i: number) => {
@@ -1009,6 +1019,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           tracks: data.tracks,
           totalDuration: data.duration || 0,
         });
+        if (data.coverUrl) void cacheCover(toAbsoluteUrl(data.coverUrl));
 
         void cacheAbsPlayable(
           itemId,

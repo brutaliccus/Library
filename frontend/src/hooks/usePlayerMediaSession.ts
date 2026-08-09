@@ -171,24 +171,41 @@ export function usePlayerMediaSession(
         ? np.tracks[state.currentTrackIndex].title
         : "";
 
-    const artUrl = toAbsoluteArtworkUrl(np.coverUrl);
-    const artwork: MediaImage[] = artUrl
-      ? [
-          { src: artUrl, sizes: "512x512", type: "image/jpeg" },
-          { src: artUrl, sizes: "192x192", type: "image/jpeg" },
-        ]
-      : [];
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    const applyMeta = (artUrl: string) => {
+      if (cancelled) return;
+      const artwork: MediaImage[] = artUrl
+        ? [
+            { src: artUrl, sizes: "512x512", type: "image/jpeg" },
+            { src: artUrl, sizes: "192x192", type: "image/jpeg" },
+          ]
+        : [];
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: scope.label || np.title,
+          artist: np.author || "Audiobook",
+          album: trackLabel || np.title,
+          artwork,
+        });
+      } catch {
+        /* invalid artwork URL etc */
+      }
+    };
 
-    try {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: scope.label || np.title,
-        artist: np.author || "Audiobook",
-        album: trackLabel || np.title,
-        artwork,
-      });
-    } catch {
-      /* invalid artwork URL etc */
-    }
+    applyMeta(toAbsoluteArtworkUrl(np.coverUrl));
+    void import("../utils/coverCache").then(({ getCachedCoverObjectUrl }) =>
+      getCachedCoverObjectUrl(np.coverUrl).then((cached) => {
+        if (!cached || cancelled) return;
+        objectUrl = cached;
+        applyMeta(cached);
+      })
+    );
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: skip currentTime
   }, [state.nowPlaying, state.currentTrackIndex]);
 

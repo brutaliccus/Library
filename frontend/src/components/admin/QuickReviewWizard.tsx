@@ -1234,7 +1234,8 @@ export default function QuickReviewWizard({
               <p className="text-sm text-gray-200">Chapter Forge — Audible chapters</p>
               <p className="text-xs text-gray-500">
                 Import ASIN from applied metadata, fetch chapters for a visual check, then confirm
-                embed into the .m4b. Embed requires LibraForge ``embedded_into`` (not sidecar-only).
+                embed into the .m4b. LibraForge looks up Audible chapters; Library remuxes markers
+                into the file (ffmpeg stream copy).
               </p>
               <label className="block text-xs text-gray-400">
                 ASIN

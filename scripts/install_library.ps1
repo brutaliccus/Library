@@ -775,7 +775,9 @@ foreach ($d in @(
 $absAggInstall = Join-Path $TARGET "scripts\install_abs_agg.ps1"
 if (Test-Path $absAggInstall) {
     Write-Step "==> Wiring abs-agg for LibraForge specialty metadata"
-    & powershell -ExecutionPolicy Bypass -File $absAggInstall -RepoRoot $TARGET
+    $absAggArgs = @{ RepoRoot = $TARGET }
+    if ($useBundled) { $absAggArgs["StartCompose"] = $true }
+    & powershell -ExecutionPolicy Bypass -File $absAggInstall @absAggArgs
 }
 
 function Invoke-Compose {
@@ -848,6 +850,10 @@ if ($upCode -ne 0) {
 if ($useNpm) {
     Write-Host "Ensuring library-npm is up (compose profile npm) ..."
     [void](Invoke-Compose @("compose", "--profile", "npm", "up", "-d", "nginx-proxy-manager"))
+}
+if ($useBundled) {
+    Write-Host "Ensuring abs-agg is up (LibraForge specialty metadata) ..."
+    [void](Invoke-Compose @("compose", "--profile", "bundled-media", "up", "-d", "abs-agg"))
 }
 if (-not $useBundledJackett) {
     Write-Warn "Stopping bundled Jackett (using external JACKETT_URL)"

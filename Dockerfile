@@ -15,8 +15,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Calibre for MOBI/AZW3 → EPUB; p7zip for RAR/ZIP extraction (ebook torrents)
-RUN apt-get update && apt-get install -y --no-install-recommends calibre p7zip-full \
+# Calibre for MOBI/AZW3 → EPUB; p7zip for RAR/ZIP extraction (ebook torrents);
+# ffmpeg for Chapter Forge .m4b chapter remux (stream copy, no re-encode).
+RUN apt-get update && apt-get install -y --no-install-recommends calibre p7zip-full ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

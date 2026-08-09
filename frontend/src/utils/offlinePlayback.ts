@@ -28,6 +28,15 @@ export interface AbsOfflineManifest {
   tracks: Track[];
   totalDuration: number;
   absChapters?: AbsChapter[];
+  /** Optional catalog fields for offline shelf / player chrome. */
+  narrator?: string;
+  subtitle?: string;
+  seriesName?: string;
+  sequence?: string;
+  description?: string;
+  asin?: string;
+  genres?: string[];
+  publishedYear?: string;
   updatedAt: number;
 }
 
@@ -145,11 +154,28 @@ export function saveAbsOfflineManifest(
   manifest: Omit<AbsOfflineManifest, "source" | "updatedAt">
 ): void {
   const all = allManifests();
-  all[absKey(manifest.itemId)] = {
+  const prev = all[absKey(manifest.itemId)];
+  const prevAbs = prev?.source === "abs" ? prev : null;
+  // Never wipe chapters/metadata already saved when a later listen-path write
+  // omits them (e.g. /play handshake before /chapters returns).
+  const merged: AbsOfflineManifest = {
+    ...(prevAbs || {}),
     ...manifest,
+    absChapters: manifest.absChapters?.length
+      ? manifest.absChapters
+      : prevAbs?.absChapters,
+    narrator: manifest.narrator || prevAbs?.narrator,
+    subtitle: manifest.subtitle || prevAbs?.subtitle,
+    seriesName: manifest.seriesName || prevAbs?.seriesName,
+    sequence: manifest.sequence || prevAbs?.sequence,
+    description: manifest.description || prevAbs?.description,
+    asin: manifest.asin || prevAbs?.asin,
+    genres: manifest.genres?.length ? manifest.genres : prevAbs?.genres,
+    publishedYear: manifest.publishedYear || prevAbs?.publishedYear,
     source: "abs",
     updatedAt: Date.now(),
   };
+  all[absKey(manifest.itemId)] = merged;
   saveAllManifests(all);
 }
 

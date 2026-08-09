@@ -6,10 +6,14 @@ import {
   type SyntheticEvent,
 } from "react";
 import { toAbsoluteUrl } from "../api/instanceUrl";
+import { getCachedCoverObjectUrl } from "../utils/coverCache";
 
 /**
- * Book cover &lt;img&gt; that resolves root-relative /api/… URLs against the
+ * Book cover img that resolves root-relative /api/... URLs against the
  * Library server on Capacitor (WebView origin is https://localhost).
+ *
+ * When a cover was saved offline, prefers a Cache API blob URL so artwork
+ * still shows with no network.
  *
  * Optional fallbackSrc (string or list) is tried when earlier URLs fail —
  * e.g. Open Library -L.jpg 404 while -M.jpg / Hardcover art still works.
@@ -49,13 +53,37 @@ export default function CoverImage({
 }: Props) {
   const chain = buildChain(src, fallbackSrc);
   const [index, setIndex] = useState(0);
+  const [displaySrc, setDisplaySrc] = useState<string>("");
   const chainKey = chain.join("\0");
 
   useEffect(() => {
     setIndex(0);
   }, [chainKey]);
 
-  if (chain.length === 0 || index >= chain.length) {
+  const candidate = chain[index] || "";
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    if (!candidate) {
+      setDisplaySrc("");
+      return;
+    }
+
+    setDisplaySrc(toAbsoluteUrl(candidate));
+    void getCachedCoverObjectUrl(candidate).then((cached) => {
+      if (cancelled || !cached) return;
+      objectUrl = cached;
+      setDisplaySrc(cached);
+    });
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [candidate]);
+
+  if (chain.length === 0 || index >= chain.length || !displaySrc) {
     return <>{fallback}</>;
   }
 
@@ -70,7 +98,7 @@ export default function CoverImage({
 
   return (
     <img
-      src={toAbsoluteUrl(chain[index])}
+      src={displaySrc}
       alt={alt}
       referrerPolicy="no-referrer"
       {...rest}

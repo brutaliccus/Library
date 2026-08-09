@@ -50,6 +50,10 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 mkdir -p "${STACK_DIR}/data"
+# Image runs as node (uid 1000); root-owned data causes SQLITE_CANTOPEN crash loop.
+if ! chown -R 1000:1000 "${STACK_DIR}/data" 2>/dev/null; then
+  docker run --rm -v "${STACK_DIR}/data:/data" alpine:3.20 chown -R 1000:1000 /data >/dev/null 2>&1 || true
+fi
 
 HARDCOVER_TOKEN=""
 GOODREADS_API_KEY=""

@@ -239,6 +239,27 @@ ensure_indexer_seed() {
   return 0
 }
 
+# abs-agg (ghcr.io/vito0912/abs-agg) runs as image user `node` (uid/gid 1000).
+# When install runs under sudo, mkdir creates root:root abs-agg-data and SQLite fails
+# with SQLITE_CANTOPEN → Restarting (1). Prefer host chown; fall back to a one-shot container.
+ensure_abs_agg_data_perms() {
+  local data_dir="${TARGET}/abs-agg-data"
+  local puid pgid
+  mkdir -p "$data_dir" 2>/dev/null || true
+  puid="$(get_env PUID 2>/dev/null || true)"
+  pgid="$(get_env PGID 2>/dev/null || true)"
+  puid="${puid:-1000}"
+  pgid="${pgid:-1000}"
+  if chown -R "${puid}:${pgid}" "$data_dir" 2>/dev/null; then
+    return 0
+  fi
+  if $DOCKER run --rm -v "${data_dir}:/data" alpine:3.20 \
+    chown -R "${puid}:${pgid}" /data >/dev/null 2>&1; then
+    return 0
+  fi
+  c_yellow "Could not chown abs-agg-data to ${puid}:${pgid} — if abs-agg crash-loops (SQLITE_CANTOPEN), run: chown -R ${puid}:${pgid} ${data_dir}"
+}
+
 # --- begin ---
 echo ""
 c_cyan "╔══════════════════════════════════════════════════════════╗"
@@ -596,6 +617,8 @@ if [[ "$SETUP_MODE" == "browser" ]]; then
     abs-agg-data \
     npm-data npm-letsencrypt \
     media/audiobooks media/ebooks media/openlibrary
+  # abs-agg image runs as `node` (uid 1000); root-owned ./abs-agg-data → SQLITE_CANTOPEN crash loop.
+  ensure_abs_agg_data_perms
   if [[ ! -f libraforge-config/abs-agg.json ]]; then
     printf '%s\n' '{' '  "url": "http://abs-agg:3000"' '}' >libraforge-config/abs-agg.json
   fi
@@ -609,6 +632,9 @@ if [[ "$SETUP_MODE" == "browser" ]]; then
     $DOCKER compose "${COMPOSE_PROFILE_ARGS[@]+"${COMPOSE_PROFILE_ARGS[@]}"}" up -d
   else
     $DOCKER compose "${COMPOSE_PROFILE_ARGS[@]+"${COMPOSE_PROFILE_ARGS[@]}"}" up -d --build
+  fi
+  if $USE_BUNDLED; then
+    $DOCKER compose --profile bundled-media up -d abs-agg || true
   fi
   if $USE_NPM; then
     $DOCKER compose --profile npm up -d nginx-proxy-manager || true
@@ -1047,6 +1073,9 @@ mkdir -p data prowlarr-config jackett-config \
   npm-data npm-letsencrypt \
   media/audiobooks media/ebooks media/openlibrary
 
+# abs-agg image runs as `node` (uid 1000); root-owned ./abs-agg-data → SQLITE_CANTOPEN crash loop.
+ensure_abs_agg_data_perms
+
 # Point LibraForge at bundled abs-agg (compose service hostname).
 if [[ ! -f libraforge-config/abs-agg.json ]]; then
   printf '%s\n' '{' '  "url": "http://abs-agg:3000"' '}' >libraforge-config/abs-agg.json
@@ -1257,6 +1286,11 @@ fi
 if $USE_NPM; then
   c_cyan "Ensuring library-npm is up (compose profile npm) ..."
   $DOCKER compose --profile npm up -d nginx-proxy-manager
+fi
+if $USE_BUNDLED; then
+  c_cyan "Ensuring abs-agg is up (LibraForge specialty metadata) ..."
+  ensure_abs_agg_data_perms
+  $DOCKER compose --profile bundled-media up -d abs-agg || true
 fi
 
 # When operators connected external Jackett/Prowlarr, stop the unused local containers

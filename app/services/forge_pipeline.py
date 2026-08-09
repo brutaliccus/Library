@@ -16,7 +16,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.database import async_session
 from app.models import DownloadRequest, User
-from app.services import audiobookshelf, downloader, libraforge, m4b_queue, push
+from app.services import audiobookshelf, chapter_embed, downloader, libraforge, m4b_queue, push
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -1725,14 +1725,20 @@ async def _run_chapter_forge_step(
                 )
             return
 
-        chapters = 0
         stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
         try:
-            chapters = int(stats.get("chapters") or 0)
+            chapters_count = int(stats.get("chapters") or 0)
         except (TypeError, ValueError):
-            chapters = 0
+            chapters_count = 0
         embedded_into = str(stats.get("embedded_into") or "").strip()
-        if chapters <= 0:
+        chapter_rows = chapter_embed.chapters_from_run_report(
+            report if isinstance(report, dict) else {}
+        )
+        if not chapter_rows:
+            chapter_rows = chapter_embed.chapters_from_libraforge_sidecar(audio)
+        if chapters_count <= 0:
+            chapters_count = len(chapter_rows)
+        if chapters_count <= 0 and not chapter_rows:
             detail = (
                 f"Audible returned no chapters for ASIN {asin}; "
                 "keeping existing chapter markers"
@@ -1741,20 +1747,52 @@ async def _run_chapter_forge_step(
             async with async_session() as db:
                 await p._update_status(db, request_id, "chapter_forge", detail[:400])
             return
+
+        # Upstream LibraForge only writes sidecars; Library embeds markers into the .m4b.
+        # If a forked LibraForge already set embedded_into, skip a second remux.
         if not embedded_into:
-            # Older LibraForge only wrote cue/JSON sidecars — treat as soft-fail so
-            # we do not claim Audible markers were applied when m4b still has 1–N.
-            detail = (
-                f"Chapter Forge saved Audible chapter data (ASIN {asin}, {chapters} chapters) "
-                "but did not embed markers into the .m4b; keeping existing chapters"
+            if not chapter_rows:
+                detail = (
+                    f"Chapter Forge saved Audible chapter data (ASIN {asin}, "
+                    f"{chapters_count} chapters) but no chapter list was available to embed; "
+                    "keeping existing chapters"
+                )
+                logger.warning("Chapter Forge soft-fail for request %s: %s", request_id, detail)
+                async with async_session() as db:
+                    await p._update_status(db, request_id, "chapter_forge", detail[:400])
+                return
+            duration = chapter_embed.duration_from_run_report(
+                report if isinstance(report, dict) else {}
             )
-            logger.warning("Chapter Forge soft-fail for request %s: %s", request_id, detail)
             async with async_session() as db:
-                await p._update_status(db, request_id, "chapter_forge", detail[:400])
-            return
+                await p._update_status(
+                    db,
+                    request_id,
+                    "chapter_forge",
+                    f"Embedding {len(chapter_rows)} Audible chapters into {audio.name}…",
+                )
+            try:
+                await asyncio.to_thread(
+                    chapter_embed.embed_chapters_into_audio,
+                    audio,
+                    chapter_rows,
+                    duration=duration,
+                    asin=asin,
+                )
+            except chapter_embed.ChapterEmbedError as e:
+                detail = (
+                    f"Chapter Forge looked up ASIN {asin} ({len(chapter_rows)} chapters) "
+                    f"but embed failed ({e}); keeping existing chapters"
+                )[:400]
+                logger.warning("Chapter Forge embed soft-fail for request %s: %s", request_id, e)
+                async with async_session() as db:
+                    await p._update_status(db, request_id, "chapter_forge", detail)
+                return
+            chapters_count = len(chapter_rows)
 
         detail = (
-            f"Embedded Audible chapters into {audio.name} (ASIN {asin}, {chapters} chapters)"
+            f"Embedded Audible chapters into {audio.name} "
+            f"(ASIN {asin}, {chapters_count} chapters)"
         )
         logger.info("Chapter Forge success for request %s: %s", request_id, detail)
         async with async_session() as db:
@@ -2981,7 +3019,7 @@ async def apply_audible_chapters(
     *,
     asin: str,
 ) -> dict[str, Any]:
-    """Embed Audible chapters into staging .m4b (requires embedded_into on success)."""
+    """Look up Audible chapters via LibraForge, then embed markers into staging .m4b."""
     p = _pipeline()
     async with async_session() as db:
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))

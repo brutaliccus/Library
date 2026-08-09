@@ -12,6 +12,7 @@ import {
   isBookCached,
   type CacheableTrack,
 } from "./audioCache";
+import { cacheCover, clearAbsCoverCache, clearCover } from "./coverCache";
 import { cacheBookEbook, clearEbookCache, isEbookCached } from "./ebookCache";
 import {
   getAbsOfflineManifest,
@@ -26,6 +27,35 @@ import {
   saveRdOfflineManifest,
 } from "./offlinePlayback";
 import type { AbsChapter, Track } from "../types/player";
+
+export type OfflineBookMeta = {
+  narrator?: string;
+  subtitle?: string;
+  seriesName?: string;
+  sequence?: string;
+  description?: string;
+  asin?: string;
+  genres?: string[];
+  publishedYear?: string;
+};
+
+function normalizeOfflineMeta(data: Record<string, unknown> | null | undefined): OfflineBookMeta {
+  if (!data || typeof data !== "object") return {};
+  const genresRaw = data.genres;
+  const genres = Array.isArray(genresRaw)
+    ? genresRaw.map((g) => String(g || "").trim()).filter(Boolean)
+    : undefined;
+  return {
+    narrator: String(data.narrator || "").trim() || undefined,
+    subtitle: String(data.subtitle || "").trim() || undefined,
+    seriesName: String(data.seriesName || "").trim() || undefined,
+    sequence: String(data.sequence || "").trim() || undefined,
+    description: String(data.description || "").trim() || undefined,
+    asin: String(data.asin || "").trim() || undefined,
+    genres: genres?.length ? genres : undefined,
+    publishedYear: String(data.publishedYear || "").trim() || undefined,
+  };
+}
 
 /** Kavita MangaFormat Pdf = 4 */
 const KAVITA_PDF_FORMAT = 4;
@@ -56,6 +86,15 @@ function normalizeAbsChapters(raw: unknown): AbsChapter[] | undefined {
 }
 
 /** Fetch ABS track URLs for offline cache — prefers metadata (no play session). */
+async function fetchAbsChaptersFallback(pathId: string): Promise<AbsChapter[] | undefined> {
+  try {
+    const ch = await api.get<{ chapters: unknown }>(`/stream/abs/${pathId}/chapters`);
+    return normalizeAbsChapters(ch.data?.chapters);
+  } catch {
+    return undefined;
+  }
+}
+
 async function fetchAbsOfflinePlayInfo(
   itemId: string,
   shareToken?: string
@@ -66,6 +105,7 @@ async function fetchAbsOfflinePlayInfo(
   coverUrl: string;
   duration: number;
   chapters?: AbsChapter[];
+  meta: OfflineBookMeta;
   sessionId?: string;
 }> {
   const pathId = encodeURIComponent(itemId);
@@ -75,13 +115,18 @@ async function fetchAbsOfflinePlayInfo(
     const { data } = await api.get(`/share/${encodeURIComponent(shareToken)}/offline`);
     const tracks = absolutizeTracks((data.tracks || []) as Track[]);
     if (!tracks.length) throw new Error("No audio tracks found");
+    let chapters = normalizeAbsChapters(data.chapters);
+    if (!chapters && data.absItemId) {
+      chapters = await fetchAbsChaptersFallback(encodeURIComponent(String(data.absItemId)));
+    }
     return {
       tracks,
       title: data.title || "Audiobook",
       author: data.author || "",
       coverUrl: data.coverUrl ? toAbsoluteUrl(data.coverUrl) : "",
       duration: data.duration || 0,
-      chapters: normalizeAbsChapters(data.chapters),
+      chapters,
+      meta: normalizeOfflineMeta(data),
     };
   }
 
@@ -90,13 +135,18 @@ async function fetchAbsOfflinePlayInfo(
     const { data } = await api.get(`/stream/abs/${pathId}/offline`);
     const tracks = absolutizeTracks((data.tracks || []) as Track[]);
     if (tracks.length) {
+      let chapters = normalizeAbsChapters(data.chapters);
+      if (!chapters) {
+        chapters = await fetchAbsChaptersFallback(pathId);
+      }
       return {
         tracks,
         title: data.title || "Audiobook",
         author: data.author || "",
         coverUrl: data.coverUrl ? toAbsoluteUrl(data.coverUrl) : "",
         duration: data.duration || 0,
-        chapters: normalizeAbsChapters(data.chapters),
+        chapters,
+        meta: normalizeOfflineMeta(data),
       };
     }
   } catch {
@@ -121,12 +171,7 @@ async function fetchAbsOfflinePlayInfo(
 
   let chapters = normalizeAbsChapters(data.chapters);
   if (!chapters) {
-    try {
-      const ch = await api.get<{ chapters: unknown }>(`/stream/abs/${pathId}/chapters`);
-      chapters = normalizeAbsChapters(ch.data?.chapters);
-    } catch {
-      /* optional */
-    }
+    chapters = await fetchAbsChaptersFallback(pathId);
   }
 
   return {
@@ -136,6 +181,7 @@ async function fetchAbsOfflinePlayInfo(
     coverUrl: data.coverUrl ? toAbsoluteUrl(data.coverUrl) : "",
     duration: data.duration || 0,
     chapters,
+    meta: normalizeOfflineMeta(data),
     sessionId,
   };
 }
@@ -169,6 +215,11 @@ export async function downloadAbsOffline(
   const info = await fetchAbsOfflinePlayInfo(itemId, shareToken);
   if (!info.tracks.length) throw new Error("No audio tracks to download");
 
+  // Cover first so shelf artwork is ready while audio downloads.
+  if (info.coverUrl) {
+    await cacheCover(info.coverUrl);
+  }
+
   saveAbsOfflineManifest({
     itemId,
     title: info.title,
@@ -177,6 +228,7 @@ export async function downloadAbsOffline(
     tracks: info.tracks,
     totalDuration: info.duration,
     absChapters: info.chapters,
+    ...info.meta,
   });
 
   await cacheBookAudio(info.tracks, { immediate: true, onProgress });
@@ -204,12 +256,17 @@ export async function downloadRdOffline(opts: {
   if (!tracks?.length) throw new Error("No audio tracks to download");
   tracks = absolutizeTracks(tracks);
 
+  const coverUrl = opts.coverUrl ? toAbsoluteUrl(opts.coverUrl) : opts.coverUrl || "";
+  if (coverUrl) {
+    await cacheCover(coverUrl);
+  }
+
   saveRdOfflineManifest({
     libraryItemId: opts.libraryItemId,
     streamHistoryId: opts.streamHistoryId,
     title: opts.title,
     author: opts.author || "",
-    coverUrl: opts.coverUrl ? toAbsoluteUrl(opts.coverUrl) : opts.coverUrl || "",
+    coverUrl,
     tracks: tracks as never,
     totalDuration: opts.totalDuration || 0,
   });
@@ -245,11 +302,16 @@ export async function downloadEbookOffline(opts: {
   }
   if (isPdf == null) isPdf = true;
 
+  const coverUrl = opts.coverUrl ? toAbsoluteUrl(opts.coverUrl) : opts.coverUrl || "";
+  if (coverUrl) {
+    await cacheCover(coverUrl);
+  }
+
   saveEbookOfflineManifest({
     chapterId: opts.chapterId,
     title,
     author: opts.author || "",
-    coverUrl: opts.coverUrl || "",
+    coverUrl,
     isPdf,
     pages: pages || undefined,
     pagesCached: false,
@@ -274,7 +336,7 @@ export async function downloadEbookOffline(opts: {
     chapterId: opts.chapterId,
     title,
     author: opts.author || "",
-    coverUrl: opts.coverUrl || "",
+    coverUrl,
     isPdf: false,
     pages: pages || undefined,
     pagesCached: false,
@@ -282,7 +344,10 @@ export async function downloadEbookOffline(opts: {
 }
 
 export async function removeAbsOffline(itemId: string): Promise<void> {
+  const m = getAbsOfflineManifest(itemId);
   await clearAbsBookCache(itemId);
+  await clearAbsCoverCache(itemId);
+  if (m?.coverUrl) await clearCover(m.coverUrl);
   removeAbsOfflineManifest(itemId);
 }
 
@@ -299,10 +364,13 @@ export async function removeRdOffline(opts: {
     // Best-effort: no URL prefix without tracks
     await clearBookCache("h", opts.libraryItemId).catch(() => undefined);
   }
+  if (m?.coverUrl) await clearCover(m.coverUrl);
   removeRdOfflineManifest(opts);
 }
 
 export async function removeEbookOffline(chapterId: number): Promise<void> {
+  const m = getEbookOfflineManifest(chapterId);
   await clearEbookCache(chapterId);
+  if (m?.coverUrl) await clearCover(m.coverUrl);
   removeEbookOfflineManifest(chapterId);
 }

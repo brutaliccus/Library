@@ -103,9 +103,9 @@ function seqSortKey(seq?: string | null): number {
 }
 
 const iconBtn =
-  "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+  "inline-flex items-center justify-center w-12 h-12 shrink-0 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
 const iconBtnDanger =
-  "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-red-950/50 text-red-300 border border-red-800/60 hover:bg-red-900/60 hover:text-red-200 transition-colors";
+  "inline-flex items-center justify-center w-12 h-12 shrink-0 rounded-xl bg-red-950/50 text-red-300 border border-red-800/60 hover:bg-red-900/60 hover:text-red-200 transition-colors";
 const mobileIconBtn =
   "inline-flex items-center justify-center flex-1 min-w-0 h-12 max-w-[4.5rem] rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
 const mobileIconBtnDanger =
@@ -427,7 +427,7 @@ export default function LibraryBookDetail() {
     const offlineClass =
       variant === "mobile"
         ? "!h-12 !w-auto flex-1 min-w-0 max-w-[4.5rem] !rounded-xl"
-        : undefined;
+        : "!h-12 !w-12 !rounded-xl shrink-0";
     return (
       <>
         {itemId && (
@@ -773,17 +773,17 @@ export default function LibraryBookDetail() {
             {metaDetails()}
           </div>
 
-          <div className="hidden md:block mt-4">
+          <div className="hidden md:flex mt-4 w-full items-center gap-2">
             <button
               type="button"
               onClick={() => void handlePlay()}
               disabled={playLoading}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-base font-semibold rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
+              className="flex-1 min-w-0 h-12 inline-flex items-center justify-center gap-2 px-4 text-base font-semibold rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
             >
               {playLoading ? <Loader2 size={20} className="animate-spin" /> : <Headphones size={20} />}
               {hasLocalProgress ? "Resume" : "Listen"}
             </button>
-            <div className="mt-3 flex w-full flex-wrap items-center justify-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               {iconActions("desktop")}
             </div>
           </div>

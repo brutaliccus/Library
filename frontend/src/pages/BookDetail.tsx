@@ -444,7 +444,7 @@ export default function BookDetailPage() {
     );
 
   const iconBtn =
-    "inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
+    "inline-flex items-center justify-center w-12 h-12 shrink-0 rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
   const mobileIconBtn =
     "inline-flex items-center justify-center flex-1 min-w-0 h-12 max-w-[4.5rem] rounded-xl bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 transition-colors disabled:opacity-50";
 
@@ -693,17 +693,19 @@ export default function BookDetailPage() {
           </div>
 
           <div className="hidden md:block mt-4">
-            <button
-              type="button"
-              onClick={primaryCta.onClick}
-              disabled={primaryCta.disabled}
-              className={`w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-base font-semibold rounded-xl text-white transition-colors disabled:opacity-50 ${primaryCta.className}`}
-            >
-              {primaryCta.icon}
-              {primaryCta.label}
-            </button>
-            <div className="mt-3 flex w-full flex-wrap items-center justify-center gap-2">
-              {iconActions("desktop")}
+            <div className="flex w-full items-center gap-2">
+              <button
+                type="button"
+                onClick={primaryCta.onClick}
+                disabled={primaryCta.disabled}
+                className={`flex-1 min-w-0 h-12 inline-flex items-center justify-center gap-2 px-4 text-base font-semibold rounded-xl text-white transition-colors disabled:opacity-50 ${primaryCta.className}`}
+              >
+                {primaryCta.icon}
+                {primaryCta.label}
+              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                {iconActions("desktop")}
+              </div>
             </div>
             {!absMatch && !canRead && (
               <p className="mt-2 text-center text-xs text-gray-500">

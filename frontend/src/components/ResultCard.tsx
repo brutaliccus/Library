@@ -174,9 +174,11 @@ export default function ResultCard({
               </span>
             )}
           </div>
-          <h3 className="font-semibold text-gray-100 truncate">{result.title}</h3>
+          <h3 className="font-semibold text-gray-100 break-words whitespace-normal leading-snug">
+            {result.title}
+          </h3>
           {result.author && isAA && (
-            <p className="text-xs text-gray-400 truncate mt-0.5">{result.author}</p>
+            <p className="text-xs text-gray-400 break-words mt-0.5">{result.author}</p>
           )}
           <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-gray-400">
             {result.size > 0 && (

@@ -292,6 +292,11 @@ def build_split_plan_from_release_files(
 def parse_file_list_text(text: str) -> list[dict[str, Any]]:
     """Parse pasted ABB-style lines: path segments + filename + size."""
     rows: list[dict[str, Any]] = []
+    media_ext_re = re.compile(
+        r"\.(?:mp3|m4b|m4a|flac|ogg|opus|aac|wav|epub|mobi|azw3|pdf|"
+        r"jpg|jpeg|png|opf|cue|json|txt|nfo)$",
+        re.IGNORECASE,
+    )
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
         if not line:
@@ -300,7 +305,6 @@ def parse_file_list_text(text: str) -> list[dict[str, Any]]:
         if len(tokens) < 2:
             continue
         size_bytes = 0
-        # Size may be "2.07 MBs" (two tokens) or "1GB"
         if len(tokens) >= 2 and _SIZE_TOKEN_RE.match(f"{tokens[-2]} {tokens[-1]}"):
             size_bytes = parse_size_to_bytes(f"{tokens[-2]} {tokens[-1]}")
             tokens = tokens[:-2]
@@ -309,48 +313,42 @@ def parse_file_list_text(text: str) -> list[dict[str, Any]]:
             tokens = tokens[:-1]
         if not tokens:
             continue
-        # Last token with a file extension is the basename; prior tokens are folders.
-        filename_idx = None
-        for i in range(len(tokens) - 1, -1, -1):
-            if "." in tokens[i] and Path(tokens[i]).suffix:
-                filename_idx = i
-                break
-        if filename_idx is None:
+        body = " ".join(tokens)
+        if not media_ext_re.search(body):
             continue
-        folders = tokens[:filename_idx]
-        filename = tokens[filename_idx]
-        # If filename was split (rare), join remaining into name
-        if filename_idx < len(tokens) - 1:
+        # Prefer split after GraphicAudio marker: remainder is usually the filename.
+        split = re.match(
+            r"^(?P<top>.+?(?:\[\s*Graphic\s*Audio[^\]]*\]|Graphic\s*Audio))\s+(?P<rest>.+)$",
+            body,
+            re.I,
+        )
+        if split and media_ext_re.search(split.group("rest")):
+            top = split.group("top").strip()
+            filename = split.group("rest").strip()
+            path = f"{top}/{filename}"
+        else:
+            # Fallback: last token with extension; include leading "pt N" fragments.
+            filename_idx = None
+            for i in range(len(tokens) - 1, -1, -1):
+                if media_ext_re.search(tokens[i]):
+                    filename_idx = i
+                    break
+            if filename_idx is None:
+                continue
+            while filename_idx > 0 and re.fullmatch(
+                r"(?:pt\.?|part|cd|disc|\d+)", tokens[filename_idx - 1], re.I
+            ):
+                filename_idx -= 1
+            # If still a tiny name like "1.mp3", take a wider trailing window.
             filename = " ".join(tokens[filename_idx:])
-        # Folder tokens that look like multi-word names: join consecutive
-        # non-filename tokens as a single top folder when they were cell-separated
-        # in HTML. For pasted text we treat each run carefully:
-        # Prefer reconstructing as folder1/folder2/file when we see 2+ folder cells.
-        path = "/".join([*folders, filename]) if folders else filename
-        # Heuristic: ABB paste often has one multi-word root folder then nested folder.
-        # Without cell boundaries we cannot perfectly rebuild; keep joined path only
-        # when folders already contain slashes. Otherwise leave as flat filename —
-        # HTML parser is the primary path.
-        if folders and not any("/" in f for f in folders):
-            folder_blob = " ".join(folders)
-            split = re.match(
-                r"^(?P<top>.+?(?:\[\s*Graphic\s*Audio[^\]]*\]|Graphic\s*Audio))\s+(?P<rest>.+)$",
-                folder_blob,
-                re.I,
-            )
-            if split:
-                path = f"{split.group('top').strip()}/{split.group('rest').strip()}/{filename}"
-            else:
-                # Prefer a leading book folder when the line starts with a numbered title.
-                mnum = re.match(
-                    r"^(?P<top>\d+\s+.+?\s*-\s*.+?)\s+(?P<rest>.+)$",
-                    folder_blob,
-                )
-                if mnum and len(mnum.group("top")) < len(folder_blob):
-                    # Fall back to whole blob as top folder (stable per-book when paste
-                    # includes the same prefix on every row for that book).
-                    path = f"{folder_blob}/{filename}"
-                else:
-                    path = f"{folder_blob}/{filename}"
+            folders = " ".join(tokens[:filename_idx]).strip()
+            if len(Path(filename).stem) <= 2 and filename_idx > 0:
+                # Take from last " - " chunk as filename when possible.
+                m = re.match(r"^(?P<head>.+ - )(?P<name>.+\.[A-Za-z0-9]{2,5})$", body)
+                if m:
+                    folders = m.group("head").rstrip(" -")
+                    filename = m.group("name")
+            path = f"{folders}/{filename}" if folders else filename
         rows.append({"path": path, "size_bytes": size_bytes})
     return normalize_release_files(rows)
+

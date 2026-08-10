@@ -92,3 +92,36 @@ def test_exclude_skips_unique_cache_winner():
         assert debrid.download_provider_order(
             debrid.TORBOX, debrid.TORBOX, exclude=[debrid.TORBOX]
         ) == [debrid.RD]
+
+
+def test_torbox_preferred_only_rd_cached_picks_rd():
+    cached = {debrid.RD: {HASH}, debrid.TORBOX: set()}
+    with _both_configured():
+        assert debrid.pick_provider(HASH, cached, debrid.TORBOX) == debrid.RD
+
+
+def test_rd_preferred_only_torbox_cached_picks_torbox():
+    cached = {debrid.RD: set(), debrid.TORBOX: {HASH}}
+    with _both_configured():
+        assert debrid.pick_provider(HASH, cached, debrid.RD) == debrid.TORBOX
+
+
+def test_rd_preferred_neither_cached_picks_rd_first_in_order():
+    cached = {debrid.RD: set(), debrid.TORBOX: set()}
+    with _both_configured():
+        assert debrid.pick_provider(HASH, cached, debrid.RD) == debrid.RD
+        assert debrid.download_provider_order(debrid.RD, debrid.RD) == [
+            debrid.RD,
+            debrid.TORBOX,
+        ]
+
+
+def test_torbox_preferred_neither_cached_order_tries_torbox_first():
+    cached = {debrid.RD: set(), debrid.TORBOX: set()}
+    with _both_configured():
+        chosen = debrid.pick_provider(HASH, cached, debrid.TORBOX)
+        assert chosen == debrid.TORBOX
+        assert debrid.download_provider_order(chosen, debrid.TORBOX) == [
+            debrid.TORBOX,
+            debrid.RD,
+        ]

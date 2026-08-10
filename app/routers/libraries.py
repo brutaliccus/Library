@@ -81,13 +81,14 @@ def _require_owner(user: User):
         raise HTTPException(status_code=403, detail="Only the library owner can do this")
 
 
-def _token_sources(group: LibraryGroup) -> dict[str, str]:
-    """Per-provider key source: group (library DB), server (.env), or none."""
-    from app.config import get_settings
+async def _token_sources(group: LibraryGroup) -> dict[str, str]:
+    """Per-provider key source: group (library DB), server (Admin Config/env), or none."""
+    from app.services import instance_settings
 
-    env = get_settings()
-    rd = "group" if group.real_debrid_api_token else ("server" if env.real_debrid_api_token else "none")
-    tb = "group" if group.torbox_api_token else ("server" if env.torbox_api_token else "none")
+    server_rd = (await instance_settings.get_effective("config.real_debrid_api_token") or "").strip()
+    server_tb = (await instance_settings.get_effective("config.torbox_api_token") or "").strip()
+    rd = "group" if (group.real_debrid_api_token or "").strip() else ("server" if server_rd else "none")
+    tb = "group" if (group.torbox_api_token or "").strip() else ("server" if server_tb else "none")
     return {"rd": rd, "torbox": tb}
 
 
@@ -120,7 +121,7 @@ def _invite_link_for(code: str, base: str) -> str | None:
 
 async def _serialize_group(group: LibraryGroup, user: User, db: AsyncSession) -> dict:
     can_invite = user.library_role in ("owner", "admin")
-    sources = _token_sources(group)
+    sources = await _token_sources(group)
     invite_code = group.invite_code if can_invite else None
     invite_link = None
     if invite_code:

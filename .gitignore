@@ -94,6 +94,7 @@ scripts/scan_kavita.py
 scripts/test_*.py
 scripts/make_deploy_archive.py
 scripts/run_flaresolverr_local.ps1
+scripts/.capture_readme_screenshots_worker.mjs
 
 # Internal planning docs (keep local)
 docs/EREADER-PAGINATION-PLAN.md

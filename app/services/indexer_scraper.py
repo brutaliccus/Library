@@ -452,17 +452,24 @@ async def _run_scrape_job() -> None:
             total_upserted += abb_upserted
 
         # Recent-releases feed every Nth job (0 = disabled).
-        # In dual RSS-only mode, always poll feeds each job (cadence still applies
-        # to the shared ABB Flare+VPN recent pull inside _run_rss_job).
+        # ABB recent listings (Flare/VPN + hash resolve) stay on this cadence.
+        # Knaben native RSS is cheap HTTP — poll every job when knaben_rss_only.
         if cfg.rss_every_n_jobs > 0:
             _jobs_since_rss += 1
+            ran_cadence_rss = False
             if _jobs_since_rss >= cfg.rss_every_n_jobs:
                 _jobs_since_rss = 0
+                ran_cadence_rss = True
                 try:
                     total_upserted += await _run_rss_job(cfg)
-                    total_upserted += await _run_knaben_rss_poll(cfg)
                 except Exception as e:
                     logger.warning("Indexer scraper RSS ingest failed: %s", e)
+            run_knaben_rss = bool(cfg.knaben_rss_only) or ran_cadence_rss
+            if run_knaben_rss:
+                try:
+                    total_upserted += await _run_knaben_rss_poll(cfg)
+                except Exception as e:
+                    logger.warning("Knaben RSS poll failed: %s", e)
         else:
             # Knaben RSS when RSS cadence is off: run each job in RSS-only mode,
             # or after the full category crawl reaches maintenance.

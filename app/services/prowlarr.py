@@ -576,9 +576,8 @@ async def fetch_recent_scraper_releases(
                         size_bytes=int(r.get("size") or 0),
                     )
                 ][:limit_per_indexer]
-                # Do NOT hash-resolve here. Each missing infoHash is another Flare
-                # detail-page hit (~7s); resolving a dozen after every RSS pull is
-                # what burned the home IP. Hashes resolve on download / live search.
+                # Listing HTML has no magnets/infoHashes. Upsert requires hashes —
+                # resolve after merge (VPN proxy preferred; Flare only as fallback).
                 batches.append(abb_rows)
                 counts[label] = len(abb_rows)
             except Exception as e:
@@ -606,12 +605,18 @@ async def fetch_recent_scraper_releases(
             counts[idx["name"]] = len(batch)
 
     merged = merge_indexer_results(*batches) if batches else []
-    if not proxy:
-        abb = [r for r in merged if _is_audiobookbay_indexer(r.get("indexer") or "")]
-        other = [r for r in merged if r not in abb]
-        if abb:
-            abb = await enrich_audiobookbay_for_cache(abb)
-            merged = merge_indexer_results(abb, other)
+    # Indexer cache keys rows by info_hash — ABB listing rows are dropped without
+    # enrichment. Prefer Mullvad/proxy detail fetches; without proxy, keep a tight
+    # Flare cap so RSS still ingests a few titles instead of zero.
+    abb = [r for r in merged if _is_audiobookbay_indexer(r.get("indexer") or "")]
+    other = [r for r in merged if r not in abb]
+    if abb:
+        abb = await enrich_audiobookbay_for_cache(
+            abb,
+            limit=12 if proxy else 6,
+            timeout=120.0 if proxy else 45.0,
+        )
+        merged = merge_indexer_results(abb, other)
     return merged, counts
 
 

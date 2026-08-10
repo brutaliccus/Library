@@ -178,9 +178,14 @@ def env_defaults() -> dict[str, Any]:
     s = get_settings()
     rss_n = s.scraper_rss_every_n_jobs
     if rss_n is None:
-        # ABB RSS-only uses Flare+Chromium for listings + hash resolve. Every-job
-        # cadence (~30s) kept the Pi under continuous Chromium load; space it out.
-        rss_n = 10 if s.abb_rss_only else 3
+        # ABB recent ingest needs detail-page hash resolve. With Mullvad/proxy that
+        # is cheap direct HTTP — every job is fine. Without proxy, Flare/Chromium
+        # load means space ABB pulls out (Knaben RSS still runs every job).
+        if s.abb_rss_only:
+            proxy = (getattr(s, "abb_proxy_url", "") or "").strip()
+            rss_n = 1 if proxy else 10
+        else:
+            rss_n = 3
     return {
         "interval_seconds": s.scraper_interval_seconds,
         "queries_per_job": s.scraper_queries_per_job,

@@ -694,48 +694,50 @@ async def search_audiobookbay_multi(
         if remaining is not None and remaining < 8:
             logger.warning("ABB overall budget exhausted before Mullvad Flare for %r", query[:60])
             return []
-        # Match ABB site depth (abb_live_search_pages, default 6). Older code
-        # hard-capped at 1–2 pages so the app looked much thinner than a direct
-        # site search. ~15–20s/page through Mullvad Flare after CF warmup.
+        # Paginate under the budget and KEEP partial hits. A single wait_for around
+        # search_deep(6 pages) used to time out and return [] even after page 1
+        # succeeded — that looked like "ABB search is broken".
         live_pages = max(
             1,
             min(12, int(getattr(settings, "abb_live_search_pages", None) or 6)),
         )
         if remaining is not None:
-            # Keep at least one page; fit as many as the budget allows.
-            live_pages = max(1, min(live_pages, int(max(15.0, remaining - 20.0) // 18)))
-        flare_timeout = (
-            float(live_pages) * 20.0 + 40.0
-            if remaining is None
-            else max(20.0, remaining - 1.0)
-        )
+            # ~25s/page through Mullvad Flare after CF warmup; leave a cushion.
+            live_pages = max(1, min(live_pages, int(max(25.0, remaining - 15.0) // 25)))
+        deep: list[dict[str, Any]] = []
+        pages_done = 0
         try:
-            deep = await asyncio.wait_for(
-                audiobookbay.search_deep(
-                    query, max_pages=live_pages, resolve_hashes=False, for_live=True,
-                ),
-                timeout=flare_timeout,
-            )
-            if deep:
-                logger.info(
-                    "ABB via Mullvad Flare: %s results (≤%s pages) for %r",
-                    len(deep[:limit]),
-                    live_pages,
-                    query[:60],
-                )
-                # Prefer returning the full listing quickly — magnets resolve on
-                # Request/Stream from the ABB detail URL. Brief enrich for a few
-                # hashes helps cache/debrid badges without blocking the UI.
-                return await enrich_audiobookbay_for_cache(deep[:limit], limit=6, timeout=12.0)
-            logger.info("ABB Mullvad Flare returned 0 results for %r", query[:60])
-        except asyncio.TimeoutError:
-            logger.warning(
-                "ABB Mullvad Flare timed out after %.0fs for %r",
-                flare_timeout,
-                query[:60],
-            )
+            async for _page, _max_p, fresh in audiobookbay.iter_search_pages(
+                query, max_pages=live_pages, for_live=True,
+            ):
+                pages_done = _page
+                if fresh:
+                    deep.extend(fresh)
+                rem = _remaining()
+                # Stop while we still have time to return / enrich — don't burn
+                # the whole budget on page 4+ and then hand the client nothing.
+                if rem is not None and rem < 20:
+                    logger.info(
+                        "ABB Mullvad Flare stopping early with %s hits after %s page(s) "
+                        "(%.0fs budget left) for %r",
+                        len(deep),
+                        pages_done,
+                        rem,
+                        query[:60],
+                    )
+                    break
         except Exception as e:
             logger.warning("ABB Mullvad Flare failed for %r: %s", query[:60], e)
+        if deep:
+            logger.info(
+                "ABB via Mullvad Flare: %s results (%s page(s)) for %r",
+                len(deep[:limit]),
+                pages_done or "?",
+                query[:60],
+            )
+            # Magnets resolve on Request/Stream from the ABB detail URL.
+            return await enrich_audiobookbay_for_cache(deep[:limit], limit=6, timeout=12.0)
+        logger.info("ABB Mullvad Flare returned 0 results for %r", query[:60])
         return []
 
     # --- No VPN: Jackett / Prowlarr (host IP) ---

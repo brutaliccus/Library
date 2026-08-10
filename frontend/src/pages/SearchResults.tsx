@@ -434,7 +434,8 @@ export default function SearchResults({
         timeout: 180_000,
       });
       return data as {
-        results: SearchResult[];
+        results?: SearchResult[];
+        releases?: SearchResult[];
         count: number;
         source?: string;
         timedOut?: boolean;
@@ -657,7 +658,8 @@ export default function SearchResults({
   const totalPages = data ? Math.ceil(data.totalItems / pageSize) : 0;
   const heading = buildHeading(q, activeCategories, genres);
   const aaHits = (aaResults?.results || []).slice(0, 12);
-  const abbHits = (abbReleases?.results || []).slice(0, 12);
+  // Prefer ``results``; fall back to ``releases`` for older API payloads.
+  const abbHits = (abbReleases?.results || abbReleases?.releases || []).slice(0, 12);
 
   return (
     <div

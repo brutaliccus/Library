@@ -381,7 +381,7 @@ async def search_abb_releases(
     """
     query = (q or "").strip()
     if len(query) < 2:
-        return {"results": [], "count": 0, "timedOut": False, "source": "abb"}
+        return {"results": [], "releases": [], "count": 0, "timedOut": False, "source": "abb"}
 
     rows: list[dict] = []
     timed_out = False
@@ -430,7 +430,13 @@ async def search_abb_releases(
             logger.debug("ABB Prowlarr fallback failed: %s", e)
 
     if not rows:
-        return {"results": [], "count": 0, "timedOut": timed_out, "source": "abb"}
+        return {
+            "results": [],
+            "releases": [],
+            "count": 0,
+            "timedOut": timed_out,
+            "source": "abb",
+        }
 
     try:
         await indexer_cache.upsert_torrents(rows)
@@ -449,8 +455,11 @@ async def search_abb_releases(
     except asyncio.TimeoutError:
         enriched = await _annotate_rd_cached(enriched, live=False)
     shown = enriched[:limit]
+    # ``results`` is Find Downloads–shaped; ``releases`` kept as an alias so a
+    # mismatched frontend/backend deploy still shows ABB hits.
     return {
         "results": shown,
+        "releases": shown,
         "count": len(shown),
         "totalFetched": len(enriched),
         "hiddenCount": max(0, len(enriched) - len(shown)),

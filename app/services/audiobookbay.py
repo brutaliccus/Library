@@ -213,14 +213,26 @@ def _page_delay() -> float:
 
 
 def _scrape_enabled(*, for_live: bool = False) -> bool:
+    """Whether listing scrape may run.
+
+    Live/on-demand search may always attempt a cheap direct listing fetch.
+    FlareSolverr (home-IP risk) stays gated inside ``_flare_allowed``.
+    Background deep crawl still requires ``abb_deep_search_enabled``.
+    """
     if for_live:
-        # On-demand download search through Mullvad Flare is intentional and rare —
-        # allow it whenever an ABB proxy is configured even if ABB_LIVE_SEARCH_ENABLED
-        # is off (that flag is for unprotected Flare from the home IP).
-        if (getattr(settings, "abb_proxy_url", "") or "").strip():
-            return True
-        return bool(getattr(settings, "abb_live_search_enabled", True))
+        return True
     return bool(settings.abb_deep_search_enabled)
+
+
+def _flare_allowed() -> bool:
+    """FlareSolverr ABB traffic — VPN proxy, or an explicit live/deep opt-in."""
+    if not (getattr(settings, "flaresolverr_url", "") or "").strip():
+        return False
+    if (getattr(settings, "abb_proxy_url", "") or "").strip():
+        return True
+    if bool(getattr(settings, "abb_live_search_enabled", False)):
+        return True
+    return bool(getattr(settings, "abb_deep_search_enabled", False))
 
 
 def _max_pages(override: int | None = None, *, for_live: bool = False) -> int:
@@ -395,57 +407,62 @@ async def _fetch_via_flare(url: str, *, warmup: bool = False) -> str | None:
 
 
 async def _direct_get(url: str, timeout: float = 12.0) -> str | None:
-    """Cheap direct HTTP — never FlareSolverr (used for mirror probing)."""
+    """Cheap HTTP GET — never FlareSolverr. Uses ``ABB_PROXY_URL`` when set."""
     headers = {
         "User-Agent": _USER_AGENT,
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    proxy = (getattr(settings, "abb_proxy_url", "") or "").strip() or None
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=timeout, proxy=proxy,
+        ) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code < 400 and not _is_cloudflare(resp.text):
                 return resp.text
+            if resp.status_code < 400 and _is_cloudflare(resp.text):
+                logger.debug("ABB direct GET got Cloudflare challenge for %s", url)
     except Exception as e:
         logger.debug("ABB direct GET failed for %s: %s", url, e)
     return None
 
 
 async def _fetch_html(url: str, timeout: float = 20.0, allow_flare: bool = True) -> str | None:
-    """Direct GET when possible; FlareSolverr session for Cloudflare-only mirrors."""
+    """Prefer direct HTTP (optionally via Mullvad proxy); FlareSolverr only if needed.
+
+    Hosts were previously marked Flare-only, which skipped working direct
+    responses and returned empty results whenever FlareSolverr/VPN was down.
+    """
     async with _FETCH_LOCK:
-        if not _needs_flare_only(url):
-            html = await _direct_get(url, timeout=min(timeout, 15.0))
-            if html:
-                return html
-        if not allow_flare or not settings.flaresolverr_url:
-            if _needs_flare_only(url):
-                return await _fetch_via_flare(url, warmup=_should_warmup(url))
+        html = await _direct_get(url, timeout=min(timeout, 15.0))
+        if html:
+            return html
+        if not allow_flare or not _flare_allowed():
             return None
         return await _fetch_via_flare(url, warmup=_should_warmup(url))
 
 
 async def _resolve_base_url() -> str | None:
-    """Pick a working ABB mirror. Real mirrors need FlareSolverr from this network."""
+    """Pick a working ABB mirror — direct first, then Flare when allowed."""
     global _BASE_URL
     if _BASE_URL:
         return _BASE_URL
 
     max_tries = max(1, min(len(_SITE_CANDIDATES), int(getattr(settings, "abb_mirror_max_tries", 3) or 3)))
     for base in _SITE_CANDIDATES[:max_tries]:
-        if _needs_flare_only(base):
+        html = await _direct_get(base, timeout=8.0)
+        if html and "postTitle" in html:
+            _BASE_URL = base
+            logger.info("AudioBook Bay base URL (direct): %s", base)
+            return base
+        if _flare_allowed():
             html = await _fetch_via_flare(base, warmup=True)
             if html and "postTitle" in html:
                 _BASE_URL = base
                 logger.info("AudioBook Bay base URL (FlareSolverr): %s", base)
                 return base
             await _destroy_flare_session()
-            continue
-        html = await _direct_get(base, timeout=8.0)
-        if html and "postTitle" in html:
-            _BASE_URL = base
-            logger.info("AudioBook Bay base URL: %s", base)
-            return base
 
     logger.warning("Could not reach any AudioBook Bay mirror")
     return None
@@ -761,6 +778,14 @@ async def resolve_hashes_for_results(
         key = _abb_details_url(r) or (r.get("downloadUrl") or r.get("guid") or "")
         out.append(by_key.get(key, r) if key in by_key else r)
     return out
+
+
+def is_abb_page_url(url: str | None) -> bool:
+    """True when ``url`` points at an AudioBookBay details/listing page (not a magnet)."""
+    if not url:
+        return False
+    compact = url.lower().replace(" ", "")
+    return "audiobookbay" in compact or "/abss/" in compact
 
 
 async def resolve_magnet_from_details(details_url: str, title: str = "") -> tuple[str | None, str | None]:

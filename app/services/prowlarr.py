@@ -651,6 +651,50 @@ async def enrich_audiobookbay_for_cache(
         return rows
 
 
+async def _abb_live_scrape(
+    query: str,
+    *,
+    max_pages: int,
+    remaining_fn,
+    label: str,
+) -> list[dict[str, Any]]:
+    """Paginate ABB listings under a time budget; keep partial hits."""
+    from app.services import audiobookbay
+
+    deep: list[dict[str, Any]] = []
+    pages_done = 0
+    try:
+        async for page, _max_p, fresh in audiobookbay.iter_search_pages(
+            query, max_pages=max_pages, for_live=True,
+        ):
+            pages_done = page
+            if fresh:
+                deep.extend(fresh)
+            rem = remaining_fn()
+            if rem is not None and rem < 12:
+                logger.info(
+                    "ABB %s stopping early with %s hits after %s page(s) "
+                    "(%.0fs budget left) for %r",
+                    label,
+                    len(deep),
+                    pages_done,
+                    rem,
+                    query[:60],
+                )
+                break
+    except Exception as e:
+        logger.warning("ABB %s failed for %r: %s", label, query[:60], e)
+    if deep:
+        logger.info(
+            "ABB %s: %s results (%s page(s)) for %r",
+            label,
+            len(deep),
+            pages_done or "?",
+            query[:60],
+        )
+    return deep
+
+
 async def search_audiobookbay_multi(
     queries: list[str],
     *,
@@ -661,13 +705,13 @@ async def search_audiobookbay_multi(
 ) -> list[dict[str, Any]]:
     """Search ABB for live download UI.
 
-    When ``ABB_PROXY_URL`` (gluetun/Mullvad) is set, use FlareSolverr through that
-    proxy only. Jackett/Prowlarr ABB always egress from the host IP and cannot use
-    gluetun — after a home-IP ban they time out and must not be preferred.
+    Waterfall (keeps partial successes; never blank the UI after one path dies):
+    1. Listing scrape when VPN proxy is set (direct via proxy, Flare if needed)
+    2. Jackett Torznab
+    3. Prowlarr ABB indexer
+    4. Opportunistic listing scrape (direct HTTP; Flare only if explicitly allowed)
 
-    Without a proxy: Jackett Torznab first (fast). Optional Flare fallback is
-    gated by ``allow_flare_fallback`` (live UI usually leaves it off to protect
-    the home IP). ``overall_timeout`` caps the whole chain.
+    ``overall_timeout`` caps the whole chain.
     """
     if not queries:
         return []
@@ -685,97 +729,95 @@ async def search_audiobookbay_multi(
         return max(0.0, deadline - time.monotonic())
 
     proxy = (getattr(settings, "abb_proxy_url", "") or "").strip()
+    scraped_already = False
 
-    # --- Mullvad path: Flare via gluetun (skip Jackett host-IP egress) ---
+    def _live_pages(default_pages: int, *, per_page_budget: float) -> int:
+        live_pages = max(1, min(12, int(default_pages)))
+        rem = _remaining()
+        if rem is not None:
+            live_pages = max(
+                1,
+                min(live_pages, int(max(per_page_budget, rem - 10.0) // per_page_budget)),
+            )
+        return live_pages
+
+    # --- 1) VPN / Mullvad: scrape first (direct through gluetun, Flare backup) ---
     if proxy and allow_flare_fallback:
-        from app.services import audiobookbay
-
         remaining = _remaining()
         if remaining is not None and remaining < 8:
-            logger.warning("ABB overall budget exhausted before Mullvad Flare for %r", query[:60])
-            return []
-        # Paginate under the budget and KEEP partial hits. A single wait_for around
-        # search_deep(6 pages) used to time out and return [] even after page 1
-        # succeeded — that looked like "ABB search is broken".
-        live_pages = max(
-            1,
-            min(12, int(getattr(settings, "abb_live_search_pages", None) or 6)),
-        )
-        if remaining is not None:
-            # ~25s/page through Mullvad Flare after CF warmup; leave a cushion.
-            live_pages = max(1, min(live_pages, int(max(25.0, remaining - 15.0) // 25)))
-        deep: list[dict[str, Any]] = []
-        pages_done = 0
-        try:
-            async for _page, _max_p, fresh in audiobookbay.iter_search_pages(
-                query, max_pages=live_pages, for_live=True,
-            ):
-                pages_done = _page
-                if fresh:
-                    deep.extend(fresh)
-                rem = _remaining()
-                # Stop while we still have time to return / enrich — don't burn
-                # the whole budget on page 4+ and then hand the client nothing.
-                if rem is not None and rem < 20:
-                    logger.info(
-                        "ABB Mullvad Flare stopping early with %s hits after %s page(s) "
-                        "(%.0fs budget left) for %r",
-                        len(deep),
-                        pages_done,
-                        rem,
-                        query[:60],
-                    )
-                    break
-        except Exception as e:
-            logger.warning("ABB Mullvad Flare failed for %r: %s", query[:60], e)
-        if deep:
-            logger.info(
-                "ABB via Mullvad Flare: %s results (%s page(s)) for %r",
-                len(deep[:limit]),
-                pages_done or "?",
-                query[:60],
+            logger.warning("ABB overall budget exhausted before proxy scrape for %r", query[:60])
+        else:
+            live_pages = _live_pages(
+                getattr(settings, "abb_live_search_pages", None) or 6,
+                per_page_budget=25.0,
             )
-            # Magnets resolve on Request/Stream from the ABB detail URL.
-            return await enrich_audiobookbay_for_cache(deep[:limit], limit=6, timeout=12.0)
-        logger.info("ABB Mullvad Flare returned 0 results for %r", query[:60])
-        return []
+            deep = await _abb_live_scrape(
+                query,
+                max_pages=live_pages,
+                remaining_fn=_remaining,
+                label="proxy scrape",
+            )
+            scraped_already = True
+            if deep:
+                return await enrich_audiobookbay_for_cache(deep[:limit], limit=6, timeout=12.0)
+            logger.info("ABB proxy scrape returned 0 — trying Jackett/direct for %r", query[:60])
 
-    # --- No VPN: Jackett / Prowlarr (host IP) ---
+    # --- 2) Jackett Torznab ---
     jt = max(8, int(jackett_timeout if jackett_timeout is not None else 18))
-    jackett_budget = jt if deadline is None else max(5, min(jt, int(_remaining() or 0)))
-    if jackett_budget < 5:
-        logger.warning("ABB overall budget exhausted before Jackett for %r", query[:60])
-        return []
-
-    jackett_rows = await search_jackett_audiobookbay(query, limit=limit, timeout=jackett_budget)
-    if jackett_rows:
-        logger.info("ABB Jackett direct: %s results for %r", len(jackett_rows), query[:60])
-        # Torznab magnets already carry infoHash — skip Flare detail crawls here.
-        return await enrich_audiobookbay_for_cache(jackett_rows, limit=0)
-
-    remaining = _remaining()
-    if remaining is not None and remaining < 4:
-        logger.warning("ABB overall budget exhausted before Prowlarr for %r", query[:60])
-        return []
-
-    iid = await get_audiobookbay_indexer_id()
-    if not iid:
-        return []
-    try:
-        pt = prowlarr_timeout if prowlarr_timeout is not None else 12
-        if remaining is not None:
-            pt = max(4, min(int(pt), int(remaining)))
-        return await search(
-            query,
-            indexer_ids=[iid],
-            limit=limit,
-            timeout=pt,
+    rem = _remaining()
+    jackett_budget = jt if rem is None else max(0, min(jt, int(rem)))
+    if jackett_budget >= 5:
+        jackett_rows = await search_jackett_audiobookbay(
+            query, limit=limit, timeout=jackett_budget,
         )
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 400:
-            logger.warning("Prowlarr ABB indexer unavailable — fix Jackett/FlareSolverr or re-enable in Prowlarr")
-            return []
-        raise
+        if jackett_rows:
+            logger.info("ABB Jackett direct: %s results for %r", len(jackett_rows), query[:60])
+            return await enrich_audiobookbay_for_cache(jackett_rows, limit=0)
+    elif rem is not None and rem < 5:
+        logger.warning("ABB overall budget exhausted before Jackett for %r", query[:60])
+
+    # --- 3) Prowlarr ABB indexer ---
+    remaining = _remaining()
+    if remaining is None or remaining >= 4:
+        iid = await get_audiobookbay_indexer_id()
+        if iid:
+            try:
+                pt = prowlarr_timeout if prowlarr_timeout is not None else 12
+                if remaining is not None:
+                    pt = max(4, min(int(pt), int(remaining)))
+                prow_rows = await search(
+                    query,
+                    indexer_ids=[iid],
+                    limit=limit,
+                    timeout=pt,
+                )
+                if prow_rows:
+                    logger.info("ABB Prowlarr: %s results for %r", len(prow_rows), query[:60])
+                    return prow_rows
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 400:
+                    logger.warning(
+                        "Prowlarr ABB indexer unavailable — fix Jackett/FlareSolverr "
+                        "or re-enable in Prowlarr"
+                    )
+                else:
+                    raise
+    else:
+        logger.warning("ABB overall budget exhausted before Prowlarr for %r", query[:60])
+
+    # --- 4) Opportunistic listing scrape (direct; Flare only when allowed) ---
+    if not scraped_already and (_remaining() is None or (_remaining() or 0) >= 8):
+        live_pages = _live_pages(3, per_page_budget=12.0)
+        deep = await _abb_live_scrape(
+            query,
+            max_pages=live_pages,
+            remaining_fn=_remaining,
+            label="direct scrape",
+        )
+        if deep:
+            return await enrich_audiobookbay_for_cache(deep[:limit], limit=4, timeout=10.0)
+
+    return []
 
 
 async def search_jackett_audiobookbay(

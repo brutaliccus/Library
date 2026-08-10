@@ -1,0 +1,107 @@
+From f3814a375df0bb471d624a8aa227a042645f3b6b Mon Sep 17 00:00:00 2001
+From: brutaliccus <jeb32411@gmail.com>
+Date: Mon, 10 Aug 2026 07:32:52 -0400
+Subject: [PATCH] Floor score for strong title+author+sequence when duration is
+ unknown.
+
+Without local runtime, clear matches like Honeybites / I.S. Belle topped out near 0.46 and never auto-applied. Keep wrong book numbers rejected.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ app/fixer/scoring.py               | 14 ++++++++
+ app/tests/test_fixer_v5_scoring.py | 55 ++++++++++++++++++++++++++++++
+ 2 files changed, 69 insertions(+)
+
+diff --git a/app/fixer/scoring.py b/app/fixer/scoring.py
+index c0dd1f1..e6feb15 100644
+--- a/app/fixer/scoring.py
++++ b/app/fixer/scoring.py
+@@ -1102,6 +1102,20 @@ def score_product_for_metadata(
+     if series_match and (author_good or narrator_good):
+         score = max(score, 0.72)
+ 
++    # Missing local duration (ffprobe miss / unscanned m4b) must not block a
++    # clear identity. Without a duration signal, title+author+sequence tops out
++    # near ~0.46 and never clears min_score — e.g. Honeybites / I.S. Belle with
++    # empty runtime vs Audible Honeybloods #2. Require agreeing book numbers so
++    # same-author adjacent volumes stay rejected.
++    if (
++        duration_result["status"] == "unknown"
++        and title_score >= 0.85
++        and author_good
++        and sequence_match
++        and not _number_unconfirmed
++    ):
++        score = max(score, 0.72)
++
+     # Perfect confidence path:
+     # duration <= 3% difference + title match + author match
+     # should be considered extremely reliable.
+diff --git a/app/tests/test_fixer_v5_scoring.py b/app/tests/test_fixer_v5_scoring.py
+index 887d94d..1c9c9da 100644
+--- a/app/tests/test_fixer_v5_scoring.py
++++ b/app/tests/test_fixer_v5_scoring.py
+@@ -682,5 +682,60 @@ class SubstringSeriesCoincidentalMatchTests(unittest.TestCase):
+         self.assertLess(score, 0.70, f"score={score}")
+ 
+ 
++class MissingDurationIdentityFloorTests(unittest.TestCase):
++    """Title + author + agreeing book number must auto-apply even when local
++    duration was never probed (common for some prebuilt .m4b imports).
++    """
++
++    def test_honeybites_without_duration_clears_min_score(self):
++        clues = {
++            "title": "Honeybites, Book 2",
++            "raw_title": "Honeybites, Book 2",
++            "series": "",
++            "author": "I.S. Belle",
++            "narrator": "",
++            "book_number": "2",
++            "book_number_source": "title",
++        }
++        p = product(
++            asin="B0HONEYBIT2",
++            title="Honeybites",
++            series="Honeybloods",
++            sequence="2",
++            authors=("I.S. Belle",),
++            narrators=("Jen Jayden",),
++            minutes=274.0,
++        )
++        # Pre-fix baseline without the unknown-duration floor was ~0.46.
++        score = FIXER.score_product_for_metadata(clues, p, None)
++        self.assertGreaterEqual(score, 0.70, f"score={score}")
++        self.assertGreaterEqual(
++            FIXER.score_product_for_metadata(clues, p, 274.0),
++            0.90,
++        )
++
++    def test_missing_duration_still_rejects_wrong_book_number(self):
++        clues = {
++            "title": "Honeybites, Book 2",
++            "raw_title": "Honeybites, Book 2",
++            "series": "",
++            "author": "I.S. Belle",
++            "narrator": "",
++            "book_number": "2",
++            "book_number_source": "title",
++        }
++        p = product(
++            asin="B0HONEYBLO1",
++            title="Honeybloods",
++            series="Honeybloods",
++            sequence="1",
++            authors=("I.S. Belle",),
++            narrators=("Jen Jayden",),
++            minutes=240.0,
++        )
++        score = FIXER.score_product_for_metadata(clues, p, None)
++        self.assertLess(score, 0.70, f"score={score}")
++
++
+ if __name__ == "__main__":
+     unittest.main()
+-- 
+2.47.1.windows.2
+

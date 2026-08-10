@@ -12,6 +12,7 @@ from app.services.libraforge import (
     metadata_matched_without_apply,
     organizer_moved_files,
     organizer_move_targets,
+    organizer_stale_existing_skips,
     quarantine_reason_from_report,
     run_failed,
 )
@@ -224,6 +225,68 @@ def test_organizer_move_targets():
     }
     assert organizer_move_targets(report) == ["/audiobooks/Author/Title"]
     assert organizer_move_targets({}) == []
+
+
+def test_organizer_stale_existing_skips():
+    report = {
+        "stats": {
+            "moves_succeeded": 0,
+            "move_items": [
+                {
+                    "structure": "skipped_existing_book_folders",
+                    "review_reasons": [
+                        "title matches series name; using sequence only",
+                        "skipped: folder name already matches the naming template",
+                    ],
+                    "source": "/audiobooks/.unorganized/req_34_Honeybloods/Honeybloods/book.m4b",
+                    "target": "/audiobooks/I.S. Belle/Honeybloods/Honeybloods",
+                },
+                {
+                    "structure": "skipped_unknown_author",
+                    "source": "/audiobooks/.unorganized/x/a.m4b",
+                    "target": "/audiobooks/Unknown/a",
+                },
+            ],
+        }
+    }
+    stale = organizer_stale_existing_skips(report)
+    assert len(stale) == 1
+    assert stale[0]["target"].endswith("/Honeybloods")
+
+
+def test_force_apply_stale_organizer_skips(tmp_path, monkeypatch):
+    from app.services import forge_pipeline
+
+    library = tmp_path / "audiobooks"
+    staging = library / ".unorganized" / "req_34_Honeybloods"
+    book_dir = staging / "Honeybloods"
+    book_dir.mkdir(parents=True)
+    src = book_dir / "Honeybloods- Book 1.m4b"
+    src.write_bytes(b"audio")
+    (book_dir / "libraforge.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(library))
+    report = {
+        "stats": {
+            "moves_succeeded": 0,
+            "move_items": [
+                {
+                    "structure": "skipped_existing_book_folders",
+                    "review_reasons": [
+                        "skipped: folder name already matches the naming template"
+                    ],
+                    "source": str(src),
+                    "target": str(library / "I.S. Belle" / "Honeybloods" / "Honeybloods"),
+                }
+            ],
+        }
+    }
+    n = forge_pipeline._force_apply_stale_organizer_skips(staging, report)
+    assert n == 1
+    dest = library / "I.S. Belle" / "Honeybloods" / "Honeybloods" / src.name
+    assert dest.is_file()
+    assert dest.read_bytes() == b"audio"
+    assert not src.exists()
+    assert (dest.parent / "libraforge.json").is_file()
 
 
 def test_quarantine_reason_from_manual_items():

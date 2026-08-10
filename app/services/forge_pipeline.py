@@ -871,6 +871,99 @@ def _staging_audio_hardlinked(staging: Path) -> bool:
     return True
 
 
+def _force_apply_stale_organizer_skips(
+    staging: Path,
+    report: dict[str, Any],
+) -> int:
+    """Move books LibraForge skipped as already-organized while still in staging.
+
+    Returns the number of audio files successfully placed under the library root.
+    """
+    skips = libraforge.organizer_stale_existing_skips(report)
+    if not skips:
+        return 0
+    library_root = Path(settings.audiobook_dir).resolve()
+    staging_resolved = staging.resolve()
+    moved_n = 0
+    for move in skips:
+        source = Path(str(move.get("source") or ""))
+        target_raw = Path(str(move.get("target") or ""))
+        if not source.is_file():
+            continue
+        try:
+            source_resolved = source.resolve()
+        except OSError:
+            continue
+        try:
+            source_resolved.relative_to(staging_resolved)
+        except ValueError:
+            continue
+        # Target may be a folder or a full file path.
+        if target_raw.suffix.lower() in AUDIO_EXTENSIONS:
+            dest_file = target_raw
+            dest_dir = dest_file.parent
+        else:
+            dest_dir = target_raw
+            dest_file = dest_dir / source.name
+        try:
+            dest_dir_resolved = dest_dir.resolve()
+        except OSError:
+            dest_dir_resolved = dest_dir
+        # Never "recover" into another staging tree or outside the library root.
+        if _path_under_staging_roots(dest_dir_resolved):
+            continue
+        try:
+            dest_dir_resolved.relative_to(library_root)
+        except ValueError:
+            continue
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            if dest_file.exists():
+                dest_file.unlink()
+            shutil.move(str(source_resolved), str(dest_file))
+            moved_n += 1
+            # Bring sidecars / cover sitting next to the source audio.
+            for sibling in source_resolved.parent.iterdir():
+                if not sibling.is_file() or sibling == source_resolved:
+                    continue
+                name_l = sibling.name.lower()
+                if not (
+                    name_l.endswith(".json")
+                    or name_l.endswith(".cue")
+                    or name_l.endswith(".jpg")
+                    or name_l.endswith(".jpeg")
+                    or name_l.endswith(".png")
+                    or name_l.endswith(".nfo")
+                    or "libraforge" in name_l
+                ):
+                    continue
+                sibling_dest = dest_dir / sibling.name
+                try:
+                    if sibling_dest.exists():
+                        sibling_dest.unlink()
+                    shutil.move(str(sibling), str(sibling_dest))
+                except OSError as e:
+                    logger.warning(
+                        "Stale-skip sidecar move failed %s -> %s: %s",
+                        sibling,
+                        sibling_dest,
+                        e,
+                    )
+            logger.info(
+                "Stale Folder Forge skip recovered: %s -> %s",
+                source_resolved,
+                dest_file,
+            )
+        except OSError as e:
+            logger.warning(
+                "Stale Folder Forge skip recovery failed %s -> %s: %s",
+                source_resolved,
+                dest_file,
+                e,
+            )
+    return moved_n
+
+
 def _cleanup_staging_after_folder_forge(
     staging: Path,
     *,
@@ -2711,6 +2804,19 @@ async def run_forge_after_download(
             # tree, so a no-op organize is expected; drop staging links and finalize.
             leftover_audio = _collect_audio(staging)
             moved = libraforge.organizer_moved_files(report)
+            if leftover_audio and not moved:
+                # Title == series (Honeybloods book 1) can make LibraForge skip as
+                # "already matches naming template" while files remain in staging.
+                forced = _force_apply_stale_organizer_skips(staging, report)
+                if forced:
+                    logger.info(
+                        "Folder Forge stale-skip recovery moved %s item(s) for request %s",
+                        forced,
+                        request_id,
+                    )
+                    leftover_audio = _collect_audio(staging)
+                    if not leftover_audio:
+                        moved = True
             if leftover_audio and not moved:
                 if _staging_audio_hardlinked(staging):
                     logger.info(

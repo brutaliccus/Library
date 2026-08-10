@@ -762,6 +762,37 @@ def organizer_move_targets(report: dict[str, Any]) -> list[str]:
     return out
 
 
+def organizer_stale_existing_skips(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Skipped 'already organized' move_items that still have source + target paths.
+
+    LibraForge can emit ``skipped_existing_book_folders`` when title == series
+    (e.g. Honeybloods book 1) even though the audio still lives under
+    ``.unorganized/req_*``. Callers can force-apply those targets.
+    """
+    stats = report.get("stats") or {}
+    if not isinstance(stats, dict):
+        return []
+    moves = stats.get("move_items") or []
+    if not isinstance(moves, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for move in moves:
+        if not isinstance(move, dict):
+            continue
+        source = str(move.get("source") or "").strip()
+        target = str(move.get("target") or "").strip()
+        if not source or not target:
+            continue
+        structure = str(move.get("structure") or "").strip().lower()
+        reasons = [str(r).strip().lower() for r in (move.get("review_reasons") or [])]
+        stale = structure == "skipped_existing_book_folders" or any(
+            "already matches the naming template" in r for r in reasons
+        )
+        if stale:
+            out.append(move)
+    return out
+
+
 def quarantine_reason_from_report(report: dict[str, Any]) -> str:
     if metadata_matched_without_apply(report):
         best = None

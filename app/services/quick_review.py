@@ -52,6 +52,44 @@ class QuickReviewError(ValueError):
     """User-facing quick review failure (bad path / status / empty staging)."""
 
 
+def _unwritable_media_message(err: str) -> str | None:
+    """Map LibraForge tag-write failures on corrupt/misnamed media to a clear tip."""
+    low = (err or "").lower()
+    if not any(
+        token in low
+        for token in (
+            "moov atom",
+            "not a mp4",
+            "invalid data found when processing input",
+            "ffmpeg failed",
+            "mutagen writer failed",
+        )
+    ):
+        return None
+    return (
+        "Staging file is not writable audio (often a RAR/ZIP still named .m4b). "
+        "Extract the real audio under Files, then apply metadata again."
+    )
+
+
+async def _ensure_staging_archives_extracted(staging: Path) -> list[str]:
+    """Extract misnamed/nested archives so Manual Review can write tags."""
+    from app.services.downloader import extract_archives_in_dir
+
+    try:
+        extracted = await extract_archives_in_dir(staging)
+    except Exception as e:
+        logger.warning("Staging archive extract failed for %s: %s", staging, e)
+        return []
+    if extracted:
+        logger.info(
+            "Extracted staging archive(s) under %s: %s",
+            staging,
+            ", ".join(extracted),
+        )
+    return extracted
+
+
 def _looks_like_junk_title(value: str) -> bool:
     t = (value or "").strip()
     if not t:
@@ -247,9 +285,13 @@ async def load_quick_review(
         raise QuickReviewError("Quick Review metadata is audiobook-only (ebooks use Continue)")
 
     staging = resolve_staging_dir(req.staging_path or "")
+    await _ensure_staging_archives_extracted(staging)
     targets = list_staging_targets(staging)
     if not targets:
-        raise QuickReviewError("No audio files found in staging")
+        raise QuickReviewError(
+            "No audio files found in staging "
+            "(if the download was a RAR/ZIP named like .m4b, extract failed — check Files)"
+        )
 
     chosen_rel = (relative_path or "").strip()
     if not chosen_rel:
@@ -482,11 +524,23 @@ async def apply_quick_review(
         raise QuickReviewError("selected_result is required")
 
     staging = resolve_staging_dir(req.staging_path or "")
+    await _ensure_staging_archives_extracted(staging)
     targets = list_staging_targets(staging)
     if not targets:
-        raise QuickReviewError("No audio files found in staging")
+        raise QuickReviewError(
+            "No audio files found in staging "
+            "(download may still be a RAR/ZIP — extract under Files first)"
+        )
 
     chosen_rel = (relative_path or "").strip()
+    # Archive extract may delete a misnamed ``.m4b`` the UI still points at.
+    if chosen_rel:
+        try:
+            candidate = safe_path_under_staging(staging.resolve(), chosen_rel)
+            if not candidate.exists():
+                chosen_rel = ""
+        except (ValueError, OSError):
+            chosen_rel = ""
     if not chosen_rel and targets:
         chosen_rel = targets[0].get("relative_path") or ""
 
@@ -517,7 +571,17 @@ async def apply_quick_review(
             metadata_override=metadata_override or None,
         )
     except libraforge.LibraForgeError as e:
-        raise QuickReviewError(str(e)) from e
+        tip = _unwritable_media_message(str(e))
+        if tip is None:
+            # LibraForge often returns a bare HTTP 500 without ffmpeg stderr.
+            from app.services.downloader import _is_archive
+
+            if any(p.is_file() and _is_archive(p) for p in staging.rglob("*")):
+                tip = (
+                    "Staging still contains an archive (often a RAR named .m4b). "
+                    "Extract it under Files, then apply metadata again."
+                )
+        raise QuickReviewError(tip or str(e)) from e
 
     # Force-seed ABS metadata.json from the applied match so post-M4B Metadata
     # Forge rematch reads catalog author/ASIN even if embedded tags lag.

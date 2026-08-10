@@ -1385,6 +1385,25 @@ async def _llm_corroborated_manual_apply(
         )
         return False
 
+    # Misnamed RAR/ZIP payloads (``.m4b`` extension) must be extracted before
+    # LibraForge can write tags — same remediation as Quick Review apply.
+    try:
+        from app.services.downloader import extract_archives_in_dir
+
+        extracted = await extract_archives_in_dir(staging)
+        if extracted:
+            logger.info(
+                "LLM corroboration extracted staging archive(s) for request %s: %s",
+                request_id,
+                ", ".join(extracted),
+            )
+    except Exception as e:
+        logger.warning(
+            "LLM corroboration archive extract failed for request %s: %s",
+            request_id,
+            e,
+        )
+
     targets = list_staging_targets(staging)
     if not targets:
         return False

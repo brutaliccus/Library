@@ -11,6 +11,29 @@ import httpx
 logger = logging.getLogger(__name__)
 
 ARCHIVE_SUFFIXES = {".rar", ".zip", ".7z", ".tar", ".gz", ".bz2", ".tgz", ".tbz2"}
+# Audio-looking suffixes that sometimes arrive as misnamed archives (RAR/.zip).
+AUDIO_LIKE_SUFFIXES = {
+    ".mp3",
+    ".m4a",
+    ".m4b",
+    ".ogg",
+    ".opus",
+    ".flac",
+    ".wav",
+    ".wma",
+    ".aac",
+    ".mp4",
+}
+# Magic prefixes for common archive containers (checked when extension lies).
+_ARCHIVE_MAGIC_PREFIXES: tuple[tuple[bytes, str], ...] = (
+    (b"Rar!\x1a\x07", "rar"),
+    (b"PK\x03\x04", "zip"),
+    (b"PK\x05\x06", "zip"),
+    (b"PK\x07\x08", "zip"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"\x1f\x8b", "gz"),
+    (b"BZh", "bz2"),
+)
 KAVITA_CONVERT_TO_EPUB = {".mobi", ".azw", ".azw3"}
 # Backwards-compatible alias used by convert helpers
 KAVITA_UNSUPPORTED_EBOK = KAVITA_CONVERT_TO_EPUB
@@ -35,11 +58,30 @@ def sanitize_rel_path(rel: str) -> str:
     return "/".join(parts)
 
 
+def archive_magic_kind(path: Path) -> str | None:
+    """Return archive kind from file magic, or None when not an archive payload."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return None
+    for magic, kind in _ARCHIVE_MAGIC_PREFIXES:
+        if head.startswith(magic):
+            return kind
+    return None
+
+
 def _is_archive(path: Path) -> bool:
     name = path.name.lower()
     if name.endswith((".tar.gz", ".tar.bz2")):
         return True
-    return path.suffix.lower() in ARCHIVE_SUFFIXES
+    if path.suffix.lower() in ARCHIVE_SUFFIXES:
+        return True
+    # Misnamed archives — e.g. ``Book.m4b`` whose payload is actually RAR/ZIP.
+    # Only sniff audio-like suffixes so comic .cbz/.cbr stay untouched.
+    if path.suffix.lower() in AUDIO_LIKE_SUFFIXES and archive_magic_kind(path):
+        return True
+    return False
 
 
 async def extract_archive(archive_path: Path) -> bool:
@@ -68,6 +110,39 @@ async def extract_archive(archive_path: Path) -> bool:
             await extract_archive(item)
 
     return True
+
+
+async def extract_archives_in_dir(root: Path, *, max_passes: int = 5) -> list[str]:
+    """Extract archives under ``root`` (extension or misnamed audio magic).
+
+    Returns the base names of archives that extracted successfully. Used to
+    remediate staging folders where a debrid/CDN filename claimed ``.m4b`` but
+    the payload was still a RAR/ZIP (Manual Review tag-write then 500s).
+    """
+    if not root.is_dir():
+        return []
+    extracted_names: list[str] = []
+    passes = max(1, int(max_passes or 1))
+    for _ in range(passes):
+        candidates = [
+            path
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and _is_archive(path)
+        ]
+        if not candidates:
+            break
+        progress = False
+        for archive in candidates:
+            # Re-check — a prior extract in this pass may have removed a nested path.
+            if not archive.is_file():
+                continue
+            ok = await extract_archive(archive)
+            if ok:
+                extracted_names.append(archive.name)
+                progress = True
+        if not progress:
+            break
+    return extracted_names
 
 
 def parse_torrent_name(title: str, *, indexer: str | None = None) -> tuple[str, str]:

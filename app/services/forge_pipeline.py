@@ -1385,24 +1385,10 @@ async def _llm_corroborated_manual_apply(
         )
         return False
 
-    # Misnamed RAR/ZIP payloads (``.m4b`` extension) must be extracted before
-    # LibraForge can write tags — same remediation as Quick Review apply.
-    try:
-        from app.services.downloader import extract_archives_in_dir
-
-        extracted = await extract_archives_in_dir(staging)
-        if extracted:
-            logger.info(
-                "LLM corroboration extracted staging archive(s) for request %s: %s",
-                request_id,
-                ", ".join(extracted),
-            )
-    except Exception as e:
-        logger.warning(
-            "LLM corroboration archive extract failed for request %s: %s",
-            request_id,
-            e,
-        )
+    # Safety net: pre-match extract should already have run; re-check before tag write.
+    await _ensure_staging_archives_extracted_before_match(
+        staging, request_id=request_id
+    )
 
     targets = list_staging_targets(staging)
     if not targets:
@@ -1822,6 +1808,44 @@ def primary_audio_for_chaptering(staging: Path) -> Path | None:
     return max(m4bs, key=lambda p: p.stat().st_size if p.is_file() else 0)
 
 
+async def _ensure_staging_archives_extracted_before_match(
+    staging: Path,
+    *,
+    request_id: int | None = None,
+) -> list[str]:
+    """Extract archives (extension or misnamed audio magic) before metadata match.
+
+    Returns base names of archives that extracted successfully. Soft-fails on
+    errors so a flaky 7z never blocks the forge path entirely.
+    """
+    try:
+        extracted = await downloader.extract_archives_in_dir(staging)
+    except Exception as e:
+        if request_id is not None:
+            logger.warning(
+                "Pre-match archive extract failed for request %s: %s",
+                request_id,
+                e,
+            )
+        else:
+            logger.warning("Pre-match archive extract failed for %s: %s", staging, e)
+        return []
+    if extracted:
+        if request_id is not None:
+            logger.info(
+                "Pre-match extracted staging archive(s) for request %s: %s",
+                request_id,
+                ", ".join(extracted),
+            )
+        else:
+            logger.info(
+                "Pre-match extracted staging archive(s) under %s: %s",
+                staging,
+                ", ".join(extracted),
+            )
+    return extracted
+
+
 async def _persist_staging(request_id: int, staging: Path, run_id: str | None = None) -> None:
     async with async_session() as db:
         result = await db.execute(select(DownloadRequest).where(DownloadRequest.id == request_id))
@@ -2227,6 +2251,14 @@ async def run_forge_after_download(
 
     # --- Metadata Forge ---
     if start_step == "metadata":
+        # Misnamed RAR/ZIP/7z payloads (e.g. ``Book.m4b`` that is still a RAR)
+        # must be unpacked before LibraForge probes duration / scores a match.
+        # Same helpers as Manual Review / LLM corroboration; run here so automatic
+        # matching benefits, not only Quick Review.
+        await _ensure_staging_archives_extracted_before_match(
+            staging, request_id=request_id
+        )
+
         # Prefer catalog title/author when tags are empty (single-book only).
         if not author:
             async with async_session() as db:

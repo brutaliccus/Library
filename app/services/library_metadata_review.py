@@ -7,12 +7,13 @@ library item paths instead of quarantine staging.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
-from app.services import audiobookshelf, kavita, libraforge
+from app.services import audiobookshelf, chapter_embed, kavita, libraforge
 from app.services.ebook_pipeline import (
     EbookMeta,
     clean_ebook_search_title,
@@ -30,9 +31,16 @@ from app.services.ebook_quick_review import (
     write_applied_ebook_meta,
 )
 from app.services.forge_pipeline import (
+    _cleanup_forge_temps,
     _collect_audio,
+    _extract_chapters_from_report,
+    extract_asin_from_staging,
+    normalize_asin,
+    primary_audio_for_chaptering,
+    read_chapter_preview,
     seed_staging_metadata_hints,
     staging_path_for_libraforge,
+    write_chapter_preview,
 )
 from app.services.library_media_delete import resolve_abs_book_dir
 from app.services.quick_review import (
@@ -139,6 +147,14 @@ async def load_abs_metadata_review(item_id: str) -> dict[str, Any]:
     metadata = {**fields, **{k: v for k, v in meta_loaded.items() if v not in (None, "")}}
     provider_hint = _provider_hint_from_meta(metadata) or _provider_hint_from_meta(fields)
 
+    m4b = primary_audio_for_chaptering(book_dir)
+    asin = (
+        normalize_asin(metadata.get("asin"))
+        or normalize_asin(fields.get("asin"))
+        or extract_asin_from_staging(book_dir)
+    )
+    chapter_preview = read_chapter_preview(book_dir)
+
     return {
         "item_id": item_id,
         "media_type": "audiobook",
@@ -148,6 +164,11 @@ async def load_abs_metadata_review(item_id: str) -> dict[str, Any]:
         "quarantine_reason": None,
         "staging_path": lf_path,
         "manual_review_url": libraforge.public_manual_review_url() or None,
+        "chaptering_url": libraforge.public_chaptering_url() or None,
+        "has_m4b": m4b is not None,
+        "m4b_path": staging_path_for_libraforge(m4b) if m4b else None,
+        "asin": asin,
+        "chapter_preview": chapter_preview,
         "targets": [
             {
                 "relative_path": "",
@@ -420,6 +441,8 @@ async def apply_abs_metadata_review(
         "libraforge": apply_result,
         "abs_synced": bool(sync.get("updated") or patched),
         "cover_updated": cover_updated,
+        "has_m4b": primary_audio_for_chaptering(book_dir) is not None,
+        "asin": seed_asin,
         "metadata_preview": {
             "title": seed_title,
             "author": seed_author,
@@ -429,6 +452,221 @@ async def apply_abs_metadata_review(
             "cover_url": cover,
         },
         "cover_url": cover,
+    }
+
+
+async def preview_abs_audible_chapters(
+    item_id: str,
+    *,
+    asin: str = "",
+) -> dict[str, Any]:
+    """Fetch Audible chapters for an in-library .m4b (no embed / no_save=True)."""
+    _item, book_dir = await _resolve_abs_book_dir(item_id)
+    asin_n = normalize_asin(asin) or extract_asin_from_staging(book_dir)
+    if not asin_n:
+        raise LibraryMetadataReviewError("ASIN is required to preview Audible chapters")
+    audio = primary_audio_for_chaptering(book_dir)
+    if audio is None:
+        raise LibraryMetadataReviewError(
+            "No .m4b found — Chapter Forge requires a single M4B audiobook"
+        )
+
+    source_path = staging_path_for_libraforge(audio)
+    current_chapters: list[dict[str, Any]] = []
+    try:
+        loaded = await libraforge.chaptering_load(source_path)
+        current_chapters = _extract_chapters_from_report(loaded)
+    except libraforge.LibraForgeError:
+        logger.debug(
+            "chaptering_load failed for library item %s preview (non-fatal)",
+            item_id,
+            exc_info=True,
+        )
+
+    try:
+        run_id = await libraforge.start_chaptering_run(
+            source_path,
+            asin=asin_n,
+            backend="audible-chapters",
+            no_save=True,
+        )
+        report = await libraforge.wait_for_run(
+            run_id,
+            poll_seconds=2.0,
+            timeout_seconds=min(settings.libraforge_chaptering_timeout, 300.0),
+        )
+    except libraforge.LibraForgeError as e:
+        raise LibraryMetadataReviewError(str(e)) from e
+
+    if libraforge.run_failed(report):
+        detail = (
+            report.get("phase_detail")
+            or report.get("error")
+            or report.get("status")
+            or "Chapter preview failed"
+        )
+        raise LibraryMetadataReviewError(str(detail))
+
+    audible = _extract_chapters_from_report(report)
+    stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
+    chaptering_result = (
+        stats.get("chaptering_result")
+        if isinstance(stats.get("chaptering_result"), dict)
+        else {}
+    )
+    resolved_asin = (
+        normalize_asin(str(stats.get("asin") or chaptering_result.get("asin") or ""))
+        or asin_n
+    )
+    chapters_n = 0
+    try:
+        chapters_n = int(stats.get("chapters") or len(audible) or 0)
+    except (TypeError, ValueError):
+        chapters_n = len(audible)
+    chapters_n = chapters_n or len(audible)
+    detail = (
+        f"Chapter preview ready (ASIN {resolved_asin}, "
+        f"{chapters_n} Audible / {len(current_chapters)} current)"
+    )
+    payload = {
+        "ok": True,
+        "item_id": item_id,
+        "asin": resolved_asin,
+        "source_path": source_path,
+        "chapters": audible,
+        "chapter_count": chapters_n,
+        "current_chapters": current_chapters,
+        "current_chapter_count": len(current_chapters),
+        "backend": str(
+            stats.get("backend") or chaptering_result.get("backend") or "audible-chapters"
+        ),
+        "duration": stats.get("duration") or chaptering_result.get("duration"),
+        "embedded_into": str(stats.get("embedded_into") or "").strip(),
+        "status_detail": detail,
+        "status": "preview_ready",
+    }
+    try:
+        write_chapter_preview(
+            book_dir,
+            {
+                "asin": resolved_asin,
+                "chapters": audible,
+                "chapter_count": chapters_n,
+                "current_chapters": current_chapters,
+                "current_chapter_count": len(current_chapters),
+                "backend": payload["backend"],
+                "duration": payload.get("duration"),
+                "status_detail": detail,
+                "source_path": source_path,
+            },
+        )
+    except OSError:
+        logger.debug(
+            "Could not persist chapter preview for library item %s", item_id, exc_info=True
+        )
+    return payload
+
+
+async def apply_abs_audible_chapters(
+    item_id: str,
+    *,
+    asin: str = "",
+) -> dict[str, Any]:
+    """Look up Audible chapters and embed markers into an in-library .m4b, then sync ABS."""
+    _item, book_dir = await _resolve_abs_book_dir(item_id)
+    asin_n = normalize_asin(asin) or extract_asin_from_staging(book_dir)
+    if not asin_n:
+        raise LibraryMetadataReviewError("ASIN is required to apply Chapter Forge")
+    audio = primary_audio_for_chaptering(book_dir)
+    if audio is None:
+        raise LibraryMetadataReviewError(
+            "No .m4b found — Chapter Forge requires a single M4B audiobook"
+        )
+
+    source_path = staging_path_for_libraforge(audio)
+    try:
+        run_id = await libraforge.start_chaptering_run(
+            source_path,
+            asin=asin_n,
+            backend="audible-chapters",
+        )
+        report = await libraforge.wait_for_run(
+            run_id,
+            poll_seconds=2.0,
+            timeout_seconds=settings.libraforge_chaptering_timeout,
+        )
+    except libraforge.LibraForgeError as e:
+        raise LibraryMetadataReviewError(str(e)) from e
+
+    if libraforge.run_failed(report):
+        detail = (
+            report.get("phase_detail")
+            or report.get("error")
+            or report.get("status")
+            or "Chapter Forge failed"
+        )
+        raise LibraryMetadataReviewError(str(detail))
+
+    stats = report.get("stats") if isinstance(report.get("stats"), dict) else {}
+    try:
+        chapters_count = int(stats.get("chapters") or 0)
+    except (TypeError, ValueError):
+        chapters_count = 0
+    embedded_into = str(stats.get("embedded_into") or "").strip()
+    chapter_rows = chapter_embed.chapters_from_run_report(
+        report if isinstance(report, dict) else {}
+    )
+    if not chapter_rows:
+        chapter_rows = chapter_embed.chapters_from_libraforge_sidecar(audio)
+    if chapters_count <= 0:
+        chapters_count = len(chapter_rows)
+    if chapters_count <= 0 and not chapter_rows:
+        raise LibraryMetadataReviewError(
+            f"Audible returned no chapters for ASIN {asin_n}"
+        )
+
+    if not embedded_into:
+        if not chapter_rows:
+            raise LibraryMetadataReviewError(
+                f"Chapter Forge saved Audible data (ASIN {asin_n}) but no chapter "
+                "list was available to embed"
+            )
+        duration = chapter_embed.duration_from_run_report(
+            report if isinstance(report, dict) else {}
+        )
+        try:
+            await asyncio.to_thread(
+                chapter_embed.embed_chapters_into_audio,
+                audio,
+                chapter_rows,
+                duration=duration,
+                asin=asin_n,
+            )
+        except chapter_embed.ChapterEmbedError as e:
+            raise LibraryMetadataReviewError(f"Chapter embed failed: {e}") from e
+        chapters_count = len(chapter_rows)
+
+    _cleanup_forge_temps(book_dir)
+    sync = await audiobookshelf.sync_book_dir_metadata_to_abs(book_dir)
+    if sync.get("updated") or sync.get("chapters_updated") or sync.get("cover_updated"):
+        audiobookshelf.invalidate_cache()
+
+    detail = (
+        f"Embedded Audible chapters into {audio.name} "
+        f"(ASIN {asin_n}, {chapters_count} chapters)"
+    )
+    logger.info("Library Chapter Forge success for item %s: %s", item_id, detail)
+    return {
+        "ok": True,
+        "item_id": item_id,
+        "asin": asin_n,
+        "embedded": True,
+        "chapter_count": chapters_count,
+        "m4b_path": source_path,
+        "status_detail": detail,
+        "status": "embedded",
+        "abs_synced": bool(sync.get("chapters_updated") or sync.get("updated")),
+        "chapters_updated": bool(sync.get("chapters_updated")),
     }
 
 

@@ -1607,6 +1607,49 @@ async def post_abs_library_metadata_apply(
     return result
 
 
+@router.post("/library/abs/{item_id}/metadata-review/chapters/preview")
+async def post_abs_library_chapters_preview(
+    item_id: str,
+    body: QuickReviewAsinBody = Body(default_factory=QuickReviewAsinBody),
+    _admin: User = Depends(require_admin),
+):
+    """Fetch Audible chapters for an in-library audiobook (no embed)."""
+    from app.services.library_metadata_review import (
+        LibraryMetadataReviewError,
+        preview_abs_audible_chapters,
+    )
+
+    try:
+        return await preview_abs_audible_chapters(item_id, asin=body.asin or "")
+    except LibraryMetadataReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/library/abs/{item_id}/metadata-review/chapters/apply")
+async def post_abs_library_chapters_apply(
+    item_id: str,
+    body: QuickReviewAsinBody = Body(default_factory=QuickReviewAsinBody),
+    _admin: User = Depends(require_admin),
+):
+    """Embed Audible chapters into an in-library .m4b after admin confirm."""
+    from app.services.library_metadata_review import (
+        LibraryMetadataReviewError,
+        apply_abs_audible_chapters,
+    )
+
+    try:
+        result = await apply_abs_audible_chapters(item_id, asin=body.asin or "")
+    except LibraryMetadataReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    logger.info(
+        "Admin %s applied library Chapter Forge for item %s (ASIN %s)",
+        _admin.username,
+        item_id,
+        result.get("asin"),
+    )
+    return result
+
+
 @router.get("/library/ebook/{series_id}/metadata-review")
 async def get_ebook_library_metadata_review(
     series_id: int,

@@ -28,33 +28,6 @@ type Clues = {
   narrator: string;
 };
 
-type QuickReviewLoad = {
-  request_id: number;
-  title: string;
-  author: string | null;
-  status: string;
-  quarantine_reason: string | null;
-  staging_path: string;
-  manual_review_url: string | null;
-  targets: {
-    relative_path: string;
-    path: string;
-    display_name: string;
-    file_count: number;
-    is_grouped: boolean;
-  }[];
-  selected_relative_path: string;
-  target_path: string;
-  source_path: string;
-  is_grouped: boolean;
-  file_count: number;
-  queries: string[];
-  clues: Clues;
-  metadata: Record<string, unknown>;
-  provider_hint: string | null;
-  already_applied: boolean;
-};
-
 type ChapterRow = {
   index: number;
   title: string;
@@ -72,6 +45,39 @@ type ChapterPreview = {
   status_detail?: string;
   source_path?: string;
   updated_at?: string;
+};
+
+type QuickReviewLoad = {
+  request_id?: number;
+  item_id?: string;
+  title: string;
+  author: string | null;
+  status: string;
+  quarantine_reason: string | null;
+  staging_path: string;
+  manual_review_url: string | null;
+  chaptering_url?: string | null;
+  has_m4b?: boolean;
+  m4b_path?: string | null;
+  asin?: string;
+  chapter_preview?: ChapterPreview | null;
+  targets: {
+    relative_path: string;
+    path: string;
+    display_name: string;
+    file_count: number;
+    is_grouped: boolean;
+  }[];
+  selected_relative_path: string;
+  target_path: string;
+  source_path: string;
+  is_grouped: boolean;
+  file_count: number;
+  queries: string[];
+  clues: Clues;
+  metadata: Record<string, unknown>;
+  provider_hint: string | null;
+  already_applied: boolean;
 };
 
 type PipelineState = {
@@ -172,6 +178,12 @@ const STEPS: { id: WizardStep; label: string; icon: typeof Files }[] = [
   { id: "m4b", label: "M4B", icon: Disc3 },
   { id: "chapters", label: "Chapters", icon: ListMusic },
   { id: "pipeline", label: "Continue", icon: Play },
+];
+
+/** Library Edit Metadata: metadata apply + Chapter Forge (audiobook m4b only). */
+const LIBRARY_STEPS: { id: WizardStep; label: string; icon: typeof Files }[] = [
+  { id: "metadata", label: "Metadata", icon: Tags },
+  { id: "chapters", label: "Chapters", icon: ListMusic },
 ];
 
 /** Mirror LibraForge Manual Review compare table fields. */
@@ -417,9 +429,26 @@ export default function QuickReviewWizard({
     if (!relativePath && review.selected_relative_path) {
       setRelativePath(review.selected_relative_path);
     }
-    const metaAsin = fieldStr(review.metadata?.asin);
+    const metaAsin = fieldStr(review.metadata?.asin) || fieldStr(review.asin);
     if (metaAsin && !chapterAsin) setChapterAsin(metaAsin);
-  }, [review, relativePath, chapterAsin]);
+    // Hydrate last library Chapter Forge compare from book folder.
+    if (isLibrary) {
+      const prev = review.chapter_preview;
+      if (prev && previewChapters.length === 0 && (prev.chapters?.length || 0) > 0) {
+        setPreviewChapters(prev.chapters || []);
+        setCurrentChapters(prev.current_chapters || []);
+        setChapterCompareDetail(prev.status_detail || "");
+        setChapterCompareMeta({
+          asin: prev.asin,
+          chapterCount: prev.chapter_count ?? prev.chapters?.length,
+          currentCount: prev.current_chapter_count ?? prev.current_chapters?.length,
+          backend: prev.backend,
+          updatedAt: prev.updated_at,
+        });
+        if (prev.asin && !chapterAsin) setChapterAsin(prev.asin);
+      }
+    }
+  }, [review, relativePath, chapterAsin, isLibrary, previewChapters.length]);
 
   useEffect(() => {
     if (!pipeline) return;
@@ -485,9 +514,11 @@ export default function QuickReviewWizard({
       );
       return data;
     },
-    onSuccess: (_data, selected) => {
+    onSuccess: (data, selected) => {
       setMetadataApplied(true);
-      const asin = fieldStr(selected.asin || selected.chosen_metadata?.asin);
+      const asin =
+        fieldStr(selected.asin || selected.chosen_metadata?.asin) ||
+        fieldStr((data as { asin?: string } | undefined)?.asin);
       if (asin) setChapterAsin(asin);
       toast(isLibrary ? "Metadata applied to audiobook" : "Metadata applied to staging", "success");
       void queryClient.invalidateQueries({ queryKey: loadKey });
@@ -537,11 +568,10 @@ export default function QuickReviewWizard({
 
   const previewMutation = useMutation({
     mutationFn: async () => {
-      const { data } = await api.post(
-        `/admin/requests/${requestId}/quick-review/chapters/preview`,
-        { asin: chapterAsin },
-        { timeout: 320_000 },
-      );
+      const path = isLibrary
+        ? `/admin/library/abs/${encodeURIComponent(itemId!)}/metadata-review/chapters/preview`
+        : `/admin/requests/${requestId}/quick-review/chapters/preview`;
+      const { data } = await api.post(path, { asin: chapterAsin }, { timeout: 320_000 });
       return data as {
         chapters: ChapterRow[];
         current_chapters: ChapterRow[];
@@ -574,8 +604,12 @@ export default function QuickReviewWizard({
       if (!audible.length) {
         toast(data.status_detail || "Preview returned no chapters", "info");
       }
-      void queryClient.invalidateQueries({ queryKey: pipelineKey });
-      void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      if (isLibrary) {
+        void queryClient.invalidateQueries({ queryKey: loadKey });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: pipelineKey });
+        void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      }
     },
     onError: (err: any) => {
       setChapterCompareDetail(err.response?.data?.detail || "Chapter preview failed");
@@ -585,11 +619,10 @@ export default function QuickReviewWizard({
 
   const applyChaptersMutation = useMutation({
     mutationFn: async () => {
-      const { data } = await api.post(
-        `/admin/requests/${requestId}/quick-review/chapters/apply`,
-        { asin: chapterAsin },
-        { timeout: 320_000 },
-      );
+      const path = isLibrary
+        ? `/admin/library/abs/${encodeURIComponent(itemId!)}/metadata-review/chapters/apply`
+        : `/admin/requests/${requestId}/quick-review/chapters/apply`;
+      const { data } = await api.post(path, { asin: chapterAsin }, { timeout: 320_000 });
       return data as { ok: boolean; embedded?: boolean; status_detail?: string };
     },
     onSuccess: (data) => {
@@ -600,8 +633,13 @@ export default function QuickReviewWizard({
           : data.status_detail || "Chapter Forge finished",
         data.embedded ? "success" : "info",
       );
-      void queryClient.invalidateQueries({ queryKey: pipelineKey });
-      void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      if (isLibrary) {
+        void queryClient.invalidateQueries({ queryKey: loadKey });
+        onApplied?.();
+      } else {
+        void queryClient.invalidateQueries({ queryKey: pipelineKey });
+        void queryClient.invalidateQueries({ queryKey: ["admin-downloads"] });
+      }
     },
     onError: (err: any) => toast(err.response?.data?.detail || "Chapter apply failed", "error"),
   });
@@ -626,14 +664,17 @@ export default function QuickReviewWizard({
     step === "m4b"
       ? pipeline?.m4b_url || null
       : step === "chapters"
-        ? pipeline?.chaptering_url || null
+        ? (isLibrary ? review?.chaptering_url : pipeline?.chaptering_url) || null
         : review?.manual_review_url || manualReviewUrl || pipeline?.manual_review_url || null;
   const selected = results.find((r) => (r.asin || r.title) === selectedAsin) || null;
-  const stepIndex = STEPS.findIndex((s) => s.id === step);
+  const visibleSteps = isLibrary ? LIBRARY_STEPS : STEPS;
+  const stepIndex = visibleSteps.findIndex((s) => s.id === step);
+  const libraryHasM4b = Boolean(review?.has_m4b);
   const currentCover = fieldStr(
     review?.metadata?.cover_url || (review?.clues as { cover_url?: string } | undefined)?.cover_url,
   );
   const m4bBusy = pipeline?.status === "m4b_convert" || m4bMutation.isPending;
+  const chapterBusy = previewMutation.isPending || applyChaptersMutation.isPending;
   const continueHint = chaptersDone
     ? "Folder Forge → finalize"
     : m4bDone || (pipeline && !pipeline.needs_m4b)
@@ -644,11 +685,20 @@ export default function QuickReviewWizard({
 
   const canJumpTo = (target: WizardStep, index: number) => {
     if (index <= stepIndex) return true;
+    if (isLibrary) {
+      if (target === "chapters") return true;
+      return false;
+    }
     if (target === "metadata" && step !== "files") return true;
     if (target === "m4b" && (metadataApplied || stepIndex >= 1)) return true;
     if (target === "chapters" && (m4bDone || stepIndex >= 2)) return true;
     if (target === "pipeline" && stepIndex >= 2) return true;
     return false;
+  };
+
+  const finishLibraryWizard = () => {
+    onApplied?.();
+    onClose();
   };
 
   return (
@@ -659,12 +709,11 @@ export default function QuickReviewWizard({
       size="xl"
     >
       <div className="space-y-4">
-        {!isLibrary && (
         <nav
-          aria-label="Quick review steps"
+          aria-label={isLibrary ? "Edit metadata steps" : "Quick review steps"}
           className="flex flex-wrap items-center gap-1 sm:gap-2"
         >
-          {STEPS.map((s, i) => {
+          {visibleSteps.map((s, i) => {
             const Icon = s.icon;
             const active = s.id === step;
             const done =
@@ -695,9 +744,8 @@ export default function QuickReviewWizard({
             );
           })}
         </nav>
-        )}
 
-        {!isLibrary && forgeUrl && (
+        {forgeUrl && (
           <div className="flex justify-end">
             <a
               href={forgeUrl}
@@ -1109,16 +1157,28 @@ export default function QuickReviewWizard({
                   >
                     Cancel
                   </button>
-                  {metadataApplied && (
-                    <button
-                      type="button"
-                      onClick={onClose}
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
-                    >
-                      <Check size={14} />
-                      Done
-                    </button>
-                  )}
+                  <div className="flex flex-col-reverse sm:flex-row gap-2">
+                    {libraryHasM4b && (
+                      <button
+                        type="button"
+                        onClick={() => setStep("chapters")}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-teal-600/60 text-teal-200 hover:bg-teal-900/30"
+                      >
+                        {metadataApplied ? "Next — Chapters" : "Chapter Forge"}
+                        <ChevronRight size={14} />
+                      </button>
+                    )}
+                    {metadataApplied && (
+                      <button
+                        type="button"
+                        onClick={finishLibraryWizard}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
+                      >
+                        <Check size={14} />
+                        Done
+                      </button>
+                    )}
+                  </div>
                 </>
               ) : (
                 <>
@@ -1228,14 +1288,14 @@ export default function QuickReviewWizard({
           </div>
         )}
 
-        {!isLibrary && step === "chapters" && (
+        {step === "chapters" && (
           <div className="space-y-4">
             <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4 space-y-3">
               <p className="text-sm text-gray-200">Chapter Forge — Audible chapters</p>
               <p className="text-xs text-gray-500">
-                Import ASIN from applied metadata, fetch chapters for a visual check, then confirm
-                embed into the .m4b. LibraForge looks up Audible chapters; Library remuxes markers
-                into the file (ffmpeg stream copy).
+                {isLibrary
+                  ? "Use the ASIN from metadata, fetch chapters for a visual check, then confirm embed into the library .m4b. Same path as the download pipeline: LibraForge looks up Audible chapters; Library remuxes markers (ffmpeg stream copy) and syncs ABS."
+                  : "Import ASIN from applied metadata, fetch chapters for a visual check, then confirm embed into the .m4b. LibraForge looks up Audible chapters; Library remuxes markers into the file (ffmpeg stream copy)."}
               </p>
               <label className="block text-xs text-gray-400">
                 ASIN
@@ -1247,9 +1307,22 @@ export default function QuickReviewWizard({
                   className="mt-1 w-full bg-gray-900 border border-gray-600 rounded-lg px-2.5 py-2 text-sm text-gray-100 font-mono tracking-wide"
                 />
               </label>
-              {pipeline && !pipeline.has_m4b && (
+              {isLibrary && !libraryHasM4b && (
+                <p className="text-xs text-amber-300/90">
+                  No .m4b on this library item — Chapter Forge needs a single M4B file.
+                </p>
+              )}
+              {!isLibrary && pipeline && !pipeline.has_m4b && (
                 <p className="text-xs text-amber-300/90">
                   No .m4b in staging yet — finish M4B first, or Open LibraForge.
+                </p>
+              )}
+              {chapterBusy && (
+                <p className="text-xs text-teal-200/90 inline-flex items-center gap-1.5">
+                  <Loader2 size={12} className="animate-spin" />
+                  {previewMutation.isPending
+                    ? "Fetching Audible chapters…"
+                    : "Embedding chapters into M4B…"}
                 </p>
               )}
               {chaptersDone && (
@@ -1266,7 +1339,7 @@ export default function QuickReviewWizard({
                 disabled={
                   previewMutation.isPending ||
                   !chapterAsin.trim() ||
-                  (pipeline != null && !pipeline.has_m4b)
+                  (isLibrary ? !libraryHasM4b : pipeline != null && !pipeline.has_m4b)
                 }
                 className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600 disabled:opacity-50"
               >
@@ -1381,19 +1454,30 @@ export default function QuickReviewWizard({
             <div className="flex flex-col-reverse sm:flex-row sm:justify-between gap-2">
               <button
                 type="button"
-                onClick={() => setStep("m4b")}
+                onClick={() => setStep(isLibrary ? "metadata" : "m4b")}
                 className="px-3 py-2 text-sm rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-700/50"
               >
                 Back
               </button>
-              <button
-                type="button"
-                onClick={() => setStep("pipeline")}
-                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
-              >
-                {chaptersDone ? "Next — Continue" : "Skip / Continue pipeline"}
-                <ChevronRight size={14} />
-              </button>
+              {isLibrary ? (
+                <button
+                  type="button"
+                  onClick={finishLibraryWizard}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
+                >
+                  <Check size={14} />
+                  {chaptersDone ? "Done" : "Skip / Done"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setStep("pipeline")}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-teal-700/80 text-white hover:bg-teal-600"
+                >
+                  {chaptersDone ? "Next — Continue" : "Skip / Continue pipeline"}
+                  <ChevronRight size={14} />
+                </button>
+              )}
             </div>
           </div>
         )}

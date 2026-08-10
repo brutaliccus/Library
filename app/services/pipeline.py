@@ -193,6 +193,8 @@ def _is_hard_debrid_failure(exc: BaseException) -> bool:
         "createtorrent failed",
         "addmagnet failed",
         "torrent file rejected",
+        "returned html instead of a .torrent",
+        "api token is not configured",
     )
     return any(m in msg for m in hard_markers)
 
@@ -850,6 +852,8 @@ async def _resolve_debrid_torrent(
     label = debrid.PROVIDER_LABELS.get(provider, provider)
 
     if not torrent_id:
+        if not debrid.provider_configured(provider):
+            raise RuntimeError(f"{label} API token is not configured")
         await _update_status(
             db,
             request_id,
@@ -1045,27 +1049,43 @@ async def process_download(request_id: int) -> None:
                 return
 
             # ABB detail pages are HTML — scrape info hash + file list into a magnet first.
+            # Never hand the HTML URL to TorBox/RD (add_torrent_file would upload CF HTML).
             if (
                 not torrent_id
-                and not link.startswith("magnet:")
-                and "audiobookbay" in link.lower()
+                and not str(link or "").startswith("magnet:")
             ):
-                try:
-                    from app.services import audiobookbay
+                from app.services import audiobookbay
 
-                    m, _h, abb_files = await audiobookbay.resolve_details_from_page(
-                        link, title=title or ""
-                    )
-                    if abb_files:
-                        _persist_release_files(req, abb_files)
-                    if m:
-                        link = m
-                        req.magnet_link = m
-                        await db.commit()
-                    elif abb_files:
-                        await db.commit()
-                except Exception as e:
-                    logger.warning("ABB magnet resolve for request %s failed: %s", request_id, e)
+                if audiobookbay.is_abb_page_url(link):
+                    resolve_err: Exception | None = None
+                    try:
+                        m, _h, abb_files = await audiobookbay.resolve_details_from_page(
+                            link, title=title or ""
+                        )
+                        if abb_files:
+                            _persist_release_files(req, abb_files)
+                        if m:
+                            link = m
+                            req.magnet_link = m
+                            await db.commit()
+                        elif abb_files:
+                            await db.commit()
+                    except Exception as e:
+                        resolve_err = e
+                        logger.warning(
+                            "ABB magnet resolve for request %s failed: %s", request_id, e
+                        )
+
+                    if not str(link or "").startswith("magnet:"):
+                        detail = (
+                            "Could not resolve AudioBook Bay magnet before TorBox/Real-Debrid. "
+                            "ABB may be blocked (Cloudflare/VPN/FlareSolverr) or the listing "
+                            "has no info hash. Retry later, or pick a result that already "
+                            "shows a magnet/info hash."
+                        )
+                        if resolve_err:
+                            detail = f"{detail} ({resolve_err})"
+                        raise RuntimeError(detail)
 
             # Retry path may ask us to skip a provider that already failed.
             exclude_providers = _retry_exclude_providers.pop(request_id, None) or []

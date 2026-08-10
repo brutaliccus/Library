@@ -52,6 +52,29 @@ def extract_info_hash(magnet_url: str | None, info_hash: str | None = None,
     return real_debrid.extract_info_hash(magnet_url, info_hash, download_url)
 
 
+def reject_non_torrent_body(body: bytes | None, content_type: str = "") -> None:
+    """Raise when a download URL returned HTML/challenge page instead of a .torrent.
+
+    Without this, TorBox/RD createtorrent/addTorrent get fed Cloudflare HTML and
+    surface opaque "connection" / createtorrent failures to the user.
+    """
+    if not body:
+        raise RuntimeError("Download URL returned an empty body (not a .torrent)")
+    ct = (content_type or "").lower()
+    head = body[:256].lstrip().lower()
+    if (
+        "text/html" in ct
+        or head.startswith(b"<!doctype html")
+        or head.startswith(b"<html")
+        or head.startswith(b"<head")
+        or b"<html" in head[:80]
+    ):
+        raise RuntimeError(
+            "Download URL returned HTML instead of a .torrent/magnet "
+            "(indexer may require Cloudflare). Resolve the magnet before debrid."
+        )
+
+
 async def check_cached_all(hashes: list[str]) -> dict[str, set[str]]:
     """Check instant/cached availability on every configured provider concurrently.
     Returns {provider: set(lowercase hashes cached)}."""

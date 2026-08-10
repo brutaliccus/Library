@@ -1257,19 +1257,32 @@ async def _resolve_rd_background(
         if (
             not magnet
             and download_url
-            and "audiobookbay" in (download_url or "").lower()
         ):
-            task["detail"] = "Resolving AudioBook Bay magnet…"
-            try:
-                from app.services import audiobookbay
+            from app.services import audiobookbay
 
-                m, _h = await audiobookbay.resolve_magnet_from_details(
-                    download_url, title=title or ""
-                )
-                if m:
-                    magnet = m
-            except Exception as e:
-                logger.debug("ABB magnet resolve failed for %s: %s", download_url, e)
+            if audiobookbay.is_abb_page_url(download_url):
+                task["detail"] = "Resolving AudioBook Bay magnet…"
+                try:
+                    m, _h = await audiobookbay.resolve_magnet_from_details(
+                        download_url, title=title or ""
+                    )
+                    if m:
+                        magnet = m
+                except Exception as e:
+                    logger.warning("ABB magnet resolve failed for %s: %s", download_url, e)
+                    task["status"] = "error"
+                    task["error"] = (
+                        f"Could not resolve AudioBook Bay magnet before debrid: {e}"
+                    )
+                    return
+                if not magnet:
+                    task["status"] = "error"
+                    task["error"] = (
+                        "Could not resolve AudioBook Bay magnet (Cloudflare/VPN/"
+                        "FlareSolverr?). Try Request later, or pick a result that "
+                        "already has a magnet/info hash."
+                    )
+                    return
 
         if not magnet and download_url:
             task["detail"] = "Resolving download link from indexer..."
@@ -1786,19 +1799,23 @@ async def _try_resolve_single(
     torrent_bytes: bytes | None = None
 
     # Direct ABB detail pages need a hash scrape (Jackett normally does this).
-    if (
-        not magnet
-        and download_url
-        and "audiobookbay" in download_url.lower()
-    ):
-        try:
-            from app.services import audiobookbay
+    # Do not fall through to a bare HTTP GET of the ABB HTML page — that returns
+    # Cloudflare HTML which TorBox/RD reject as a bogus torrent.
+    if not magnet and download_url:
+        from app.services import audiobookbay
 
-            m, _h = await audiobookbay.resolve_magnet_from_details(download_url, title=title)
-            if m:
-                magnet = m
-        except Exception as e:
-            logger.debug("ABB magnet resolve failed for %s: %s", download_url, e)
+        if audiobookbay.is_abb_page_url(download_url):
+            try:
+                m, _h = await audiobookbay.resolve_magnet_from_details(
+                    download_url, title=title
+                )
+                if m:
+                    magnet = m
+            except Exception as e:
+                logger.warning("ABB magnet resolve failed for %s: %s", download_url, e)
+                return None
+            if not magnet:
+                return None
 
     if not magnet and download_url:
         try:

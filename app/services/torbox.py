@@ -201,6 +201,9 @@ async def add_torrent_file(torrent_url: str) -> dict[str, Any]:
         body = torrent_resp.content
         if body[:7] == b"magnet:" or "magnet" in content_type:
             return await add_magnet(body.decode("utf-8").strip())
+        from app.services import debrid as debrid_svc
+
+        debrid_svc.reject_non_torrent_body(body, content_type)
 
     return await add_torrent_bytes(body)
 

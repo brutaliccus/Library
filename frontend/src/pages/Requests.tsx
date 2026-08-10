@@ -327,6 +327,7 @@ export default function RequestsPage() {
                       <RequestStatusBadge
                         status={req.status}
                         detail={req.status_detail}
+                        mediaType={req.media_type}
                       />
                     </div>
                     <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-500">

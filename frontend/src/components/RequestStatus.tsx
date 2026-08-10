@@ -65,6 +65,8 @@ interface Props {
   detail?: string | null;
   /** When true (default), show listener-friendly labels. Admin pages pass false. */
   plainLanguage?: boolean;
+  /** When ``ebook``, completed status shows "Ready to read" instead of "Ready to listen". */
+  mediaType?: string | null;
 }
 
 function isM4bQueued(status: string, detail?: string | null): boolean {
@@ -76,6 +78,7 @@ export default function RequestStatusBadge({
   status,
   detail,
   plainLanguage = true,
+  mediaType,
 }: Props) {
   const tech = STATUS_CONFIG[status] || STATUS_CONFIG.pending;
   const plain = PLAIN_STATUS[status] || PLAIN_STATUS.pending;
@@ -92,6 +95,9 @@ export default function RequestStatusBadge({
       Icon = Headphones;
     } else {
       label = plain.label;
+      if (status === "completed" && mediaType === "ebook") {
+        label = "Ready to read";
+      }
       color = plain.color;
       Icon = plain.icon;
     }

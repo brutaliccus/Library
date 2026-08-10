@@ -97,11 +97,19 @@ interface SetupValidateResult {
 
 interface OlCatalogStatus {
   status?: string;
+  message?: string;
   catalog_ready?: boolean;
   dumps_present?: boolean;
+  dumps_size_bytes?: number;
+  catalog_size_bytes?: number;
   warnings?: string[];
   scheduled_build_at?: string | null;
   new_dumps_available?: boolean;
+  process_alive?: boolean;
+  elapsed_seconds?: number | null;
+  progress_age_seconds?: number | null;
+  log_tail?: string;
+  log_recent?: string[];
 }
 
 const STEP_GROUPS: Record<string, string[]> = {
@@ -261,6 +269,7 @@ export default function InstanceSetup() {
       return data as OlCatalogStatus;
     },
     enabled: status?.steps?.[stepIdx]?.id === "openlibrary",
+    refetchInterval: (q) => (q.state.data?.status === "running" ? 3000 : false),
   });
 
   const steps = status?.steps || [];
@@ -916,19 +925,56 @@ export default function InstanceSetup() {
           (multi-GB, can take hours on a Pi).
         </p>
         {olStatus && (
-          <p className="text-[11px] text-gray-500 font-mono pt-1">
-            Status:{" "}
-            {olLoading
-              ? "…"
-              : olStatus.catalog_ready
-                ? `${olStatus.status || "ready"} · catalog ready`
-                : olStatus.dumps_present
-                  ? `${olStatus.status || "idle"} · dumps only`
-                  : olStatus.status || "idle"}
-            {olStatus.scheduled_build_at
-              ? ` · scheduled ${new Date(olStatus.scheduled_build_at).toLocaleString()}`
-              : ""}
-          </p>
+          <div className="pt-2 space-y-1.5">
+            <p className="text-[11px] text-gray-500 font-mono">
+              Status:{" "}
+              {olLoading
+                ? "…"
+                : olStatus.catalog_ready
+                  ? `${olStatus.status || "ready"} · catalog ready`
+                  : olStatus.dumps_present
+                    ? `${olStatus.status || "idle"} · dumps only`
+                    : olStatus.status || "idle"}
+              {olStatus.scheduled_build_at
+                ? ` · scheduled ${new Date(olStatus.scheduled_build_at).toLocaleString()}`
+                : ""}
+            </p>
+            {(olStatus.status === "running" || olStatus.status === "interrupted") && (
+              <div
+                className={`rounded-md border px-2.5 py-2 space-y-1 ${
+                  olStatus.status === "interrupted"
+                    ? "border-rose-700/50 bg-rose-950/30"
+                    : "border-emerald-700/40 bg-emerald-950/20"
+                }`}
+              >
+                <p className="text-xs text-gray-200 break-words">
+                  {olStatus.message ||
+                    (olStatus.status === "interrupted"
+                      ? "Build was interrupted — start again to continue."
+                      : "Build in progress…")}
+                </p>
+                {olStatus.status === "running" && (
+                  <p className="text-[11px] font-mono text-gray-500">
+                    Elapsed{" "}
+                    {olStatus.elapsed_seconds != null
+                      ? `${Math.floor(olStatus.elapsed_seconds / 60)}m ${olStatus.elapsed_seconds % 60}s`
+                      : "—"}
+                    {olStatus.progress_age_seconds != null
+                      ? ` · last log ${olStatus.progress_age_seconds}s ago`
+                      : ""}
+                    {olStatus.dumps_size_bytes
+                      ? ` · dumps ${(olStatus.dumps_size_bytes / 1e9).toFixed(2)} GB`
+                      : ""}
+                  </p>
+                )}
+                {olStatus.log_tail && (
+                  <p className="text-[11px] font-mono text-gray-400 break-words">
+                    {olStatus.log_tail}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

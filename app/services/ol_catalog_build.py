@@ -31,6 +31,10 @@ _DEFAULT_IDLE_MESSAGE = "Open Library catalog has not been built yet."
 _MIN_READY_BYTES = 1024 * 1024
 # Don't re-probe openlibrary.org more often than this when Admin opens Config.
 _CHECK_THROTTLE_SECONDS = 6 * 3600
+# After restart, status JSON can still say "running" while `_proc` is gone.
+# Give the background task a short window to attach before marking interrupted.
+_ORPHAN_GRACE_SECONDS = 15.0
+_LOG_RECENT_MAX = 12
 _SCHEDULE_KEYS = (
     "scheduled_build_at",
     "scheduled_include_editions",
@@ -219,11 +223,14 @@ def _reconcile_message(
     new_dumps_available: bool = False,
 ) -> str:
     """Pick an operator-facing message that cannot contradict catalog_ready."""
-    if running:
-        return str(job.get("message") or "Build in progress…")
-
     job_status = str(job.get("status") or "idle")
     job_message = str(job.get("message") or "").strip()
+    # Treat file status "running" as in-progress even during the brief window
+    # before `_proc` is attached (or while UI polls mid-start).
+    in_progress = running or job_status == "running"
+    if in_progress:
+        return job_message or "Build in progress…"
+
     stale_idle = (
         job_status in ("idle", "unknown", "")
         and (not job_message or job_message == _DEFAULT_IDLE_MESSAGE)
@@ -259,7 +266,7 @@ def _reconcile_message(
             )
         return update_note
 
-    if job_status == "error" and job_message:
+    if job_status in ("error", "interrupted") and job_message:
         return job_message
 
     if dumps_present:
@@ -274,6 +281,41 @@ def _reconcile_message(
     if stale_idle or not job_message:
         return _DEFAULT_IDLE_MESSAGE
     return job_message
+
+
+def _heal_orphaned_running(status: dict[str, Any]) -> dict[str, Any]:
+    """If JSON says running but this process has no live subprocess, mark interrupted.
+
+    Survives app restarts: the dump importer child dies with the parent, but the
+    status file would otherwise claim "running" forever with no progress updates.
+    """
+    if str(status.get("status") or "") != "running":
+        return status
+    if _proc is not None and _proc.returncode is None:
+        return status
+
+    now = time.time()
+    anchor = float(status.get("updated_at") or status.get("started_at") or 0)
+    if anchor and (now - anchor) < _ORPHAN_GRACE_SECONDS:
+        return status
+
+    msg = (
+        "Catalog build was interrupted (app restarted or the import process exited). "
+        "Click Generate catalog to continue — existing dumps are reused unless you use "
+        "Update catalog / Download & rebuild."
+    )
+    healed = {
+        **status,
+        "status": "interrupted",
+        "message": msg,
+        "finished_at": now,
+        "process_alive": False,
+    }
+    try:
+        _write_status(healed)
+    except Exception:
+        logger.warning("Could not persist interrupted OL catalog status", exc_info=True)
+    return healed
 
 
 def _dump_names(*, include_editions: bool | None = None) -> list[str]:
@@ -292,11 +334,15 @@ def _dump_names(*, include_editions: bool | None = None) -> list[str]:
 def get_status() -> dict[str, Any]:
     catalog = _catalog_stats()
     dumps_present, dumps_size = _dumps_stats()
-    status = _read_status()
-    running = _proc is not None and _proc.returncode is None
-    if running:
+    status = _heal_orphaned_running(_read_status())
+    now = time.time()
+    process_alive = _proc is not None and _proc.returncode is None
+    file_status = str(status.get("status") or "idle")
+    # Effective running: live child, or status still "running" inside startup grace.
+    running = process_alive or file_status == "running"
+    if process_alive:
         status["status"] = "running"
-    elif catalog["ready"] and str(status.get("status") or "idle") in (
+    elif catalog["ready"] and file_status in (
         "idle",
         "unknown",
         "",
@@ -305,6 +351,22 @@ def get_status() -> dict[str, Any]:
         status["status"] = "ready"
 
     new_dumps = bool(status.get("new_dumps_available"))
+    started_at = status.get("started_at")
+    updated_at = status.get("updated_at")
+    finished_at = status.get("finished_at")
+    try:
+        started_f = float(started_at) if started_at is not None else None
+    except (TypeError, ValueError):
+        started_f = None
+    try:
+        updated_f = float(updated_at) if updated_at is not None else None
+    except (TypeError, ValueError):
+        updated_f = None
+    try:
+        finished_f = float(finished_at) if finished_at is not None else None
+    except (TypeError, ValueError):
+        finished_f = None
+
     status["catalog_ready"] = bool(catalog["ready"])
     status["catalog_size_bytes"] = int(catalog["size_bytes"] or 0)
     status["catalog_mtime"] = catalog.get("mtime")
@@ -329,6 +391,29 @@ def get_status() -> dict[str, Any]:
     status["scheduled_created_at"] = status.get("scheduled_created_at") if scheduled_at else None
     # UI uses <input type="datetime-local"> in the admin browser's local timezone.
     status["schedule_timezone"] = "browser_local"
+    status["process_alive"] = process_alive
+    status["started_at"] = started_f
+    status["updated_at"] = updated_f
+    status["finished_at"] = finished_f
+    if running and started_f:
+        status["elapsed_seconds"] = max(0, int(now - started_f))
+    elif finished_f and started_f:
+        status["elapsed_seconds"] = max(0, int(finished_f - started_f))
+    else:
+        status["elapsed_seconds"] = None
+    if updated_f:
+        status["progress_age_seconds"] = max(0, int(now - updated_f))
+    else:
+        status["progress_age_seconds"] = None
+    log_recent = status.get("log_recent")
+    if not isinstance(log_recent, list):
+        log_recent = []
+        if status.get("log_tail"):
+            log_recent = [str(status.get("log_tail"))]
+    status["log_recent"] = [str(x) for x in log_recent[-_LOG_RECENT_MAX:]]
+    status["log_tail"] = status.get("log_tail") or (
+        status["log_recent"][-1] if status["log_recent"] else None
+    )
     status["message"] = _reconcile_message(
         job=status,
         catalog=catalog,
@@ -346,6 +431,7 @@ def get_status() -> dict[str, Any]:
         "Dumps download to OPENLIBRARY_HOST_DIR (/openlibrary); the catalog DB is written to the configured path (usually under ./data).",
         "A daily check notifies admins when newer dumps are published; download only starts from Update catalog or a scheduled run.",
         "Schedule times use your browser's local timezone; the server stores them as UTC.",
+        "While building, this panel refreshes every few seconds with the latest [ol-import] log line, elapsed time, and dump/DB sizes.",
     ]
     return status
 
@@ -445,9 +531,15 @@ async def _pump_output(proc: asyncio.subprocess.Process) -> None:
         last_line = text[-500:]
         logger.info("ol-catalog-build: %s", text)
         cur = _read_status()
+        recent = cur.get("log_recent")
+        if not isinstance(recent, list):
+            recent = []
+        recent = [str(x) for x in recent if x][-(_LOG_RECENT_MAX - 1) :]
+        recent.append(last_line)
         cur["status"] = "running"
         cur["message"] = last_line
         cur["log_tail"] = last_line
+        cur["log_recent"] = recent
         _write_status(cur)
 
 
@@ -505,6 +597,8 @@ async def _run_build(
             "force_download": force_download,
             "command": cmd,
             "started_at": time.time(),
+            "log_tail": None,
+            "log_recent": [],
             # Keep the banner visible until success; cleared below on done.
             "new_dumps_available": bool(prev.get("new_dumps_available")),
             "changed_dumps": list(prev.get("changed_dumps") or []),

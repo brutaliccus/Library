@@ -154,13 +154,20 @@ export default function Home({
 
   const carouselQueries = useMemo(() => {
     const shelves = (homeShelvesPages?.pages || []).flatMap((p) => p.shelves || []);
-    return shelves.map((shelf) => ({
-      slug: shelf.slug,
-      name: shelf.listName || shelf.title || shelf.genre || shelf.slug,
-      subtitle: shelf.source?.startsWith("hardcover") ? "Curated on Hardcover" : undefined,
-      books: shelf.books || [],
-      isLoading: homeShelvesLoading && shelves.length === 0,
-    }));
+    if (homeShelvesLoading && shelves.length === 0) {
+      return [
+        { slug: "_loading", name: "Curated lists", subtitle: undefined, books: [], isLoading: true },
+      ];
+    }
+    return shelves
+      .filter((shelf) => (shelf.books || []).length > 0)
+      .map((shelf) => ({
+        slug: shelf.slug,
+        name: shelf.listName || shelf.title || shelf.genre || shelf.slug,
+        subtitle: shelf.source?.startsWith("hardcover") ? "Curated on Hardcover" : undefined,
+        books: shelf.books || [],
+        isLoading: false,
+      }));
   }, [homeShelvesPages, homeShelvesLoading]);
 
   useEffect(() => {

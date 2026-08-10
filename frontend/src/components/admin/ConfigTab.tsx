@@ -39,6 +39,13 @@ interface OlCatalogStatus {
   warnings?: string[];
   include_editions?: boolean;
   log_tail?: string;
+  log_recent?: string[];
+  process_alive?: boolean;
+  started_at?: number | null;
+  updated_at?: number | null;
+  finished_at?: number | null;
+  elapsed_seconds?: number | null;
+  progress_age_seconds?: number | null;
 }
 
 /** Format a Date as `YYYY-MM-DDTHH:mm` in the browser's local timezone. */
@@ -148,7 +155,7 @@ export default function ConfigTab({
     },
     staleTime: 60_000,
     refetchInterval: (q) => {
-      if (q.state.data?.status === "running") return 5000;
+      if (q.state.data?.status === "running") return 3000;
       if (q.state.data?.scheduled_build_at) return 30000;
       return false;
     },
@@ -651,6 +658,24 @@ function formatBytes(n?: number): string {
   return `${Math.round(n / 1024)} KB`;
 }
 
+function formatElapsed(seconds?: number | null): string {
+  if (seconds == null || seconds < 0 || Number.isNaN(seconds)) return "—";
+  const s = Math.floor(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${r}s`;
+  return `${r}s`;
+}
+
+function formatProgressAge(seconds?: number | null): string {
+  if (seconds == null) return "—";
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${Math.floor(seconds / 60)}m ago`;
+}
+
 function OlCatalogPanel({
   status,
   loading,
@@ -683,6 +708,16 @@ function OlCatalogPanel({
   }, [scheduledAt]);
 
   const busy = building || scheduling;
+  const isRunning = status?.status === "running";
+  const isInterrupted = status?.status === "interrupted";
+  const progressAge = status?.progress_age_seconds;
+  const quietTooLong = isRunning && progressAge != null && progressAge >= 120;
+  const logLines =
+    status?.log_recent && status.log_recent.length
+      ? status.log_recent
+      : status?.log_tail
+        ? [status.log_tail]
+        : [];
 
   return (
     <div className="p-4 rounded-xl border border-amber-900/50 bg-amber-950/20 space-y-3">
@@ -697,6 +732,75 @@ function OlCatalogPanel({
           </p>
         </div>
       </div>
+
+      {(isRunning || isInterrupted) && (
+        <div
+          className={`rounded-lg border p-3 space-y-2 ${
+            isInterrupted
+              ? "border-rose-700/50 bg-rose-950/30"
+              : "border-emerald-700/50 bg-emerald-950/30"
+          }`}
+        >
+          <p
+            className={`text-sm font-semibold inline-flex items-center gap-1.5 ${
+              isInterrupted ? "text-rose-200" : "text-emerald-200"
+            }`}
+          >
+            <Database size={14} className={isRunning ? "animate-pulse" : undefined} />
+            {isInterrupted
+              ? "Build interrupted"
+              : status?.process_alive === false
+                ? "Build starting…"
+                : "Build in progress"}
+          </p>
+          <p className="text-xs text-gray-200 break-words">
+            {status?.message || (isInterrupted ? "Previous build did not finish." : "Working…")}
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono text-gray-400">
+            <p>
+              Elapsed:{" "}
+              <span className="text-gray-200">{formatElapsed(status?.elapsed_seconds)}</span>
+            </p>
+            <p>
+              Last log:{" "}
+              <span className={quietTooLong ? "text-amber-300" : "text-gray-200"}>
+                {formatProgressAge(progressAge)}
+              </span>
+            </p>
+            <p>
+              Dumps: <span className="text-gray-200">{formatBytes(status?.dumps_size_bytes)}</span>
+            </p>
+            <p>
+              DB: <span className="text-gray-200">{formatBytes(status?.catalog_size_bytes)}</span>
+            </p>
+          </div>
+          {quietTooLong && (
+            <p className="text-[11px] text-amber-200/90">
+              No new log lines for {formatElapsed(progressAge)}. Downloads report every ~10s;
+              import/index phases can stay quiet longer — check container logs for{" "}
+              <span className="font-mono">[ol-import]</span> if this stays stuck.
+            </p>
+          )}
+          {isInterrupted && (
+            <p className="text-[11px] text-rose-100/80">
+              The import process is no longer running (often after an app restart). Start Generate
+              catalog again to continue; dumps already on disk are reused.
+            </p>
+          )}
+          {logLines.length > 0 && (
+            <div className="rounded-md border border-white/10 bg-black/40 px-2.5 py-2 max-h-36 overflow-y-auto">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Recent log</p>
+              <ul className="space-y-0.5 font-mono text-[11px] text-gray-300">
+                {logLines.map((line, i) => (
+                  <li key={`${i}-${line.slice(0, 24)}`} className="break-words">
+                    {line}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
       {newDumps && (
         <div className="rounded-lg border border-sky-700/50 bg-sky-950/40 p-3 space-y-3">
@@ -932,7 +1036,9 @@ function OlCatalogPanel({
         {status?.catalog_error && !status?.catalog_ready && (
           <p className="text-amber-400/90 break-words">DB error: {status.catalog_error}</p>
         )}
-        {status?.message && <p className="text-gray-500 break-words">Last: {status.message}</p>}
+        {status?.message && !isRunning && !isInterrupted && (
+          <p className="text-gray-500 break-words">Last: {status.message}</p>
+        )}
       </div>
 
       <div className="flex flex-wrap gap-2">

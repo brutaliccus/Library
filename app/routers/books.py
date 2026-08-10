@@ -545,30 +545,43 @@ async def search_books(
 
 
 async def build_trending_payload() -> dict:
+    """NYT bestsellers when available; otherwise popular (score) — never ``recent``.
+
+    Padding with ``order_by="recent"`` made Trending identical to New Releases
+    whenever NYT was missing or few titles mapped into the indexer cache.
+    """
     books = await _nyt_trending_available_cards(limit=20)
-    source = "nyt"
+    nyt_count = len(books)
+    source = "nyt" if nyt_count else "popular"
     if len(books) < 20:
-        # Pad (or fully fall back) with recently matched torrents so the shelf
-        # keeps moving when NYT titles aren't in our indexer cache yet.
         have = {
             (b.get("id") or b.get("volumeId") or "")
             for b in books
             if (b.get("id") or b.get("volumeId"))
         }
+        # Exclude the same recent-matched pool New Releases uses so the two
+        # carousels stay distinct even when NYT only fills a few slots.
+        try:
+            recent_ids, _ = await indexer_cache.list_matched_volume_ids(
+                page=1, page_size=40, order_by="recent", need_total=False,
+            )
+            have.update(recent_ids)
+        except Exception:
+            pass
         need = 20 - len(books)
         volume_ids, _ = await indexer_cache.list_matched_volume_ids(
-            page=1, page_size=max(40, need * 3), order_by="recent", need_total=False,
+            page=1, page_size=max(60, need * 4), order_by="score", need_total=False,
         )
         pad_ids = [vid for vid in volume_ids if vid not in have][:need]
         if pad_ids:
             books = books + await _fetch_volume_cards(pad_ids)
-            source = "nyt+recent" if books and source == "nyt" and have else "cache"
+            source = "nyt+popular" if nyt_count else "popular"
         elif not books:
             volume_ids, _ = await indexer_cache.list_matched_volume_ids(
                 page=1, page_size=20, order_by="score", need_total=False,
             )
             books = await _fetch_volume_cards(volume_ids)
-            source = "cache"
+            source = "popular"
     return {"books": books, "source": source, "availableOnly": True}
 
 
@@ -597,12 +610,17 @@ async def build_new_releases_payload() -> dict:
     return {"books": books, "source": source, "availableOnly": True}
 
 
+# Snapshot name bumped when trending logic changed (no longer pads with ``recent``).
+_TRENDING_SHELF = "trending-v2"
+_NEW_RELEASES_SHELF = "new-releases"
+
+
 async def refresh_daily_shelves(*, force: bool = False) -> dict[str, bool]:
     """Rebuild trending + new-releases when stale (or force). Used by startup cron."""
-    results = {"trending": False, "new-releases": False}
+    results = {_TRENDING_SHELF: False, _NEW_RELEASES_SHELF: False}
     for name, builder in (
-        ("trending", build_trending_payload),
-        ("new-releases", build_new_releases_payload),
+        (_TRENDING_SHELF, build_trending_payload),
+        (_NEW_RELEASES_SHELF, build_new_releases_payload),
     ):
         try:
             if not force:
@@ -627,15 +645,15 @@ async def refresh_daily_shelves(*, force: bool = False) -> dict[str, bool]:
 async def trending_books(
     _user: User = Depends(get_current_user),
 ):
-    cached = await _load_daily_shelf("trending")
+    cached = await _load_daily_shelf(_TRENDING_SHELF)
     if cached is not None:
         return cached
     # Stale snapshot OK while we rebuild — prefer any persisted books over empty.
-    stale = await shelf_snapshots.get_snapshot("trending")
+    stale = await shelf_snapshots.get_snapshot(_TRENDING_SHELF)
     try:
         payload = await build_trending_payload()
         if payload.get("books"):
-            return await _store_daily_shelf("trending", payload)
+            return await _store_daily_shelf(_TRENDING_SHELF, payload)
         if stale and isinstance(stale.get("payload"), dict):
             return _with_refreshed_at(stale["payload"], stale.get("refreshedAt"))
         return payload
@@ -650,14 +668,14 @@ async def trending_books(
 async def new_releases(
     _user: User = Depends(get_current_user),
 ):
-    cached = await _load_daily_shelf("new-releases")
+    cached = await _load_daily_shelf(_NEW_RELEASES_SHELF)
     if cached is not None:
         return cached
-    stale = await shelf_snapshots.get_snapshot("new-releases")
+    stale = await shelf_snapshots.get_snapshot(_NEW_RELEASES_SHELF)
     try:
         payload = await build_new_releases_payload()
         if payload.get("books"):
-            return await _store_daily_shelf("new-releases", payload)
+            return await _store_daily_shelf(_NEW_RELEASES_SHELF, payload)
         if stale and isinstance(stale.get("payload"), dict):
             return _with_refreshed_at(stale["payload"], stale.get("refreshedAt"))
         return payload
@@ -1109,7 +1127,8 @@ async def home_curated_shelves(
     end = start + pageSize
     page_entries = all_entries[start:end]
     # Date in key so midnight UTC picks up the new shuffle even if TTL remains.
-    cache_key = f"home-shelves:v3:{day}:{page}:{pageSize}:{booksPerShelf}"
+    # v4: curated shelves use depth-safe Hardcover list hydration.
+    cache_key = f"home-shelves:v4:{day}:{page}:{pageSize}:{booksPerShelf}"
     cached = _shelf_get(cache_key)
     if cached is not None:
         return cached

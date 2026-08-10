@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,61 @@ def test_status_dumps_only_not_catalog_ready(ol_paths):
     assert status["dumps_size_bytes"] > 0
     assert "Dumps present" in status["message"]
     assert "catalog DB has not been built yet" in status["message"]
+
+
+def test_status_running_keeps_progress_message_even_without_proc(ol_paths):
+    """Startup race / brief window: JSON says running before `_proc` is attached."""
+    db, dumps = ol_paths
+    (dumps / "ol_dump_works_latest.txt.gz").write_bytes(b"x" * (2 * 1024 * 1024))
+    now = time.time()
+    (db.parent / "ol_catalog_build.json").write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "message": "[ol-import] downloading works… 1.2 GB / 4.0 GB (30%)",
+                "log_tail": "[ol-import] downloading works… 1.2 GB / 4.0 GB (30%)",
+                "log_recent": ["[ol-import] downloading works… 1.2 GB / 4.0 GB (30%)"],
+                "started_at": now - 30,
+                "updated_at": now,
+            }
+        ),
+        encoding="utf-8",
+    )
+    ol_catalog_build._proc = None
+    status = ol_catalog_build.get_status()
+    assert status["status"] == "running"
+    assert "downloading works" in status["message"]
+    assert "has not been built yet" not in status["message"]
+    assert status["elapsed_seconds"] is not None
+    assert status["elapsed_seconds"] >= 25
+    assert status["log_tail"]
+    assert status["process_alive"] is False
+
+
+def test_status_orphaned_running_marked_interrupted(ol_paths):
+    db, dumps = ol_paths
+    (dumps / "ol_dump_works_latest.txt.gz").write_bytes(b"x" * (2 * 1024 * 1024))
+    old = time.time() - 120
+    path = db.parent / "ol_catalog_build.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "message": "Starting Open Library catalog build…",
+                "started_at": old,
+                "updated_at": old,
+            }
+        ),
+        encoding="utf-8",
+    )
+    ol_catalog_build._proc = None
+    status = ol_catalog_build.get_status()
+    assert status["status"] == "interrupted"
+    assert "interrupted" in status["message"].lower()
+    assert "has not been built yet" not in status["message"]
+    # Persisted so the next poll stays consistent.
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["status"] == "interrupted"
 
 
 def test_status_ready_db_without_job_json(ol_paths):

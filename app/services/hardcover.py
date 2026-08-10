@@ -311,10 +311,12 @@ async def _graphql(query: str, variables: dict | None = None) -> dict:
                 return {}
             payload = resp.json()
             if payload.get("errors"):
-                logger.debug("Hardcover GraphQL errors: %s", payload["errors"][:2])
+                # Depth/schema failures used to hide at debug and empty every
+                # curated shelf (Hardcover caps query depth at 3 as of 2025).
+                logger.warning("Hardcover GraphQL errors: %s", payload["errors"][:2])
             return payload.get("data") or {}
     except Exception as e:
-        logger.debug("Hardcover request failed: %s", e)
+        logger.warning("Hardcover request failed: %s", e)
         return {}
 
 
@@ -1227,80 +1229,46 @@ async def get_curated_list_books(genre_slug: str, *, limit: int = 20) -> list[di
     return shelf.get("books") or []
 
 
-async def get_curated_shelf(slug: str, *, limit: int = 20) -> dict:
-    """Return ``{listName, listId, books, source}`` for a curated recommendation shelf."""
-    empty = {"listName": "", "listId": None, "books": [], "source": "none"}
-    if not await get_api_key():
-        return empty
+async def _books_by_ids(ids: list[int]) -> dict[int, dict]:
+    """Fetch book summaries by id with a depth-safe GraphQL query.
 
-    cache_key = f"hc_shelf:v2:{slug}:{limit}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    list_id, list_name = await _pick_best_list(slug)
-    if list_id is None:
-        # Last resort: book search for the first query — still themed, not random cache.
-        queries, _, _ = _shelf_search_config(slug)
-        q = queries[0] if queries else slug
-        books = await search_books(q, limit=limit)
-        # Drop hits that are clearly list/meta titles.
-        books = [
-            b for b in books
-            if "best " not in (b.get("title") or "").lower()[:12]
-            and "novels" not in (b.get("title") or "").lower()[-8:]
-        ]
-        out = {
-            "listName": list_name or q.title(),
-            "listId": None,
-            "books": books[:limit],
-            "source": "hardcover_search" if books else "none",
-        }
-        _cache_set(cache_key, out)
-        return out
-
-    detail = await _graphql(
+    Hardcover caps query depth at 3 (2025). Nesting ``image`` /
+    ``contributions`` / ``editions`` under ``lists → list_books → book``
+    exceeds that and returns GraphQL errors with empty data — so list
+    membership is fetched shallowly, then books are hydrated here.
+    """
+    clean = [int(i) for i in ids if i is not None]
+    if not clean:
+        return {}
+    data = await _graphql(
         """
-        query ListBooks($id: Int!) {
-          lists(where: {id: {_eq: $id}}) {
+        query BooksByIds($ids: [Int!]!) {
+          books(where: {id: {_in: $ids}}, limit: 40) {
             id
-            name
-            list_books(order_by: {position: asc}, limit: 40) {
-              position
-              book {
-                id
-                title
-                subtitle
-                slug
-                rating
-                ratings_count
-                reviews_count
-                pages
-                release_year
-                image { url }
-                contributions { author { name } }
-                editions(limit: 2, order_by: {users_count: desc}) {
-                  isbn_13
-                  isbn_10
-                }
-              }
+            title
+            subtitle
+            slug
+            rating
+            ratings_count
+            reviews_count
+            pages
+            release_year
+            image { url }
+            contributions { author { name } }
+            editions(limit: 2, order_by: {users_count: desc}) {
+              isbn_13
+              isbn_10
             }
           }
         }
         """,
-        {"id": int(list_id)},
+        {"ids": clean[:40]},
     )
-    lists = detail.get("lists") or []
-    if not lists:
-        out = {**empty, "listName": list_name, "listId": list_id}
-        _cache_set(cache_key, out)
-        return out
-
-    list_name = (lists[0].get("name") or list_name).strip()
-    books: list[dict] = []
-    for entry in lists[0].get("list_books") or []:
-        book = entry.get("book") or {}
-        if not book:
+    out: dict[int, dict] = {}
+    for book in data.get("books") or []:
+        try:
+            bid = int(book.get("id"))
+        except (TypeError, ValueError):
             continue
         shaped = {
             "id": book.get("id"),
@@ -1322,16 +1290,135 @@ async def get_curated_shelf(slug: str, *, limit: int = 20) -> dict:
         }
         norm = _hc_book_to_summary(shaped)
         if norm:
+            out[bid] = norm
+    return out
+
+
+async def _shelf_from_book_search(slug: str, *, list_name: str, limit: int) -> dict:
+    """Themed book-search fallback when list resolution fails."""
+    queries, _, _ = _shelf_search_config(slug)
+    q = queries[0] if queries else slug
+    books = await search_books(q, limit=limit)
+    books = [
+        b for b in books
+        if "best " not in (b.get("title") or "").lower()[:12]
+        and "novels" not in (b.get("title") or "").lower()[-8:]
+    ]
+    return {
+        "listName": (list_name or q).strip() or q.title(),
+        "listId": None,
+        "books": books[:limit],
+        "source": "hardcover_search" if books else "none",
+    }
+
+
+async def get_curated_shelf(slug: str, *, limit: int = 20) -> dict:
+    """Return ``{listName, listId, books, source}`` for a curated recommendation shelf."""
+    empty = {"listName": "", "listId": None, "books": [], "source": "none"}
+    if not await get_api_key():
+        return empty
+
+    # v3: depth-safe list→book hydration (v2 nested past Hardcover's depth=3 cap).
+    cache_key = f"hc_shelf:v3:{slug}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    list_id, list_name = await _pick_best_list(slug)
+    if list_id is None:
+        out = await _shelf_from_book_search(slug, list_name=list_name, limit=limit)
+        _cache_set(cache_key, out)
+        return out
+
+    # Depth-safe: lists(1) → list_books(2) → book scalars(3). No nested book fields.
+    detail = await _graphql(
+        """
+        query ListBooks($id: Int!) {
+          lists(where: {id: {_eq: $id}}) {
+            id
+            name
+            list_books(order_by: {position: asc}, limit: 40) {
+              position
+              book {
+                id
+                title
+                subtitle
+                slug
+                rating
+                ratings_count
+                reviews_count
+                pages
+                release_year
+              }
+            }
+          }
+        }
+        """,
+        {"id": int(list_id)},
+    )
+    lists = detail.get("lists") or []
+    if not lists:
+        logger.warning(
+            "Hardcover list %s (%s) returned no rows — falling back to book search",
+            list_name or slug,
+            list_id,
+        )
+        out = await _shelf_from_book_search(slug, list_name=list_name, limit=limit)
+        # Don't cache hard-empty list failures for a full TTL; short negative cache
+        # happens via the search result cache key when books were found.
+        if out.get("books"):
+            _cache_set(cache_key, out)
+        return out
+
+    list_name = (lists[0].get("name") or list_name).strip()
+    ordered_ids: list[int] = []
+    shallow_by_id: dict[int, dict] = {}
+    for entry in lists[0].get("list_books") or []:
+        book = entry.get("book") or {}
+        raw_id = book.get("id")
+        if raw_id is None:
+            continue
+        try:
+            bid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if bid in shallow_by_id:
+            continue
+        ordered_ids.append(bid)
+        shallow_by_id[bid] = book
+        if len(ordered_ids) >= max(limit, 40):
+            break
+
+    hydrated = await _books_by_ids(ordered_ids[: max(limit * 2, limit)])
+    books: list[dict] = []
+    for bid in ordered_ids:
+        norm = hydrated.get(bid)
+        if not norm:
+            # Keep order even if enrichment failed — title/slug still useful.
+            norm = _hc_book_to_summary(shallow_by_id.get(bid) or {})
+        if norm:
             books.append(norm)
         if len(books) >= limit:
             break
+
+    if not books:
+        logger.warning(
+            "Hardcover list %r (%s) had membership but no book payloads — search fallback",
+            list_name,
+            list_id,
+        )
+        out = await _shelf_from_book_search(slug, list_name=list_name, limit=limit)
+        if out.get("books"):
+            out = {**out, "listId": list_id, "listName": list_name or out.get("listName")}
+            _cache_set(cache_key, out)
+        return out
 
     logger.info("Hardcover list %r (%s) → %s books", list_name, list_id, len(books))
     out = {
         "listName": list_name,
         "listId": list_id,
         "books": books,
-        "source": "hardcover" if books else "none",
+        "source": "hardcover",
     }
     _cache_set(cache_key, out)
     return out

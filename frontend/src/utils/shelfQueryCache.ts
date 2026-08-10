@@ -19,7 +19,7 @@ import { currentOrigin } from "../api/libraryRegistry";
 import { libraryQueryKey } from "./libraryQueryKeys";
 
 /** Base prefix; use shelfPersistKey() for the active origin. */
-export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v9:";
+export const SHELF_PERSIST_KEY_PREFIX = "rq-shelf-cache-v10:";
 export const SHELF_PERSIST_LEGACY_KEYS = [
   "rq-shelf-cache-v2",
   "rq-shelf-cache-v3",
@@ -28,6 +28,7 @@ export const SHELF_PERSIST_LEGACY_KEYS = [
   "rq-shelf-cache-v6",
   "rq-shelf-cache-v7",
   "rq-shelf-cache-v8",
+  "rq-shelf-cache-v9",
 ] as const;
 
 /** Origin-scoped localStorage key for shelf query persistence. */

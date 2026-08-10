@@ -1,4 +1,4 @@
-﻿"""HTTP client for the sibling LibraForge stack (Metadata / M4B / Folder Forge).
+"""HTTP client for the sibling LibraForge stack (Metadata / M4B / Folder Forge).
 
 LibraForge is AGPL â€” we only call its HTTP API; we never import its code.
 There is no API key; access relies on Docker/LAN network controls.
@@ -711,14 +711,34 @@ def run_failed(report: dict[str, Any]) -> bool:
 
 
 def organizer_moved_files(report: dict[str, Any]) -> bool:
-    """True when Folder Forge actually moved at least one book into the library."""
+    """True when Folder Forge actually moved at least one book into the library.
+
+    LibraForge includes *skipped* books in ``stats.move_items`` (unknown author,
+    already organized, conflicts, etc.). Those must not count as moves — otherwise
+    finalize force-wipes staging and marks the request completed while the audio
+    was never placed in the library.
+    """
     stats = report.get("stats") or {}
     if not isinstance(stats, dict):
         return False
-    if int(stats.get("moves_succeeded") or 0) > 0:
-        return True
+    if "moves_succeeded" in stats:
+        return int(stats.get("moves_succeeded") or 0) > 0
+    # Legacy reports without moves_succeeded: count only non-skipped move_items.
     moves = stats.get("move_items") or []
-    return isinstance(moves, list) and len(moves) > 0
+    if not isinstance(moves, list):
+        return False
+    for move in moves:
+        if not isinstance(move, dict):
+            continue
+        structure = str(move.get("structure") or "").strip().lower()
+        if structure.startswith("skipped"):
+            continue
+        reasons = move.get("review_reasons") or []
+        if any(str(r).strip().lower().startswith("skipped") for r in reasons):
+            continue
+        if move.get("target"):
+            return True
+    return False
 
 
 def organizer_move_targets(report: dict[str, Any]) -> list[str]:

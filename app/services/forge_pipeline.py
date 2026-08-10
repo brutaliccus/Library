@@ -3405,6 +3405,47 @@ async def apply_audible_chapters(
         }
 
 
+def _book_folder_audio(folder: Path) -> list[Path]:
+    """Audio that belongs to *this* book folder (not nested sibling books).
+
+    Matches Folder Forge layout: ``Author/Series/Title/*.m4b`` or
+    ``Author/Title/mp3/*.mp3``. Series containers that only hold child book
+    directories are excluded so a re-run of book 1 titled like the series
+    (e.g. Honeybloods) cannot copy Honeybites from ``Author/Honeybloods/``.
+    """
+    if not folder.is_dir():
+        return []
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return []
+    direct = sorted(
+        f
+        for f in entries
+        if f.is_file()
+        and f.suffix.lower() in AUDIO_EXTENSIONS
+        and "-tmpfiles" not in f.parts
+    )
+    if direct:
+        return direct
+    collected: list[Path] = []
+    for sub in entries:
+        if not sub.is_dir() or sub.name.startswith("."):
+            continue
+        if sub.name.lower() not in _FORMAT_DIR_NAMES:
+            continue
+        collected.extend(
+            sorted(
+                f
+                for f in sub.rglob("*")
+                if f.is_file()
+                and f.suffix.lower() in AUDIO_EXTENSIONS
+                and "-tmpfiles" not in f.parts
+            )
+        )
+    return collected
+
+
 def find_library_book_dir(title: str, author: str | None = None) -> Path | None:
     """Best-effort locate a finished book under the audiobook library root."""
     root = Path(settings.audiobook_dir)
@@ -3427,7 +3468,8 @@ def find_library_book_dir(title: str, author: str | None = None) -> Path | None:
             name_l = path.name.lower()
             if title_slug not in name_l and name_l not in title_slug:
                 continue
-            if not _collect_audio(path):
+            # Require book-folder audio — not recursive series-container matches.
+            if not _book_folder_audio(path):
                 continue
             score = 0
             if name_l == title_slug:

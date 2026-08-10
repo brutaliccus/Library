@@ -161,6 +161,54 @@ def test_run_failed_on_error_status():
 def test_organizer_moved_files():
     assert organizer_moved_files({"stats": {"moves_succeeded": 1}})
     assert not organizer_moved_files({"stats": {"moves_succeeded": 0, "move_items": []}})
+    # Skipped review stubs in move_items must not count as successful moves
+    # (Honeycraves / Honeybloods false-complete wiped staging).
+    skipped_report = {
+        "stats": {
+            "moves_succeeded": 0,
+            "planned_moves": 0,
+            "move_items": [
+                {
+                    "title": "Honeycraves Honeybloods",
+                    "author": "Unknown Author",
+                    "structure": "skipped_unknown_author",
+                    "review_reasons": ["skipped unknown author"],
+                    "source": "/audiobooks/.unorganized/req_36_x/book.m4b",
+                    "target": "/audiobooks/Unknown Author/Honeycraves Honeybloods/Honeycraves Honeybloods",
+                }
+            ],
+        }
+    }
+    assert not organizer_moved_files(skipped_report)
+    # Legacy reports without moves_succeeded still treat real targets as moved.
+    assert organizer_moved_files(
+        {
+            "stats": {
+                "move_items": [
+                    {
+                        "title": "Honeybites",
+                        "structure": "moved",
+                        "target": "/audiobooks/I.S. Belle/Honeybloods/Honeybites",
+                    }
+                ]
+            }
+        }
+    )
+    assert not organizer_moved_files(
+        {
+            "stats": {
+                "move_items": [
+                    {
+                        "structure": "skipped_existing_book_folders",
+                        "review_reasons": [
+                            "skipped: folder name already matches the naming template"
+                        ],
+                        "target": "/audiobooks/I.S. Belle/Honeybloods/Honeybites",
+                    }
+                ]
+            }
+        }
+    )
 
 
 def test_organizer_move_targets():
@@ -193,6 +241,25 @@ def test_staging_dir_under_unorganized(tmp_path, monkeypatch):
     assert path.parent.name == ".unorganized"
     assert path.name.startswith("req_42_")
     assert (tmp_path / ".unorganized" / ".ignore").is_file()
+
+
+def test_find_library_book_dir_skips_series_container(tmp_path, monkeypatch):
+    """Series folder named like book 1 must not win over a missing book folder."""
+    from app.services import forge_pipeline
+
+    monkeypatch.setattr(forge_pipeline.settings, "audiobook_dir", str(tmp_path))
+    series = tmp_path / "I.S. Belle" / "Honeybloods"
+    bites = series / "Honeybites"
+    bites.mkdir(parents=True)
+    (bites / "Honeybites - Honeybloods, Book 2.m4b").write_bytes(b"x")
+    # No book-1 folder — only the series container + book 2.
+    assert forge_pipeline.find_library_book_dir("Honeybloods", "I.S. Belle") is None
+    assert forge_pipeline.find_library_book_dir("Honeybites", "I.S. Belle") == bites
+    # Book folder directly under series still matches.
+    book1 = series / "Honeybloods"
+    book1.mkdir()
+    (book1 / "Honeybloods - Honeybloods, Book 1.m4b").write_bytes(b"y")
+    assert forge_pipeline.find_library_book_dir("Honeybloods", "I.S. Belle") == book1
 
 
 def test_needs_m4b_single_m4b(tmp_path):

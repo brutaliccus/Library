@@ -47,6 +47,30 @@ _SAMPLE_NAME_RE = re.compile(
     r"(?:^|[\s._-])(?:sample|preview|excerpt|promo|teaser)(?:[\s._-]|$)",
     re.IGNORECASE,
 )
+# Release / request titles that usually mean multiple books in one torrent.
+_SERIES_PACK_TITLE_RE = re.compile(
+    r"\b(?:"
+    r"complete\s+series|full\s+series|entire\s+series|"
+    r"books?\s*\d+\s*[-–to]+\s*\d+|"
+    r"omnibus|box\s*sets?|boxsets?|boxed\s*sets?|"
+    r"bundle|series\s+pack|complete\s+collection|anthology"
+    r")\b",
+    re.IGNORECASE,
+)
+# Filenames that look like chapter/part tracks of one book (not whole books).
+_CHAPTERISH_STEM_RE = re.compile(
+    r"(?:"
+    r"(?:^|[\s._-])(?:ch(?:apter)?|track|disc|disk|cd|part|pt)\s*\d+"
+    r"|(?:^|[\s._-])(?:part|pt)\s*\d+(?:\s*of\s*\d+)?"
+    r"|\(\d+\s*of\s*\d+\)"
+    r"|(?:^|[\s._-])(?:file|f)\s*\d{1,3}(?:[\s._-]|$)"
+    r")",
+    re.IGNORECASE,
+)
+_BARE_TRACK_NUM_RE = re.compile(r"^\d{1,3}$")
+# Soft floor: whole-book M4Bs are usually large; chapters/clips are smaller.
+# Used as a positive signal only (tiny test fixtures still work via names).
+_WHOLE_BOOK_MIN_BYTES = 15 * 1024 * 1024
 
 HandleResult = Literal["continue", "quarantined", "split"]
 
@@ -106,6 +130,169 @@ def detect_dual_format(staging: Path) -> bool:
         return False
     format_dirs = [p for p in parents if p.name.lower() in _FORMAT_DIR_NAMES]
     return bool(format_dirs) and len(format_dirs) == len(parents)
+
+
+def title_looks_like_series_pack(title: str | None) -> bool:
+    """True when the download/request title suggests multiple books."""
+    return bool(_SERIES_PACK_TITLE_RE.search(title or ""))
+
+
+def _stem_looks_like_chapter(stem: str) -> bool:
+    s = (stem or "").strip()
+    if not s:
+        return True
+    if _BARE_TRACK_NUM_RE.fullmatch(s):
+        return True
+    if _CHAPTERISH_STEM_RE.search(s):
+        return True
+    return False
+
+
+def analyze_flat_multi_book(
+    staging: Path,
+    *,
+    title: str = "",
+) -> dict[str, Any]:
+    """Decide if a flat audio folder is multiple books vs chapters of one book.
+
+    Returns ``{likely, files, confidence, rationale}``. Designed for packs like
+    five complete ``.m4b`` files in one folder titled "Full Series" — which
+    folder-parent detection misses.
+    """
+    from app.services.release_files import _flat_book_key
+
+    empty = {
+        "likely": False,
+        "files": [],
+        "confidence": 0.0,
+        "rationale": "",
+    }
+    if not staging.is_dir():
+        return empty
+
+    audio = [
+        f
+        for f in _collect_audio(staging)
+        if not _SAMPLE_NAME_RE.search(f.stem)
+    ]
+    if len(audio) < 2:
+        return empty
+
+    m4bs = [f for f in audio if f.suffix.lower() == ".m4b"]
+    # Prefer complete audiobook containers when present.
+    candidates = m4bs if len(m4bs) >= 2 else audio
+    if not (2 <= len(candidates) <= 12):
+        return empty
+
+    parents = {f.parent for f in candidates}
+    if len(parents) != 1:
+        return empty
+
+    # If other non-candidate audio remains (e.g. m4b + loose mp3), be cautious.
+    if candidates is m4bs and len(audio) != len(m4bs):
+        return empty
+
+    keys = [_flat_book_key(f.name) for f in candidates]
+    distinct_keys = {k.casefold() for k in keys if k}
+    chapterish = sum(1 for f in candidates if _stem_looks_like_chapter(f.stem))
+    pack_title = title_looks_like_series_pack(title)
+    all_m4b = len(m4bs) >= 2 and len(m4bs) == len(candidates)
+    large = [f for f in candidates if f.stat().st_size >= _WHOLE_BOOK_MIN_BYTES]
+    # Same book key after stripping "pt N" / "(1 of 3)" → chapter parts, not books.
+    same_book_parts = len(distinct_keys) == 1 and len(candidates) >= 2
+
+    if same_book_parts:
+        return {
+            **empty,
+            "rationale": "Audio files share one book key (chapter/part set)",
+        }
+    if chapterish >= max(2, len(candidates) - 1) and not pack_title:
+        return {
+            **empty,
+            "rationale": "Filenames look like chapter/track parts of one book",
+        }
+    if len(distinct_keys) < 2 and not (all_m4b and pack_title):
+        return empty
+
+    # Score signals — need a clear multi-book story before we split/quarantine.
+    score = 0.0
+    reasons: list[str] = []
+    if all_m4b:
+        score += 0.45
+        reasons.append(f"{len(candidates)} complete .m4b files in one folder")
+    if len(distinct_keys) >= 2:
+        score += 0.30
+        reasons.append(f"{len(distinct_keys)} distinct book-like filenames")
+    if pack_title:
+        score += 0.35
+        reasons.append("download title indicates a series/bundle/box set")
+    if large and len(large) == len(candidates):
+        score += 0.15
+        reasons.append("each file is whole-book sized")
+    if chapterish:
+        score -= 0.25 * (chapterish / len(candidates))
+
+    likely = score >= 0.70 or (all_m4b and pack_title and len(distinct_keys) >= 2)
+    if not likely and all_m4b and len(distinct_keys) >= 2 and len(candidates) <= 8:
+        # Flat multi-.m4b with different titles is almost always a pack even
+        # without "series" in the torrent name.
+        likely = True
+        score = max(score, 0.82)
+        reasons.append("multiple differently named .m4b files (treat as books)")
+
+    if not likely:
+        return {
+            **empty,
+            "rationale": "; ".join(reasons) or "insufficient multi-book signal",
+        }
+
+    return {
+        "likely": True,
+        "files": sorted(candidates, key=lambda p: p.name.lower()),
+        "confidence": round(min(0.95, max(0.75, score)), 2),
+        "rationale": "; ".join(reasons),
+    }
+
+
+def build_split_plan_from_flat_audio(
+    staging: Path,
+    files: list[Path],
+    *,
+    default_author: str = "",
+    confidence: float = 0.88,
+    rationale: str = "",
+) -> dict[str, Any] | None:
+    """One book per complete audio file (flat multi-book pack)."""
+    from app.services.release_files import _flat_book_key, _title_from_group_key
+
+    if len(files) < 2:
+        return None
+    books: list[dict[str, Any]] = []
+    for f in sorted(files, key=lambda p: p.name.lower()):
+        try:
+            rel = f.relative_to(staging).as_posix()
+        except ValueError:
+            continue
+        title = _title_from_group_key(_flat_book_key(f.name))
+        title = clean_catalog_title(title) or title or f.stem
+        books.append({
+            "title": title,
+            "author": default_author or "",
+            "paths": [rel],
+            "confidence": confidence,
+        })
+    if len(books) < 2:
+        return None
+    return {
+        "books": books,
+        "confidence": confidence,
+        "rationale": rationale
+        or (
+            f"Split {len(books)} complete audio files as separate books "
+            "(flat folder multi-book pack)."
+        ),
+        "folder_based": False,
+    }
 
 
 def _paths_are_clear_folders(staging: Path, plan: openrouter.BookSplitPlan) -> bool:
@@ -189,18 +376,43 @@ async def maybe_handle_multi_book(
         default_author=author or "",
     )
     release_groups = group_release_files_by_book(release_files)
-    likely = detect_likely_multi_book(staging) or len(release_groups) >= 2
+    flat = analyze_flat_multi_book(staging, title=title)
+    likely = (
+        detect_likely_multi_book(staging)
+        or len(release_groups) >= 2
+        or bool(flat.get("likely"))
+    )
     if not likely:
         return "continue"
 
     plan: openrouter.BookSplitPlan | None = None
     if heuristic_raw:
         plan = openrouter.parse_split_plan(heuristic_raw)
+    if plan is None and flat.get("likely") and flat.get("files"):
+        flat_plan = build_split_plan_from_flat_audio(
+            staging,
+            list(flat["files"]),
+            default_author=author or "",
+            confidence=float(flat.get("confidence") or 0.88),
+            rationale=str(flat.get("rationale") or ""),
+        )
+        if flat_plan:
+            plan = openrouter.parse_split_plan(flat_plan)
 
     if plan is None and await openrouter.is_enabled():
         context = {
             "request_title": title,
             "request_author": author or "",
+            "series_pack_title": title_looks_like_series_pack(title),
+            "flat_multi_book": {
+                "likely": bool(flat.get("likely")),
+                "confidence": flat.get("confidence"),
+                "rationale": flat.get("rationale"),
+                "files": [
+                    f.relative_to(staging).as_posix()
+                    for f in (flat.get("files") or [])
+                ],
+            },
             "audio_parent_dirs": [
                 str(p.relative_to(staging)) if p != staging else "."
                 for p in _audio_parent_dirs(staging)
@@ -226,10 +438,16 @@ async def maybe_handle_multi_book(
             plan = None
 
     if not plan:
-        if len(release_groups) >= 2:
+        if len(release_groups) >= 2 or flat.get("likely"):
+            n = max(len(release_groups), len(flat.get("files") or []))
             reason = (
-                f"Multi-book pack ({len(release_groups)} titles in release file list) "
-                "but files could not be mapped automatically — review in Quick Review"
+                f"Multi-book pack ({n} titles) detected"
+                + (
+                    f" — {flat.get('rationale')}"
+                    if flat.get("rationale")
+                    else " but files could not be mapped automatically"
+                )
+                + " — review in Quick Review"
             )[:500]
             write_assist(
                 staging,
@@ -239,6 +457,14 @@ async def maybe_handle_multi_book(
                         {"title": g.get("title"), "key": g.get("key")}
                         for g in release_groups
                     ],
+                    "flat_multi_book": {
+                        "likely": bool(flat.get("likely")),
+                        "rationale": flat.get("rationale"),
+                        "files": [
+                            f.relative_to(staging).as_posix()
+                            for f in (flat.get("files") or [])
+                        ],
+                    },
                 },
             )
             await _set_quarantine(request_id, reason, staging)

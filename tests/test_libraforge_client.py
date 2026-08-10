@@ -202,6 +202,16 @@ def test_needs_m4b_single_m4b(tmp_path):
     assert needs_m4b_conversion(book) is False
 
 
+def test_needs_m4b_does_not_merge_multiple_complete_m4bs(tmp_path):
+    """Series packs of whole .m4b files must never be concatenated."""
+    book = tmp_path / "pack"
+    book.mkdir()
+    (book / "Book One.m4b").write_bytes(b"a")
+    (book / "Book Two.m4b").write_bytes(b"b")
+    (book / "Book Three.m4b").write_bytes(b"c")
+    assert needs_m4b_conversion(book) is False
+
+
 def test_needs_m4b_multipart_mp3(tmp_path):
     book = tmp_path / "book"
     book.mkdir()

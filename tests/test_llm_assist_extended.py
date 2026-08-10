@@ -88,6 +88,71 @@ def test_detect_multi_book_vs_dual_format(tmp_path: Path):
     assert llm_assist.detect_dual_format(dual) is True
 
 
+def test_flat_multi_m4b_full_series_detected(tmp_path: Path):
+    """ACOTAR-style: 5 complete m4bs in one folder, title says full series."""
+    staging = tmp_path / "acotar"
+    staging.mkdir()
+    names = [
+        "A Court of Thorns and Roses.m4b",
+        "A Court of Mist and Fury.m4b",
+        "A Court of Wings and Ruin.m4b",
+        "A Court of Frost and Starlight.m4b",
+        "A Court of Silver Flames.m4b",
+    ]
+    for name in names:
+        (staging / name).write_bytes(b"x")
+
+    # Folder-parent heuristic alone misses flat packs.
+    assert llm_assist.detect_likely_multi_book(staging) is False
+
+    hit = llm_assist.analyze_flat_multi_book(
+        staging,
+        title="A Court of Thorns and Roses - Full Series",
+    )
+    assert hit["likely"] is True
+    assert len(hit["files"]) == 5
+    assert hit["confidence"] >= 0.75
+
+    plan = llm_assist.build_split_plan_from_flat_audio(
+        staging,
+        hit["files"],
+        default_author="Sarah J. Maas",
+        confidence=hit["confidence"],
+        rationale=hit["rationale"],
+    )
+    assert plan is not None
+    assert len(plan["books"]) == 5
+    assert all(len(b["paths"]) == 1 and b["paths"][0].endswith(".m4b") for b in plan["books"])
+    parsed = parse_split_plan(plan)
+    assert parsed is not None
+    assert len(parsed.books) == 5
+
+
+def test_flat_m4b_chapter_parts_not_multi_book(tmp_path: Path):
+    """Same title with pt 1/2/3 is one book, even if files are .m4b."""
+    staging = tmp_path / "parts"
+    staging.mkdir()
+    for name in (
+        "The Final Empire pt 1.m4b",
+        "The Final Empire pt 2.m4b",
+        "The Final Empire pt 3.m4b",
+    ):
+        (staging / name).write_bytes(b"x")
+
+    hit = llm_assist.analyze_flat_multi_book(
+        staging,
+        title="Mistborn 1 - The Final Empire",
+    )
+    assert hit["likely"] is False
+
+
+def test_title_looks_like_series_pack():
+    assert llm_assist.title_looks_like_series_pack("ACOTAR Full Series") is True
+    assert llm_assist.title_looks_like_series_pack("Mistborn Complete Series") is True
+    assert llm_assist.title_looks_like_series_pack("Books 1-5 Box Set") is True
+    assert llm_assist.title_looks_like_series_pack("A Court of Thorns and Roses") is False
+
+
 def test_apply_file_prune_path_safe_and_never_sole(tmp_path: Path):
     staging = tmp_path / "st"
     staging.mkdir()

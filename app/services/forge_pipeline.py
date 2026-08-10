@@ -94,7 +94,12 @@ _SERIES_NUMBER_DASH_TITLE_RE = re.compile(
 )
 _LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
 _SERIES_PACK_RE = re.compile(
-    r"\b(?:complete\s+series|books?\s*\d+\s*[-–]\s*\d+|omnibus|box\s*set)\b",
+    r"\b(?:"
+    r"complete\s+series|full\s+series|entire\s+series|"
+    r"books?\s*\d+\s*[-–to]+\s*\d+|"
+    r"omnibus|box\s*sets?|boxsets?|boxed\s*sets?|"
+    r"bundle|series\s+pack|complete\s+collection"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -177,6 +182,11 @@ def needs_m4b_conversion(folder: Path) -> bool:
         return False
     m4bs = [f for f in audio if f.suffix.lower() == ".m4b"]
     if len(m4bs) == 1 and len(audio) == 1:
+        return False
+    # Multiple complete .m4b files are already books — never concatenate into
+    # one mega M4B (series packs / flat multi-book drops). Multi-book assist
+    # should split them first; if it did not, Folder Forge must not merge.
+    if len(m4bs) >= 2 and len(m4bs) == len(audio):
         return False
     return True
 

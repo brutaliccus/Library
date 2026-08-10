@@ -590,7 +590,10 @@ async def identify_book(context: dict[str, Any]) -> BookIdentification | None:
         "and leave narrator empty. When title + duration strongly match a known "
         "edition, do NOT lower confidence just because the file author looks like "
         "a narrator — return the real book author (e.g. Michael Crichton) and "
-        "treat the tag author as the narrator."
+        "treat the tag author as the narrator. "
+        "When local duration is missing/unknown but title + author clearly identify "
+        "a published audiobook (and series/book number agree when present), still "
+        "return high confidence — missing runtime alone is not a reason to abstain."
     )
     data = await _chat_json(system, context, max_tokens=600, log_label="identify")
     identification = parse_identification(data)

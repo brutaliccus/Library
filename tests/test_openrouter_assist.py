@@ -12,6 +12,7 @@ import pytest
 from app.services import openrouter
 from app.services.forge_pipeline import (
     _apply_metadata_forge,
+    _identity_fields_corroborate,
     _llm_metadata_assist_retry,
     collect_staging_llm_context,
     seed_staging_metadata_hints,
@@ -298,3 +299,129 @@ def test_identify_book_soft_fails_on_http_error(monkeypatch):
             return await openrouter.identify_book({"request_title": "Dune"})
 
     assert asyncio.run(_run()) is None
+
+
+def test_identity_fields_corroborate_honeybites():
+    hit = BookIdentification(
+        title="Honeybites",
+        author="I.S. Belle",
+        series="Honeybloods",
+        confidence=0.92,
+    )
+    assert _identity_fields_corroborate(
+        hit,
+        {
+            "title": "Honeybites, Book 2",
+            "authors": ["I.S. Belle"],
+            "series": "Honeybloods",
+            "score": 0.46,
+        },
+    )
+    assert not _identity_fields_corroborate(
+        hit,
+        {
+            "title": "Honeybloods",
+            "authors": ["Someone Else"],
+            "score": 0.46,
+        },
+    )
+
+
+def test_llm_assist_corroborates_when_forge_retry_still_fails(tmp_path: Path, monkeypatch):
+    """Missing-duration ~46% Forge scores should still apply after LLM confirm."""
+    staging = tmp_path / "req_honey"
+    staging.mkdir()
+    (staging / "book.m4b").write_bytes(b"x")
+
+    monkeypatch.setattr(openrouter, "is_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(openrouter, "get_confidence_threshold", AsyncMock(return_value=0.85))
+    monkeypatch.setattr(
+        openrouter,
+        "identify_book",
+        AsyncMock(
+            return_value=BookIdentification(
+                title="Honeybites",
+                author="I.S. Belle",
+                series="Honeybloods",
+                confidence=0.93,
+                rationale="Clear title+author match; duration unknown",
+            )
+        ),
+    )
+
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(
+        return_value=MagicMock(
+            scalar_one_or_none=MagicMock(
+                return_value=MagicMock(
+                    title="Honeybites, Book 2",
+                    author="I.S. Belle",
+                    media_type="audiobook",
+                )
+            )
+        )
+    )
+    pipeline = MagicMock()
+    pipeline._update_status = AsyncMock()
+    pipeline._is_cancelled = AsyncMock(return_value=False)
+
+    candidate = {
+        "asin": "B0HONEYBIT2",
+        "title": "Honeybites",
+        "authors": ["I.S. Belle"],
+        "series": "Honeybloods",
+        "sequence": "2",
+        "score": 0.46,
+        "chosen_metadata": {
+            "title": "Honeybites",
+            "author": "I.S. Belle",
+            "series": "Honeybloods",
+            "asin": "B0HONEYBIT2",
+        },
+        "allowed_edit_modes": ["full"],
+        "recommended_edit_mode": "full",
+    }
+
+    async def _fake_apply(**kwargs):
+        marker = staging / "libraforge.json"
+        marker.write_text(
+            json.dumps({"marker": {"applied": True, "manually_applied": True}}),
+            encoding="utf-8",
+        )
+        return {"ok": True}
+
+    async def _run():
+        with (
+            patch("app.services.forge_pipeline.async_session", return_value=session),
+            patch("app.services.forge_pipeline._pipeline", return_value=pipeline),
+            patch(
+                "app.services.forge_pipeline._run_metadata_forge_once",
+                new=AsyncMock(
+                    return_value=("fail", "skipped: score below minimum: 0.46 < 0.7")
+                ),
+            ),
+            patch(
+                "app.services.libraforge.manual_review_search",
+                new=AsyncMock(return_value={"results": [candidate]}),
+            ) as search,
+            patch(
+                "app.services.libraforge.manual_review_apply",
+                new=AsyncMock(side_effect=_fake_apply),
+            ) as apply,
+        ):
+            status, reason = await _llm_metadata_assist_retry(
+                88,
+                staging=staging,
+                user_id=1,
+                prior_reason="skipped: score below minimum: 0.46 < 0.7",
+            )
+            return status, reason, search, apply
+
+    status, reason, search, apply = asyncio.run(_run())
+    assert status == "ok"
+    assert reason == ""
+    search.assert_awaited_once()
+    apply.assert_awaited_once()
+    assert (staging / "libraforge.json").is_file()

@@ -1269,6 +1269,181 @@ async def _run_metadata_forge_with_provider_fallback(
     return "fail", last_reason
 
 
+def _norm_match_text(value: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _identity_fields_corroborate(
+    identification: Any,
+    candidate: dict[str, Any],
+    *,
+    min_title: float = 0.72,
+    min_author: float = 0.75,
+) -> bool:
+    """True when a Manual Review hit agrees with LLM title + author identity."""
+    from difflib import SequenceMatcher
+
+    id_title = _norm_match_text(str(getattr(identification, "title", "") or ""))
+    id_author = _norm_match_text(str(getattr(identification, "author", "") or ""))
+    if not id_title or not id_author:
+        return False
+
+    cand_title = _norm_match_text(str(candidate.get("title") or ""))
+    authors = candidate.get("authors")
+    if isinstance(authors, list) and authors:
+        cand_author = _norm_match_text(
+            ", ".join(str(a).strip() for a in authors if str(a).strip())
+        )
+    else:
+        cand_author = _norm_match_text(str(candidate.get("author") or ""))
+    if not cand_title or not cand_author:
+        return False
+
+    title_ok = (
+        id_title == cand_title
+        or id_title in cand_title
+        or cand_title in id_title
+        or SequenceMatcher(None, id_title, cand_title).ratio() >= min_title
+    )
+    author_ok = (
+        id_author == cand_author
+        or id_author in cand_author
+        or cand_author in id_author
+        or SequenceMatcher(None, id_author, cand_author).ratio() >= min_author
+    )
+    return title_ok and author_ok
+
+
+async def _llm_corroborated_manual_apply(
+    request_id: int,
+    *,
+    staging: Path,
+    identification: Any,
+) -> bool:
+    """Apply a Manual Review hit that corroborates high-confidence LLM identity.
+
+    Used when Metadata Forge still fails after LLM seeding — typically because
+    local duration is missing and the scorer tops out near ~0.46 despite a
+    clear title+author (+ book number) match. Manual Review apply bypasses
+    ``min_score`` once a candidate is explicitly selected.
+    """
+    from app.services.quick_review import (
+        _enrich_selected_for_apply,
+        list_staging_targets,
+        resolve_apply_edit_mode,
+        resolve_target_path,
+    )
+
+    query = clean_search_title(str(getattr(identification, "title", "") or ""))
+    if not query:
+        return False
+
+    metadata = {
+        "title": str(getattr(identification, "title", "") or "").strip(),
+        "author": str(getattr(identification, "author", "") or "").strip(),
+        "series": str(getattr(identification, "series", "") or "").strip(),
+    }
+    asin = normalize_asin(getattr(identification, "asin", "") or "")
+    try:
+        data = await libraforge.manual_review_search(
+            query=query,
+            metadata=metadata,
+            limit=10,
+            provider="audible",
+        )
+    except libraforge.LibraForgeError as e:
+        logger.warning(
+            "LLM corroboration search failed for request %s: %s", request_id, e
+        )
+        return False
+
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list) or not results:
+        return False
+
+    chosen: dict[str, Any] | None = None
+    if asin:
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            if normalize_asin(row.get("asin")) == asin:
+                chosen = row
+                break
+    if chosen is None:
+        for row in results:
+            if isinstance(row, dict) and _identity_fields_corroborate(identification, row):
+                chosen = row
+                break
+    if chosen is None:
+        logger.info(
+            "LLM corroboration found no title/author match for request %s "
+            "(title=%r author=%r)",
+            request_id,
+            metadata.get("title"),
+            metadata.get("author"),
+        )
+        return False
+
+    targets = list_staging_targets(staging)
+    if not targets:
+        return False
+    chosen_rel = str(targets[0].get("relative_path") or "")
+    _local, lf_path = resolve_target_path(staging, chosen_rel or None)
+    mode = resolve_apply_edit_mode(chosen, edit_mode="full", replace_cover=True)
+    enriched, metadata_override = _enrich_selected_for_apply(
+        chosen, edit_mode=mode, replace_cover=True
+    )
+    try:
+        await libraforge.manual_review_apply(
+            path=lf_path,
+            selected_result=enriched,
+            edit_mode=mode,
+            write_policy="overwrite",
+            replace_cover=True,
+            cover_if_missing=False,
+            backup=False,
+            metadata_override=metadata_override or None,
+        )
+    except libraforge.LibraForgeError as e:
+        logger.warning(
+            "LLM corroboration apply failed for request %s: %s", request_id, e
+        )
+        return False
+
+    if not staging_has_applied_metadata(staging):
+        logger.warning(
+            "LLM corroboration apply for request %s returned without applied markers",
+            request_id,
+        )
+        return False
+
+    logger.info(
+        "LLM corroboration applied metadata for request %s via Manual Review "
+        "(asin=%r title=%r)",
+        request_id,
+        chosen.get("asin") or asin or "",
+        chosen.get("title") or metadata.get("title"),
+    )
+    try:
+        from app.services import llm_assist
+
+        llm_assist.write_assist(
+            staging,
+            {
+                "metadata_corroboration": {
+                    "asin": chosen.get("asin") or asin or "",
+                    "title": chosen.get("title") or "",
+                    "confidence": float(getattr(identification, "confidence", 0) or 0),
+                    "status": "applied",
+                }
+            },
+        )
+    except Exception:  # pragma: no cover - assist sidecar is best-effort
+        pass
+    return True
+
+
 async def _llm_metadata_assist_retry(
     request_id: int,
     *,
@@ -1276,9 +1451,12 @@ async def _llm_metadata_assist_retry(
     user_id: int,
     prior_reason: str,
 ) -> tuple[str, str]:
-    """OpenRouter identify → seed hints → one Metadata Forge retry.
+    """OpenRouter identify → seed hints → Forge retry → corroborating Manual apply.
 
     Soft-fails to ``("fail", reason)`` on disable/low confidence/API errors.
+    When Forge still scores below ``min_score`` after correct LLM clues (common
+    when local duration is missing), search + apply a hit that corroborates the
+    LLM title/author so assist can still confirm the match.
     """
     from app.services import openrouter
 
@@ -1355,12 +1533,30 @@ async def _llm_metadata_assist_retry(
         identification.confidence,
     )
 
-    return await _run_metadata_forge_with_provider_fallback(
+    status, reason = await _run_metadata_forge_with_provider_fallback(
         request_id,
         staging=staging,
         user_id=user_id,
         phase_detail="Retrying metadata with AI clues…",
     )
+    if status in ("ok", "cancelled"):
+        return status, reason
+
+    async with async_session() as db:
+        await p._update_status(
+            db,
+            request_id,
+            "metadata_forge",
+            "Confirming AI match via Manual Review…",
+        )
+    if await _llm_corroborated_manual_apply(
+        request_id,
+        staging=staging,
+        identification=identification,
+    ):
+        return "ok", ""
+
+    return "fail", reason or prior_reason
 
 
 async def _apply_metadata_forge(

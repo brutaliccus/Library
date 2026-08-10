@@ -62,7 +62,9 @@ _CHAPTERISH_STEM_RE = re.compile(
     r"(?:"
     r"(?:^|[\s._-])(?:ch(?:apter)?|track|disc|disk|cd|part|pt)\s*\d+"
     r"|(?:^|[\s._-])(?:part|pt)\s*\d+(?:\s*of\s*\d+)?"
-    r"|\(\d+\s*of\s*\d+\)"
+    r"|\(\s*\d+\s*of\s*\d+\s*\)"
+    r"|\b\d{1,4}\s*of\s*\d{1,4}\b"
+    r"|\b\d{1,4}\s*/\s*\d{1,4}\b"
     r"|(?:^|[\s._-])(?:file|f)\s*\d{1,3}(?:[\s._-]|$)"
     r")",
     re.IGNORECASE,
@@ -364,18 +366,41 @@ async def maybe_handle_multi_book(
     from app.services.release_files import (
         build_split_plan_from_release_files,
         group_release_files_by_book,
+        release_groups_look_like_chapters,
     )
 
     release_files = await _load_release_files_for_request(request_id, staging)
     if release_files:
         write_assist(staging, {"release_files": release_files[:500]})
 
-    heuristic_raw = build_split_plan_from_release_files(
-        staging,
-        release_files,
-        default_author=author or "",
-    )
     release_groups = group_release_files_by_book(release_files)
+    # Chapterized torrents (e.g. 341× "001 of 341.mp3") must not look like 341 books.
+    if release_groups_look_like_chapters(release_groups):
+        logger.info(
+            "Request %s: treating %s release groups as chapter tracks of one book",
+            request_id,
+            len(release_groups),
+        )
+        release_groups = []
+    staging_audio_n = len(_collect_audio(staging))
+    # Single (or dual) file landed, but the magnet's file list is huge — common when
+    # debrid selects one file from a chapterized pack. Do not multi-split on that list.
+    if staging_audio_n <= 2 and len(release_groups) >= 6:
+        logger.info(
+            "Request %s: ignoring %s release groups — staging only has %s audio file(s)",
+            request_id,
+            len(release_groups),
+            staging_audio_n,
+        )
+        release_groups = []
+
+    heuristic_raw = None
+    if len(release_groups) >= 2:
+        heuristic_raw = build_split_plan_from_release_files(
+            staging,
+            release_files,
+            default_author=author or "",
+        )
     flat = analyze_flat_multi_book(staging, title=title)
     likely = (
         detect_likely_multi_book(staging)

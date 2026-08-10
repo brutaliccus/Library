@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 _JUNK_TITLE_RE = re.compile(
     r"^(?:tape|track|disc|disk|cd|chapter|part|pt|file|audio|track)\s*[-_.]?\s*\d+$"
     r"|^(?:chapter|part|disc|disk|cd|track)\s+\d+$"
-    r"|^\d{1,3}$",
+    r"|^\d{1,4}$"
+    r"|^\d{1,4}\s*of\s*\d{1,4}$"
+    r"|^\d{1,4}\s*/\s*\d{1,4}$",
     re.IGNORECASE,
 )
 _REQ_FOLDER_RE = re.compile(r"^req_\d+_(.+)$", re.IGNORECASE)

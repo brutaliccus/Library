@@ -95,3 +95,38 @@ def test_normalize_release_files_dedupes():
         ]
     )
     assert len(rows) == 2
+
+
+def test_flat_book_key_collapses_track_of_total():
+    from app.services.release_files import _flat_book_key, group_release_files_by_book
+    from app.services.release_files import release_groups_look_like_chapters
+
+    assert _flat_book_key("001 of 341.mp3") == "_chapterized"
+    assert _flat_book_key("002 of 341.mp3") == "_chapterized"
+    assert _flat_book_key("The Blade Itself 001 of 341.mp3") == "The Blade Itself"
+    assert _flat_book_key("The Blade Itself (1 of 3).mp3") == "The Blade Itself"
+    # Fullwidth slash can appear in odd release names; ASCII "/" is a path sep.
+    assert _flat_book_key("Title 12／340.mp3") == "Title"
+
+    files = [
+        {"path": f"{i:03d} of 341.mp3", "size_bytes": 1}
+        for i in range(1, 21)
+    ]
+    groups = group_release_files_by_book(files)
+    assert len(groups) == 1
+    assert release_groups_look_like_chapters(groups) is False  # already collapsed
+
+    # Pre-collapse style unique stems still detected as chapters when grouped poorly
+    bad_groups = [
+        {"title": f"{i:03d} of 341", "key": f"{i:03d} of 341"}
+        for i in range(1, 30)
+    ]
+    assert release_groups_look_like_chapters(bad_groups) is True
+
+
+def test_clean_catalog_strips_track_of_total():
+    from app.services.forge_pipeline import clean_catalog_title, clean_search_title
+
+    assert clean_catalog_title("The Blade Itself 001 of 341") == "The Blade Itself"
+    assert clean_search_title("001 of 341") == ""
+    assert "341" not in clean_search_title("The Blade Itself 001 of 341")

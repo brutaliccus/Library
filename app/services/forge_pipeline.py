@@ -88,6 +88,16 @@ _TRAILING_EDITION_NOISE_RE = re.compile(
     r"unabridged|chapterized)\s*$",
     re.IGNORECASE,
 )
+# "Title 001 of 341" / "Title (1 of 3)" / "Title 12/340" — chapter indexes, not titles.
+_TRACK_OF_TOTAL_RE = re.compile(
+    r"\s*[-\u2013\u2014|]?\s*"
+    r"(?:"
+    r"\(\s*\d{1,4}\s*of\s*\d{1,4}\s*\)"
+    r"|\b\d{1,4}\s*of\s*\d{1,4}\b"
+    r"|\b\d{1,4}\s*/\s*\d{1,4}\b"
+    r")\s*$",
+    re.IGNORECASE,
+)
 # "Mistborn 6 - The Bands of Mourning" / "Series 03 - Title" → keep the title part.
 _SERIES_NUMBER_DASH_TITLE_RE = re.compile(
     r"^.+?\s+\d+(?:\.\d+)?\s*[-–:]\s+(.+)$",
@@ -205,6 +215,10 @@ def clean_catalog_title(title: str) -> str:
     t = _TITLE_JUNK_RE.sub("", t)
     t = _SERIES_BOOKNUM_PARENS_RE.sub("", t)
     t = _TRAILING_EDITION_NOISE_RE.sub("", t)
+    t = _TRACK_OF_TOTAL_RE.sub("", t).strip()
+    # Bare chapter indexes left after stripping a prefix — not usable titles.
+    if re.fullmatch(r"\d{1,4}(?:\s*of\s*\d{1,4})?", t or "", re.IGNORECASE):
+        return ""
     # "Book Title, Complete Series, Chapterized" → "Book Title"
     t = re.sub(
         r"\s*,\s*(?:complete\s+series|chapterized|full[-\s]?cast(?:\s+edition)?|"

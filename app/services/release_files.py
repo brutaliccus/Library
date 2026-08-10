@@ -152,19 +152,80 @@ def group_release_files_by_book(files: list[dict[str, Any]]) -> list[dict[str, A
     return groups
 
 
+# Chapter/track suffixes: "Title 001 of 341", "Title (1 of 3)", "Title 12/340", "pt 2"
+_FLAT_PART_SUFFIX_RE = re.compile(
+    r"^(?P<head>.+?)\s*[-\u2013\u2014|]?\s*"
+    r"(?:"
+    r"pt\.?\s*\d+"
+    r"|part\s*\d+"
+    r"|\(\s*\d+\s*of\s*\d+\s*\)"
+    r"|\b\d{1,4}\s*of\s*\d{1,4}\b"
+    r"|\b\d{1,4}\s*/\s*\d{1,4}\b"
+    r")\s*$",
+    re.IGNORECASE,
+)
+# Bare chapterized stems with no book title — collapse to one synthetic key.
+_FLAT_BARE_PART_RE = re.compile(
+    r"^(?:"
+    r"\d{1,4}\s*of\s*\d{1,4}"
+    r"|\d{1,4}\s*/\s*\d{1,4}"
+    r"|pt\.?\s*\d+"
+    r"|part\s*\d+"
+    r")$",
+    re.IGNORECASE,
+)
+_CHAPTER_GROUP_TITLE_RE = re.compile(
+    r"^(?:"
+    r"\d{1,4}"
+    r"|\d{1,4}\s*of\s*\d{1,4}"
+    r"|\d{1,4}\s*/\s*\d{1,4}"
+    r"|_chapterized"
+    r"|ch(?:apter)?\s*\d+"
+    r"|track\s*\d+"
+    r"|part\s*\d+"
+    r"|pt\.?\s*\d+"
+    r")$",
+    re.IGNORECASE,
+)
+
+
 def _flat_book_key(filename: str) -> str:
-    stem = Path(filename).stem
+    # Basename only — Path("Title 12/340.mp3") would mis-parse ASCII "/".
+    base = (filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    stem = Path(base).stem.strip().replace("／", "/").replace("⁄", "/")
+    if not stem:
+        return stem
     m = re.match(r"^([A-Z]{3,}\d{2})\d{0,2}P?\d*$", stem, re.I)
     if m:
         return m.group(1).upper()
-    m = re.match(
-        r"^(.+?)\s+(?:pt\.?\s*\d+|part\s*\d+|\(\d+\s*of\s*\d+\))\s*$",
-        stem,
-        re.I,
-    )
+    if _FLAT_BARE_PART_RE.fullmatch(stem):
+        # "001 of 341.mp3" / "12／340.mp3" — chapter tracks of one book.
+        return "_chapterized"
+    m = _FLAT_PART_SUFFIX_RE.match(stem)
     if m:
-        return m.group(1).strip()
+        head = (m.group("head") or "").strip(" -–—|_")
+        return head or "_chapterized"
     return stem
+
+
+def release_groups_look_like_chapters(groups: list[dict[str, Any]]) -> bool:
+    """True when grouped \"books\" are really sequential chapter/track names.
+
+    Guards against chapterized torrents (hundreds of ``001 of 341`` files) being
+    treated as a multi-book pack after a single file lands in staging.
+    """
+    if len(groups) < 6:
+        return False
+    chapterish = 0
+    for g in groups:
+        label = str(g.get("title") or g.get("key") or "").strip()
+        if _CHAPTER_GROUP_TITLE_RE.fullmatch(label):
+            chapterish += 1
+            continue
+        # Titles that are only a number + "of N" buried in noise
+        if re.search(r"\b\d{1,4}\s*of\s*\d{2,4}\b", label, re.I) and len(label.split()) <= 4:
+            chapterish += 1
+    return chapterish >= max(6, int(len(groups) * 0.7))
 
 
 def _title_from_group_key(key: str) -> str:

@@ -337,7 +337,7 @@ async function readBodyCapped(
     return blob.size > maxBytes ? "too-large" : blob;
   }
   const reader = resp.body.getReader();
-  const chunks: Uint8Array[] = [];
+  const chunks: BlobPart[] = [];
   let total = 0;
   try {
     for (;;) {
@@ -352,7 +352,8 @@ async function readBodyCapped(
         }
         return "too-large";
       }
-      chunks.push(value);
+      // Copy so each part is a Uint8Array<ArrayBuffer> (TS 5.7+ BlobPart typing).
+      chunks.push(value.slice());
     }
   } catch {
     return null;

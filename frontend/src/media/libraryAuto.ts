@@ -457,8 +457,7 @@ export async function syncAndroidAutoPlayback(
       const artUrl = toAbsoluteArtworkUrl(np.coverUrl);
       const artwork = artUrl
         ? [
-            { src: artUrl, sizes: "512x512", type: "image/jpeg" },
-            { src: artUrl, sizes: "192x192", type: "image/jpeg" },
+            { src: artUrl, sizes: "320x320", type: "image/jpeg" },
           ]
         : [];
 

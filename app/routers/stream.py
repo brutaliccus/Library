@@ -24,6 +24,7 @@ from app.config import get_settings
 from app.database import get_db, async_session
 from app.models import User, StreamHistory, StreamingLibraryItem, ABSPlayTracking
 from app.utils.auth import get_current_user, ALGORITHM
+from app.utils.http_range import parse_range_header, resolve_range, response_for_slice
 from app.services import audiobookshelf, debrid, debrid_tokens, real_debrid, prowlarr
 
 logger = logging.getLogger(__name__)
@@ -614,31 +615,86 @@ def _abs_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {settings.abs_api_key}"}
 
 
-@router.get("/abs/proxy/audio/{item_id}/{file_id}")
-async def proxy_abs_audio(
-    item_id: str,
-    file_id: str,
-    request: Request,
-):
-    """Reverse-proxy an ABS audio file so the browser fetches it over HTTPS.
-    Uses path params to avoid query-string encoding issues."""
-    url = f"{settings.abs_url}/api/items/{item_id}/file/{file_id}"
-    logger.info("ABS audio proxy: %s", url)
+def _passthrough_audio_headers(resp: httpx.Response) -> dict[str, str]:
+    resp_headers: dict[str, str] = {}
+    for key in ("content-type", "content-length", "content-range", "accept-ranges"):
+        val = resp.headers.get(key)
+        if val:
+            resp_headers[key] = val
+    if "accept-ranges" not in resp_headers:
+        resp_headers["accept-ranges"] = "bytes"
+    resp_headers["x-accel-buffering"] = "no"
+    resp_headers.setdefault("cache-control", "no-store")
+    return resp_headers
 
-    headers = _abs_headers()
+
+async def _sliced_audio_body(
+    body_iter,
+    first_chunk: bytes,
+    skip: int,
+    max_out: int | None,
+    close_resp,
+):
+    """Yield at most max_out bytes after discarding skip prefix bytes."""
+    remaining_skip = max(0, skip)
+    remaining_out = max_out
+
+    async def _chunks():
+        if first_chunk:
+            yield first_chunk
+        async for chunk in body_iter:
+            yield chunk
+
+    try:
+        async for buf in _chunks():
+            if not buf:
+                continue
+            if remaining_skip:
+                if len(buf) <= remaining_skip:
+                    remaining_skip -= len(buf)
+                    continue
+                buf = buf[remaining_skip:]
+                remaining_skip = 0
+            if remaining_out is None:
+                yield buf
+                continue
+            if remaining_out <= 0:
+                break
+            if len(buf) > remaining_out:
+                yield buf[:remaining_out]
+                break
+            remaining_out -= len(buf)
+            yield buf
+    finally:
+        await close_resp()
+
+
+async def _audio_proxy_response(
+    url: str,
+    request: Request,
+    extra_headers: dict[str, str],
+) -> Response | None:
+    """Stream upstream audio, enforcing client Range even when CDN/ABS ignore it.
+
+    A 200 of a multi-GB file forwarded to Android WebView / ExoPlayer OOMs the
+    phone. If the player asked for bytes=X-Y we always return 206 of that window.
+    """
+    headers = dict(extra_headers)
     range_header = request.headers.get("range")
     if range_header:
         headers["Range"] = range_header
 
+    is_head = request.method.upper() == "HEAD"
     client = _get_stream_client()
+    method = "HEAD" if is_head else "GET"
     try:
         resp = await client.send(
-            client.build_request("GET", url, headers=headers),
+            client.build_request(method, url, headers=headers),
             stream=True,
         )
     except Exception as e:
-        logger.error("ABS audio proxy failed: %s", e)
-        raise HTTPException(status_code=502, detail="Failed to fetch audio from ABS")
+        logger.warning("audio proxy connect failed: %s", e)
+        return None
 
     if resp.status_code == 416:
         content_range = resp.headers.get("content-range")
@@ -651,11 +707,14 @@ async def proxy_abs_audio(
     if resp.status_code >= 400:
         body = await resp.aread()
         await resp.aclose()
-        logger.error("ABS returned %s for %s: %s", resp.status_code, url, body[:200])
-        raise HTTPException(status_code=resp.status_code, detail="ABS file not found")
+        logger.warning("audio upstream returned %s: %s", resp.status_code, body[:200])
+        return None
 
-    # Same guard as RD: don't commit to a 206/200 until the first body byte
-    # arrives — an empty stream poisons client chunk downloads.
+    if is_head:
+        out = _passthrough_audio_headers(resp)
+        await resp.aclose()
+        return Response(status_code=resp.status_code, headers=out)
+
     body_iter = resp.aiter_bytes(chunk_size=65536)
     first_chunk = b""
     try:
@@ -664,40 +723,85 @@ async def proxy_abs_audio(
         first_chunk = b""
     except Exception as e:
         await resp.aclose()
-        logger.warning("ABS audio stream died before first byte: %s", e)
-        raise HTTPException(status_code=502, detail="ABS audio stream failed")
+        logger.warning("audio stream died before first byte: %s", e)
+        return None
 
     content_length = resp.headers.get("content-length")
     if not first_chunk and content_length not in (None, "0"):
         await resp.aclose()
-        logger.warning("ABS sent empty body for %s-byte response", content_length)
-        raise HTTPException(status_code=502, detail="ABS audio stream empty")
+        logger.warning("audio upstream sent empty body for %s-byte response", content_length)
+        return None
 
-    resp_headers: dict[str, str] = {}
-    for key in ("content-type", "content-length", "content-range", "accept-ranges"):
-        val = resp.headers.get(key)
-        if val:
-            resp_headers[key] = val
-    if "accept-ranges" not in resp_headers:
-        resp_headers["accept-ranges"] = "bytes"
-    resp_headers["x-accel-buffering"] = "no"
-
-    status_code = resp.status_code
-
-    async def stream_body():
-        try:
-            if first_chunk:
-                yield first_chunk
-            async for chunk in body_iter:
-                yield chunk
-        finally:
-            await resp.aclose()
-
-    return StreamingResponse(
-        stream_body(),
-        status_code=status_code,
-        headers=resp_headers,
+    client_rng = parse_range_header(range_header)
+    upstream_is_partial = resp.status_code == 206 or bool(resp.headers.get("content-range"))
+    # bytes=0- with no end is "whole file from start" — pass through 200.
+    # Any other Range (seek, chunk download) must be sliced if upstream ignored it.
+    open_ended_from_start = (
+        client_rng is not None and client_rng.start == 0 and client_rng.end is None
     )
+    need_slice = (
+        client_rng is not None and not upstream_is_partial and not open_ended_from_start
+    )
+
+    async def _close():
+        await resp.aclose()
+
+    if not need_slice:
+        out_headers = _passthrough_audio_headers(resp)
+
+        async def stream_body():
+            try:
+                if first_chunk:
+                    yield first_chunk
+                async for chunk in body_iter:
+                    yield chunk
+            finally:
+                await _close()
+
+        return StreamingResponse(
+            stream_body(),
+            status_code=resp.status_code,
+            headers=out_headers,
+        )
+
+    total = None
+    if content_length and str(content_length).isdigit():
+        total = int(content_length)
+    skip, last, total = resolve_range(client_rng, total)
+    max_out = None if last is None else max(0, last - skip + 1)
+    status, out_headers = response_for_slice(
+        start=skip,
+        last=last,
+        total=total,
+        content_type=resp.headers.get("content-type"),
+    )
+    logger.info(
+        "audio proxy slicing ignored-Range 200 into %s skip=%s max_out=%s",
+        status,
+        skip,
+        max_out,
+    )
+    return StreamingResponse(
+        _sliced_audio_body(body_iter, first_chunk, skip, max_out, _close),
+        status_code=status,
+        headers=out_headers,
+    )
+
+
+@router.api_route("/abs/proxy/audio/{item_id}/{file_id}", methods=["GET", "HEAD"])
+async def proxy_abs_audio(
+    item_id: str,
+    file_id: str,
+    request: Request,
+):
+    """Reverse-proxy an ABS audio file so the browser fetches it over HTTPS.
+    Uses path params to avoid query-string encoding issues."""
+    url = f"{settings.abs_url}/api/items/{item_id}/file/{file_id}"
+    logger.info("ABS audio proxy: %s", url)
+    proxied = await _audio_proxy_response(url, request, _abs_headers())
+    if proxied is None:
+        raise HTTPException(status_code=502, detail="Failed to fetch audio from ABS")
+    return proxied
 
 
 # Placeholder SVG when ABS cover is unreachable (avoids 502 console errors)
@@ -751,87 +855,7 @@ async def _stream_rd_url(real_url: str, request: Request) -> Response | None:
     """Open a streaming proxy to an RD CDN URL. Returns None when RD rejects the
     URL (expired link) or the body dies before the first byte, so callers can
     refresh and retry."""
-    headers: dict[str, str] = {}
-    range_header = request.headers.get("range")
-    if range_header:
-        headers["Range"] = range_header
-
-    client = _get_stream_client()
-    try:
-        resp = await client.send(
-            client.build_request("GET", real_url, headers=headers),
-            stream=True,
-        )
-    except Exception as e:
-        logger.warning("RD audio proxy connect failed: %s", e)
-        return None
-
-    if resp.status_code == 416:
-        # Range beyond end of file — the link is fine, the client just read past
-        # the end. Pass it through so downloaders know they're done (a refresh
-        # here would pointlessly re-resolve healthy links).
-        content_range = resp.headers.get("content-range")
-        await resp.aclose()
-        return Response(
-            status_code=416,
-            headers={"content-range": content_range} if content_range else {},
-        )
-
-    if resp.status_code >= 400:
-        body = await resp.aread()
-        await resp.aclose()
-        logger.warning("RD CDN returned %s: %s", resp.status_code, body[:200])
-        return None
-
-    # Pull the first body chunk BEFORE committing to a response. If the CDN
-    # accepts the request but resets immediately (stale link), returning a 206
-    # with an empty body poisons client downloads ("empty chunk received");
-    # returning None here routes callers into the link-refresh path instead.
-    body_iter = resp.aiter_bytes(chunk_size=65536)
-    first_chunk = b""
-    try:
-        first_chunk = await body_iter.__anext__()
-    except StopAsyncIteration:
-        first_chunk = b""
-    except Exception as e:
-        await resp.aclose()
-        logger.warning("RD CDN stream died before first byte: %s", e)
-        return None
-
-    content_length = resp.headers.get("content-length")
-    if not first_chunk and content_length not in (None, "0"):
-        await resp.aclose()
-        logger.warning("RD CDN sent empty body for %s-byte response", content_length)
-        return None
-
-    resp_headers: dict[str, str] = {}
-    for key in ("content-type", "content-length", "content-range", "accept-ranges"):
-        val = resp.headers.get(key)
-        if val:
-            resp_headers[key] = val
-    if "accept-ranges" not in resp_headers:
-        resp_headers["accept-ranges"] = "bytes"
-    # Tell nginx not to buffer: with default buffering it slurps the whole
-    # upstream stream into SD-card temp files as fast as RD serves it, starving
-    # the Pi's bandwidth and disk while the client plays at 1x.
-    resp_headers["x-accel-buffering"] = "no"
-
-    status_code = resp.status_code
-
-    async def stream_body():
-        try:
-            if first_chunk:
-                yield first_chunk
-            async for chunk in body_iter:
-                yield chunk
-        finally:
-            await resp.aclose()
-
-    return StreamingResponse(
-        stream_body(),
-        status_code=status_code,
-        headers=resp_headers,
-    )
+    return await _audio_proxy_response(real_url, request, {})
 
 
 # Per-row refresh locks so parallel track requests don't stampede Real-Debrid
@@ -913,7 +937,7 @@ async def _load_proxy_row(kind: str, row_id: int, db: AsyncSession):
     return result.scalar_one_or_none()
 
 
-@router.get("/rd/proxy/{kind}/{row_id}/{index}/{sig}")
+@router.api_route("/rd/proxy/{kind}/{row_id}/{index}/{sig}", methods=["GET", "HEAD"])
 async def proxy_rd_audio_stable(
     kind: str,
     row_id: int,
@@ -957,7 +981,7 @@ async def proxy_rd_audio_stable(
     raise HTTPException(status_code=502, detail="Stream unavailable — debrid links could not be refreshed")
 
 
-@router.get("/rd/proxy/{token}")
+@router.api_route("/rd/proxy/{token}", methods=["GET", "HEAD"])
 async def proxy_rd_audio(
     token: str,
     request: Request,

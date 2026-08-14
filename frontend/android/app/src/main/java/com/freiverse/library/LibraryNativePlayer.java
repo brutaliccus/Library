@@ -16,6 +16,7 @@ import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.extractor.DefaultExtractorsFactory;
 import java.util.ArrayList;
 import java.util.List;
 import org.json.JSONArray;
@@ -31,12 +32,13 @@ public final class LibraryNativePlayer {
     private static final String TAG = "LibraryNativePlayer";
     /** Position ticks for MediaSession scrubber — keep cheap (no metadata). */
     private static final long POSITION_TICK_MS = 2_000;
-    /** Cap Exo readahead — large progressive buffers OOM mid-AA-play. */
-    private static final int MIN_BUFFER_MS = 12_000;
-    private static final int MAX_BUFFER_MS = 28_000;
+    /** Cap Exo readahead — time-first buffering of a multi-GB progressive
+     * stream OOMs the phone; byte cap must win. */
+    private static final int MIN_BUFFER_MS = 6_000;
+    private static final int MAX_BUFFER_MS = 12_000;
     private static final int PLAYBACK_BUFFER_MS = 1_500;
     private static final int REBUFFER_MS = 3_000;
-    private static final int TARGET_BUFFER_BYTES = 2 * 1024 * 1024;
+    private static final int TARGET_BUFFER_BYTES = 512 * 1024;
 
     public interface Listener {
         /**
@@ -591,9 +593,14 @@ public final class LibraryNativePlayer {
         }
         // DefaultDataSource supports file:// (offline disk cache) + http(s).
         // Progressive HTTP streams — never assemble full-track blobs in RAM.
+        // CBR seeking lets MP3 start without scanning the whole remote file.
+        DefaultExtractorsFactory extractorsFactory =
+            new DefaultExtractorsFactory()
+                .setConstantBitrateSeekingEnabled(true)
+                .setConstantBitrateSeekingAlwaysEnabled(true);
         DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(app, http);
-        DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(app)
-            .setDataSourceFactory(dataSourceFactory);
+        DefaultMediaSourceFactory mediaSourceFactory =
+            new DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory);
 
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
             .setBufferDurationsMs(
@@ -603,7 +610,7 @@ public final class LibraryNativePlayer {
                 REBUFFER_MS
             )
             .setTargetBufferBytes(TARGET_BUFFER_BYTES)
-            .setPrioritizeTimeOverSizeThresholds(true)
+            .setPrioritizeTimeOverSizeThresholds(false)
             .build();
 
         AudioAttributes audioAttrs = new AudioAttributes.Builder()
@@ -619,6 +626,8 @@ public final class LibraryNativePlayer {
             .setAudioAttributes(audioAttrs, /* handleAudioFocus= */ false)
             .setHandleAudioBecomingNoisy(true)
             .build();
+        // Do not metadata-probe the next HTTP playlist item (multi-GB files).
+        player.setPreloadConfiguration(new ExoPlayer.PreloadConfiguration(0));
         player.addListener(
             new Player.Listener() {
                 @Override

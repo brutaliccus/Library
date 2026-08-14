@@ -315,6 +315,52 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
   return headers;
 }
 
+/**
+ * Read a response body with a hard byte cap. Cancels the stream instead of
+ * materializing a multi-GB 200 into JS RAM (Android WebView OOM / phone reboot).
+ */
+async function readBodyCapped(
+  resp: Response,
+  maxBytes: number
+): Promise<Blob | "too-large" | null> {
+  const cl = Number(resp.headers.get("content-length") || 0);
+  if (cl > maxBytes) {
+    try {
+      await resp.body?.cancel();
+    } catch {
+      /* ignore */
+    }
+    return "too-large";
+  }
+  if (!resp.body) {
+    const blob = await resp.blob();
+    return blob.size > maxBytes ? "too-large" : blob;
+  }
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          /* ignore */
+        }
+        return "too-large";
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return null;
+  }
+  const type = resp.headers.get("content-type") || "application/octet-stream";
+  return new Blob(chunks, { type });
+}
+
 async function fetchChunkWithBody(
   url: string,
   offset: number,
@@ -340,8 +386,14 @@ async function fetchChunkWithBody(
         setLastError(`Server returned ${resp.status} while downloading`);
         continue;
       }
-      const blob = await resp.blob();
-      if (blob.size === 0) {
+      const cap =
+        resp.status === 200 ? MAX_BLOB_PLAYBACK_BYTES : CHUNK_SIZE * 2;
+      const body = await readBodyCapped(resp, cap);
+      if (body === "too-large") {
+        setLastError("Track too large for single-response cache — need Range");
+        return null;
+      }
+      if (!body || body.size === 0) {
         setLastError("Empty chunk received — retrying");
         continue;
       }
@@ -350,7 +402,7 @@ async function fetchChunkWithBody(
       );
       return {
         status: resp.status as 200 | 206,
-        blob,
+        blob: body,
         contentType: resp.headers.get("content-type"),
         totalFromRange: rangeMatch ? Number(rangeMatch[1]) : null,
       };

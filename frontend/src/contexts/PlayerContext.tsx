@@ -302,7 +302,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const getAudio = useCallback(() => {
     if (!audioRef.current) {
       audioRef.current = new Audio();
-      audioRef.current.preload = "auto";
+      // metadata only — preload=auto on a multi-GB uncached stream OOMs WebView.
+      audioRef.current.preload = "metadata";
     }
     return audioRef.current;
   }, []);
@@ -386,6 +387,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
         if (objectUrl) trackObjectUrlRef.current = objectUrl;
 
+        audio.preload = "metadata";
         audio.src = src;
         audio.playbackRate = stateRef.current.playbackRate;
         audio.volume = stateRef.current.volume;
